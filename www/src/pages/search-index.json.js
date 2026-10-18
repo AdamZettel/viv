@@ -19,7 +19,7 @@ export function GET() {
   for (const s of SIDES) {
     for (const l of [...s.pages, ...(s.more || [])]) add(l.label, l.href, s.label, l.blurb || '', 3);
   }
-  add('Home', '/', 'viv-lang.org', 'vipyr and the Viv language', 1);
+  add('Home', '/', 'viv-lang.org', 'The Viv language and vipyr', 1);
   for (const f of vipyr.fields) {
     const t = TOPICS.find((t) => t.families.includes(f.id));
     add(`vp.${f.id}`, `/vipyr/${f.id}`, 'vipyr family', `${f.title}. ${f.about}${t ? ' ' + t.title + '.' : ''}`, 2);

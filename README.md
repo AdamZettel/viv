@@ -12,6 +12,7 @@
 </p>
 
 <p align="center">
+  <a href="https://viv-lang.org"><img alt="site: viv-lang.org" src="https://img.shields.io/badge/site-viv--lang.org-4a3fc4"></a>
   <img alt="version 0.0.1" src="https://img.shields.io/badge/version-0.0.1-4a3fc4">
   <a href="LICENSING.md"><img alt="license: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
 </p>
@@ -132,9 +133,10 @@ library square root.
 **Next.** `target/release/viv --help` lists the commands, and
 `cargo install --path lang/viv` puts `viv` on your PATH.
 [docs/tutorial.md](docs/tutorial.md) is a ten-minute tour from the command
-line. The site in `www/` has a workbench, an editor with the compiler
-running in the page, and a tour of the language in runnable cells;
-[The site](#the-site) says how to build it.
+line. Without installing anything, the
+[workbench](https://viv-lang.org/workbench) is an editor with the compiler
+running in the page, and the [tour](https://viv-lang.org/tour) walks through
+the language in runnable cells.
 
 ## What is in the box
 
@@ -160,8 +162,8 @@ number by number within a stated tolerance.
 module, the calls between them with one run's counts, and a walk through
 that run line by line. Each def carries its intent, its named steps and its
 loops. The page is a single HTML file with its viewer inside, so it can be
-mailed or opened offline. The site's `/atlas` page has atlases of the vipyr
-functions.
+mailed or opened offline. The site has atlases of the vipyr functions at
+[viv-lang.org/atlas](https://viv-lang.org/atlas).
 
 ### Contracts
 
@@ -181,8 +183,9 @@ with `import vipyr.auto`), and it calls Viv's scientific programs with
 keyword arguments: `vp.scf.run`, `vp.dft.pw`, `vp.nuclear.shell_model`,
 `vp.control.lqr`, `vp.optimize.curve_fit` and more, each returning its
 results with the program's tests and a `check()` method.
-[python/vipyr/README.md](python/vipyr/README.md) is the reference, and says
-how to install vipyr from the checkout.
+[python/vipyr/README.md](python/vipyr/README.md) and
+[viv-lang.org/vipyr](https://viv-lang.org/vipyr) are the reference; the
+README says how to install vipyr from the checkout.
 
 ### Ported scientific codes, checked against references
 
@@ -201,7 +204,8 @@ and checked each against a reference. Some of them:
 | LQR gains, `lib/are.viv` | SciPy's `solve_continuous_are`, to eight digits | [show/cartpole_lqr.viv](show/cartpole_lqr.viv) |
 
 [claims/](claims/) holds claims, each a bounded statement and the program
-that checks it; the site's `/claims` page lists them with their status.
+that checks it; [viv-lang.org/claims](https://viv-lang.org/claims) lists
+them with their status.
 `node tools/inventory.mjs ls --grep <word>` finds assets by the reference
 they are checked against.
 
@@ -212,20 +216,23 @@ they are checked against.
   write Viv for Python callers. `viv help --agent` prints the compiler's
   own guide for an agent.
 - [server/mcp](server/mcp/README.md) is a read-only MCP endpoint, served
-  at `/mcp` by the site's Netlify Function. Its tools search the posts,
+  at `https://viv-lang.org/mcp` by the site's Netlify Function. In Claude
+  Code, `claude mcp add --transport http viv https://viv-lang.org/mcp`
+  adds it. Its tools search the posts,
   examples, library modules and builtins (`search`), return a post
   (`get_post`) and return the language reference (`viv_reference`). To run
   a program, use the site's workbench. After a site build,
   `node server/mcp/fn-test.mjs --serve 8788` serves it at
   `http://127.0.0.1:8788/mcp`, and in Claude Code
   `claude mcp add --transport http viv http://127.0.0.1:8788/mcp` adds it.
-  The site's `/agents` page covers other clients.
-- The site build writes `llms.txt` and `llms-full.txt`, the reference as
-  plain text for a model's context.
+  [viv-lang.org/agents](https://viv-lang.org/agents) covers other clients.
+- [viv-lang.org/llms.txt](https://viv-lang.org/llms.txt) and
+  [llms-full.txt](https://viv-lang.org/llms-full.txt) give the reference as
+  plain text for a model's context; the site build writes them.
 
 ### The site
 
-`www/` is the source of viv-lang.org, which is not online yet. It builds
+`www/` is the source of [viv-lang.org](https://viv-lang.org). It builds
 from this checkout with Node 22 or newer:
 
 ```sh
