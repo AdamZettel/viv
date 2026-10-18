@@ -1,0 +1,50 @@
+###
+post: randla's results to 17 digits, for the three-engine comparison
+agent: claude
+
+Each line is a sum over one operator or one driver's result, printed with
+every digit a double has. tools/three-engines.sh requires the interpreter, C
+and wasm to print these bytes identically, so a sketch or a driver that
+depended on evaluation order, a platform libm or an engine's summation would
+show up here as a differing digit.
+###
+
+from randla.sketch import gaussian, rademacher, saso_dense, srht_apply
+from randla.lowrank import rsvd, nystrom, rpcholesky, with_spectrum, poly_decay
+from randla.lstsq import sap_lstsq
+from randla.trace import hutchpp
+
+G = gaussian(40, 30, 2026, 0)
+R = rademacher(40, 30, 2026, 1)
+S = saso_dense(12, 40, 3, 2026, 2)
+H = srht_apply(G, 16, 2026, 3)
+print("gaussian  ", fmt(sum(G * G), 17), fmt(G[39, 29], 17))
+print("rademacher", fmt(sum(R), 17))
+print("saso      ", fmt(sum(S * S), 17), fmt(sum(S @ G), 17))
+print("srht      ", fmt(sum(H * H), 17))
+
+s = poly_decay(30, 1.5)
+A = with_spectrum(50, 35, s, 7)
+U, sk, Vt = rsvd(A, 6)
+print("rsvd      ", fmt(sum(sk), 17), fmt(norm(A - (U * sk) @ Vt), 17))
+P = transpose(A) @ A
+Un, lam = nystrom(P, 8, 7, 1)
+print("nystrom   ", fmt(sum(lam), 17))
+F, piv = rpcholesky(P, 8, 7, 2)
+print("rpchol    ", fmt(sum(F * F), 17), piv[0], piv[7])
+# least squares needs full column rank: a tall 120-by-12 problem
+T = with_spectrum(120, 12, poly_decay(12, 1.0), 8)
+b = T @ ones(12) + 0.01 * gaussian(120, 1, 7, 9)[:, 0]
+x, it = sap_lstsq(T, b, kind="saso")
+print("sap_lstsq ", fmt(sum(x), 17), it)
+print("hutchpp   ", fmt(hutchpp(P, 12, 7, 4), 17), fmt(trace(P), 17))
+
+test "the printed results are what the drivers claim" {
+    assert_near(sum(R * R), 1200.0, 0.0)
+    assert_lt(norm(A - (U * sk) @ Vt), 1.05 * norm(s[6:]))
+    assert_true(len(piv) == 8)
+    assert_lt(float(it), 60.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

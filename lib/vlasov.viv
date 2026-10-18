@@ -1,0 +1,309 @@
+# A 1D1V Vlasov-Poisson solver for electrons on a fixed ion background, and
+# the measurement of a Langmuir wave's frequency and Landau damping rate.
+#
+# Units: the electron plasma frequency is 1 and the electron charge is -1, so
+#
+#     df/dt + v df/dx - E df/dv = 0,    dE/dx = 1 - n_e,    n_e = integral f dv.
+#
+# The scheme is Cheng and Knorr's split step (J. Comput. Phys. 22, 330, 1976):
+# shift in x by half a step, solve for E, shift in v by a whole step, shift in
+# x by half a step. Each shift moves f along a straight line, so each is an
+# interpolation of f at the departure points. Two choices make it accurate:
+#
+#   x: a spectral shift. The domain is periodic and f is smooth in x, so the
+#      shift is exact: each Fourier mode is multiplied by exp(-i k v tau). It
+#      adds no numerical damping, which matters here because the quantity
+#      measured is a damping rate. Linear interpolation, which the first version
+#      of lang/viv/examples/vlasov_landau.viv used, damped the wave by its own
+#      diffusion and measured a damping rate 11.8% too large.
+#   v: a cubic B-spline, Cheng and Knorr's own choice. f is not periodic in v
+#      in principle, but the grid ends at |v| = vmax where the Maxwellian is
+#      below 1e-7 (vmax = 6 vt), so a periodic spline costs nothing measurable,
+#      and it makes the shift conserve particles exactly: the spline's weights
+#      sum to one at every shift. The spline damps the filaments f develops in
+#      v once they reach the grid scale, which is what stops a numerical echo
+#      (recurrence) from coming back.
+#
+# The periodic spline is applied through its Fourier symbol. Interpolating
+# with a cubic B-spline is two linear operations on the periodic grid: solve
+# the circulant system (c[j-1] + 4 c[j] + c[j+1]) / 6 = f[j] for the
+# coefficients, then sum four of them with the B-spline's weights at the
+# fractional shift. Both are circulant, so in Fourier space they are
+# multiplications; `vl_spline_shift` does them with one FFT pair. The test
+# "the spline shift equals the tridiagonal solve and four-point sum" checks
+# it against the direct real-space computation.
+#
+# Used with `import vlasov`. Names start with `vl_`.
+
+from zfunc import zf_z, zf_zprime
+
+VL_PI = 3.141592653589793
+#: VL_NEWTON_MAXIT  Newton steps allowed for the Landau root; it takes about six from Bohm-Gross
+VL_NEWTON_MAXIT = 60
+
+#| The signed Fourier wavenumbers of a periodic grid of `n` points on a period
+#| `period`, in numpy's fft order (0, 1, ..., then the negative ones), with the
+#| Nyquist mode of an even `n` given wavenumber 0 so a real field stays real.
+def vl_wavenumbers(n, period) {
+    m = arange(n)
+    half = floor(n / 2.0)
+    signed = where(m <= half, m, m - n)
+    k = signed * (2.0 * VL_PI / period)
+    if 2.0 * half == n {
+        k[half] = 0.0
+    }
+    return k
+}
+
+#| The four cubic B-spline weights at fractional offset `th` in [0, 1), for the
+#| coefficients at offsets -1, 0, 1, 2 from the point below. They sum to one.
+def vl_bspline_weights(th) {
+    u = 1.0 - th
+    return [u * u * u / 6.0, 2.0 / 3.0 - th * th + 0.5 * th * th * th, 2.0 / 3.0 - u * u + 0.5 * u * u * u, th * th * th / 6.0]
+}
+
+#| Shift a periodic sampled function by `s` grid points by cubic B-spline
+#| interpolation: the result at j is the spline through `f` evaluated at j + s.
+#| Done as one multiplication in Fourier space (see the top of the file).
+def vl_spline_shift(f: Arr, s) {
+    n = len(f)
+    p = floor(s)
+    th = s - p
+    w = vl_bspline_weights(th)
+    kap = arange(n) * (2.0 * VL_PI / n)
+    #: lam  the symbol of the prefilter (c[j-1] + 4 c[j] + c[j+1]) / 6
+    lam = (4.0 + 2.0 * cos(kap)) / 6.0
+    # the four weights at offsets p - 1 .. p + 2: sum of w_l exp(i kap (p + l))
+    sr = zeros(n)
+    si = zeros(n)
+    for l to len(w) {
+        off = p + l - 1.0
+        sr = sr + w[l] * cos(kap * off)
+        si = si + w[l] * sin(kap * off)
+    }
+    z = complex(f, zeros(n))
+    fft(z)
+    z = z * complex(sr / lam, si / lam)
+    ifft(z)
+    return re(z)
+}
+
+#| The same shift computed directly in real space, for the test: the cyclic
+#| tridiagonal solve for the spline coefficients (Sherman-Morrison around the
+#| Thomas algorithm), then the four-point sum.
+def vl_spline_shift_direct(f: Arr, s) {
+    n = len(f)
+    # (c[j-1] + 4 c[j] + c[j+1]) = 6 f[j], cyclic. Remove the corners with
+    # u = (gam, 0, ..., 0, 1), v = (1, 0, ..., 0, 1 / gam), gam = -4.
+    gam = -4.0
+    diag = zeros(n) + 4.0
+    diag[0] = 4.0 - gam
+    diag[n - 1.0] = 4.0 - 1.0 / gam
+    rhs = 6.0 * f
+    uvec = zeros(n)
+    uvec[0] = gam
+    uvec[n - 1.0] = 1.0
+    y = vl_thomas(diag, rhs)
+    zz = vl_thomas(diag, uvec)
+    fac = (y[0] + y[n - 1.0] / gam) / (1.0 + zz[0] + zz[n - 1.0] / gam)
+    c = y - fac * zz
+    p = floor(s)
+    w = vl_bspline_weights(s - p)
+    g = zeros(n)
+    for j to n {
+        acc = 0.0
+        for l to len(w) {
+            q = j + p + l - 1.0
+            q = q - n * floor(q / n)
+            acc = acc + w[l] * c[q]
+        }
+        g[j] = acc
+    }
+    return g
+}
+
+#| The Thomas algorithm for a tridiagonal system with ones off the diagonal.
+def vl_thomas(diag: Arr, rhs: Arr) {
+    n = len(diag)
+    cp = zeros(n)
+    dp = zeros(n)
+    cp[0] = 1.0 / diag[0]
+    dp[0] = rhs[0] / diag[0]
+    for j from 1 to n {
+        den = diag[j] - cp[j - 1.0]
+        cp[j] = 1.0 / den
+        dp[j] = (rhs[j] - dp[j - 1.0]) / den
+    }
+    x = zeros(n)
+    x[n - 1.0] = dp[n - 1.0]
+    for j from 1 to n {
+        i = n - 1.0 - j
+        x[i] = dp[i] - cp[i] * x[i + 1.0]
+    }
+    return x
+}
+
+#| Shift every row of `F` (one row per velocity) in x by `v tau`: row j is
+#| multiplied, mode by mode, by exp(-i k v_j tau), given as the arrays `pc`
+#| (the cosines) and `ps` (the sines) of shape (velocities, positions).
+def vl_shift_x(F: Arr, pc: Arr, ps: Arr) {
+    nv = shape(F)[0]
+    nx = shape(F)[1]
+    for j to nv {
+        z = complex(F[j, :], zeros(nx))
+        fft(z)
+        z = z * complex(pc[j, :], ps[j, :])
+        ifft(z)
+        F[j, :] = re(z)
+    }
+}
+
+#| The phase tables `vl_shift_x` reads: cos and sin of -k v tau.
+def vl_phase_tables(kx: Arr, v: Arr, tau) {
+    arg = -outer(v, kx) * tau
+    return cos(arg), sin(arg)
+}
+
+#| Shift every column of `F` (one column per position) in v by the
+#| acceleration: f(v, t + dt) = f(v + E dt, t) for electrons, so the
+#| departure point is E[i] dt / dv grid points above.
+def vl_shift_v(F: Arr, E: Arr, dt, dv) {
+    nx = shape(F)[1]
+    for i to nx {
+        F[:, i] = vl_spline_shift(F[:, i], E[i] * dt / dv)
+    }
+}
+
+#| The electric field from Gauss's law, dE/dx = 1 - n_e with n_e the
+#| velocity integral of `F`, solved spectrally: E_k = rho_k / (i k), with
+#| the mean (k = 0) and the Nyquist mode zero.
+def vl_field(F: Arr, kx: Arr, dv) {
+    nx = len(kx)
+    rho = 1.0 - sum(F, axis=0) * dv
+    z = complex(rho, zeros(nx))
+    fft(z)
+    inv = where(kx == 0.0, 0.0, 1.0 / where(kx == 0.0, 1.0, kx))
+    z = z * complex(zeros(nx), -inv)
+    ifft(z)
+    return re(z)
+}
+
+#| The field energy, integral of E^2 / 2 over the box.
+def vl_field_energy(E: Arr, dx) {
+    return 0.5 * sum(E * E) * dx
+}
+
+#| The Maxwellian of thermal speed `vt` with a density perturbation
+#| 1 + alpha cos(k0 x): rows are velocities, columns positions.
+def vl_initial(x: Arr, v: Arr, vt, k0, alpha) {
+    fm = exp(-(v * v) / (2.0 * vt * vt)) / sqrt(2.0 * VL_PI * vt * vt)
+    return outer(fm, 1.0 + alpha * cos(k0 * x))
+}
+
+#| The local maxima of `W` with times in [t0, t1], each refined by a parabola
+#| through log W at the sample and its two neighbors. Returns the peak times
+#| and the peak values of log W.
+def vl_peaks(t: Arr, W: Arr, t0, t1) {
+    pt = zeros(0)
+    py = zeros(0)
+    for s from 1 to len(W) - 1.0 {
+        if W[s] > W[s - 1.0] and W[s] >= W[s + 1.0] and t[s] >= t0 and t[s] <= t1 {
+            ym = log(W[s - 1.0])
+            y0 = log(W[s])
+            yp = log(W[s + 1.0])
+            curv = ym - 2.0 * y0 + yp
+            d = 0.5 * (ym - yp) / curv
+            pt = append(pt, t[s] + d * (t[s + 1.0] - t[s]))
+            py = append(py, y0 - 0.25 * (ym - yp) * d)
+        }
+    }
+    return pt, py
+}
+
+#| The slope and intercept of the least-squares line through (x, y).
+def vl_line(x: Arr, y: Arr) {
+    n = len(x)
+    mx = sum(x) / n
+    my = sum(y) / n
+    slope = sum((x - mx) * (y - my)) / sum((x - mx) * (x - mx))
+    return slope, my - slope * mx
+}
+
+#| The damping rate and frequency of a decaying standing wave from its field
+#| energy W(t) ~ e^{2 gamma t} sin^2(omega t + phi): the peaks of log W lie on
+#| a line of slope 2 gamma, and they come every pi / omega. Fits the peaks in
+#| [t0, t1]; returns gamma, omega, the number of peaks and the rms distance of
+#| log W's peaks from the fitted line.
+def vl_fit(t: Arr, W: Arr, t0, t1) {
+    pt, py = vl_peaks(t, W, t0, t1)
+    npk = len(pt)
+    if npk < 3.0 {
+        stop(f"vl_fit: only {npk} field-energy peaks in [{t0}, {t1}]; the fit needs 3")
+    }
+    slope, icpt = vl_line(pt, py)
+    rms = sqrt(sum((py - (icpt + slope * pt)) ^ 2.0) / npk)
+    spacing, t_first = vl_line(arange(npk), pt)
+    return 0.5 * slope, VL_PI / spacing, npk, rms
+}
+
+#| The Langmuir-wave root omega of the Maxwellian dielectric function,
+#| 1 + (1 + zeta Z(zeta)) / (k lambda_D)^2 = 0 with zeta = omega / (sqrt 2 k lambda_D),
+#| by Newton's method from the Bohm-Gross frequency, in units of the plasma
+#| frequency. Z is lib/zfunc's plasma dispersion function.
+def vl_landau_root(kld) {
+    rt2k = sqrt(2.0) * kld
+    w = complex(sqrt(1.0 + 3.0 * kld * kld), -0.01)
+    tol = 1.0e-13     # the convergence is quadratic: after a step this small the error is rounding
+    for it to VL_NEWTON_MAXIT {
+        zeta = w / rt2k
+        zz = zf_z(zeta)
+        eps = 1.0 + (1.0 + zeta * zz) / (kld * kld)
+        deps = (zz + zeta * zf_zprime(zeta)) / (kld * kld) / rt2k
+        dw = eps / deps
+        w = w - dw
+        if abs(dw) <= tol * abs(w) {
+            return w
+        }
+    }
+    stop(f"vl_landau_root: Newton did not converge at k lambda_D = {kld}")
+    return w
+}
+
+test "the Landau root at k lambda_D = 0.5 and 0.4 matches mpmath to 1e-13 (posts/refs/landau_root.py)" {
+    w5 = vl_landau_root(0.5)
+    assert_near(re(w5), 1.4156618886045364, 1.0e-13)
+    assert_near(im(w5), -0.15335946690960483, 1.0e-13)
+    w4 = vl_landau_root(0.4)
+    assert_near(re(w4), 1.2850569696537461, 1.0e-13)
+    assert_near(im(w4), -0.066127958690749252, 1.0e-13)
+}
+test "the spline shift equals the tridiagonal solve and four-point sum" {
+    tg = arange(24.0) * (2.0 * VL_PI / 24.0)
+    f = exp(sin(tg)) + 0.3 * cos(3.0 * tg)
+    for s in [0.37, -1.6, 2.25, 0.0] {
+        assert_allclose(vl_spline_shift(f, s), vl_spline_shift_direct(f, s), 1.0e-13)
+    }
+}
+test "the spline shift keeps the sum, gives the samples back at an integer shift, and is fourth order" {
+    tg = arange(32.0) * (2.0 * VL_PI / 32.0)
+    f = exp(sin(tg))
+    assert_near(sum(vl_spline_shift(f, 0.37)), sum(f), 1.0e-13)
+    assert_allclose(vl_spline_shift(f, 2.0), roll(f, -2.0), 1.0e-13)
+    # error of a half-cell shift against the exact exp(sin(x + h/2)), at 32 and 64 points
+    e32 = amax(abs(vl_spline_shift(f, 0.5) - exp(sin(tg + 0.5 * (2.0 * VL_PI / 32.0)))))
+    t64 = arange(64.0) * (2.0 * VL_PI / 64.0)
+    e64 = amax(abs(vl_spline_shift(exp(sin(t64)), 0.5) - exp(sin(t64 + 0.5 * (2.0 * VL_PI / 64.0)))))
+    assert_gt(e32 / e64, 14.0)
+}
+test "the spectral field of a cosine density is the sine Gauss's law gives" {
+    nx = 16.0
+    period = 4.0 * VL_PI
+    x = arange(nx) * (period / nx)
+    kx = vl_wavenumbers(nx, period)
+    F = reshape(1.0 - 0.01 * cos(0.5 * x), 1, nx)
+    E = vl_field(F, kx, 1.0)
+    assert_allclose(E, 0.02 * sin(0.5 * x), 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,40 @@
+# PySCF's max_memory=0 RHF rows for water cc-pVDZ (test_h2o_vdz.py:98 and
+# test_rhf.py:693): with no memory for the integrals, PySCF computes them on
+# the fly every iteration. Here that is the direct J/K member
+# (`int_jk_direct`, running `mdjk_direct`), which never stores an integral:
+# the SCF gets the basis blob in place of the packed ERIs.
+#
+# A direct SCF starts from the core Hamiltonian (the production guess needs
+# stored integrals), and test_rhf.py:693 starts from a zero density. In the
+# interpreter each iteration recomputes all the ERIs, which is why these
+# rows are in a program of their own.
+#
+#     tools/both-engines.sh scf/suite vdz_direct_r
+from hf.hf import hf_scf, hf_setup
+from hf.molecule import molecule_packs
+from hf.scf_loop import ScfSetup
+from hf.opts import scf_checked, SCF_RHF, ScfOptions
+from hf.guess import GS_ZERO
+from hf.jk_direct import INT_JK_DIRECT
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.pyscf_tests import (
+    PST_FILE_H2O_VDZ, PST_FILE_RHF, PST_H2O_VDZ_98, PST_H2O_VDZ_98_P, PST_RHF_693,
+    PST_RHF_693_P,
+)
+from scf.suite.ref.sts import sts_row
+
+sdr_m = molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+sdr_o = ScfOptions { method: SCF_RHF, jk: INT_JK_DIRECT, ..scf_checked() }
+sdr_p = hf_setup(sdr_m, sdr_o)
+
+test "direct RHF from the core guess and from a zero density: -76.026765673120565 and -76.026765673119627 (test_h2o_vdz.py:98, test_rhf.py:693)" {
+    sdr_r = hf_scf(sdr_p)
+    assert_near(sdr_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 98, sdr_r.energy, PST_H2O_VDZ_98, PST_H2O_VDZ_98_P), 1.0, 0.0)
+    sdr_r = hf_scf(ScfSetup { options: ScfOptions { guess: GS_ZERO, ..sdr_o }, ..sdr_p })
+    assert_near(sdr_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 693, sdr_r.energy, PST_RHF_693, PST_RHF_693_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

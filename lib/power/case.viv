@@ -1,0 +1,146 @@
+###
+post: Reading a MATPOWER case file
+agent: claude
+
+A MATPOWER case file (MATPOWER's `caseformat`, version 2, and the older
+version 1 of its test cases) is a MATLAB function that sets the system base
+`baseMVA` and three matrices, one row per bus, generator and branch.
+`read_case(path)` reads those four and ignores the rest (`gencost`, area
+data, the function line, comments after `%`).
+
+The column numbers below are MATPOWER's (idx_bus, idx_gen, idx_brch),
+counted from 0. A power flow reads the input columns and fills the result
+columns: bus voltages, generator outputs and, in four extra branch columns,
+the power entering each end of a branch.
+###
+
+record Case {
+    base_mva: Num
+    bus: Arr
+    gen: Arr
+    branch: Arr
+}
+
+#: bus columns
+BUS_I: Int = 0
+BUS_TYPE: Int = 1
+PD: Int = 2
+QD: Int = 3
+GS: Int = 4
+BS: Int = 5
+VM: Int = 7
+VA: Int = 8
+
+#: generator columns
+GEN_BUS: Int = 0
+PG: Int = 1
+QG: Int = 2
+QMAX: Int = 3
+QMIN: Int = 4
+VG: Int = 5
+GEN_STATUS: Int = 7
+
+#: branch columns (the last four are results)
+F_BUS: Int = 0
+T_BUS: Int = 1
+BR_R: Int = 2
+BR_X: Int = 3
+BR_B: Int = 4
+TAP: Int = 8
+SHIFT: Int = 9
+BR_STATUS: Int = 10
+PF: Int = 13
+QF: Int = 14
+PT: Int = 15
+QT: Int = 16
+BRANCH_COLS: Int = 17
+
+#: bus types
+PQ: Int = 1
+PV: Int = 2
+REF: Int = 3
+NONE: Int = 4
+
+#| The case in a MATPOWER .m file: baseMVA and the bus, gen and branch
+#| matrices, as written (external bus numbers, every row kept).
+def read_case(path: Str) -> Case {
+    lines = read_lines(path)
+    base = 0.0
+    for line in lines {
+        s = strip(_uncomment(line))
+        if startswith(s, "mpc.baseMVA") or startswith(s, "baseMVA") {
+            base = float(strip(replace(split(s, "=")[1], ";", "")))
+        }
+    }
+    if base <= 0.0 {
+        stop(f"read_case: {path} sets no baseMVA")
+    }
+    return Case { base_mva: base, bus: _matrix(lines, "bus", path), gen: _matrix(lines, "gen", path),
+                  branch: _matrix(lines, "branch", path) }
+}
+
+def _uncomment(line: Str) -> Str {
+    k = find(line, "%")
+    if k >= 0 {
+        return line[:k]
+    }
+    return line
+}
+
+#| The rows between `mpc.<name> = [` (or `<name> = [`) and `];`.
+def _matrix(lines: [Str], name: Str, path: Str) -> Arr {
+    M = []
+    inside = false
+    found = false
+    for line in lines {
+        s = strip(_uncomment(line))
+        if not inside {
+            head = strip(split(s, "=")[0]) if "=" in s else ""
+            if (head == "mpc." + name or head == name) and "[" in s {
+                inside = true
+                found = true
+                s = strip(split(s, "[")[1])
+            }
+            else {
+                continue
+            }
+        }
+        done = "]" in s
+        if done {
+            s = split(s, "]")[0]
+        }
+        for part in split(s, ";") {
+            fields = split(strip(part))
+            if len(fields) > 0 {
+                M = append(M, [float(f) for f in fields])
+            }
+        }
+        if done {
+            break
+        }
+    }
+    if not found {
+        stop(f"read_case: {path} has no {name} matrix")
+    }
+    return M
+}
+
+test "case9: baseMVA, 9 buses, 3 generators, 9 branches" {
+    c = read_case("lib/power/cases/case9.m")
+    assert_near(c.base_mva, 100.0, 0.0)
+    assert_allclose(shape(c.bus), [9.0, 13.0], 0.0)
+    assert_allclose(shape(c.gen), [3.0, 21.0], 0.0)
+    assert_allclose(shape(c.branch), [9.0, 13.0], 0.0)
+    assert_near(c.bus[4, PD], 90.0, 0.0)
+    assert_near(c.branch[1, BR_B], 0.158, 0.0)
+}
+
+test "a version 1 case (MATPOWER's t_case9_pf) reads the same way" {
+    c = read_case("lib/power/cases/t_case9_pf.m")
+    assert_allclose(shape(c.bus), [9.0, 13.0], 0.0)
+    assert_near(c.bus[2, BUS_I], 30.0, 0.0)
+    assert_allclose(shape(c.gen), [3.0, 10.0], 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

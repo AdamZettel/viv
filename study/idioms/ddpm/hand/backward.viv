@@ -1,0 +1,55 @@
+###
+The ddpm port's hand-written backward pass, kept verbatim from `ddpm.viv`
+(`column_sums`, `swish_slope`, `layer_back` and `loss_and_grad`, which runs
+the forward pass again to keep its intermediate values) so that
+`ddpm_ad.viv` can check its generated gradient against it.
+
+Used with `import hand.backward`.
+###
+
+def column_sums(G: Arr) {
+    return transpose(ones_column(len(G))) @ G
+}
+
+#| d swish / dz, so the adjoint of `swish(Z)` is `dY * swish_slope(Z)`.
+def swish_slope(Z: Arr) {
+    s = sigmoid(Z)
+    return s + Z * s * (1.0 - s)
+}
+
+#| Backward through `Y = X W + b`: accumulate `X^T dY` and the column sums of
+#| `dY` into the gradient, and return `dX = dY W^T`.
+def layer_back(theta: Arr, grad: Arr, X: Arr, dY: Arr, W, b) {
+    param_add(grad, model, W, transpose(X) @ dY)
+    param_add(grad, model, b, column_sums(dY))
+    return dY @ transpose(param_get(theta, model, W))
+}
+
+#| The loss at `theta` for one batch, with its gradient written into `grad`.
+def loss_and_grad(theta: Arr, grad: Arr, sched: Diffusion, x0: Arr, t: Arr, eps: Arr) {
+    fill(grad, 0.0)
+    xt = q_sample(sched, x0, t, eps)
+    feats = time_features(t)
+    u = layer(theta, feats, TE1_W, TE1_B)
+    a = swish(u)
+    temb = layer(theta, a, TE2_W, TE2_B)
+    z1 = layer(theta, xt, IN_W, IN_B) + temb
+    h1 = swish(z1)
+    z2 = layer(theta, h1, HID_W, HID_B)
+    h2 = swish(z2)
+    out = layer(theta, h2, OUT_W, OUT_B)
+
+    dout = 2.0 * (out - eps) / (len(x0) * 2)
+    dh2 = layer_back(theta, grad, h2, dout, OUT_W, OUT_B)
+    dz2 = dh2 * swish_slope(z2)
+    dh1 = layer_back(theta, grad, h1, dz2, HID_W, HID_B)
+    dz1 = dh1 * swish_slope(z1)
+    layer_back(theta, grad, xt, dz1, IN_W, IN_B)
+    da = layer_back(theta, grad, a, dz1, TE2_W, TE2_B)
+    layer_back(theta, grad, feats, da * swish_slope(u), TE1_W, TE1_B)
+    return mse(out, eps)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2020 Varuna Jayasiri (labmlai/annotated_deep_learning_paper_implementations)
+# SPDX-FileCopyrightText: 2026 The Viv authors

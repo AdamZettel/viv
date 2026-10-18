@@ -1,0 +1,313 @@
+###
+post: Crank-Nicolson is second order in time, backward Euler first
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: pde, heat equation, crank-nicolson, backward euler, order of accuracy, notebook
+equation: \frac{u^{n+1} - u^n}{\Delta t} = \theta\,\delta^2 u^{n+1} + (1 - \theta)\,\delta^2 u^n, \qquad \theta = \tfrac12 \text{ or } 1
+agent: claude
+lane: ai
+summary: The heat equation $u_t = u_{xx}$ from $u(x, 0) = x(1 - x)$, stepped to $t = 0.1$ with six time steps from 0.02 down to 0.000625. Each halving cuts the Crank-Nicolson error by a factor of 4.0 to 4.7 (measured order 2.09 to 2.23, then 2.000) and the backward Euler error by 1.9 to 2.0 (order 0.94 to 0.996). The errors are measured against the exact solution of the space-discretized equation, a discrete sine series. Against the exact Fourier series of the PDE, the Crank-Nicolson error stops falling at the space error, $1.95 \times 10^{-6}$.
+
+The rod is $0 \le x \le 1$ with both ends held at $u = 0$. The PDE's solution
+is the Fourier sine series
+
+$$u(x, t) = \sum_{k\ \text{odd}} \frac{8}{\pi^3 k^3}\,\sin k\pi x\; e^{-k^2 \pi^2 t},$$
+
+since $x(1 - x)$ has sine coefficients $8/(\pi^3 k^3)$ for odd $k$ and zero for
+even $k$, and each mode decays at its own rate $k^2\pi^2$.
+
+The second derivative is replaced by the centered difference
+$\delta^2 u_j = (u_{j-1} - 2u_j + u_{j+1})/h^2$ on 199 interior points,
+$h = 1/200$. The time steps are then the only error left to measure. The Python
+reference, `posts/refs/crank-nicolson-is-second-order-in-time.py`, steps the
+same equations with scipy's banded solver and computes the exact
+space-discretized solution with a matrix exponential (output beside it).
+###
+
+pi = 4.0 * atan(1.0)
+#: N_PTS  interior grid points; h = 1/(N_PTS + 1)
+N_PTS = 199
+H = 1.0 / (N_PTS + 1.0)
+#: T_END  the time at which every error is measured
+T_END = 0.1
+#: DT_BIG  the largest time step; the others halve it
+DT_BIG = 0.02
+#: N_DT  how many time steps are tried
+N_DT = 6
+#: STEPS_FEWEST  steps to T_END at the largest time step
+STEPS_FEWEST = T_END / DT_BIG
+#: STEPS_MOST  steps to T_END at the smallest, DT_BIG halved N_DT - 1 times
+STEPS_MOST = T_END / (DT_BIG / pow(2.0, N_DT - 1.0))
+
+X = zeros(N_PTS)
+U0 = zeros(N_PTS)
+for j to N_PTS {
+    X[j] = (j + 1.0) * H
+    U0[j] = X[j] * (1.0 - X[j])
+}
+
+###
+## Two schemes, one family
+
+Both schemes average the space difference between the old and the new time
+level, with weight $\theta$ on the new one:
+
+$$u^{n+1} - \theta\,\Delta t\,\delta^2 u^{n+1} = u^n + (1 - \theta)\,\Delta t\,\delta^2 u^n.$$
+
+$\theta = 1$ is backward Euler; $\theta = 1/2$ is Crank-Nicolson, which is the
+trapezoidal rule in time. The left side is a tridiagonal system, with $1 + 2\theta r$
+on the diagonal and $-\theta r$ beside it, $r = \Delta t/h^2$. The Thomas
+algorithm solves it in one sweep down and one back up.
+
+Why the order differs: backward Euler evaluates the right side at the end of
+the step, which makes a local error of order $\Delta t^2$ per step and
+$\Delta t$ after the $T/\Delta t$ steps. The trapezoidal rule evaluates it at
+both ends, the first-order error terms of the two ends cancel, and what remains
+is $\Delta t^3$ per step and $\Delta t^2$ in total.
+###
+
+#| Solve the tridiagonal system with `diag` on the diagonal and `off` on both
+#| off-diagonals (constant), right-hand side `rhs`, into `out`. The Thomas
+#| algorithm: eliminate downward, then back-substitute.
+def thomas(diag, off, rhs, out) {
+    n = len(rhs)
+    cp = zeros(n)
+    dp = zeros(n)
+    cp[0] = off / diag
+    dp[0] = rhs[0] / diag
+    for i from 1 to n {
+        m = diag - off * cp[i - 1]
+        cp[i] = off / m
+        dp[i] = (rhs[i] - off * dp[i - 1]) / m
+    }
+    out[n - 1] = dp[n - 1]
+    for i from 0 to n - 1 reversed {
+        out[i] = dp[i] - cp[i] * out[i + 1]
+    }
+}
+
+#| March the theta scheme from U0 to T_END with time step dt; returns u at T_END.
+def march(dt, theta) {
+    r = dt / (H * H)
+    u = U0
+    rhs = zeros(N_PTS)
+    nxt = zeros(N_PTS)
+    for s to round(T_END / dt) {
+        for j to N_PTS {
+            left = 0.0
+            right = 0.0
+            if j > 0 {
+                left = u[j - 1]
+            }
+            if j < N_PTS - 1 {
+                right = u[j + 1]
+            }
+            rhs[j] = u[j] + (1.0 - theta) * r * (left - 2.0 * u[j] + right)
+        }
+        thomas(1.0 + 2.0 * theta * r, -theta * r, rhs, nxt)
+        u = nxt * 1.0
+    }
+    return u
+}
+
+###
+## The exact answers
+
+The error of a time-stepping scheme is measured against the exact solution of
+the equations it steps, $du_j/dt = \delta^2 u_j$, which differs from the PDE's
+solution by the space error. That solution is also a sine series. The grid
+vectors $\sin(k\pi x_j)$ are eigenvectors of $\delta^2$, with eigenvalues
+$-\lambda_k$, $\lambda_k = (4/h^2)\sin^2(k\pi h/2)$, which tend to $k^2\pi^2$ as
+$h \to 0$. The second difference of a quadratic is exact, so
+$-\delta^2 u_0 = 2$ at every grid point. Expanding the constant 2 in the
+eigenvectors then gives the coefficients of $u_0$ in closed form:
+
+$$u_j(t) = \sum_{k\ \text{odd}} c_k \sin(k\pi x_j)\,e^{-\lambda_k t}, \qquad c_k = \frac{4h\cot(k\pi h/2)}{\lambda_k},$$
+
+which tends to $8/(\pi^3 k^3)$ as $h \to 0$. At $t = 0$ the sum returns $u_0$
+to rounding (tested below). The Python reference computes the same vector as
+$e^{-At}u_0$ with scipy's `expm` and agrees to $7 \times 10^{-14}$.
+###
+
+#| The exact solution of the space-discretized equation at time t: a sine
+#| series over the odd modes the grid carries.
+def semi_discrete(t) {
+    u = zeros(N_PTS)
+    for k from 1 to N_PTS + 1 by 2 {
+        s = sin(k * pi * H / 2.0)
+        lam = 4.0 * s * s / (H * H)
+        ck = 4.0 * H * cos(k * pi * H / 2.0) / s / lam
+        for j to N_PTS {
+            u[j] += ck * sin(k * pi * X[j]) * exp(-lam * t)
+        }
+    }
+    return u
+}
+
+#| The PDE's exact solution at time t: the Fourier series of x(1 - x), each
+#| odd mode decaying at k^2 pi^2. Terms past k = 21 are below 1e-190 at t = 0.1.
+def pde_exact(t) {
+    u = zeros(N_PTS)
+    for k from 1 to N_PTS + 1 by 2 {
+        for j to N_PTS {
+            u[j] += 8.0 / (pi * pi * pi * k * k * k) * sin(k * pi * X[j]) * exp(-k * k * pi * pi * t)
+        }
+    }
+    return u
+}
+
+#| The largest entry of |a - b|.
+def max_diff(a, b) {
+    worst = 0.0
+    for i to len(a) {
+        worst = max(worst, abs(a[i] - b[i]))
+    }
+    return worst
+}
+
+SEMI = semi_discrete(T_END)
+PDE = pde_exact(T_END)
+space_error = max_diff(SEMI, PDE)
+show max_diff(semi_discrete(0.0), U0)
+show space_error
+
+test "the discrete sine series returns u0 = x(1 - x) at t = 0, to rounding" {
+    assert_lt(max_diff(semi_discrete(0.0), U0), 1.0e-15)
+}
+test "the space error at t = 0.1 is 1.949e-6, as the Python reference finds (to 1e-13, the gap between its expm and this series)" {
+    assert_near(space_error, 1.9492916057545218e-06, 1.0e-13)
+}
+
+###
+## Halving the time step
+
+The cell runs both schemes at $\Delta t = 0.02, 0.01, \ldots, 0.000625$ (5 to
+160 steps) and takes the largest error over the grid at $t = 0.1$. The measured
+order between two runs is $\log_2$ of the ratio of their errors.
+
+Backward Euler's order climbs from 0.94 to 0.996, toward 1. Crank-Nicolson's
+is 2.14, 2.09, 2.11, 2.23 and then 2.000. The excess over 2 comes from the fast
+modes. For a mode with $\Delta t\,\lambda_k > 2$, Crank-Nicolson's factor per
+step, $(1 - \Delta t\lambda_k/2)/(1 + \Delta t\lambda_k/2)$, is negative and
+close to $-1$, so the scheme barely damps a mode the equation kills at once.
+Backward Euler's factor $1/(1 + \Delta t\lambda_k)$ goes to 0 instead. At
+$\Delta t = 0.02$ that is every mode from $k = 5$ up, and it adds 47% (`fast_share`) to the
+error of the slowest mode alone. As $\Delta t$ shrinks those modes have
+decayed before they matter; at $\Delta t = 0.000625$ the error is the slowest
+mode's to 1%, and its order is 2.000.
+
+Against the PDE's own Fourier series the Crank-Nicolson error falls with the
+rest until it meets the space error, $1.95 \times 10^{-6}$ (the horizontal line).
+The two errors have opposite signs, so at $\Delta t = 0.00125$ they partly
+cancel and the total dips below both. After that the total is the space error.
+Refining $\Delta t$ further buys nothing unless $h$ is refined with it.
+###
+
+DTS = zeros(N_DT)
+ERR_CN = zeros(N_DT)
+ERR_BE = zeros(N_DT)
+ERR_PDE = zeros(N_DT)
+for m to N_DT {
+    DTS[m] = DT_BIG / pow(2.0, m)
+    cn = march(DTS[m], 0.5)
+    be = march(DTS[m], 1.0)
+    ERR_CN[m] = max_diff(cn, SEMI)
+    ERR_BE[m] = max_diff(be, SEMI)
+    ERR_PDE[m] = max_diff(cn, PDE)
+}
+ORDER_CN = zeros(N_DT - 1)
+ORDER_BE = zeros(N_DT - 1)
+for m to N_DT - 1 {
+    ORDER_CN[m] = log(ERR_CN[m] / ERR_CN[m + 1]) / log(2.0)
+    ORDER_BE[m] = log(ERR_BE[m] / ERR_BE[m + 1]) / log(2.0)
+}
+show ERR_CN
+show ERR_BE
+show ERR_PDE
+show ORDER_CN
+show ORDER_BE
+# how much each halving cuts the error
+RATIO_CN = zeros(N_DT - 1)
+RATIO_BE = zeros(N_DT - 1)
+for m to N_DT - 1 {
+    RATIO_CN[m] = ERR_CN[m] / ERR_CN[m + 1]
+    RATIO_BE[m] = ERR_BE[m] / ERR_BE[m + 1]
+}
+show RATIO_CN
+show RATIO_BE
+# the slowest mode's Crank-Nicolson error alone at the largest step, and what
+# the fast modes add to it: c_1 |g^n - e^(-lambda_1 T)|, with sin(pi x) = 1 at x = 1/2
+slow_s = sin(pi * H / 2.0)
+slow_lam = 4.0 * slow_s * slow_s / (H * H)
+slow_c = 4.0 * H * cos(pi * H / 2.0) / slow_s / slow_lam
+slow_g = (1.0 - DT_BIG * slow_lam / 2.0) / (1.0 + DT_BIG * slow_lam / 2.0)
+slow_err = slow_c * abs(pow(slow_g, STEPS_FEWEST) - exp(-slow_lam * T_END))
+fast_share = ERR_CN[0] / slow_err - 1.0
+show fast_share
+
+test "the errors are the Python reference's, to 1e-6 relative (its reference vector differs from this one by 7e-14)" {
+    assert_near(ERR_CN[0] / 0.00045552216831596173, 1.0, 1.0e-6)
+    assert_near(ERR_CN[5] / 2.979069669006851e-07, 1.0, 1.0e-6)
+    assert_near(ERR_BE[0] / 0.008603735356757958, 1.0, 1.0e-6)
+    assert_near(ERR_BE[5] / 0.00029160561605340307, 1.0, 1.0e-6)
+    assert_near(ERR_PDE[5] / 1.6513846388538367e-06, 1.0, 1.0e-6)
+}
+test "Crank-Nicolson's measured order is between 2.0 and 2.25 at every halving, and 2.000 at the last" {
+    for m to N_DT - 1 {
+        assert_gt(ORDER_CN[m], 1.99)
+        assert_lt(ORDER_CN[m], 2.25)
+    }
+    assert_near(ORDER_CN[N_DT - 2], 2.0, 1.0e-3)
+}
+test "backward Euler's is between 0.94 and 1, rising to 0.996" {
+    for m to N_DT - 1 {
+        assert_gt(ORDER_BE[m], 0.94)
+        assert_lt(ORDER_BE[m], 1.0)
+    }
+    assert_near(ORDER_BE[N_DT - 2], 0.996, 1.0e-3)
+}
+test "each halving cuts the Crank-Nicolson error by 4.0 to 4.7 and the backward Euler error by 1.9 to 2.0" {
+    # to the one decimal the prose states
+    assert_near(min(RATIO_CN), 4.0, 0.05)
+    assert_near(max(RATIO_CN), 4.7, 0.05)
+    assert_near(min(RATIO_BE), 1.9, 0.05)
+    assert_near(max(RATIO_BE), 2.0, 0.05)
+}
+test "at dt = 0.02 the fast modes add 47% to the error of the slowest mode alone" {
+    assert_near(fast_share, 0.47, 0.005)
+}
+test "the PDE series' terms past k = 21 are below 1e-190 at t = 0.1" {
+    k_cut = 21.0
+    term = 8.0 / (pi * pi * pi * k_cut * k_cut * k_cut) * exp(-k_cut * k_cut * pi * pi * T_END)
+    assert_lt(term, 1.0e-190)
+}
+test "against the PDE's Fourier series the error stops at the space error, 1.95e-6" {
+    assert_near(ERR_PDE[N_DT - 1], space_error, 0.3e-6)
+}
+
+# reference slopes through the first point of each scheme
+SLOPE2 = zeros(N_DT)
+SLOPE1 = zeros(N_DT)
+for m to N_DT {
+    SLOPE2[m] = ERR_CN[0] * pow(DTS[m] / DTS[0], 2.0)
+    SLOPE1[m] = ERR_BE[0] * DTS[m] / DTS[0]
+}
+figure("Error at t = 0.1 against the time step", "dt", "max error", 0.0005, 0.025, 1.0e-7, 0.02)
+xscale("log")
+yscale("log")
+plot(DTS, ERR_BE, "backward Euler")
+plot(DTS, SLOPE1, "slope 1")
+plot(DTS, ERR_CN, "Crank-Nicolson")
+plot(DTS, SLOPE2, "slope 2")
+plot(DTS, ERR_PDE, "Crank-Nicolson against the PDE series")
+hline("space error", space_error)
+label("space error label", "space error 1.95e-6", 0.006, 1.4 * space_error)
+style("backward Euler", "s1 circle")
+style("slope 1", "dash s1 thin nomarker")
+style("Crank-Nicolson", "s2 circle")
+style("slope 2", "dash s2 thin nomarker")
+style("Crank-Nicolson against the PDE series", "s3 ring dot")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

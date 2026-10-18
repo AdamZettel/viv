@@ -1,0 +1,97 @@
+# The string form of a molecule (lib/hf/mole) against the array form
+# (lib/hf/molecule): for every molecule and basis set the lock ladder holds,
+# `molecule(text, name)` must build the atoms, shells and primitives
+# `molecule_from(z, xyz, basis_x())` builds, bit for bit, with the same
+# charge, spin and Cartesian flag. The text is what tools/hf_reference.py
+# hands PySCF (`atom=`), and the name is PySCF's spelling of the set, so with
+# scf/molecule_packs.viv (the array form against PySCF's own packs) the text
+# form builds PySCF's molecule.
+#
+#     tools/both-engines.sh scf molecule_text
+import basis.all
+from basis.sto3g import basis_sto3g
+from basis.basis import Basis
+from basis.pople631g import basis_631g
+from basis.pople631gs import basis_631gs
+from basis.pople631gss import basis_631gss
+from basis.ccpvdz import basis_ccpvdz
+from basis.ccpvtz import basis_ccpvtz
+from basis.def2svp import basis_def2svp
+from basis.def2tzvp import basis_def2tzvp
+from basis.named import BASIS_NAMES
+from hf.mole import molecule, molecule_in
+from hf.molecule import Molecule, molecule_bohr, molecule_from
+from hf.scf import rhf
+from hfref.water_631g import WATER631G_E_RHF
+
+MTX_WATER = "O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587"
+MTX_NH3 = "N 0 0 0.1173; H 0 0.9377 -0.2737; H 0.8121 -0.4689 -0.2737; H -0.8121 -0.4689 -0.2737"
+MTX_CH4 = "C 0 0 0; H 0.6276 0.6276 0.6276; H -0.6276 -0.6276 0.6276; H -0.6276 0.6276 -0.6276; H 0.6276 -0.6276 -0.6276"
+
+#| 1 when two molecules are the same bit for bit: every entry of the atoms,
+#| shells and primitives packs, the charge, the spin and the Cartesian flag.
+def mtx_same(a: Molecule, b: Molecule) {
+    if len(a.atoms) != len(b.atoms) or len(a.shells) != len(b.shells) or len(a.prims) != len(b.prims) {
+        return 0
+    }
+    if all(a.atoms == b.atoms) and all(a.shells == b.shells) and all(a.prims == b.prims) and a.charge == b.charge and a.spin == b.spin and a.cart == b.cart {
+        return 1
+    }
+    return 0
+}
+
+#| Water from the text in the set PySCF names `name`, against water from
+#| atomic numbers in table `b`.
+def mtx_water(name: Str, b: Basis) {
+    return mtx_same(molecule(MTX_WATER, name), molecule_from([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]], b))
+}
+
+test "water from text is water from arrays in all eight basis sets" {
+    mtx_n = 0
+    mtx_n = mtx_n + mtx_water("sto-3g", basis_sto3g())
+    mtx_n = mtx_n + mtx_water("6-31g", basis_631g())
+    mtx_n = mtx_n + mtx_water("6-31g*", basis_631gs())
+    mtx_n = mtx_n + mtx_water("6-31g**", basis_631gss())
+    mtx_n = mtx_n + mtx_water("cc-pvdz", basis_ccpvdz())
+    mtx_n = mtx_n + mtx_water("cc-pvtz", basis_ccpvtz())
+    mtx_n = mtx_n + mtx_water("def2-svp", basis_def2svp())
+    mtx_n = mtx_n + mtx_water("def2-tzvp", basis_def2tzvp())
+    assert_near(mtx_n, len(BASIS_NAMES), 0.0)
+}
+
+test "OH, O2, HF, NH3, CH4, N2, He and H from text are the same molecules from arrays" {
+    mtx_n = 0
+    mtx_oh = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.9697]]
+    mtx_n = mtx_n + mtx_same(molecule("O 0 0 0; H 0 0 0.9697", "sto-3g"), molecule_from([8, 1], mtx_oh, basis_sto3g()))
+    mtx_n = mtx_n + mtx_same(molecule("O 0 0 0; H 0 0 0.9697", "6-31g*"), molecule_from([8, 1], mtx_oh, basis_631gs()))
+    mtx_n = mtx_n + mtx_same(molecule("O 0 0 0; O 0 0 1.2075", "6-31g"), molecule_from([8, 8], [[0.0, 0.0, 0.0], [0.0, 0.0, 1.2075]], basis_631g()))
+    mtx_n = mtx_n + mtx_same(molecule("F 0 0 0; H 0 0 0.917", "6-31g*"), molecule_from([9, 1], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.917]], basis_631gs()))
+    mtx_nh3 = [[0.0, 0.0, 0.1173], [0.0, 0.9377, -0.2737], [0.8121, -0.4689, -0.2737], [-0.8121, -0.4689, -0.2737]]
+    mtx_n = mtx_n + mtx_same(molecule(MTX_NH3, "6-31g*"), molecule_from([7, 1, 1, 1], mtx_nh3, basis_631gs()))
+    mtx_ch4 = [[0.0, 0.0, 0.0], [0.6276, 0.6276, 0.6276], [-0.6276, -0.6276, 0.6276], [-0.6276, 0.6276, -0.6276], [0.6276, -0.6276, -0.6276]]
+    mtx_n = mtx_n + mtx_same(molecule(MTX_CH4, "6-31g*"), molecule_from([6, 1, 1, 1, 1], mtx_ch4, basis_631gs()))
+    mtx_n = mtx_n + mtx_same(molecule("N 0 0 0; N 0 0 1.0977", "6-31g*"), molecule_from([7, 7], [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0977]], basis_631gs()))
+    mtx_at = [[0.0, 0.0, 0.0]]
+    mtx_n = mtx_n + mtx_same(molecule("He 0 0 0", "sto-3g"), molecule_from([2], mtx_at, basis_sto3g()))
+    mtx_n = mtx_n + mtx_same(molecule("He 0 0 0", "cc-pvdz"), molecule_from([2], mtx_at, basis_ccpvdz()))
+    mtx_n = mtx_n + mtx_same(molecule("H 0 0 0", "sto-3g"), molecule_from([1], mtx_at, basis_sto3g()))
+    assert_near(mtx_n, 10, 0.0)
+}
+
+test "the other spellings: an XYZ file, newlines, lower-case symbols, PySCF's aliases, bohr" {
+    mtx_ref = molecule_from([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]], basis_631gs())
+    mtx_n = 0
+    mtx_n = mtx_n + mtx_same(molecule("3\nwater\nO 0 0 0\nH 0 -0.757 0.587\nH 0 0.757 0.587\n", "6-31G*"), mtx_ref)
+    mtx_n = mtx_n + mtx_same(molecule("o 0 0 0\nh 0 -0.757 0.587\nh 0 0.757 0.587", "631gs"), mtx_ref)
+    mtx_n = mtx_n + mtx_same(molecule(MTX_WATER, "6-31Gs"), mtx_ref)
+    mtx_bohr = molecule_bohr([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -1.43, 1.1], [0.0, 1.43, 1.1]], basis_631gs())
+    mtx_n = mtx_n + mtx_same(molecule_in("O 0 0 0; H 0 -1.43 1.1; H 0 1.43 1.1", "6-31g*", "bohr"), mtx_bohr)
+    assert_near(mtx_n, 4, 0.0)
+}
+
+test "water 6-31G from text gives PySCF's RHF energy, -75.98394849810573" {
+    assert_lt(abs(rhf(molecule(MTX_WATER, "6-31g")).energy - WATER631G_E_RHF), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

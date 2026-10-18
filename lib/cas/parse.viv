@@ -1,0 +1,296 @@
+###
+post: Reading an expression written as Viv text into the CAS
+agent: claude
+
+`cas(text)` reads an expression in Viv's own syntax into the store
+(lib/cas/store): numbers, names, `+ - * / ^`, parentheses and calls of the
+heads the CAS knows. The precedence is Viv's: `^` binds tightest and to the
+right, so `-x^2` is $-(x^2)$ and `2^3^2` is $2^9$; then unary minus; then
+`*` and `/`; then `+` and `-`.
+
+A decimal is read exactly: `0.1` is $1/10$, not the double nearest it, and
+`2.5e-3` is $1/400$. A number with more digits
+than $2^{53}$ holds is refused. `sqrt(u)` is $u^{1/2}$, `pow(a, b)` is $a^b$,
+`ln` is `log`, and the name `pi` is the constant $\pi$. A call of a function
+the CAS does not know is a refusal that names it.
+
+Used with `import cas.parse`.
+###
+from cas.store import (
+    C_HALF, C_MONE, C_ONE, cas_addv, cas_fail, cas_fn, cas_int, cas_isfail, cas_mul, cas_mulv,
+    cas_neg, cas_num, cas_pow, cas_sym,
+)
+from cas.rational import rat_bad, rat_iadd, rat_imul, rat_mul, rat_pow
+
+# token kinds
+T_NUM = 0
+T_NAME = 1
+T_OP = 2
+T_END = 3
+
+# the tokens of the text being read, and the reader's position in [0]
+CAS_TOK_KIND = map()
+CAS_TOK_TEXT = map()
+CAS_POS = zeros(2)
+
+def cas_digit(c) {
+    return c >= "0" and c <= "9"
+}
+def cas_letter(c) {
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+}
+
+#| Split `text` into tokens; a character that cannot start one gives a refusal id, else -1.
+def cas_lex(text) {
+    clear(CAS_TOK_KIND)
+    clear(CAS_TOK_TEXT)
+    n = len(text)
+    i = 0
+    t = 0
+    while i < n {
+        c = text[i]
+        if c == " " or c == "\t" or c == "\n" {
+            i = i + 1
+        } else if cas_digit(c) or (c == "." and i + 1 < n and cas_digit(text[i + 1])) {
+            j = i
+            while j < n and (cas_digit(text[j]) or text[j] == ".") {
+                j = j + 1
+            }
+            if j < n and (text[j] == "e" or text[j] == "E") {
+                k = j + 1
+                if k < n and (text[k] == "+" or text[k] == "-") {
+                    k = k + 1
+                }
+                if k < n and cas_digit(text[k]) {
+                    j = k
+                    while j < n and cas_digit(text[j]) {
+                        j = j + 1
+                    }
+                }
+            }
+            CAS_TOK_KIND[t] = T_NUM
+            CAS_TOK_TEXT[t] = text[i:j]
+            t = t + 1
+            i = j
+        } else if cas_letter(c) {
+            j = i
+            while j < n and (cas_letter(text[j]) or cas_digit(text[j])) {
+                j = j + 1
+            }
+            CAS_TOK_KIND[t] = T_NAME
+            CAS_TOK_TEXT[t] = text[i:j]
+            t = t + 1
+            i = j
+        } else if c in "+-*/^()," {
+            CAS_TOK_KIND[t] = T_OP
+            CAS_TOK_TEXT[t] = c
+            t = t + 1
+            i = i + 1
+        } else {
+            return cas_fail(f"the CAS cannot read `{c}` in `{text}`")
+        }
+    }
+    CAS_TOK_KIND[t] = T_END
+    CAS_TOK_TEXT[t] = ""
+    CAS_POS[0] = 0
+    return -1
+}
+
+def cas_peek() {
+    return CAS_TOK_TEXT[CAS_POS[0]]
+}
+def cas_peek_kind() {
+    return CAS_TOK_KIND[CAS_POS[0]]
+}
+def cas_bump() {
+    CAS_POS[0] = CAS_POS[0] + 1
+}
+
+#| The exact rational a decimal literal is (`2.50e-3` is 1/400).
+def cas_decimal(s) {
+    n = len(s)
+    mant = 0
+    scale = 0
+    seen_dot = false
+    i = 0
+    while i < n and (cas_digit(s[i]) or s[i] == ".") {
+        if s[i] == "." {
+            seen_dot = true
+        } else {
+            mant = rat_iadd(rat_imul(mant, 10), ord(s[i]) - ord("0"))
+            if seen_dot {
+                scale = scale - 1
+            }
+        }
+        i = i + 1
+    }
+    if i < n {
+        # the exponent
+        scale = scale + int(s[i + 1:])
+    }
+    if rat_bad(mant) {
+        return cas_fail(f"the number `{s}` has more digits than 2^53 holds; exact big integers are not built yet")
+    }
+    p, q = rat_pow(10, 1, scale)
+    a, b = rat_mul(mant, 1, p, q)
+    if rat_bad(a) {
+        return cas_fail(f"the number `{s}` is past 2^53 as a fraction; exact big integers are not built yet")
+    }
+    return cas_num(a, b)
+}
+
+#| sum := term (('+' | '-') term)*
+def cas_p_sum() {
+    terms = [cas_p_term()]
+    going = true
+    while going {
+        op = cas_peek()
+        if cas_peek_kind() == T_OP and (op == "+" or op == "-") {
+            cas_bump()
+            t = cas_p_term()
+            if op == "-" {
+                t = cas_neg(t)
+            }
+            terms = append(terms, t)
+        } else {
+            going = false
+        }
+    }
+    return cas_addv(terms)
+}
+
+#| term := unary (('*' | '/') unary)*
+def cas_p_term() {
+    fs = [cas_p_unary()]
+    going = true
+    while going {
+        op = cas_peek()
+        if cas_peek_kind() == T_OP and (op == "*" or op == "/") {
+            cas_bump()
+            f = cas_p_unary()
+            if op == "/" {
+                f = cas_pow(f, C_MONE)
+            }
+            fs = append(fs, f)
+        } else {
+            going = false
+        }
+    }
+    return cas_mulv(fs)
+}
+
+#| unary := '-' unary | power
+def cas_p_unary() {
+    if cas_peek_kind() == T_OP and cas_peek() == "-" {
+        cas_bump()
+        return cas_neg(cas_p_unary())
+    }
+    if cas_peek_kind() == T_OP and cas_peek() == "+" {
+        cas_bump()
+        return cas_p_unary()
+    }
+    return cas_p_power()
+}
+
+#| power := atom ('^' unary)?, so `^` is right-associative and `2^-1` reads
+def cas_p_power() {
+    b = cas_p_atom()
+    if cas_peek_kind() == T_OP and cas_peek() == "^" {
+        cas_bump()
+        return cas_pow(b, cas_p_unary())
+    }
+    return b
+}
+
+#| atom := number | name | name '(' sum (',' sum)* ')' | '(' sum ')'
+def cas_p_atom() {
+    k = cas_peek_kind()
+    s = cas_peek()
+    if k == T_NUM {
+        cas_bump()
+        return cas_decimal(s)
+    }
+    if k == T_NAME {
+        cas_bump()
+        if cas_peek_kind() == T_OP and cas_peek() == "(" {
+            cas_bump()
+            a = cas_p_sum()
+            b = -1
+            if cas_peek() == "," {
+                cas_bump()
+                b = cas_p_sum()
+            }
+            if cas_peek() != ")" {
+                return cas_fail(f"expected `)` after the argument of `{s}`")
+            }
+            cas_bump()
+            if s == "pow" {
+                if b < 0 {
+                    return cas_fail("`pow` takes two arguments")
+                }
+                return cas_pow(a, b)
+            }
+            if b >= 0 {
+                return cas_fail(f"the CAS has no two-argument function `{s}`")
+            }
+            return cas_fn(s, a)
+        }
+        return cas_sym(s)
+    }
+    if k == T_OP and s == "(" {
+        cas_bump()
+        e = cas_p_sum()
+        if cas_peek() != ")" {
+            return cas_fail("expected `)`")
+        }
+        cas_bump()
+        return e
+    }
+    if k == T_END {
+        return cas_fail("the expression ends early")
+    }
+    return cas_fail(f"unexpected `{s}`")
+}
+
+#| The expression `text` is, read into the store; a refusal when it cannot be read.
+def cas(text) {
+    bad = cas_lex(text)
+    if bad >= 0 {
+        return bad
+    }
+    e = cas_p_sum()
+    if cas_peek_kind() != T_END and not cas_isfail(e) {
+        return cas_fail(f"`{cas_peek()}` is left over after an expression in `{text}`")
+    }
+    return e
+}
+
+test "Viv's precedence: -x^2 is -(x^2), ^ is right-associative" {
+    x = cas_sym("x")
+    assert_near(cas("-x^2"), cas_neg(cas_pow(x, cas_int(2))), 0)
+    assert_near(cas("2^3^2"), cas_int(512), 0)
+    assert_near(cas("x - y - z"), cas_addv([x, cas_neg(cas_sym("y")), cas_neg(cas_sym("z"))]), 0)
+    assert_near(cas("1/2/x"), cas_mul(C_HALF, cas_pow(x, C_MONE)), 0)
+}
+
+test "decimals are exact rationals" {
+    assert_near(cas("0.1"), cas_num(1, 10), 0)
+    assert_near(cas("2.50e-3"), cas_num(1, 400), 0)
+    assert_near(cas("1e3"), cas_int(1000), 0)
+    assert_near(cas("0.1 + 0.2"), cas_num(3, 10), 0)
+}
+
+test "calls, sqrt as a power, and refusals" {
+    x = cas_sym("x")
+    assert_near(cas("sqrt(x)"), cas_pow(x, C_HALF), 0)
+    assert_near(cas("pow(x, 3)"), cas_pow(x, cas_int(3)), 0)
+    assert_near(cas("ln(x)"), cas_fn("log", x), 0)
+    assert_near(cas("sin(pi/2)"), C_ONE, 0)
+    assert_true(cas_isfail(cas("boys(x)")))
+    assert_true(cas_isfail(cas("x +")))
+    assert_true(cas_isfail(cas("x $ 2")))
+    assert_true(cas_isfail(cas("12345678901234567890")))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

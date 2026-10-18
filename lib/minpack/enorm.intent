@@ -1,0 +1,51 @@
+module lib/minpack/enorm  documents every variable
+  The Euclidean norm of a vector, and the two machine constants MINPACK
+  reads from dpmpar.
+
+  EPSMCH and DWARF are dpmpar(1) and dpmpar(2) exactly as netlib's dpmpar.f
+  writes them for IEEE machines, to 11 digits. They are close to, but not
+  equal to, 2^-52 and the smallest normal double, and the port uses the
+  Fortran's values so that its tolerance tests take the same branches.
+
+enorm  @dcf191ff
+  what  $\sqrt{x_0^2 + \cdots + x_{n-1}^2}$ for the first n entries of x,
+        without overflow or underflow for any representable entries.
+  how   Line by line: each entry goes into one of three sums by size.
+        Entries between RDWARF and $r_{\mathrm{giant}} / n$ are squared and added
+        directly (s2): their squares, and n of them added, stay in range.
+        Larger entries go to s1 and smaller nonzero ones to s3, each summed
+        as squares relative to the largest entry of its class seen so far
+        (x1max, x3max); when a new largest arrives, the old sum is rescaled
+        by $(\text{old max} / \text{new max})^2$ before adding $1$. At the end, if any
+        large entry was seen, the result is $x_{\max,1} \sqrt{s_1 + s_2 / x_{\max,1}^2}$
+        (the small ones cannot matter); otherwise the intermediate sum,
+        with the small ones folded in on whichever scale is larger, or the
+        small ones alone.
+  why   $\sum x_i^2$ computed directly overflows for entries near $10^{200}$ and
+        flushes entries near $10^{-200}$ to zero; enorm gets both right to rounding
+        [test "enorm of 1e200 and 1e-200 entries does not overflow or underflow"],
+        and for ordinary vectors it agrees with the plain formula
+        [test "for ordinary numbers enorm is the plain square root of the sum of squares"].
+        The Fortran's order of operations is kept, since lmder's iterates
+        are compared with the Fortran's bit for bit.
+  x       $x$  the vector
+  xabs    $|x_i|$  the size of the current entry
+  s1      $s_1$  the sum of squares of the large entries, relative to the largest
+  s2      $s_2$  the sum of squares of the ordinary entries
+  s3      $s_3$  the sum of squares of the tiny entries, relative to the largest of them
+  x1max   $x_{\max,1}$  the largest large entry so far
+  x3max   $x_{\max,3}$  the largest tiny entry so far
+  RDWARF  $r_{\mathrm{dwarf}}$  below this, a square could underflow
+  RGIANT  $r_{\mathrm{giant}}$  above this over n, a sum of n squares could overflow
+  agiant  $a_{\mathrm{giant}}$  $r_{\mathrm{giant}} / n$, the largest entry counted as ordinary for this n
+  n       $n$  how many entries of x to use
+  i       the entry being added in
+  q       a ratio at most 1, squared to put a sum on one scale: the old largest
+          over the new largest, or the entry over the largest of its class
+
+  $$ \lVert x \rVert = \sqrt{\textstyle\sum_{i=0}^{n-1} x_i^2} $$  [test "for ordinary numbers enorm is the plain square root of the sum of squares"]
+  $$ \lVert x \rVert = x_{\max,1} \sqrt{s_1 + \frac{s_2}{x_{\max,1}^2}} $$  [test "enorm of 1e200 and 1e-200 entries does not overflow or underflow"]
+  = agiant  the upper limit of an ordinary entry for this n: n squares below it add up to at most $r_{\mathrm{giant}}^2 \approx 1.7 \times 10^{38}$, which fits even in single precision, the smallest range MINPACK was written for
+  = s2#2   an entry of ordinary size: its square is added as it is
+  = s3#2   a tiny entry larger than every tiny one before it: the old sum is rescaled to the new largest, and this entry adds 1
+  = s1#2   a large entry larger than every large one before it: the same rescaling, relative to the largest large entry

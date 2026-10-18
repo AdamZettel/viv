@@ -1,0 +1,35 @@
+#! timing
+# PolyBench/C 4.2.1 gemm: C := alpha*A*B + beta*C.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/blas/gemm/gemm.c
+# Sizes are the MINI dataset; the harness sets others with --set.
+NI = 20
+NJ = 25
+NK = 30
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    C = [[((i * j + 1) % NI) / NI for j to NJ] for i to NI]
+    A = [[(i * (j + 1) % NK) / NK for j to NK] for i to NI]
+    B = [[(i * (j + 2) % NJ) / NJ for j to NJ] for i to NK]
+    return C, A, B
+}
+
+def kernel(alpha, beta, C, A, B) {
+    return alpha * (A @ B) + beta * C
+}
+
+alpha = 1.5
+beta = 1.2
+C, A, B = init()
+t0 = clock()
+C = kernel(alpha, beta, C, A, B)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("C", C)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,317 @@
+###
+module: QR factorizations for the linear-algebra claims
+by: claude
+
+Householder, classical and modified Gram-Schmidt, and Givens QR, written
+plainly so the claims can compare how orthogonal each one's Q stays, and
+a Hessenberg QR by Givens rotations next to Householder QR that ignores the
+structure, both counting their floating-point operations. Not a library:
+lib/stats/linmod has the pivoted Householder QR the solvers use.
+###
+
+#| The Frobenius norm of Q^T Q - I: how far the columns of Q are from orthonormal.
+def orth_loss(q: Arr) -> Num {
+    #: rows m, columns n
+    n: Int = int(shape(q)[1])
+    m: Int = int(shape(q)[0])
+    s = 0.0
+    for i to n {
+        for j to n {
+            d = 0.0
+            for k to m {
+                d = d + q[k, i] * q[k, j]
+            }
+            if i == j {
+                d = d - 1.0
+            }
+            s = s + d * d
+        }
+    }
+    return sqrt(s)
+}
+
+#| Householder QR of a (m x n, m >= n): returns the explicit m x n Q.
+def householder_q(a: Arr) -> Arr {
+    m: Int = int(shape(a)[0])
+    n: Int = int(shape(a)[1])
+    r = copy(a)
+    vs = zeros(n, m)
+    for k to n {
+        #: the reflector that zeros column k below the diagonal
+        norm = 0.0
+        for i from k to m {
+            norm = norm + r[i, k] * r[i, k]
+        }
+        norm = sqrt(norm)
+        alpha = -norm
+        if r[k, k] < 0.0 {
+            alpha = norm
+        }
+        vnorm2 = 0.0
+        for i from k to m {
+            vs[k, i] = r[i, k]
+        }
+        vs[k, k] = vs[k, k] - alpha
+        for i from k to m {
+            vnorm2 = vnorm2 + vs[k, i] * vs[k, i]
+        }
+        if vnorm2 > 0.0 {
+            for j from k to n {
+                dot = 0.0
+                for i from k to m {
+                    dot = dot + vs[k, i] * r[i, j]
+                }
+                f = 2.0 * dot / vnorm2
+                for i from k to m {
+                    r[i, j] = r[i, j] - f * vs[k, i]
+                }
+            }
+        }
+    }
+    #: Q = H_0 H_1 ... H_(n-1) applied to the first n columns of I
+    q = zeros(m, n)
+    for j to n {
+        q[j, j] = 1.0
+    }
+    for kk to n {
+        k: Int = n - 1 - kk
+        vnorm2 = 0.0
+        for i from k to m {
+            vnorm2 = vnorm2 + vs[k, i] * vs[k, i]
+        }
+        if vnorm2 > 0.0 {
+            for j to n {
+                dot = 0.0
+                for i from k to m {
+                    dot = dot + vs[k, i] * q[i, j]
+                }
+                f = 2.0 * dot / vnorm2
+                for i from k to m {
+                    q[i, j] = q[i, j] - f * vs[k, i]
+                }
+            }
+        }
+    }
+    return q
+}
+
+#| Classical Gram-Schmidt: each column minus its projections on the earlier q's, all taken from the original column.
+def cgs_q(a: Arr) -> Arr {
+    m: Int = int(shape(a)[0])
+    n: Int = int(shape(a)[1])
+    q = zeros(m, n)
+    for j to n {
+        v = zeros(m)
+        for i to m {
+            v[i] = a[i, j]
+        }
+        for k to j {
+            rkj = 0.0
+            for i to m {
+                rkj = rkj + q[i, k] * a[i, j]
+            }
+            for i to m {
+                v[i] = v[i] - rkj * q[i, k]
+            }
+        }
+        nv = sqrt(sum(v * v))
+        for i to m {
+            q[i, j] = v[i] / nv
+        }
+    }
+    return q
+}
+
+#| Modified Gram-Schmidt: the projections taken one at a time from the updated column.
+def mgs_q(a: Arr) -> Arr {
+    m: Int = int(shape(a)[0])
+    n: Int = int(shape(a)[1])
+    q = zeros(m, n)
+    for j to n {
+        v = zeros(m)
+        for i to m {
+            v[i] = a[i, j]
+        }
+        for k to j {
+            rkj = 0.0
+            for i to m {
+                rkj = rkj + q[i, k] * v[i]
+            }
+            for i to m {
+                v[i] = v[i] - rkj * q[i, k]
+            }
+        }
+        nv = sqrt(sum(v * v))
+        for i to m {
+            q[i, j] = v[i] / nv
+        }
+    }
+    return q
+}
+
+#| Givens QR: zero each entry below the diagonal, column by column from the bottom, with a plane rotation of two rows; returns the explicit m x m Q's first n columns.
+def givens_q(a: Arr) -> Arr {
+    m: Int = int(shape(a)[0])
+    n: Int = int(shape(a)[1])
+    r = copy(a)
+    #: qt accumulates the rotations: Q^T
+    qt = zeros(m, m)
+    for i to m {
+        qt[i, i] = 1.0
+    }
+    for k to n {
+        for ii from k + 1 to m {
+            i: Int = m - 1 - (ii - k - 1)
+            x = r[i - 1, k]
+            y = r[i, k]
+            if y != 0.0 {
+                h = sqrt(x * x + y * y)
+                c = x / h
+                s = y / h
+                for j from k to n {
+                    t1 = r[i - 1, j]
+                    t2 = r[i, j]
+                    r[i - 1, j] = c * t1 + s * t2
+                    r[i, j] = -s * t1 + c * t2
+                }
+                for j to m {
+                    t1 = qt[i - 1, j]
+                    t2 = qt[i, j]
+                    qt[i - 1, j] = c * t1 + s * t2
+                    qt[i, j] = -s * t1 + c * t2
+                }
+            }
+        }
+    }
+    q = zeros(m, n)
+    for i to m {
+        for j to n {
+            q[i, j] = qt[j, i]
+        }
+    }
+    return q
+}
+
+#| R of an upper Hessenberg h by Givens rotations: one rotation per subdiagonal entry. Returns R and the multiplications and additions done.
+def hessenberg_givens_r(h: Arr) {
+    n: Int = int(shape(h)[0])
+    r = copy(h)
+    flops: Int = 0
+    for k to n - 1 {
+        x = r[k, k]
+        y = r[k + 1, k]
+        hyp = sqrt(x * x + y * y)
+        c = x / hyp
+        s = y / hyp
+        for j from k to n {
+            t1 = r[k, j]
+            t2 = r[k + 1, j]
+            r[k, j] = c * t1 + s * t2
+            r[k + 1, j] = -s * t1 + c * t2
+            flops = flops + 6
+        }
+    }
+    return r, flops
+}
+
+#| R of a square matrix by Householder reflections that do not look at its zeros. Returns R and the multiplications and additions done.
+def householder_r(a: Arr) {
+    n: Int = int(shape(a)[0])
+    r = copy(a)
+    flops: Int = 0
+    v = zeros(n)
+    for k to n - 1 {
+        norm = 0.0
+        for i from k to n {
+            norm = norm + r[i, k] * r[i, k]
+        }
+        norm = sqrt(norm)
+        alpha = -norm
+        if r[k, k] < 0.0 {
+            alpha = norm
+        }
+        for i from k to n {
+            v[i] = r[i, k]
+        }
+        v[k] = v[k] - alpha
+        vnorm2 = 0.0
+        for i from k to n {
+            vnorm2 = vnorm2 + v[i] * v[i]
+        }
+        for j from k to n {
+            dot = 0.0
+            for i from k to n {
+                dot = dot + v[i] * r[i, j]
+            }
+            f = 2.0 * dot / vnorm2
+            for i from k to n {
+                r[i, j] = r[i, j] - f * v[i]
+            }
+            flops = flops + 4 * (n - k)
+        }
+    }
+    return r, flops
+}
+
+#| A random n x n orthogonal matrix: the Householder Q of a Gaussian matrix.
+def random_orthogonal(n: Int) -> Arr {
+    g = zeros(n, n)
+    for i to n {
+        for j to n {
+            g[i, j] = randn()
+        }
+    }
+    return householder_q(g)
+}
+
+#| U diag(s) V^T with random orthogonal U and V and singular values from 1 down to 1 / kappa, geometrically spaced.
+def with_condition(n: Int, kappa: Num) -> Arr {
+    u = random_orthogonal(n)
+    v = random_orthogonal(n)
+    a = zeros(n, n)
+    for k to n {
+        s = pow(kappa, -k / (n - 1.0))
+        for i to n {
+            for j to n {
+                a[i, j] = a[i, j] + u[i, k] * s * v[j, k]
+            }
+        }
+    }
+    return a
+}
+
+#| The test matrix for kappa after seeding the generator with seed, so Python can ask for the same one.
+def seeded_condition(n: Int, kappa: Num, seed: Int) -> Arr {
+    srand(seed)
+    return with_condition(n, kappa)
+}
+
+#| ||Q^T Q - I|| for Householder, Givens, modified and classical Gram-Schmidt on the matrices of condition 10^1 .. 10^n_kappa (seed + k for the k-th).
+def orthogonality_losses(n: Int, n_kappa: Int, seed: Int) {
+    kappas = zeros(n_kappa)
+    lh = zeros(n_kappa)
+    lg = zeros(n_kappa)
+    lm = zeros(n_kappa)
+    lc = zeros(n_kappa)
+    for k to n_kappa {
+        kappas[k] = pow(10.0, k + 1.0)
+        a = seeded_condition(n, kappas[k], seed + k)
+        lh[k] = orth_loss(householder_q(a))
+        lg[k] = orth_loss(givens_q(a))
+        lm[k] = orth_loss(mgs_q(a))
+        lc[k] = orth_loss(cgs_q(a))
+    }
+    return kappas, lh, lg, lm, lc
+}
+
+#| The least-squares slope of log y against log x.
+def loglog_slope(x: Arr, y: Arr) -> Num {
+    lx = log(x)
+    ly = log(y)
+    mx = mean(lx)
+    my = mean(ly)
+    return sum((lx - mx) * (ly - my)) / sum((lx - mx) * (lx - mx))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

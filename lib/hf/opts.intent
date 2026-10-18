@@ -1,0 +1,38 @@
+module lib/hf/opts
+  Every choice a Hartree-Fock run makes, in one record, `ScfOptions`, and the
+  plain array of numbers the registry members read those choices from.
+
+  A caller starts from `scf_defaults()` and changes the fields it wants with a
+  record update: `ScfOptions { guess: GS_CORE, ..scf_defaults() }`. A registry
+  member is called through `apply`, which passes numbers, functions and
+  arrays but not records, so the SCF driver copies the record into a column
+  array once per run (`opt_array`), and the members index it by the `OPT_*`
+  column names defined here.
+
+scf_defaults  @636641b0
+  why   One place holds the production choices, so a program that wants a
+        change names only that change, and the lock ladder and the library's
+        tests all start from the same run
+        [test "the defaults are the ones the table lists"].
+
+scf_checked  @125e6ffc
+  why   The integral stages each have several members that must agree; this is
+        the switch that makes a run compute every member and assert agreement,
+        which is how the tests in scf/ run.
+
+opt_array  @ad1e07b6
+  why   Registry members take their options through `apply`, which cannot pass
+        a record; the column array is the record flattened, built in one place
+        so no caller writes column numbers by hand
+        [test "an update changes the fields it names and the column array follows"].
+  o     the options record to flatten
+  na    the number of alpha (spin-up) electrons
+  nb    the number of beta (spin-down) electrons
+  enuc  the repulsion energy between the nuclei, in hartree, which the SCF adds
+        to the electronic energy
+  a     the column array, `OPT_LEN` numbers; column `OPT_X` holds option X
+
+opt_new  @9eb8a1ad
+  why   A member's own tests need an options array without a molecule; this is
+        the defaults with no electrons and no nuclear repulsion.
+

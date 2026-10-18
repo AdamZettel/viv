@@ -1,0 +1,88 @@
+# The Computer Language Benchmarks Game: fannkuch-redux.
+# Reference: upstream/benchmarksgame/programs/fannkuchredux.python3-6.python3
+# (Isaac Gouy, Oleg Mazurov, Buck Golemon, Justin Peel), ported line by line.
+# Differences: viv/NOTES.md.
+
+def fannkuch(n) {
+    maxFlipsCount = 0
+    permSign = true
+    checksum = 0
+
+    perm1 = zeros(n)
+    for k to n {
+        perm1[k] = k
+    }
+    count = copy(perm1)
+    nm = n - 1
+    while true {
+        k = perm1[0]
+        if k != 0 {
+            perm = copy(perm1)
+            flipsCount = 1
+            kk = perm[k]
+            while kk != 0 {
+                # perm[:k+1] = perm[k::-1]
+                lo = 0
+                hi = k
+                while lo < hi {
+                    t = perm[lo]
+                    perm[lo] = perm[hi]
+                    perm[hi] = t
+                    lo = lo + 1
+                    hi = hi - 1
+                }
+                flipsCount += 1
+                k = kk
+                kk = perm[kk]
+            }
+            if maxFlipsCount < flipsCount {
+                maxFlipsCount = flipsCount
+            }
+            if permSign {
+                checksum += flipsCount
+            }
+            else {
+                checksum -= flipsCount
+            }
+        }
+
+        # Use incremental change to generate another permutation
+        if permSign {
+            perm1[0], perm1[1] = perm1[1], perm1[0]
+            permSign = false
+        }
+        else {
+            perm1[1], perm1[2] = perm1[2], perm1[1]
+            permSign = true
+            # for r in range(2, n - 1): ... else: (the loop ran out)
+            r = 2
+            broke = false
+            while r < n - 1 {
+                if count[r] != 0 {
+                    broke = true
+                    break
+                }
+                count[r] = r
+                perm0 = perm1[0]
+                perm1[0:r + 1] = perm1[1:r + 2]
+                perm1[r + 1] = perm0
+                r = r + 1
+            }
+            if not broke {
+                r = nm
+                if count[r] == 0 {
+                    print(fmt(checksum, "d"))
+                    return maxFlipsCount
+                }
+            }
+            count[r] -= 1
+        }
+    }
+    return maxFlipsCount
+}
+
+n = int(strip(read_text("N.txt")))
+print("Pfannkuchen(", fmt(n, "d"), ") = ", fmt(fannkuch(n), "d"), sep="")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,225 @@
+###
+post: Which SCF solution is the minimum? Stability locks on reference integrals
+agent: claude
+
+An SCF converges to a stationary point of the energy, and some molecules
+have more than one. This program takes the state PySCF 2.5.0 reaches from
+its default guess, imports its density, converges it in this code, and asks
+lib/hf/stab whether it is a minimum. When it is not, the follow-down loop
+rotates the orbitals along the lowest Hessian eigenvector, restarts the SCF,
+and repeats until the Hessian has no negative eigenvalue. The energies it
+must reach are the `_STABLE` states lib/hfref recorded from PySCF's own
+restart loop (`mf.stability()` then a new SCF from the returned orbitals).
+
+| System | Default state | Stable state |
+|---|---|---|
+| Stretched water, 6-31G RHF | -75.4460693906354 (saddle) | -75.4739098537268 |
+| O2 triplet, STO-3G UHF | -147.63394678545012 (saddle) | -147.63522998065827 |
+| Water, 6-31G RHF | -75.98394849810573 | the same |
+| OH, 6-31G UHF | -75.36316991969719 | the same |
+
+The lowest Hessian eigenvalues are also held to PySCF's. PySCF's orbital
+Hessian operator (`newton_ah.gen_g_hop_rhf` / `gen_g_hop_uhf`) is half of
+the one in lib/hf/stab, which differentiates `E(C exp(K))` directly; the
+constants below are PySCF's values, measured by applying its operator to
+every unit vector and diagonalizing, at states converged with conv_tol 1e-13
+and conv_tol_grad 1e-10.
+
+Run with `tools/both-engines.sh scf stability`.
+###
+
+from hf.stab import (
+    stab_curvature, STAB_DEFAULT, stab_follow, STAB_HESS_JK, stab_hess_mo, stab_hessian,
+    stab_lowest, stab_orbitals, stab_run, STAB_STABLE, STAB_TOL,
+)
+from hf.scf_loop import (
+    scf, scf_densities, scf_iterate, scf_run_from, scf_setup, ScfResult, ScfSetup,
+)
+from hf.opts import scf_defaults, SCF_RHF, SCF_UHF, ScfOptions
+from hf.eigen import eig_of, EIG_QL, eig_values
+from hf.density import den_s2
+from hfref.water_631g_stretched import (
+    WATER631G_STRETCHED_E_DEFAULT, WATER631G_STRETCHED_E_NUC, WATER631G_STRETCHED_E_STABLE,
+    water631g_stretched_eri8_cart, water631g_stretched_rhf_d, WATER631G_STRETCHED_RHF_NALPHA,
+    WATER631G_STRETCHED_RHF_NBETA, water631g_stretched_rhf_stable_d, water631g_stretched_s_unit,
+    water631g_stretched_t_unit, water631g_stretched_v_unit,
+)
+from hfref.o2_sto3g import (
+    O2_STO3G_E_NUC, o2_sto3g_eri8_cart, o2_sto3g_s_unit, o2_sto3g_t_unit, o2_sto3g_uhf_da,
+    o2_sto3g_uhf_db, O2_STO3G_UHF_NALPHA, O2_STO3G_UHF_NBETA, O2_STO3G_UHF_S2_STABLE,
+    o2_sto3g_v_unit,
+)
+from hfref.water_631g import (
+    WATER631G_E_NUC, water631g_eri8_cart, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA,
+    water631g_s_unit, water631g_t_unit, water631g_v_unit,
+)
+from hfref.oh_631g import (
+    OH_631G_E_NUC, oh_631g_eri8_cart, oh_631g_s_unit, oh_631g_t_unit, OH_631G_UHF_NALPHA,
+    OH_631G_UHF_NBETA, oh_631g_v_unit,
+)
+
+# lowest eigenvalues of PySCF's orbital Hessian (half of lib/hf/stab's)
+STL_PYSCF_WATER_STRETCHED_LOWEST = -0.11279632389994454
+STL_PYSCF_O2_LOWEST = -0.030124973591973584
+STL_PYSCF_OH_SECOND = 0.1634790646797822
+
+# the iteration limit of the tight runs
+STL_MAXIT = 300
+
+#| A setup on reference integrals with tight options: E to 1e-13 and the
+#| orbital gradient to 1e-10, so the energies can be held to 1e-8 and the
+#| restart test to 1e-10. `m` is the method.
+def stl_setup(H: Arr, S: Arr, G: Arr, na, nb, enuc, m) -> ScfSetup {
+    o = ScfOptions { method: m, e_tol: 1.0e-13, grad_tol: 1.0e-10, max_iter: STL_MAXIT, ..scf_defaults() }
+    return scf_setup(H, S, G, na, nb, enuc, o)
+}
+
+#| Stretched water, RHF.
+def stl_stretched() -> ScfSetup {
+    H = water631g_stretched_t_unit() + water631g_stretched_v_unit()
+    return stl_setup(H, water631g_stretched_s_unit(), water631g_stretched_eri8_cart(), WATER631G_STRETCHED_RHF_NALPHA, WATER631G_STRETCHED_RHF_NBETA, WATER631G_STRETCHED_E_NUC, SCF_RHF)
+}
+
+#| Stretched water converged in this code from PySCF's default density.
+def stl_stretched_default() -> ScfResult {
+    half = water631g_stretched_rhf_d() * 0.5
+    return scf_run_from(stl_stretched(), half, half)
+}
+
+#| O2 STO-3G, UHF.
+def stl_o2() -> ScfSetup {
+    H = o2_sto3g_t_unit() + o2_sto3g_v_unit()
+    return stl_setup(H, o2_sto3g_s_unit(), o2_sto3g_eri8_cart(), O2_STO3G_UHF_NALPHA, O2_STO3G_UHF_NBETA, O2_STO3G_E_NUC, SCF_UHF)
+}
+
+#| O2 STO-3G UHF converged in this code from PySCF's default densities.
+def stl_o2_default() -> ScfResult {
+    return scf_run_from(stl_o2(), o2_sto3g_uhf_da(), o2_sto3g_uhf_db())
+}
+
+#| The explicit lowest eigenvalue, and the finite-difference curvature
+#| along its eigenvector, for the densities D.
+def stl_lowest_and_fd(p: ScfSetup, D: Arr) {
+    orb = stab_orbitals(p, D)
+    lam, v = stab_lowest(stab_hessian(orb, p), p)
+    return lam, stab_curvature(orb, p, v, 1.0e-3)
+}
+
+#| A state restarted from its own densities: `|E_restart - E|`, and whether
+#| the restart converged.
+def stl_restart(p: ScfSetup, D: Arr, e) {
+    r = scf_iterate(p, D)
+    return abs(r.energy - e), r.converged
+}
+
+#| The setup with the J/K-response Hessian.
+def stl_hess_jk(p: ScfSetup) -> ScfSetup {
+    return ScfSetup { options: ScfOptions { stab_hessian: STAB_HESS_JK, ..p.options }, ..p }
+}
+
+test "stretched water: PySCF's default RHF state is a saddle point, and the Hessian matches a finite difference" {
+    stl_r = stl_stretched_default()
+    assert_near(stl_r.converged, 1.0, 0.0)
+    assert_lt(abs(stl_r.energy - WATER631G_STRETCHED_E_DEFAULT), 1.0e-10)
+    stl_lam, stl_fd = stl_lowest_and_fd(stl_stretched(), scf_densities(stl_r))
+    assert_lt(stl_lam, -1.0e-6)
+    # measured: -0.225593, twice PySCF's value to 4.2e-9
+    assert_lt(abs(stl_lam - 2.0 * STL_PYSCF_WATER_STRETCHED_LOWEST), 1.0e-8)
+    # same sign, and within 1e-5 relative (measured 3.0e-7)
+    assert_lt(stl_fd, 0.0)
+    assert_lt(abs(stl_fd - stl_lam) / abs(stl_lam), 1.0e-5)
+}
+
+test "stretched water: follow-down reaches the stable RHF state and labels it stable" {
+    stl_p = stl_stretched()
+    stl_s = stab_run(stl_p, stl_stretched_default())
+    assert_near(stl_s.label, STAB_DEFAULT, 0.0)
+    assert_lt(stl_s.lowest, -1.0e-6)
+    assert_near(stl_s.label_end, STAB_STABLE, 0.0)
+    assert_gt(stl_s.lowest_end, -STAB_TOL)
+    assert_near(stl_s.converged, 1.0, 0.0)
+    assert_gt(stl_s.steps, 0.5)
+    assert_lt(abs(stl_s.energy - WATER631G_STRETCHED_E_STABLE), 1.0e-8)
+    # follow-down never raises E; here it drops by 0.028
+    assert_lt(stl_s.energy, stl_s.energy0 - 0.02)
+    # the end density is PySCF's stable one (stored at gradient 1e-6)
+    assert_lt(max(abs(slab(stl_s.density, 0) - water631g_stretched_rhf_stable_d())), 1.0e-6)
+    # restarted from itself, the stable state reproduces its energy and
+    # stays stable without another step
+    stl_de, stl_conv = stl_restart(stl_p, stl_s.density, stl_s.energy)
+    assert_lt(stl_de, 1.0e-10)
+    assert_near(stl_conv, 1.0, 0.0)
+    stl_t = stab_follow(stl_p, stl_s.density)
+    assert_near(stl_t.label, STAB_STABLE, 0.0)
+    assert_near(stl_t.steps, 0, 0.0)
+    assert_lt(abs(stl_t.energy - stl_s.energy), 1.0e-10)
+}
+
+test "O2 STO-3G: the default UHF triplet is flagged unstable and follow-down reaches the stable one" {
+    stl_p = stl_o2()
+    stl_r = stl_o2_default()
+    assert_near(stl_r.converged, 1.0, 0.0)
+    assert_lt(abs(stl_r.energy - (-147.63394678545012)), 1.0e-10)
+    stl_lam, stl_fd = stl_lowest_and_fd(stl_p, scf_densities(stl_r))
+    # a doubly degenerate negative pair (the two pi planes); measured -0.0602499,
+    # twice PySCF's value to 4e-13, and the finite difference within 1.9e-6
+    assert_lt(abs(stl_lam - 2.0 * STL_PYSCF_O2_LOWEST), 1.0e-8)
+    assert_lt(stl_fd, 0.0)
+    assert_lt(abs(stl_fd - stl_lam) / abs(stl_lam), 1.0e-5)
+    stl_s = stab_run(stl_p, stl_r)
+    assert_near(stl_s.label, STAB_DEFAULT, 0.0)
+    assert_lt(stl_s.lowest, -1.0e-6)
+    assert_near(stl_s.label_end, STAB_STABLE, 0.0)
+    assert_near(stl_s.converged, 1.0, 0.0)
+    assert_lt(abs(stl_s.energy - (-147.63522998065827)), 1.0e-8)
+    assert_lt(stl_s.energy, stl_s.energy0)
+    # The end density is not PySCF's (they differ by 0.19): the instability
+    # breaks the symmetry between the two pi planes, and which way it breaks
+    # depends on the eigenvector picked from the degenerate pair. Energy and
+    # <S^2> do not depend on it.
+    assert_lt(abs(den_s2(stl_s.density, stl_p.s, O2_STO3G_UHF_NALPHA, O2_STO3G_UHF_NBETA) - O2_STO3G_UHF_S2_STABLE), 1.0e-6)
+    stl_de, stl_conv = stl_restart(stl_p, stl_s.density, stl_s.energy)
+    assert_lt(stl_de, 1.0e-10)
+    assert_near(stl_conv, 1.0, 0.0)
+    # the J/K-response Hessian drives the same follow-down to the same state
+    stl_q = stab_run(stl_hess_jk(stl_p), stl_r)
+    assert_lt(abs(stl_q.energy - stl_s.energy), 1.0e-10)
+    assert_lt(abs(stl_q.lowest - stl_s.lowest), 1.0e-10)
+}
+
+test "water 6-31G RHF is labeled stable, and restarted from itself reproduces its energy" {
+    stl_p = stl_setup(water631g_t_unit() + water631g_v_unit(), water631g_s_unit(), water631g_eri8_cart(), WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, WATER631G_E_NUC, SCF_RHF)
+    stl_r = scf(stl_p)
+    assert_lt(abs(stl_r.energy - (-75.98394849810573)), 1.0e-9)
+    stl_s = stab_run(stl_p, stl_r)
+    assert_near(stl_s.label, STAB_STABLE, 0.0)
+    assert_near(stl_s.label_end, STAB_STABLE, 0.0)
+    assert_near(stl_s.steps, 0, 0.0)
+    assert_gt(stl_s.lowest, 0.1)
+    stl_de, stl_conv = stl_restart(stl_p, scf_densities(stl_r), stl_r.energy)
+    assert_lt(stl_de, 1.0e-10)
+    assert_near(stl_conv, 1.0, 0.0)
+}
+
+test "OH 6-31G UHF is labeled stable; its only near-zero mode is the rotation about the bond" {
+    stl_p = stl_setup(oh_631g_t_unit() + oh_631g_v_unit(), oh_631g_s_unit(), oh_631g_eri8_cart(), OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA, OH_631G_E_NUC, SCF_UHF)
+    stl_r = scf(stl_p)
+    assert_lt(abs(stl_r.energy - (-75.36316991969719)), 1.0e-9)
+    stl_s = stab_run(stl_p, stl_r)
+    assert_near(stl_s.label, STAB_STABLE, 0.0)
+    assert_near(stl_s.label_end, STAB_STABLE, 0.0)
+    assert_near(stl_s.steps, 0, 0.0)
+    # Turning the half-filled pi pair about the bond axis costs nothing, so
+    # the lowest eigenvalue is zero up to convergence; the next one is
+    # PySCF's second eigenvalue, doubled.
+    assert_lt(abs(stl_s.lowest), 1.0e-8)
+    stl_orb = stab_orbitals(stl_p, scf_densities(stl_r))
+    stl_vals = eig_values(eig_of(stab_hess_mo(stl_orb, stl_p.h, stl_p.eri), EIG_QL))
+    assert_lt(abs(stl_vals[1] - 2.0 * STL_PYSCF_OH_SECOND), 1.0e-8)
+    stl_de, stl_conv = stl_restart(stl_p, scf_densities(stl_r), stl_r.energy)
+    assert_lt(stl_de, 1.0e-10)
+    assert_near(stl_conv, 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

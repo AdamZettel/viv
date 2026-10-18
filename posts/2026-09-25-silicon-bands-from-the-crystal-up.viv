@@ -1,0 +1,884 @@
+###
+post: Silicon's band structure, from the crystal up
+date: 2026-09-25
+kind: demo
+channel: physics
+tags: dft, plane waves, pseudopotentials, band structure, silicon, notebook
+equation: \left[-\tfrac{1}{2}\nabla^2 + V_\text{ion} + V_\text{H}[\rho] + V_\text{xc}[\rho]\right]\psi_{n\mathbf{k}} = \varepsilon_{n\mathbf{k}}\,\psi_{n\mathbf{k}}
+agent: claude
+lane: ai
+summary: A density-functional calculation of silicon, one cell at a time: the crystal, a plane-wave basis, the pseudopotential, the Hamiltonian, the self-consistent loop and the bands from L through Gamma to X. It runs at a 5 Ha cutoff on four k-points so it fits in a browser tab; its tests check each stage, from the basis sizes to the band energies, against an independent numpy implementation at the same settings.
+
+A notebook. Each cell's output appears under it; press **Run all**, or run a
+cell with Shift+Enter. The code is a small version of the plane-wave DFT
+program in `dft/` (the dense engine, `dft/pwdft.viv`), cut into the order the
+physics goes in. Numbers are in hartree atomic units: lengths in bohr,
+energies in hartree (1 Ha = 27.2114 eV) until the last cells.
+
+The whole calculation solves one equation, the Kohn-Sham equation above: each
+electron moves in the potential of the ions, plus the classical repulsion of
+the electron density $\rho$ (Hartree), plus an exchange-correlation term for
+what the classical repulsion misses. The potential depends on $\rho$, and $\rho$ is built from the
+solutions, so it is solved by iteration until the density stops changing.
+###
+
+PI = 3.141592653589793
+ALAT = 10.26
+# the Bohr radius in angstrom, the 2022 recommended value (physics.nist.gov), so ALAT is 5.43 angstrom
+BOHR_ANGSTROM = 0.529177210544
+ALAT_ANGSTROM = ALAT * BOHR_ANGSTROM
+A = [[0.0, ALAT / 2.0, ALAT / 2.0],
+     [ALAT / 2.0, 0.0, ALAT / 2.0],
+     [ALAT / 2.0, ALAT / 2.0, 0.0]]
+NAT = 2.0
+# the dimensions of space: x, y, z
+DIM = 3.0
+TAU = zeros(NAT, DIM)
+for c to DIM {
+    TAU[0, c] = ALAT / 8.0
+    TAU[1, c] = 0.0 - ALAT / 8.0
+}
+OMEGA = A[0, 0] * (A[1, 1] * A[2, 2] - A[1, 2] * A[2, 1]) - A[0, 1] * (A[1, 0] * A[2, 2] - A[1, 2] * A[2, 0]) + A[0, 2] * (A[1, 0] * A[2, 1] - A[1, 1] * A[2, 0])
+B = zeros(DIM, DIM)
+for i to DIM {
+    j = mod(i + 1.0, 3.0)
+    k = mod(i + 2.0, 3.0)
+    B[i, 0] = 2.0 * PI * (A[j, 1] * A[k, 2] - A[j, 2] * A[k, 1]) / OMEGA
+    B[i, 1] = 2.0 * PI * (A[j, 2] * A[k, 0] - A[j, 0] * A[k, 2]) / OMEGA
+    B[i, 2] = 2.0 * PI * (A[j, 0] * A[k, 1] - A[j, 1] * A[k, 0]) / OMEGA
+}
+show OMEGA
+show B
+
+test "the cell volume is the numpy reference's, a^3 / 4" {
+    assert_near(OMEGA, 270.011394, 1.0e-6)
+    assert_near(OMEGA, ALAT * ALAT * ALAT / 4.0, 1.0e-9)
+}
+test "b_i . a_j is 2 pi when i = j and zero otherwise" {
+    ba = B @ transpose(A)
+    worst = 0.0
+    for i to DIM {
+        for j to DIM {
+            want = 0.0
+            if i == j { want = 2.0 * PI }
+            worst = max(worst, abs(ba[i, j] - want))
+        }
+    }
+    assert_lt(worst, 1.0e-12)
+}
+
+###
+## The crystal
+
+The cell above sets up silicon's crystal. Silicon has the diamond structure:
+an fcc lattice with lattice constant $a = 10.26$ bohr (5.43 Å), and two atoms
+in each primitive cell, at $\pm\tfrac{a}{8}(1, 1, 1)$. The rows of `A` are the
+three primitive vectors; the cell they span holds a quarter of the cube,
+$a^3/4 = 270.01$ bohr³.
+
+The rows of `B` are the reciprocal vectors, defined by
+$\mathbf b_i \cdot \mathbf a_j = 2\pi\,\delta_{ij}$. Every function with the
+period of the crystal is a sum of plane waves $e^{i\mathbf G\cdot\mathbf r}$
+with $\mathbf G = m_1 \mathbf b_1 + m_2 \mathbf b_2 + m_3 \mathbf b_3$ for
+integers $m_i$. That is the reason to work with plane waves: the potential,
+the density and the periodic part of every orbital are Fourier series on this
+lattice.
+
+The next cell describes one silicon ion to the valence electrons. A silicon
+atom has 14 electrons; the 10 core electrons stay put when atoms bond, so they
+are replaced, together with the nucleus, by a pseudopotential acting on the 4
+valence electrons. The parameters are the Goedecker-Teter-Hutter ones for
+silicon, copied from CP2K's table by `dft/pseudo/make_pseudo.py`. Its local
+part is a function of $|\mathbf G|$ only. Expect it to be negative (attractive)
+and to vanish at large $|\mathbf G|$, since the ion looks smooth to the valence
+electrons.
+###
+
+# silicon's 14 electrons: ZION valence electrons, and the core the pseudopotential replaces
+Z_SI = 14.0
+ZION = 4.0
+N_CORE = Z_SI - ZION
+RLOC = 0.44
+C1 = -7.33610297
+
+def vloc(g) {
+    x2 = g * g * RLOC * RLOC
+    gauss = sqrt(8.0 * PI * PI * PI) * RLOC * RLOC * RLOC * C1
+    if g < 1.0e-12 {
+        return (2.0 * PI * ZION * RLOC * RLOC + gauss) / OMEGA
+    }
+    return (0.0 - 4.0 * PI * ZION / (g * g) + gauss) * exp(-0.5 * x2) / OMEGA
+}
+
+v0 = vloc(0.0)
+v1 = vloc(1.0)
+v2 = vloc(2.0)
+show v0
+show v1
+show v2
+
+test "the local pseudopotential matches the numpy reference's closed form" {
+    assert_near(v0, -0.018430797863, 1.0e-11)
+    assert_near(v1, -0.202073033397, 1.0e-11)
+    assert_near(v2, -0.056347377498, 1.0e-11)
+}
+
+###
+## The pseudopotential, local part
+
+The first term, $-4\pi Z e^{-x^2/2}/(\Omega g^2)$, is the Coulomb attraction of
+an ion of charge $Z = 4$ whose charge is spread over a Gaussian of radius
+$r_\text{loc} = 0.44$ bohr; the second is a short-range correction. At
+$g = 0$ the Coulomb term diverges. So do the electrons' own repulsion and the
+repulsion between ions, and in a neutral crystal the three cancel, so the
+function returns only the finite remainder there.
+
+The local part is the same for every electron. The nonlocal part is not: it
+acts differently on the $s$ ($l = 0$) and $p$ ($l = 1$) parts of a wave around
+each ion, which is how it imitates the core electrons that were removed. It is
+built from projectors, Gaussians times polynomials in $|\mathbf k + \mathbf G|$,
+two for $l = 0$ and one for $l = 1$, coupled by the small matrices `HS` and
+`HP`. The next cell defines them and evaluates each at three values of
+$|\mathbf k + \mathbf G|$.
+###
+
+RS = 0.42273813
+HS = [[5.90692831, -1.26189397],
+      [-1.26189397, 3.25819622]]
+RP = 0.48427842
+HP = 2.72701346
+PI54 = pow(PI, 1.25)
+
+def proj(l, i, k) {
+    if l == 0.0 {
+        e = exp(-0.5 * k * k * RS * RS) * PI54 / sqrt(OMEGA)
+        if i == 0.0 { return 4.0 * sqrt(2.0 * RS * RS * RS) * e }
+        return 8.0 * sqrt(2.0 * RS * RS * RS / 15.0) * (3.0 - k * k * RS * RS) * e
+    }
+    e = exp(-0.5 * k * k * RP * RP) * PI54 / sqrt(OMEGA)
+    return 8.0 * sqrt(pow(RP, 5.0) / 3.0) * k * e
+}
+
+kk = [0.5, 1.0, 2.0]
+ps0 = zeros(len(kk))
+ps1 = zeros(len(kk))
+pp0 = zeros(len(kk))
+for q to len(kk) {
+    ps0[q] = proj(0.0, 0.0, kk[q])
+    ps1[q] = proj(0.0, 1.0, kk[q])
+    pp0[q] = proj(1.0, 0.0, kk[q])
+}
+show ps0
+show ps1
+show pp0
+
+test "the projectors match the numpy reference's closed forms" {
+    assert_near(ps0[1], 0.361928323513, 1.0e-11)
+    assert_near(ps1[1], 0.527296692898, 1.0e-11)
+    assert_near(pp0[0], 0.093164789124, 1.0e-11)
+    assert_near(pp0[2], 0.240069564801, 1.0e-11)
+}
+
+###
+## The nonlocal part, and the k-points
+
+The $p$ projector starts at zero and grows with $|\mathbf k + \mathbf G|$: a
+plane wave with small $|\mathbf k + \mathbf G|$ is nearly constant across the
+ion, and a constant has no $p$ ($l = 1$) component.
+
+An electron in a crystal is a Bloch wave, $e^{i\mathbf k\cdot\mathbf r}$ times
+a periodic function, and each wave vector $\mathbf k$ in the Brillouin zone
+gives its own set of energy bands. The density averages over $\mathbf k$, and
+that average is replaced by a sum over a few points. The next cell uses the
+k-mesh module of the full program, `dft/kmesh.viv`, at its smallest setting.
+It is a four-shift mesh: its points are closed under the crystal's rotations,
+so the density comes out with the crystal's symmetry without any explicit
+symmetrization. Expect four points, the four $L$ points
+$(\tfrac12, \tfrac12, \tfrac12)$, $(\tfrac12, 0, 0)$, $(0, \tfrac12, 0)$ and
+$(0, 0, \tfrac12)$ in units of the reciprocal vectors, each with weight
+$\tfrac14$.
+###
+
+NKMESH = 1.0
+from dft.kmesh import KFRAC, KWT, NKPT
+show NKPT
+show KFRAC
+show KWT
+
+test "four k-points, a quarter of the weight each" {
+    assert_near(NKPT, 4.0, 0.0)
+    assert_near(sum(KWT), 1.0, 1.0e-15)
+    assert_near(KWT[0], 0.25, 1.0e-15)
+}
+
+###
+## The plane-wave basis
+
+The basis at one $\mathbf k$ is every plane wave whose kinetic energy
+$\tfrac12|\mathbf k + \mathbf G|^2$ is at most the cutoff. The full program
+uses 10 Ha for silicon; this notebook uses 5 Ha so it runs in a few seconds.
+The cutoff is the basis's one tunable parameter (the k-point mesh is the other
+convergence setting): raising it adds shorter waves and lowers the energy.
+
+`plane_waves` loops over a box of integer triples $m$ large enough to hold
+every $\mathbf G$ that can pass, and keeps the ones that do. Called with slot
+$-1$ it only counts, and records the largest $|m_i|$ in `MAXM`. The count is
+done at the four k-points and at the 21 points of the band path used later,
+from $L$ through $\Gamma$ to $X$, so the arrays and the FFT grid are big
+enough for all of them. Expect 137 plane waves at $\Gamma$ and a few more at
+the other points.
+###
+
+ECUT = 5.0
+NSEG = 10.0
+NPTS = 2.0 * NSEG + 1.0
+PATHK = zeros(NPTS, DIM)
+for p to NPTS {
+    t = p / NSEG
+    if p <= NSEG {
+        PATHK[p, 0] = 0.5 * (1.0 - t)
+        PATHK[p, 1] = 0.5 * (1.0 - t)
+        PATHK[p, 2] = 0.5 * (1.0 - t)
+    }
+    else {
+        PATHK[p, 0] = 0.5 * (t - 1.0)
+        PATHK[p, 2] = 0.5 * (t - 1.0)
+    }
+}
+ALEN = sqrt(A[0, 0] * A[0, 0] + A[0, 1] * A[0, 1] + A[0, 2] * A[0, 2])
+BLEN = sqrt(B[0, 0] * B[0, 0] + B[0, 1] * B[0, 1] + B[0, 2] * B[0, 2])
+MM = floor((sqrt(2.0 * ECUT) + BLEN) * ALEN / (2.0 * PI)) + 1.0
+MAXM = zeros(1)
+
+def plane_waves(slot, k1, k2, k3) {
+    n = 0.0
+    for i1 to 2.0 * MM + 1.0 {
+        for i2 to 2.0 * MM + 1.0 {
+            for i3 to 2.0 * MM + 1.0 {
+                m1 = i1 - MM
+                m2 = i2 - MM
+                m3 = i3 - MM
+                gx = (m1 + k1) * B[0, 0] + (m2 + k2) * B[1, 0] + (m3 + k3) * B[2, 0]
+                gy = (m1 + k1) * B[0, 1] + (m2 + k2) * B[1, 1] + (m3 + k3) * B[2, 1]
+                gz = (m1 + k1) * B[0, 2] + (m2 + k2) * B[1, 2] + (m3 + k3) * B[2, 2]
+                if 0.5 * (gx * gx + gy * gy + gz * gz) <= ECUT {
+                    if slot >= 0.0 {
+                        MILL[slot, n, 0] = m1
+                        MILL[slot, n, 1] = m2
+                        MILL[slot, n, 2] = m3
+                        KGV[slot, n, 0] = gx
+                        KGV[slot, n, 1] = gy
+                        KGV[slot, n, 2] = gz
+                    }
+                    MAXM[0] = max(MAXM[0], max(abs(m1), max(abs(m2), abs(m3))))
+                    n = n + 1.0
+                }
+            }
+        }
+    }
+    return n
+}
+
+###
+The cell above only defines things. The next one counts, sizes the arrays
+(one slot per k-point, and one spare slot for the band path), and fills each
+k-point's slot.
+###
+
+NPWMAX = 0.0
+for q to NKPT {
+    NPWMAX = max(NPWMAX, plane_waves(-1.0, KFRAC[q, 0], KFRAC[q, 1], KFRAC[q, 2]))
+}
+for p to NPTS {
+    NPWMAX = max(NPWMAX, plane_waves(-1.0, PATHK[p, 0], PATHK[p, 1], PATHK[p, 2]))
+}
+NPW_GAMMA = plane_waves(-1.0, 0.0, 0.0, 0.0)
+NSLOT = NKPT + 1.0
+MILL = zeros(NSLOT, NPWMAX, DIM)
+KGV = zeros(NSLOT, NPWMAX, DIM)
+NPW = zeros(NSLOT)
+for q to NKPT {
+    NPW[q] = plane_waves(q, KFRAC[q, 0], KFRAC[q, 1], KFRAC[q, 2])
+}
+show NPW_GAMMA
+show NPWMAX
+show NPW
+
+test "the basis sizes are the numpy reference's" {
+    assert_near(NPW_GAMMA, 137.0, 0.0)
+    assert_near(NPWMAX, 153.0, 0.0)
+}
+
+###
+## The FFT grid and the ions' potential
+
+The Hamiltonian couples two plane waves $\mathbf G$ and $\mathbf G'$ through
+the potential's Fourier component at $\mathbf G - \mathbf G'$, so the grid
+must hold differences up to twice the largest $|m_i|$ without wrapping around.
+Any side of at least $4 \max|m_i| + 2$ points does; `fft_nice` rounds up to a
+size with no prime factor above 5, which the FFT handles fastest.
+
+On that grid the cell tabulates $1/|\mathbf G|^2$ (for the Hartree term later)
+and the ions' potential. Each atom contributes its local pseudopotential times
+a phase $e^{-i\mathbf G\cdot\boldsymbol\tau}$, the structure factor, which
+says where in the cell the atom sits. Silicon's two atoms sit at
+$\pm\boldsymbol\tau$, so the phases add to $2\cos(\mathbf G\cdot\boldsymbol\tau)$,
+a real number: the ions' potential has no imaginary part, which the cell
+checks. Expect a grid of 18 points on a side.
+###
+
+def fft_nice(n) {
+    m = n
+    found = false
+    while not found {
+        rest = m
+        while mod(rest, 2.0) == 0.0 { rest = rest / 2.0 }
+        while mod(rest, 3.0) == 0.0 { rest = rest / 3.0 }
+        while mod(rest, 5.0) == 0.0 { rest = rest / 5.0 }
+        if rest == 1.0 {
+            found = true
+        }
+        else {
+            m = m + 1.0
+        }
+    }
+    return m
+}
+
+NG = fft_nice(4.0 * MAXM[0] + 2.0)
+NGRID = NG * NG * NG
+DV = OMEGA / NGRID
+GINV = zeros(NG, NG, NG)
+VPS = czeros(NG, NG, NG)
+for i1 to NG {
+    for i2 to NG {
+        for i3 to NG {
+            m1 = i1 - NG * floor(2.0 * i1 / NG)
+            m2 = i2 - NG * floor(2.0 * i2 / NG)
+            m3 = i3 - NG * floor(2.0 * i3 / NG)
+            gx = m1 * B[0, 0] + m2 * B[1, 0] + m3 * B[2, 0]
+            gy = m1 * B[0, 1] + m2 * B[1, 1] + m3 * B[2, 1]
+            gz = m1 * B[0, 2] + m2 * B[1, 2] + m3 * B[2, 2]
+            g2 = gx * gx + gy * gy + gz * gz
+            if g2 > 1.0e-12 { GINV[i1, i2, i3] = 1.0 / g2 }
+            v = complex(0.0, 0.0)
+            for a to NAT {
+                ph = gx * TAU[a, 0] + gy * TAU[a, 1] + gz * TAU[a, 2]
+                v = v + vloc(sqrt(g2)) * complex(cos(ph), 0.0 - sin(ph))
+            }
+            VPS[i1, i2, i3] = v
+        }
+    }
+}
+show NG
+imag_part = max(abs(im(VPS)))
+show imag_part
+
+test "the grid is the numpy reference's" {
+    assert_near(NG, 18.0, 0.0)
+}
+test "the ions' potential is real: the structure factor is 2 cos(G . tau)" {
+    assert_lt(imag_part, 1.0e-15)
+}
+
+###
+## Exchange and correlation
+
+Two electrons repel, so each keeps the others at a distance, and electrons of
+the same spin are kept apart further by the Pauli principle. The Hartree term
+treats the density as a smooth charge cloud and misses both. The local density
+approximation (LDA) adds, at each point, the exchange-correlation energy per
+electron $\varepsilon_{xc}(\rho)$ of a uniform electron gas with the density
+found there. The cell uses the Teter-93 Padé fit, a ratio of two polynomials
+in the Wigner-Seitz radius $r_s = (3/4\pi\rho)^{1/3}$, the radius of a sphere
+that holds one electron. It is the functional the pseudopotential was fitted
+with. The potential is the derivative,
+$v_{xc} = d(\rho\,\varepsilon_{xc})/d\rho = \varepsilon_{xc} - \tfrac{r_s}{3}\, d\varepsilon_{xc}/dr_s$.
+
+Expect both to be negative and to grow in size with the density: silicon's
+valence density is about 0.03 electrons per bohr³.
+###
+
+XA = [0.4581652932831429, 2.217058676663745, 0.7405551735357053, 0.01968227878617998]
+XB = [1.0, 4.504130959426697, 1.110667363742916, 0.02359291751427506]
+RS0 = pow(3.0 / (4.0 * PI), 1.0 / 3.0)
+
+def xc_energy(rho) {
+    rs = exp(log(max(rho, 1.0e-30)) * (0.0 - 1.0 / 3.0)) * RS0
+    num = XA[0] + rs * (XA[1] + rs * (XA[2] + rs * XA[3]))
+    den = rs * (XB[0] + rs * (XB[1] + rs * (XB[2] + rs * XB[3])))
+    return 0.0 - num / den
+}
+def xc_potential(rho) {
+    rs = exp(log(max(rho, 1.0e-30)) * (0.0 - 1.0 / 3.0)) * RS0
+    num = XA[0] + rs * (XA[1] + rs * (XA[2] + rs * XA[3]))
+    den = rs * (XB[0] + rs * (XB[1] + rs * (XB[2] + rs * XB[3])))
+    dnum = XA[1] + rs * (2.0 * XA[2] + rs * 3.0 * XA[3])
+    dden = XB[0] + rs * (2.0 * XB[1] + rs * (3.0 * XB[2] + rs * 4.0 * XB[3]))
+    return 0.0 - num / den + rs * (dnum * den - num * dden) / (den * den) / 3.0
+}
+
+dens = [0.001, 0.01, 0.03, 0.1]
+exc_test = xc_energy(dens)
+vxc_test = xc_potential(dens)
+show exc_test
+show vxc_test
+
+test "the LDA energy and potential match the numpy reference" {
+    assert_near(exc_test[2], -0.274078131149, 1.0e-11)
+    assert_near(vxc_test[2], -0.357137214637, 1.0e-11)
+    assert_near(exc_test[0], -0.098846057340, 1.0e-11)
+    assert_near(vxc_test[3], -0.517133091575, 1.0e-11)
+}
+
+###
+## The Hamiltonian at one k-point
+
+In the plane-wave basis at $\mathbf k$, the Hamiltonian is a matrix with one
+row per plane wave:
+
+$$H_{\mathbf G\mathbf G'} = \tfrac12|\mathbf k + \mathbf G|^2\,\delta_{\mathbf G\mathbf G'} + V(\mathbf G - \mathbf G') + V_\text{nl}(\mathbf G, \mathbf G').$$
+
+The kinetic energy is diagonal. The local potential $V$ couples two plane
+waves through its Fourier component at their difference, read off the grid.
+The nonlocal part is a sum over projectors,
+$V_\text{nl} = \sum_{IJ} |\beta_I\rangle D_{IJ} \langle\beta_J|$, where each
+$\beta_I$ is one projector of one atom times an angular factor (a real
+spherical harmonic of the direction of $\mathbf k + \mathbf G$) times the
+atom's structure factor. Five per atom: two $s$ projectors and one $p$
+projector with three orientations. `D` holds the coupling matrices.
+
+Every k-point has its own number of plane waves, so the matrices are padded to
+`NPWMAX` rows. The padding rows are decoupled and given diagonal values near
+1000 Ha, far above any band, so they never mix in.
+
+To see the Hamiltonian before any self-consistency, the cell diagonalizes it at
+$\Gamma$ in the starting potential: the ions plus the exchange-correlation
+potential of a uniform density (whose Hartree potential is zero). Expect one
+low $s$-like state and then a triple degeneracy: at $\Gamma$ the three $p$
+directions are equivalent.
+###
+
+# per atom, two s projectors and three p projectors (x, y, z)
+NS_PROJ = 2.0
+NP_PROJ = 3.0
+PROJ_PER_ATOM = NS_PROJ + NP_PROJ
+NPROJ = PROJ_PER_ATOM * NAT
+D = czeros(NPROJ, NPROJ)
+for a to NAT {
+    r = PROJ_PER_ATOM * a
+    for i to NS_PROJ {
+        for j to NS_PROJ {
+            D[r + i, r + j] = HS[i, j]
+        }
+    }
+    for m to NP_PROJ {
+        D[r + NS_PROJ + m, r + NS_PROJ + m] = HP
+    }
+}
+BETA = czeros(NSLOT, NPROJ, NPWMAX)
+
+def projectors(slot) {
+    setslab(BETA, slot, czeros(NPROJ, NPWMAX))
+    for n to NPW[slot] {
+        kx = KGV[slot, n, 0]
+        ky = KGV[slot, n, 1]
+        kz = KGV[slot, n, 2]
+        kn = sqrt(kx * kx + ky * ky + kz * kz)
+        u = max(kn, 1.0e-12)
+        gx = MILL[slot, n, 0] * B[0, 0] + MILL[slot, n, 1] * B[1, 0] + MILL[slot, n, 2] * B[2, 0]
+        gy = MILL[slot, n, 0] * B[0, 1] + MILL[slot, n, 1] * B[1, 1] + MILL[slot, n, 2] * B[2, 1]
+        gz = MILL[slot, n, 0] * B[0, 2] + MILL[slot, n, 1] * B[1, 2] + MILL[slot, n, 2] * B[2, 2]
+        for a to NAT {
+            ph = gx * TAU[a, 0] + gy * TAU[a, 1] + gz * TAU[a, 2]
+            sf = complex(cos(ph), 0.0 - sin(ph))
+            r = PROJ_PER_ATOM * a
+            BETA[slot, r, n] = sf * (sqrt(1.0 / (4.0 * PI)) * proj(0.0, 0.0, kn))
+            BETA[slot, r + 1.0, n] = sf * (sqrt(1.0 / (4.0 * PI)) * proj(0.0, 1.0, kn))
+            pk = sqrt(3.0 / (4.0 * PI)) * proj(1.0, 0.0, kn) / u
+            BETA[slot, r + 2.0, n] = sf * (pk * kx)
+            BETA[slot, r + 3.0, n] = sf * (pk * ky)
+            BETA[slot, r + 4.0, n] = sf * (pk * kz)
+        }
+    }
+    return 0.0
+}
+
+###
+The next cell builds $H$ itself. `pair_index` gives, for every pair of plane
+waves, where their difference $\mathbf G - \mathbf G'$ sits in the FFT grid,
+using whole-matrix arithmetic: an outer difference of the integer triples,
+wrapped onto the grid (a negative component $m$ is stored at $m + N$). `wrap`
+does the same for one number. `take` then reads the potential at all those places at
+once.
+###
+
+ONES = zeros(1, NPWMAX) + 1.0
+
+def wrap(m) {
+    return m - NG * floor(m / NG)
+}
+def pair_index(slot) {
+    c1 = zeros(NPWMAX, 1)
+    c2 = zeros(NPWMAX, 1)
+    c3 = zeros(NPWMAX, 1)
+    for i to NPWMAX {
+        c1[i, 0] = MILL[slot, i, 0]
+        c2[i, 0] = MILL[slot, i, 1]
+        c3[i, 0] = MILL[slot, i, 2]
+    }
+    d1 = c1 @ ONES - transpose(c1 @ ONES)
+    d2 = c2 @ ONES - transpose(c2 @ ONES)
+    d3 = c3 @ ONES - transpose(c3 @ ONES)
+    d1 = d1 - NG * floor(d1 / NG)
+    d2 = d2 - NG * floor(d2 / NG)
+    d3 = d3 - NG * floor(d3 / NG)
+    return (d1 * NG + d2) * NG + d3
+}
+def hamiltonian(slot, vtot) {
+    n = NPW[slot]
+    mask = zeros(NPWMAX, 1)
+    for i to n {
+        mask[i, 0] = 1.0
+    }
+    bs = slab(BETA, slot)
+    h = take(vtot, pair_index(slot)) * (mask @ transpose(mask)) + transpose(bs) @ (D @ conj(bs))
+    for i to NPWMAX {
+        if i < n {
+            kx = KGV[slot, i, 0]
+            ky = KGV[slot, i, 1]
+            kz = KGV[slot, i, 2]
+            h[i, i] = h[i, i] + 0.5 * (kx * kx + ky * ky + kz * kz)
+        }
+        else {
+            h[i, i] = 1000.0 + i
+        }
+    }
+    return h
+}
+
+###
+Now the starting potential and one diagonalization at $\Gamma$, in the spare
+slot. `potential` assembles the total local potential on the grid from a
+density: the ions, the Hartree potential and exchange-correlation. The Hartree
+potential comes from Poisson's equation, $\nabla^2 V_H = -4\pi\rho$, which in
+reciprocal space is algebra: $V_H(\mathbf G) = 4\pi\rho(\mathbf G)/|\mathbf G|^2$.
+An FFT takes the density to reciprocal space, one multiplication solves
+Poisson's equation, and the $\mathbf G = 0$ term is left out, as the ions'
+$g = 0$ term was.
+###
+
+NELEC = ZION * NAT
+ZERO3 = zeros(NG, NG, NG)
+
+def potential(rho) {
+    rg = complex(rho, ZERO3)
+    fft3(rg)
+    vx = complex(xc_potential(rho), ZERO3)
+    fft3(vx)
+    return VPS + (rg * (4.0 * PI / NGRID)) * GINV + vx * (1.0 / NGRID)
+}
+def hartree_energy(rho) {
+    rg = complex(rho, ZERO3)
+    fft3(rg)
+    mag = abs(rg) / NGRID
+    return 0.5 * OMEGA * sum(4.0 * PI * mag * mag * GINV)
+}
+
+RHO = zeros(NG, NG, NG) + NELEC / OMEGA
+VTOT = potential(RHO)
+SCRATCH = NKPT
+NPW[SCRATCH] = plane_waves(SCRATCH, 0.0, 0.0, 0.0)
+junk = projectors(SCRATCH)
+EV = zeros(NPWMAX)
+CV = czeros(NPWMAX, NPWMAX)
+eig_herm(hamiltonian(SCRATCH, VTOT), EV, CV)
+# the bands computed and shown: the four valence bands and the two lowest
+# conduction bands
+NB = 6.0
+gamma_start = zeros(NB)
+for b to NB {
+    gamma_start[b] = EV[b]
+}
+show gamma_start
+
+test "the starting Hamiltonian at Gamma has the numpy reference's eigenvalues" {
+    assert_near(gamma_start[0], -0.307623672, 1.0e-8)
+    assert_near(gamma_start[1], 0.082870949, 1.0e-8)
+    assert_near(gamma_start[3], 0.082870949, 1.0e-8)
+    assert_near(gamma_start[4], 0.216412159, 1.0e-8)
+    assert_near(gamma_start[5], 0.241234183, 1.0e-8)
+}
+
+###
+## The self-consistent loop
+
+Silicon has 8 valence electrons per cell, two in each of the lowest 4 bands at
+every k-point. One pass of the loop:
+
+1. build the potential from the density `RHO`;
+2. at each k-point, build $H$, diagonalize it, and add the lowest 4 bands'
+   density $2|\psi(\mathbf r)|^2$ (an inverse FFT takes each band to the
+   grid) with the k-point's weight;
+3. compute the total energy and how far the new density is from the old one;
+4. if they have both stopped changing (below $10^{-8}$), stop; otherwise mix:
+   move the density 60% of the way toward the new one.
+
+The energy is the sum of the occupied band energies, corrected for double
+counting: each band energy contains the electron's interaction with the whole
+density, which counts every pair of electrons twice, so the Hartree energy is
+subtracted once and $\int\rho\,v_{xc}$ is replaced by $\int\rho\,\varepsilon_{xc}$.
+
+The full program mixes with the last three iterations (Anderson mixing,
+`dft/pw_common.viv`), which takes fewer iterations; plain mixing is one line
+and reaches the same density. Plain mixing converges geometrically: once the
+first few iterations are past, expect the density change to shrink by about
+the same factor at every iteration.
+###
+
+NOCC = NELEC / 2.0
+BOX = czeros(NG, NG, NG)
+
+def add_bands(slot, acc) {
+    out = acc
+    for b to NOCC {
+        fill(BOX, 0.0)
+        for i to NPW[slot] {
+            BOX[wrap(MILL[slot, i, 0]), wrap(MILL[slot, i, 1]), wrap(MILL[slot, i, 2])] = CV[i, b]
+        }
+        ifft3(BOX)
+        mag = abs(BOX)
+        out = out + (KWT[slot] * 2.0 * NGRID * NGRID / OMEGA) * mag * mag
+    }
+    return out
+}
+
+for q to NKPT {
+    junk = projectors(q)
+}
+
+###
+The loop itself.
+###
+
+MIX = 0.6
+TOL = 1.0e-8
+ETOT = 0.0
+EOLD = 0.0
+DRHO = 1.0
+ITER = 0.0
+DONE = false
+# the most iterations the loop may take
+MAX_ITER = 80.0
+HIST = zeros(MAX_ITER)
+while not DONE and ITER < MAX_ITER {
+    VTOT = potential(RHO)
+    rhonew = ZERO3 * 0.0
+    EBAND = 0.0
+    for q to NKPT {
+        eig_herm(hamiltonian(q, VTOT), EV, CV)
+        for b to NOCC {
+            EBAND = EBAND + KWT[q] * 2.0 * EV[b]
+        }
+        rhonew = add_bands(q, rhonew)
+    }
+    EH = hartree_energy(RHO)
+    ETOT = EBAND - EH - sum(xc_potential(RHO) * RHO) * DV + sum(xc_energy(RHO) * RHO) * DV
+    diff = rhonew - RHO
+    DRHO = sqrt(sum(diff * diff) * DV)
+    HIST[ITER] = DRHO
+    DONE = DRHO < TOL and abs(ETOT - EOLD) < TOL
+    EOLD = ETOT
+    if not DONE {
+        RHO = RHO + MIX * diff
+    }
+    ITER = ITER + 1.0
+}
+drho_history = zeros(ITER)
+for n to ITER {
+    drho_history[n] = HIST[n]
+}
+show drho_history
+show ITER
+show ETOT
+electrons = sum(RHO) * DV
+show electrons
+
+test "the loop converges in the numpy reference's number of iterations" {
+    assert_near(ITER, 21.0, 0.0)
+    assert_lt(DRHO, TOL)
+}
+test "the total energy is the numpy reference's (no ion-ion term)" {
+    assert_near(ETOT, 0.6166501662, 1.0e-8)
+}
+test "after the first few iterations, each one multiplies the density change by about 0.42" {
+    # the iterations before the ratio settles
+    first = 6.0
+    for n to ITER - first {
+        assert_near(HIST[n + first] / HIST[n + first - 1.0], 0.42, 0.01)
+    }
+}
+test "the density holds the 8 valence electrons" {
+    assert_near(electrons, 8.0, 1.0e-9)
+}
+
+###
+In the loop's output the density change fell by a factor of 0.42 per
+iteration, from 0.46 to $5 \times 10^{-9}$ in 21 iterations.
+
+## The bands along a path
+
+With the potential converged, the bands at any $\mathbf k$ come from one
+diagonalization each, with no further iteration. The path runs from $L$, the
+center of a hexagonal face of the Brillouin zone, to its center $\Gamma$, and
+on to $X$, the center of a square face. Energies are shifted so that the top
+of the valence bands is zero, and converted to eV.
+
+What to look for: the valence-band top is at $\Gamma$ and threefold
+degenerate. The lowest conduction state is not at $\Gamma$ but most of the
+way to $X$, so silicon's gap is indirect: an electron at the bottom of the
+conduction band has a different crystal momentum from a hole at the top of the
+valence band. The LDA gap is also too small, about 0.5 eV where the measured
+gap is 1.17 eV. That is a known failure of the LDA, not of the code.
+###
+
+HA_EV = 27.211386245988
+BANDS = zeros(NPTS, NB)
+PATHX = zeros(NPTS)
+for p to NPTS {
+    NPW[SCRATCH] = plane_waves(SCRATCH, PATHK[p, 0], PATHK[p, 1], PATHK[p, 2])
+    junk = projectors(SCRATCH)
+    eig_herm(hamiltonian(SCRATCH, VTOT), EV, CV)
+    for b to NB {
+        BANDS[p, b] = EV[b]
+    }
+    if p > 0.0 {
+        dk = (PATHK[p, 0] - PATHK[p - 1.0, 0]) * B[0, 0] + (PATHK[p, 1] - PATHK[p - 1.0, 1]) * B[1, 0] + (PATHK[p, 2] - PATHK[p - 1.0, 2]) * B[2, 0]
+        dy = (PATHK[p, 0] - PATHK[p - 1.0, 0]) * B[0, 1] + (PATHK[p, 1] - PATHK[p - 1.0, 1]) * B[1, 1] + (PATHK[p, 2] - PATHK[p - 1.0, 2]) * B[2, 1]
+        dz = (PATHK[p, 0] - PATHK[p - 1.0, 0]) * B[0, 2] + (PATHK[p, 1] - PATHK[p - 1.0, 1]) * B[1, 2] + (PATHK[p, 2] - PATHK[p - 1.0, 2]) * B[2, 2]
+        PATHX[p] = PATHX[p - 1.0] + sqrt(dk * dk + dy * dy + dz * dz)
+    }
+}
+
+###
+The next cell finds the valence-band top and the conduction-band bottom along
+the path and prints the six lowest bands at $L$, $\Gamma$ and $X$ in eV.
+###
+
+VBM = -1.0e9
+for p to NPTS {
+    VBM = max(VBM, BANDS[p, NOCC - 1.0])
+}
+EVB = (BANDS - VBM) * HA_EV
+GAP = 1.0e9
+KGAP = 0.0
+for p to NPTS {
+    if EVB[p, NOCC] < GAP {
+        GAP = EVB[p, NOCC]
+        KGAP = p
+    }
+}
+at_L = zeros(NB)
+at_Gamma = zeros(NB)
+at_X = zeros(NB)
+for b to NB {
+    at_L[b] = EVB[0.0, b]
+    at_Gamma[b] = EVB[NSEG, b]
+    at_X[b] = EVB[2.0 * NSEG, b]
+}
+show at_L
+show at_Gamma
+show at_X
+show GAP
+gap_where = (KGAP - NSEG) / NSEG
+show gap_where
+
+test "band energies at L, Gamma and X are the numpy reference's (eV)" {
+    assert_near(at_L[0], -9.408019, 1.0e-5)
+    assert_near(at_L[2], -1.256569, 1.0e-5)
+    assert_near(at_L[4], 1.878741, 1.0e-5)
+    assert_near(at_Gamma[0], -11.775792, 1.0e-5)
+    assert_near(at_Gamma[4], 2.460698, 1.0e-5)
+    assert_near(at_X[0], -7.639533, 1.0e-5)
+    assert_near(at_X[2], -2.965775, 1.0e-5)
+    assert_near(at_X[4], 0.598470, 1.0e-5)
+}
+test "the valence-band top is at Gamma and threefold degenerate" {
+    assert_near(at_Gamma[1], 0.0, 1.0e-6)
+    assert_near(at_Gamma[3], 0.0, 1.0e-6)
+}
+test "the gap is indirect, 0.8 of the way from Gamma to X, and 0.50 eV as in the reference" {
+    assert_near(GAP, 0.499902, 1.0e-5)
+    assert_near(gap_where, 0.8, 1.0e-12)
+    assert_lt(GAP, 0.5 * 1.17)
+}
+
+###
+## How far from converged
+
+The full program runs silicon at 10 Ha with 16 k-points (`dft/si.viv`), and
+its check file pins the band energies at $L$, $\Gamma$ and $X$. The next cell
+compares against those: the largest difference among the valence bands, and
+the difference for the lowest conduction state at $L$. Two settings differ,
+the cutoff and the k-points, so each difference mixes the two effects. The
+energies on both sides are measured from the valence-band top, so the
+comparison is of spacings between bands, and the differences need not have one
+sign. Expect a few tenths of an eV either way: the lowest valence band higher
+here than at 10 Ha, the second pair of valence states at $X$ lower.
+###
+
+# dft/si.viv's k-points: dft/kmesh.viv's four shifted NKMESH^3 meshes with
+# NKMESH = 2, each k kept once with its -k: 16
+SI_NKMESH = 2.0
+SI_NKPT = 4.0 * SI_NKMESH * SI_NKMESH * SI_NKMESH / 2.0
+CONV_L = [-9.643898540, -7.020423871, -1.209812691, -1.209812691, 1.425065296]
+CONV_GAMMA = [-11.983838003, 0.0, 0.0, 0.0, 2.536605820]
+CONV_X = [-7.837469277, -7.837469277, -2.877092576, -2.877092576, 0.614392968]
+worst_valence = 0.0
+for b to NOCC {
+    worst_valence = max(worst_valence, abs(at_L[b] - CONV_L[b]))
+    worst_valence = max(worst_valence, abs(at_Gamma[b] - CONV_GAMMA[b]))
+    worst_valence = max(worst_valence, abs(at_X[b] - CONV_X[b]))
+}
+l_conduction = at_L[4] - CONV_L[4]
+x_valence = at_X[2] - CONV_X[2]
+show worst_valence
+show l_conduction
+show x_valence
+
+test "the 10 Ha bands differ by up to 0.24 eV in the valence bands and 0.45 eV at L" {
+    assert_near(worst_valence, 0.236, 0.001)
+    assert_near(l_conduction, 0.454, 0.001)
+    assert_near(x_valence, -0.089, 0.001)
+}
+
+###
+## The picture
+
+The six lowest bands along the path. The four at or below zero are the valence
+bands, which hold silicon's 8 valence electrons; the two above are the lowest
+conduction bands. The 10 Ha run has the same degeneracies at $L$, $\Gamma$
+and $X$ and the same order of states; the cell above measured how far the
+energies differ.
+###
+
+def band_curve(b) {
+    e = zeros(NPTS)
+    for p to NPTS {
+        e[p] = EVB[p, b]
+    }
+    return e
+}
+
+figure("Silicon: LDA bands, 5 Ha cutoff, 4 k-points",
+       "path length (1/bohr): L 0, Gamma 0.53, X 1.14",
+       "energy from the valence-band top (eV)")
+plot(PATHX, band_curve(0.0), "valence 1")
+plot(PATHX, band_curve(1.0), "valence 2")
+plot(PATHX, band_curve(2.0), "valence 3")
+plot(PATHX, band_curve(3.0), "valence 4")
+plot(PATHX, band_curve(4.0), "conduction 1")
+plot(PATHX, band_curve(5.0), "conduction 2")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

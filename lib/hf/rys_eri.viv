@@ -1,0 +1,684 @@
+###
+post: Electron repulsion integrals by Rys quadrature
+agent: claude
+
+This is the third ERI algorithm in lib/hf, next to McMurchie-Davidson and
+Head-Gordon-Pople. It shares no code with either: it never builds Hermite
+expansions or Obara-Saika intermediates, and it does not call the Boys
+function. Its tests use Boys as the oracle for the quadrature rule.
+
+**The idea.** A primitive ERI over Cartesian Gaussians reduces to
+
+    (ab|cd) = K * int_0^1 Ix(t) Iy(t) Iz(t) exp(-x t^2) dt
+
+where `x = rho |P - Q|^2` (P and Q are the product centers of the bra and
+the ket, `rho = pq/(p+q)`), `K` collects the Gaussian prefactors, and each
+`I` is a polynomial in `u = t^2` of degree at most `L/2`, with
+`L = la + lb + lc + ld`. The Boys function is the special case where all
+three `I` are 1. A polynomial of degree `L/2` in `u` is integrated exactly by
+an `n`-point Gauss rule for the weight `exp(-x u) / (2 sqrt(u))` on
+`[0, 1]` once `2n - 1 >= L/2`, so
+
+    n = floor(L/2) + 1
+
+roots suffice: 1 for (ss|ss), 3 for (pp|pp), 5 for (dd|dd), 7 for (ff|ff).
+The rule for weight `x` is the Rys quadrature; its moments are the Boys values,
+
+    sum_i w_i u_i^k = int_0^1 t^(2k) exp(-x t^2) dt = F_k(x),   k < 2n,
+
+which is what the first test checks.
+
+**Roots and weights.** The rule changes with `x`, and every primitive quartet
+has its own `x`, so the roots are computed on the spot:
+
+1. Discretize the measure. An 80-point Gauss-Legendre rule on `[-1, 1]`,
+   folded to its 40 positive nodes, integrates `t^(2k) exp(-x t^2)` on
+   `[0, 1]`. Above `x = 80` the integrand is negligible past
+   `t = sqrt(80/x)`, so the nodes shrink onto `[0, sqrt(80/x)]` and the
+   integrand the rule sees is never sharper than `exp(-80 v^2)`. The dropped
+   tail is at most 7.7e-21 of `F_13`, the highest moment 7 roots use (the
+   regularized upper incomplete gamma Q(13.5, 80), from mpmath).
+2. Stieltjes. On the discrete measure, build the monic orthogonal
+   polynomials by the three-term recurrence
+   `pi_(k+1)(u) = (u - alpha_k) pi_k(u) - beta_k pi_(k-1)(u)`, reading
+   `alpha_k` and `beta_k` off discrete inner products.
+3. Golub-Welsch. The roots are the eigenvalues of the Jacobi matrix with
+   `alpha` on the diagonal and `sqrt(beta)` beside it, and each weight is
+   `beta_0` (the total mass, `F_0`) times the squared first component of its
+   unit eigenvector. The eigenproblem is tridiagonal and at most 7 by 7, so
+   an implicit QL iteration that tracks only the first row of the
+   eigenvector matrix does it.
+
+Measured here, over the 16 seeded `x` of the first test (1e-4 to 200): the
+worst relative error in `F_k`, `k < 2n`, against lib/hf/boys is 8.9e-16 at
+`n = 1` and 4.7e-15 at `n = 7`. A numpy prototype of the same three steps
+chose the constants: with 72 nodes and a cutoff of 100 its worst error
+(`n <= 5`, `x` up to 1e5) was 3.9e-12, and with 80 nodes and a cutoff of 80
+it was 6.2e-14 (`n <= 7`, `x` up to 1e6, numpy's eigensolver rather than
+this QL). The node count and the cutoff move together.
+
+Against PySCF, the worst absolute gap is 9.2e-15 over the 512 prims picks
+(every class through (ff|ff)) and 2.2e-14 over the 4186 water 6-31G values.
+Shifting `C00` by one part in 1e7 makes the prims test fail at 4.0e-9.
+
+**The 2-D integrals.** At a root `u`, each Cartesian direction separates.
+The integral `G(i, k)` of `(x - Ax)^i (x - Cx)^k` against the root's 2-D
+Gaussian obeys
+
+    G(i+1, k) = C00 G(i, k) + i B10 G(i-1, k) + k B00 G(i, k-1)
+    G(i, k+1) = D00 G(i, k) + k B01 G(i, k-1) + i B00 G(i-1, k)
+
+with `G(0, 0) = 1` and
+
+    B00 = u / (2(p+q))
+    B10 = (1 - q u/(p+q)) / (2p),   B01 = (1 - p u/(p+q)) / (2q)
+    C00 = (P - A) - q u/(p+q) (P - Q)
+    D00 = (Q - C) + p u/(p+q) (P - Q)
+
+`G` puts all the bra's angular momentum on A and the ket's on C. Writing
+`x - B = (x - A) + (A - B)` and expanding the power moves it back:
+
+    I(a, b; c, d) = sum_i sum_j C(b,i) (A-B)^(b-i) C(d,j) (C-D)^(d-j) G(a+i, c+j)
+
+Then `(ab|cd) = K sum_r w_r Ix Iy Iz`, with
+`K = 2 pi^(5/2) / (p q sqrt(p+q)) exp(-ab/p |AB|^2) exp(-cd/q |CD|^2)`.
+
+**Normalization.** Everything is in the library's unit-Cartesian convention:
+each primitive carries `cn` from
+`bas_contract`, and each component its `bas_nc` factor.
+
+**Validated range.** `rys_applicable(L)` is 1 for `L <= RYS_LTOT_MAX = 12`,
+(ff|ff), the highest class lib/hfref/prims holds. Every prims case agrees
+with PySCF there, and so does every water 6-31G value (tests below). The
+coverage counters use it to decide which classes Rys may vote on.
+
+Used with `import hf.rys_eri`.
+###
+
+from hf.basis import (
+    AT_X, AT_Z, bas_contract, bas_nao_cart, bas_nc, bas_ncart, BAS_NDIM, bas_odfact, bas_powers,
+    PR_EXP, SH_ATOM, SH_CART0, SH_L, SH_NCART, SH_NPRIM, SH_P0,
+)
+from hf.eri_store import es_index8, es_len8
+from hf.boys import boys_values
+
+RYS_PI = 3.141592653589793
+# positive nodes of the folded Gauss-Legendre rule (80 points on [-1, 1])
+RYS_M = 40
+# above this x the nodes shrink onto [0, sqrt(RYS_U / x)]
+RYS_U = 80.0
+RYS_NROOT_MAX = 7
+RYS_LTOT_MAX = 12
+# QL stops when an off-diagonal is below this share of its neighbors
+RYS_EPS = 2.220446049250313e-16
+# Newton steps per Gauss-Legendre node: quadratic convergence is done well before
+RYS_NEWTON_ITERS = 12
+# rows of the rys_roots workspace W: the folded rule (node, weight), then the
+# discrete measure (u, mass) and the last two orthogonal polynomials
+RYS_W_ROWS = 6
+# rows of the Jacobi matrix J: diagonal, off-diagonal, first eigenvector component
+RYS_J_ROWS = 3
+# a shell quartet (ab|cd) has four centers
+RYS_NCENTER = 4
+# the largest block of the prims cases, (ff|ff): 10^4 Cartesian components
+RYS_T_BLK_MAX = 10000
+
+#| 1 when Rys is validated for total angular momentum `ltot` (a quartet's
+#| la + lb + lc + ld), else 0.
+def rys_applicable(ltot) {
+    if ltot <= RYS_LTOT_MAX {
+        return 1
+    }
+    return 0
+}
+
+#| Roots needed for total angular momentum `ltot`.
+def rys_nroot(ltot) {
+    return floor(ltot / 2) + 1
+}
+
+#| The positive half of the `2m`-point Gauss-Legendre rule: `GL[0, i]` is a
+#| node in (0, 1) and `GL[1, i]` its weight. The rule is symmetric, so for an
+#| even integrand the half with these weights gives the integral over [0, 1].
+#| Newton on `P_2m` from the cosine guess converges quadratically; 12 steps is
+#| past the point where the nodes stop moving.
+def rys_gl_half(m) {
+    nn = 2 * m
+    GL = zeros(2, m)
+    for i to m {
+        z = cos(RYS_PI * (i + 0.75) / (nn + 0.5))
+        dp = 1.0
+        for it to RYS_NEWTON_ITERS {
+            p1 = 1.0
+            p2 = 0.0
+            for j to nn {
+                p3 = p2
+                p2 = p1
+                p1 = ((2.0 * j + 1.0) * z * p2 - j * p3) / (j + 1.0)
+            }
+            dp = nn * (z * p1 - p2) / (z * z - 1.0)
+            z = z - p1 / dp
+        }
+        GL[0, i] = z
+        GL[1, i] = 2.0 / ((1.0 - z * z) * dp * dp)
+    }
+    return GL
+}
+
+#| Workspace for `rys_roots`: rows 0-1 are the folded Gauss-Legendre rule,
+#| rows 2-5 hold the discrete measure (u, mass) and the last two orthogonal
+#| polynomials at its nodes. Allocate once per integral build.
+def rys_work_new() {
+    W = zeros(RYS_W_ROWS, RYS_M)
+    W[0:2, :] = rys_gl_half(RYS_M)
+    return W
+}
+
+#| sqrt(a^2 + b^2) without overflow or underflow in the squares.
+def rys_hypot(a, b) {
+    aa = abs(a)
+    bb = abs(b)
+    if aa > bb {
+        return aa * sqrt(1.0 + (bb / aa) * (bb / aa))
+    }
+    if bb == 0.0 {
+        return 0.0
+    }
+    return bb * sqrt(1.0 + (aa / bb) * (aa / bb))
+}
+
+#| Eigenvalues of the symmetric tridiagonal matrix with diagonal `J[0, 0..n-1]`
+#| and off-diagonal `J[1, 0..n-2]` by implicit QL with Wilkinson shifts: the
+#| `tql2` of EISPACK in the form the public-domain JAMA library gives it, as
+#| lib/hf/eigen's eig_tql2 has it. Only the first row of the eigenvector
+#| matrix is carried, in `J[2, ]`, because Golub-Welsch needs nothing else. On
+#| return `J[0, i]` is an eigenvalue and `J[2, i]` the first component of its
+#| unit eigenvector.
+def rys_tql(n, J: Arr) {
+    J[2, 0:n] = 0.0
+    J[2, 0] = 1.0
+    J[1, n - 1] = 0.0
+    f = 0.0
+    tst1 = 0.0
+    for l to n {
+        #: find a negligible off-diagonal at or below l
+        tst1 = max(tst1, abs(J[0, l]) + abs(J[1, l]))
+        m = l
+        while m < n - 1 and abs(J[1, m]) > RYS_EPS * tst1 {
+            m = m + 1
+        }
+        sweeps = 0
+        going = 1 if m > l else 0
+        while going > 0 {
+            sweeps = sweeps + 1
+            if sweeps > 60 {
+                # QL converges in 2 or 3 sweeps per eigenvalue; 60 means a NaN got in
+                assert_lt(sweeps, 60)
+            }
+            #: Wilkinson shift from the 2 by 2 at l
+            g = J[0, l]
+            p = (J[0, l + 1] - g) / (2.0 * J[1, l])
+            r = rys_hypot(p, 1.0)
+            if p < 0.0 {
+                r = -r
+            }
+            J[0, l] = J[1, l] / (p + r)
+            J[0, l + 1] = J[1, l] * (p + r)
+            dl1 = J[0, l + 1]
+            h = g - J[0, l]
+            i = l + 2
+            while i < n {
+                J[0, i] = J[0, i] - h
+                i = i + 1
+            }
+            f = f + h
+            #: the QL sweep from m up to l
+            p = J[0, m]
+            c = 1.0
+            c2 = c
+            c3 = c
+            el1 = J[1, l + 1]
+            s = 0.0
+            s2 = 0.0
+            i = m - 1
+            while i >= l {
+                c3 = c2
+                c2 = c
+                s2 = s
+                g = c * J[1, i]
+                h = c * p
+                r = rys_hypot(p, J[1, i])
+                J[1, i + 1] = s * r
+                s = J[1, i] / r
+                c = p / r
+                p = c * J[0, i] - s * g
+                J[0, i + 1] = h + s * (c * g + s * J[0, i])
+                h = J[2, i + 1]
+                J[2, i + 1] = s * J[2, i] + c * h
+                J[2, i] = c * J[2, i] - s * h
+                i = i - 1
+            }
+            p = -s * s2 * c3 * el1 * J[1, l] / dl1
+            J[1, l] = s * p
+            J[0, l] = c * p
+            if abs(J[1, l]) <= RYS_EPS * tst1 {
+                going = 0
+            }
+        }
+        #: undo the accumulated shift
+        J[0, l] = J[0, l] + f
+        J[1, l] = 0.0
+    }
+    return 0.0
+}
+
+#| The `n`-point Rys rule for argument `x`: `R[0, i]` is a root `u_i = t_i^2`
+#| in (0, 1) and `R[1, i]` its weight, so that `sum_i R[1,i] R[0,i]^k = F_k(x)`
+#| for `k < 2n`. `W` is `rys_work_new()`; `J` is a `[3, RYS_NROOT_MAX]`
+#| scratch. Discretized Stieltjes gives the recurrence, Golub-Welsch the rule.
+def rys_roots(n, x, W: Arr, J: Arr, R: Arr) {
+    tm = 1.0
+    if x > RYS_U {
+        tm = sqrt(RYS_U / x)
+    }
+    for j to RYS_M {
+        t = W[0, j] * tm
+        u = t * t
+        W[2, j] = u
+        W[3, j] = W[1, j] * tm * exp(-x * u)
+        W[4, j] = 1.0
+        W[5, j] = 0.0
+    }
+    nprev = 1.0
+    beta0 = 0.0
+    for k to n {
+        nk = 0.0
+        mk = 0.0
+        for j to RYS_M {
+            lp = W[3, j] * W[4, j] * W[4, j]
+            nk = nk + lp
+            mk = mk + lp * W[2, j]
+        }
+        alpha = mk / nk
+        J[0, k] = alpha
+        beta = 0.0
+        if k == 0 {
+            beta0 = nk
+        }
+        else {
+            beta = nk / nprev
+            J[1, k - 1] = sqrt(beta)
+        }
+        nprev = nk
+        if k < n - 1 {
+            for j to RYS_M {
+                pn = (W[2, j] - alpha) * W[4, j] - beta * W[5, j]
+                W[5, j] = W[4, j]
+                W[4, j] = pn
+            }
+        }
+    }
+    rys_tql(n, J)
+    for i to n {
+        R[0, i] = J[0, i]
+        R[1, i] = beta0 * J[2, i] * J[2, i]
+    }
+    return 0.0
+}
+
+#| Binomial coefficient C(n, k) for small n.
+def rys_binom(n, k) {
+    r = 1.0
+    for i to k {
+        r = r * (n - i) / (i + 1.0)
+    }
+    return r
+}
+
+#| The unit-Cartesian block of shell quartet (s1 s2|s3 s4), written into
+#| `blk` in the order ((ia*nb + ib)*nc + ic)*nd + id, components in PySCF's
+#| order. `cn` is `bas_contract(shells, prims)`; `W`, `J` and `R` are the
+#| scratch arrays of `rys_roots`. The per-quartet tables are allocated here,
+#| so they are freed when the quartet is done.
+def rys_shell_quartet(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, s1, s2, s3, s4, W: Arr, J: Arr, R: Arr, blk: Arr) {
+    la = shells[s1, SH_L]
+    lb = shells[s2, SH_L]
+    lc = shells[s3, SH_L]
+    ld = shells[s4, SH_L]
+    na = bas_ncart(la)
+    nb = bas_ncart(lb)
+    nc = bas_ncart(lc)
+    nd = bas_ncart(ld)
+    nab = la + lb
+    ncd = lc + ld
+    nr = rys_nroot(nab + ncd)
+    PA = bas_powers(la)
+    PB = bas_powers(lb)
+    PC = bas_powers(lc)
+    PD = bas_powers(ld)
+    # centers, one row per shell
+    at = [shells[s1, SH_ATOM], shells[s2, SH_ATOM], shells[s3, SH_ATOM], shells[s4, SH_ATOM]]
+    X = zeros(len(at), BAS_NDIM)
+    for k to len(at) {
+        X[k, :] = atoms[round(at[k]), AT_X:AT_Z + 1]
+    }
+    ab2 = 0.0
+    cd2 = 0.0
+    # hab[d, b, i] = C(b, i) (A-B)^(b-i): the weights that move b onto A
+    hab = zeros(BAS_NDIM, lb + 1, lb + 1)
+    hcd = zeros(BAS_NDIM, ld + 1, ld + 1)
+    for d to BAS_NDIM {
+        abd = X[0, d] - X[1, d]
+        cdd = X[2, d] - X[3, d]
+        ab2 = ab2 + abd * abd
+        cd2 = cd2 + cdd * cdd
+        for b to lb + 1 {
+            for i to b + 1 {
+                hab[d, b, i] = rys_binom(b, i) * pow(abd, b - i)
+            }
+        }
+        for b to ld + 1 {
+            for i to b + 1 {
+                hcd[d, b, i] = rys_binom(b, i) * pow(cdd, b - i)
+            }
+        }
+    }
+    nblk = na * nb * nc * nd
+    blk[0:nblk] = 0.0
+    G = zeros(BAS_NDIM, nab + 1, ncd + 1)
+    T = zeros(BAS_NDIM, (la + 1) * (lb + 1), (lc + 1) * (ld + 1))
+    P = zeros(BAS_NDIM)
+    Q = zeros(BAS_NDIM)
+    pa0 = round(shells[s1, SH_P0])
+    pb0 = round(shells[s2, SH_P0])
+    pc0 = round(shells[s3, SH_P0])
+    pd0 = round(shells[s4, SH_P0])
+    for ia0 to shells[s1, SH_NPRIM] {
+        ea = prims[pa0 + ia0, PR_EXP]
+        for ib0 to shells[s2, SH_NPRIM] {
+            eb = prims[pb0 + ib0, PR_EXP]
+            p = ea + eb
+            kab = exp(-ea * eb / p * ab2) * cn[pa0 + ia0] * cn[pb0 + ib0]
+            for d to BAS_NDIM {
+                P[d] = (ea * X[0, d] + eb * X[1, d]) / p
+            }
+            for ic0 to shells[s3, SH_NPRIM] {
+                ec = prims[pc0 + ic0, PR_EXP]
+                for id0 to shells[s4, SH_NPRIM] {
+                    ed = prims[pd0 + id0, PR_EXP]
+                    q = ec + ed
+                    pq = p + q
+                    pq2 = 0.0
+                    for d to BAS_NDIM {
+                        Q[d] = (ec * X[2, d] + ed * X[3, d]) / q
+                        pq2 = pq2 + (P[d] - Q[d]) * (P[d] - Q[d])
+                    }
+                    kk = 2.0 * pow(RYS_PI, 2.5) / (p * q * sqrt(pq)) * kab * exp(-ec * ed / q * cd2) * cn[pc0 + ic0] * cn[pd0 + id0]
+                    rys_roots(nr, p * q / pq * pq2, W, J, R)
+                    for r to nr {
+                        u = R[0, r]
+                        b00 = 0.5 * u / pq
+                        b10 = (1.0 - q * u / pq) / (2.0 * p)
+                        b01 = (1.0 - p * u / pq) / (2.0 * q)
+                        for d to BAS_NDIM {
+                            c00 = P[d] - X[0, d] - q * u / pq * (P[d] - Q[d])
+                            d00 = Q[d] - X[2, d] + p * u / pq * (P[d] - Q[d])
+                            # vertical: all bra momentum on A, all ket on C
+                            G[d, 0, 0] = 1.0
+                            for i to nab {
+                                g = c00 * G[d, i, 0]
+                                if i > 0 {
+                                    g = g + i * b10 * G[d, i - 1, 0]
+                                }
+                                G[d, i + 1, 0] = g
+                            }
+                            for k to ncd {
+                                for i to nab + 1 {
+                                    g = d00 * G[d, i, k]
+                                    if k > 0 {
+                                        g = g + k * b01 * G[d, i, k - 1]
+                                    }
+                                    if i > 0 {
+                                        g = g + i * b00 * G[d, i - 1, k]
+                                    }
+                                    G[d, i, k + 1] = g
+                                }
+                            }
+                            # horizontal: move b back to B and d back to D
+                            for a to la + 1 {
+                                for b to lb + 1 {
+                                    for c to lc + 1 {
+                                        for e to ld + 1 {
+                                            s = 0.0
+                                            for i to b + 1 {
+                                                for j to e + 1 {
+                                                    s = s + hab[d, b, i] * hcd[d, e, j] * G[d, a + i, c + j]
+                                                }
+                                            }
+                                            T[d, a * (lb + 1) + b, c * (ld + 1) + e] = s
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        fac = kk * R[1, r]
+                        idx = 0
+                        for ia to na {
+                            for ib to nb {
+                                rx = PA[ia, 0] * (lb + 1) + PB[ib, 0]
+                                ry = PA[ia, 1] * (lb + 1) + PB[ib, 1]
+                                rz = PA[ia, 2] * (lb + 1) + PB[ib, 2]
+                                for ic to nc {
+                                    for id to nd {
+                                        cx = PC[ic, 0] * (ld + 1) + PD[id, 0]
+                                        cy = PC[ic, 1] * (ld + 1) + PD[id, 1]
+                                        cz = PC[ic, 2] * (ld + 1) + PD[id, 2]
+                                        blk[idx] = blk[idx] + fac * T[0, rx, cx] * T[1, ry, cy] * T[2, rz, cz]
+                                        idx = idx + 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    # the component factors Nc, the same for every primitive
+    idx = 0
+    for ia to na {
+        fa = bas_nc(PA[ia, 0], PA[ia, 1], PA[ia, 2])
+        for ib to nb {
+            fb = fa * bas_nc(PB[ib, 0], PB[ib, 1], PB[ib, 2])
+            for ic to nc {
+                fc = fb * bas_nc(PC[ic, 0], PC[ic, 1], PC[ic, 2])
+                for id to nd {
+                    blk[idx] = blk[idx] * fc * bas_nc(PD[id, 0], PD[id, 1], PD[id, 2])
+                    idx = idx + 1
+                }
+            }
+        }
+    }
+    return nblk
+}
+
+#| Registry member for the ERI stage: the packed-8 unit-Cartesian ERIs of a
+#| basis, every shell quartet by Rys quadrature. It computes every class; the
+#| classes it is validated for are those with `rys_applicable(la+lb+lc+ld)`.
+def rys_eri(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    n = bas_nao_cart(shells)
+    Gp = zeros(es_len8(n))
+    cn = bas_contract(shells, prims)
+    W = rys_work_new()
+    J = zeros(RYS_J_ROWS, RYS_NROOT_MAX)
+    R = zeros(2, RYS_NROOT_MAX)
+    lmax = 0
+    nsh = len(shells)
+    for s to nsh {
+        lmax = max(lmax, shells[s, SH_L])
+    }
+    blk = zeros(pow(bas_ncart(lmax), RYS_NCENTER))
+    for s1 to nsh {
+        for s2 to s1 + 1 {
+            for s3 to s1 + 1 {
+                top = s3
+                if s3 == s1 {
+                    top = s2
+                }
+                for s4 to top + 1 {
+                    rys_shell_quartet(atoms, shells, prims, cn, s1, s2, s3, s4, W, J, R, blk)
+                    nb = shells[s2, SH_NCART]
+                    nc = shells[s3, SH_NCART]
+                    nd = shells[s4, SH_NCART]
+                    idx = 0
+                    for ia to shells[s1, SH_NCART] {
+                        for ib to nb {
+                            for ic to nc {
+                                for id to nd {
+                                    i = shells[s1, SH_CART0] + ia
+                                    j = shells[s2, SH_CART0] + ib
+                                    k = shells[s3, SH_CART0] + ic
+                                    l = shells[s4, SH_CART0] + id
+                                    Gp[es_index8(i, j, k, l)] = blk[idx]
+                                    idx = idx + 1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Gp
+}
+
+# ---- test helpers ----
+
+#| Test helper: the next uniform number in (0, 1) from a Park-Miller state in
+#| `st[0]`, so a failing x can be quoted by its seed.
+def rys_rng(st: Arr) {
+    st[0] = mod(16807.0 * st[0], 2147483647.0)
+    return st[0] / 2147483647.0
+}
+
+#| Test helper: the worst relative gap between the `n`-point rule's moments
+#| `sum_i w_i u_i^k`, `k0 <= k < k1`, and `F` (the Boys values at the same x).
+def rys_moment_gap(n, R: Arr, F: Arr, k0, k1) {
+    w = 0.0
+    for k to k1 - k0 {
+        m = 0.0
+        for i to n {
+            m = m + R[1, i] * pow(R[0, i], k0 + k)
+        }
+        w = max(w, abs(m / F[k0 + k] - 1.0))
+    }
+    return w
+}
+
+#| Test helper: the worst moment gap over orders `k < 2n` at one x, with
+#| the Boys values from lib/hf/boys as the reference.
+def rys_moment_worst(n, x, W: Arr, J: Arr, R: Arr) {
+    rys_roots(n, x, W, J, R)
+    return rys_moment_gap(n, R, boys_values(2 * n - 1, x), 0, 2 * n)
+}
+
+#| Test helper: 1 when every root of the `n`-point rule at `x` lies in (0, 1)
+#| and every weight is positive, else 0.
+def rys_rule_ok(n, x, W: Arr, J: Arr, R: Arr) {
+    rys_roots(n, x, W, J, R)
+    ok = 1
+    for i to n {
+        if R[0, i] <= 0.0 or R[0, i] >= 1.0 or R[1, i] <= 0.0 {
+            ok = 0
+        }
+    }
+    return ok
+}
+
+test "the n-point rule reproduces F_0 .. F_(2n-1) to 1e-13 at 16 seeded x, for n up to 7" {
+    rys_w = rys_work_new()
+    rys_j = zeros(RYS_J_ROWS, RYS_NROOT_MAX)
+    rys_r = zeros(2, RYS_NROOT_MAX)
+    rys_st = zeros(1)
+    rys_st[0] = 20260923
+    rys_worst = 0.0
+    rys_bad = 0
+    rys_nx = 16
+    for rys_s to rys_nx {
+        # log-uniform from 1e-4 to 200, the range lib/hf/boys is validated on
+        rys_x = pow(10.0, -4.0 + 6.30103 * rys_rng(rys_st))
+        for rys_n0 to RYS_NROOT_MAX {
+            rys_worst = max(rys_worst, rys_moment_worst(rys_n0 + 1, rys_x, rys_w, rys_j, rys_r))
+            if rys_rule_ok(rys_n0 + 1, rys_x, rys_w, rys_j, rys_r) == 0 {
+                rys_bad = rys_bad + 1
+            }
+        }
+    }
+    assert_lt(rys_worst, 1.0e-13)
+    assert_near(rys_bad, 0.0, 0.0)
+}
+
+test "the rule holds at x = 0, on both sides of the cutoff at 80, and at 199" {
+    rys_w = rys_work_new()
+    rys_j = zeros(RYS_J_ROWS, RYS_NROOT_MAX)
+    rys_r = zeros(2, RYS_NROOT_MAX)
+    rys_xs = [0.0, 1.0e-12, 79.999, 80.0, 80.001, 199.0]
+    rys_worst = 0.0
+    for rys_i to len(rys_xs) {
+        for rys_n0 to RYS_NROOT_MAX {
+            rys_worst = max(rys_worst, rys_moment_worst(rys_n0 + 1, rys_xs[rys_i], rys_w, rys_j, rys_r))
+        }
+    }
+    assert_lt(rys_worst, 1.0e-13)
+}
+
+test "far above the cutoff the moments match the closed form (2k-1)!!/2^(k+1) sqrt(pi/x^(2k+1))" {
+    # at x >= 1000 the erfc tail that the closed form drops is about 1e-436,
+    # so this checks the shrunken discretization without lib/hf/boys
+    rys_w = rys_work_new()
+    rys_j = zeros(RYS_J_ROWS, RYS_NROOT_MAX)
+    rys_r = zeros(2, RYS_NROOT_MAX)
+    rys_xs = [1000.0, 3.7e4, 1.0e6]
+    rys_f = zeros(2 * RYS_NROOT_MAX)
+    rys_worst = 0.0
+    for rys_i to len(rys_xs) {
+        rys_x = rys_xs[rys_i]
+        for rys_k to 2 * RYS_NROOT_MAX {
+            rys_f[rys_k] = bas_odfact(rys_k) / pow(2.0, rys_k + 1) * sqrt(RYS_PI / pow(rys_x, 2 * rys_k + 1))
+        }
+        for rys_n0 to RYS_NROOT_MAX {
+            rys_roots(rys_n0 + 1, rys_x, rys_w, rys_j, rys_r)
+            rys_worst = max(rys_worst, rys_moment_gap(rys_n0 + 1, rys_r, rys_f, 0, 2 * rys_n0 + 2))
+        }
+    }
+    assert_lt(rys_worst, 1.0e-13)
+}
+
+test "an n-point rule misses F_(2n), so the moment check can fail" {
+    # a Gauss rule is exact to degree 2n-1 and no further; if the check above
+    # passed on F_(2n) too, it would not be testing the rule
+    rys_w = rys_work_new()
+    rys_j = zeros(RYS_J_ROWS, RYS_NROOT_MAX)
+    rys_r = zeros(2, RYS_NROOT_MAX)
+    rys_fewest = 1.0
+    rys_nmax = 5
+    for rys_n0 to rys_nmax {
+        rys_roots(rys_n0 + 1, 2.5, rys_w, rys_j, rys_r)
+        rys_fb = boys_values(2 * rys_n0 + 2, 2.5)
+        rys_fewest = min(rys_fewest, rys_moment_gap(rys_n0 + 1, rys_r, rys_fb, 2 * rys_n0 + 2, 2 * rys_n0 + 3))
+    }
+    assert_gt(rys_fewest, 1.0e-6)
+}
+
+test "Rys is validated through (ff|ff), so (dd|dd) at Ltot 8 is covered" {
+    assert_near(rys_applicable(4), 1.0, 0.0)
+    assert_near(rys_applicable(8), 1.0, 0.0)
+    assert_near(rys_applicable(12), 1.0, 0.0)
+    assert_near(rys_applicable(13), 0.0, 0.0)
+    assert_near(rys_nroot(8), 5.0, 0.0)
+    assert_near(rys_nroot(12), 7.0, 0.0)
+    show RYS_LTOT_MAX
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

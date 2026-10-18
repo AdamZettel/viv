@@ -1,0 +1,531 @@
+module lib/hf/md_eri
+  The electron repulsion integrals (ERIs) of a basis, by the
+  McMurchie-Davidson method (lib/hf/hermite): the numbers
+  $(ab|cd) = \iint \phi_a(r_1)\phi_b(r_1)\, \frac{1}{|r_1 - r_2|}\, \phi_c(r_2)\phi_d(r_2)$
+  from which the SCF builds its Coulomb and exchange matrices J and K.
+
+  The work is organized by shell group: the shells of one general
+  contraction (same atom, same angular momentum, same exponents, as
+  Dunning's sets have them) form a group, and their primitive integrals are
+  computed once for all of them. A pair of groups (the bra or the ket) is
+  prepared once, with the exponent $p$, the center $P$ and the E
+  coefficients of each of its primitive pairs; a shell quartet (a bra pair and
+  a ket pair) is then two matrix products over those prepared E values and
+  one R table per primitive quartet. Quartets whose Schwarz bound
+  $\sqrt{(ab|ab)(cd|cd)}$ is below a threshold are skipped, since every
+  integral they hold is smaller than it. The result is the packed vector of
+  lib/hf/eri_store, which stores each distinct integral once.
+
+mderi_packsize  @46f3a13e
+  why   The store is one flat array, so each group pair's pack must be sized
+        before it is filled.
+  la    the first group's angular momentum
+  lb    the second group's angular momentum
+  npp   the number of primitive pairs
+  ca    the shells in the first group
+  cb    the shells in the second group
+
+mderi_fillpack  @40d048a0
+  why   Everything about a group pair that does not depend on the other pair
+        of a quartet: computed once here and read by every quartet the pair
+        is in. The contraction coefficients, the component factors and the
+        product prefactor go into the E entries, so the quartet code only
+        multiplies matrices. The shells of a group share their exponents, so
+        one primitive pair's E table serves every shell pair of the two
+        groups; each shell pair gets rows of its own with its own
+        contraction coefficients, and the R tables of a quartet are computed
+        once for all of them.
+  ST      the store being filled
+  off     where this pair's pack starts in `ST`
+  atoms   the atom pack: charge and position, `[natom, AT_LEN]`
+  shells  the shell pack
+  prims   the primitive pack
+  cn      the contracted coefficients from bas_contract
+  sa      the first group's first shell
+  nga     the shells in the first group
+  sb      the second group's first shell
+  ngb     the shells in the second group
+  ga      a shell of the first group, counted from sa
+  gb      a shell of the second group, counted from sb
+  r0      the first row of the shell pair (ga, gb)
+  la      the first shell's angular momentum; lb the second's
+  na      the first shell's Cartesian component count; nb the second's
+  npa     the first shell's primitive count; npb the second's
+  npp     the primitive pairs, `npa npb`
+  L       `la + lb`, the pair's total angular momentum
+  nh      the Hermite functions of order up to `L`
+  PA      the first shell's component powers; PB the second's
+  H       the Hermite index list $(t, u, v)$
+  NA      the component factors of the first shell; NB the second's
+  Ax      the first shell's atom's $x$; the other five coordinates likewise
+  EX      the E table on $x$ for the current primitive pair; EY and EZ on $y$, $z$
+  nt      the $t$ values per $(i, j)$ in an E table
+  ld      the $j$ values per $i$
+  ncol    the columns of $E_{ab}$, `npp nh`
+  e0      where $E_{ab}$ starts in the pack
+  pa0     the first shell's first primitive row; pb0 the second's
+  a       the first primitive's exponent; b the second's
+  k       the primitive pair's index
+  p       $p = a + b$, the product's exponent
+  c       the product of the two shells' contraction coefficients
+  ox      where E(i, j, .) of this component pair starts on $x$; oy and oz likewise
+  tx      the highest $t$ with a nonzero E on $x$; ty and tz likewise
+  w       the coefficient and component factors of this entry
+  rowoff  where this component pair's row, for this primitive pair, starts
+
+  = NA#2      the component factors, one per component, so each shell shares one set of coefficients
+  = ST#6      the primitive pair's exponent $p$, then its center $P = (aA + bB)/p$
+  = c         after herm_efill has filled this primitive pair's E table on each axis: the product of the two shells' contraction coefficients, for each shell pair of the groups
+  = ST#10     one entry of $E_{ab}$: the product of the three axes' E values, zero beyond $t \le i + j$ on each axis
+
+mderi_store_groups  @8551b39d
+  why   The group pairs of a build, or the two pairs of one quartet, laid
+        out where every quartet can find them by index: the directory says,
+        for each pair, where its pack starts, the first shell and the shell
+        count of each group, and the two group numbers.
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+  GT      the groups, `[ng, 2]`: first shell, shell count
+  PL      the group pairs to store, `[npl, 2]`
+  cn      the contracted coefficients
+  npl     the number of pairs
+  total   the store's length
+  lmax    the largest angular momentum in any pair, which sizes the Boys grid
+  sa      the current pair's first group's first shell; sb the second's
+  ST      the store
+  off     where the next pack goes
+  ga      the current pair's first group; gb its second
+  d0      where the pair's directory entry starts
+
+  = total#2  each pair's pack, sized before anything is filled
+  = ST#3     the directory entry: offset, first shells, shell counts, group numbers
+  = off#2    the next pack starts where this one ends
+
+mderi_store_pairs  @517f53ad
+  why   The two pairs of one quartet (mderi_quartet), each shell a group of
+        its own.
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+  PL      the shell pairs to store, `[npl, 2]`
+
+mderi_seg_groups  @cab7f939
+  why   The segmented store, one shell a group, is the one the grouped store
+        is checked against, and the store of a single quartet.
+  shells  the shell pack
+  nsh     the number of shells
+  GT      the groups, `[nsh, 2]`
+  s       a shell
+
+mderi_same_prims  @26fb54b5
+  why   Two shells can share their primitive integrals only when they are
+        the same Gaussians up to the contraction coefficients.
+  shells  the shell pack
+  prims   the primitive pack
+  s       one shell
+  t       the other
+  ps      s's first primitive row
+  pt      t's first primitive row
+  i       a primitive
+
+mderi_groups  @4881e370
+  why   The basis tables write a general contraction as segmented shells one
+        after the other (lib/basis), so the groups are runs of neighbors that
+        share their primitives. Carbon in cc-pVDZ has two s contractions
+        over the same eight exponents: grouped, a quartet of those shells
+        computes its primitive integrals once instead of up to sixteen times
+        [test "the grouped store gives the segmented store's integrals with fewer pairs, cc-pVDZ water"].
+  shells  the shell pack
+  prims   the primitive pack
+  nsh     the number of shells
+  first   the first shell of each group
+  ng      the number of groups
+  GT      the groups, `[ng, 2]`
+  s       a shell
+  g       a group
+  nxt     the first shell after group g
+
+mderi_canon_pairs  @e5a6dd3e
+  why   $(ab|cd) = (ba|cd)$, so only pairs with the first shell at least the
+        second are computed.
+  nsh   the number of shells or groups
+  PL    the pairs, row `sa (sa + 1)/2 + sb` for pair `(sa, sb)`
+
+mderi_store  @f5db6846
+  why   The store a full ERI build uses: every canonical pair of shell groups.
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+  GT      the shell groups
+
+mderi_store_seg  @498887f5
+  why   The same store with every shell its own group: what the grouped
+        store is held to.
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+
+mderi_grid  @f1254ceb
+  why   A quartet's total angular momentum is at most four times the store's
+        largest `l`, and the Boys function is needed at every order up to it.
+  ST    the store
+
+mderi_emat  @3109436c
+  why   `@` needs a matrix; the store holds $E_{ab}$ flat.
+  ST    the store
+  o     where the pack starts
+  npp   its primitive pairs
+  nab   its component pairs, the rows of E
+  ncol  its columns, primitive pairs times Hermite functions
+  e0    where $E_{ab}$ starts
+  E     the copy
+  r     the row being copied
+  c     the column being copied
+
+mderi_hoff  @9f2ccb92
+  why   The quartet code reads R at the sum of a bra and a ket Hermite index;
+        these offsets turn that into one addition, and the ket's signs
+        $(-1)^{t'+u'+v'}$ come from the same walk.
+  L       the order of the Hermite list
+  D       the side of the R cube
+  signed  `1` for the signs, `0` for the offsets
+  O       the result, one entry per Hermite function
+  h       the next entry of O
+
+mderi_block  @968a8638
+  why   Every integral of one shell quartet: the unit of work of the build and
+        of the Schwarz bound. Written as two matrix products, the sums over
+        primitives run inside `@`, and one Boys evaluation and one R table per
+        primitive quartet serve every component
+        [test "all 18145 water 6-31G* ERIs match PySCF to 1e-12"].
+  ST    the store
+  k1    the bra pair's index in the store
+  k2    the ket pair's index
+  G     the Boys grid from mderi_grid
+  o1    where the bra's pack starts; o2 the ket's
+  L1    the bra's total angular momentum; L2 the ket's
+  np1   the bra's primitive pairs; np2 the ket's
+  nh1   the bra's Hermite functions; nh2 the ket's
+  L     the quartet's total angular momentum
+  D     the side of the R cube
+  HA    the R offsets of the bra's Hermite functions; HC the ket's
+  SG    the ket's signs $(-1)^{t'+u'+v'}$
+  ncd   the ket's component pairs
+  E2    the ket's $E_{cd}$ as a matrix
+  nbat  how many bra primitive pairs one batch holds, so BR stays near
+        `MDERI_BATCH` entries
+  BR    the signed R values of one batch: a row per ket (primitive pair,
+        Hermite function), a column per bra one
+  ZT    $Z^\top$  every batch's $E_{cd}\,BR$, transposed and stacked
+  S     the R cube buffer for herm_rfill
+  F     the Boys values
+  c52   $2\pi^{5/2}$, the constant of the ERI formula
+  k0    the first bra primitive pair of the batch
+  kn    the batch's size, smaller at the end
+  b1    where the bra primitive pair's $(p, P)$ sits; b2 the ket's
+  p     the bra pair's exponent; q the ket's
+  X     $P - Q$ on $x$; Y and Z likewise
+  al    $\alpha = pq/(p+q)$, the exponent of the Boys argument
+  row   the row of BR for this ket primitive pair and Hermite function
+  base  the R offset of this ket Hermite function
+  sg    its sign
+  Zb    one batch's $E_{cd}\,BR$
+
+  $$ (ab|cd) = \frac{2\pi^{5/2}}{pq\sqrt{p+q}} \sum_{h} E_{ab}(h) \sum_{h'} (-1)^{t'+u'+v'} E_{cd}(h')\, R(h + h') $$  [test "all 18145 water 6-31G* ERIs match PySCF to 1e-12"]
+  = nbat  batches keep BR small whatever the contraction depth
+  = al    the exponent of the Boys argument; herm_boys_fill and herm_rfill then build this primitive quartet's R table, with the ERI constant folded in
+  = BR#2  the signed R entry for one ket and one bra Hermite function
+  = Zb    the ket's sums, over its primitives and Hermite functions, as one product
+  = ZT#2  this batch's rows of $Z^\top$
+
+mderi_schwarz  @2711cb10
+  why   The Schwarz bound $|(ab|cd)| \le Q_{ab} Q_{cd}$ lets a build skip a
+        quartet without computing it, once each pair's $Q$ is known.
+  ST    the store
+  G     the Boys grid
+  npl   the number of pairs
+  Q     the result, one number per pair
+
+mderi_schwarz_one  @18285e2b
+  what  $Q_{ab} = \sqrt{\max (ab|ab)}$ over the components of one store pair,
+        written into `Q[k]`.
+  why   A def of its own so the block it computes is freed when it returns,
+        on whichever thread ran it.
+  ST    the store
+  G     the Boys grid
+  Q     the bounds, filled in place
+  k     the pair
+  B     the pair's block against itself
+  w     the largest diagonal entry so far
+
+mderi_qlist  @1814a056
+  why   The build runs one flat loop over quartets, so screening decides the
+        list before the loop starts.
+  Q     the Schwarz bounds
+  npl   the number of pairs
+  tol   the threshold; negative keeps every quartet
+  QL    the list, `[nq, 2]`, grown one row per kept quartet
+
+mderi_put  @e2c75e24
+  why   A block holds every component combination, while the packed vector
+        holds each distinct integral once; this picks the canonical entries
+        and puts each in its slot, so the quartets of a parallel build write
+        disjoint slots.
+  Gp    the packed integrals, written in place
+  B     the block from mderi_block
+  ST    the store
+  shells  the shell pack
+  k1    the bra pair; k2 the ket pair
+
+mderi_put_at  @e68ede97
+  why   The same placement for a block over Cartesian or spherical functions:
+        only the shells-table columns that number the functions differ.
+  Gp    the packed integrals, written in place
+  B     the block, Cartesian or spherical
+  ST    the store
+  shells  the shell pack
+  k1    the bra pair; k2 the ket pair
+  c0col the shells-table column of a shell's first function
+  ncol  the column of its function count
+  d1    the bra pair's directory entry; d2 the ket pair's
+  sa    the four groups' first shells: sa, sb from the bra pair, sc, sd from the ket
+  gna   the shells in each group: gna, gnb, gnc, gnd
+  na    the functions of one shell of each group: na, nb, nc, nd
+  ga    a shell of the first group; gb, gc, gd of the others
+  ia    a function of that shell; ib, ic, id of the others
+  i     the function of the first index; j, k, l of the others
+  ij    the index of the function pair $(i, j)$ with $i \ge j$
+  kl    the index of $(k, l)$
+  row   the block's row for this bra function pair
+  slot  where $(ij|kl)$ goes in the packed vector
+
+  = ij      pair index $i(i+1)/2 + j$, with $i \ge j$ guaranteed by the skip above it
+  = slot#2  the larger pair index goes first, so $(ij|kl)$ and $(kl|ij)$ share a slot
+  = Gp      the write, once per distinct integral
+
+mderi_do  @8fa5e1f0
+  why   A def of its own so the block's arrays are freed when it returns, on
+        whichever thread ran the row.
+  Gp      the packed integrals
+  ST      the store
+  G       the Boys grid
+  shells  the shell pack
+  QL      the quartet list
+  q       the row to compute
+  k1      its bra pair; k2 its ket pair
+
+mderi_build  @d448345c
+  why   The ERI build the integral stage runs, over the grouped store.
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+  tol     the screening threshold; negative computes every quartet
+
+mderi_build_st  @1eb334e8
+  why   Store, grid, bounds, list, then every quartet, over the store it is
+        given: the grouped one in production, the segmented one in the
+        member that checks it.
+  ST      the store
+  shells  the shell pack
+  tol     the screening threshold; negative computes every quartet
+  n       the number of Cartesian AOs
+  G       the Boys grid
+  npl     the number of pairs
+  Q       the Schwarz bounds
+  QL      the quartet list
+  Gp      the packed integrals
+
+mderi_screened  @7ed9a8cc
+  why   The production member: screening skips quartets far apart, and changes
+        no integral by more than its threshold
+        [test "with one hydrogen moved 12 bohr out, screening skips quartets and changes no integral by more than its threshold"].
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+
+mderi_full  @c01c4fe7
+  what  Every quartet, with no screening and every shell its own group, as an
+        integral-stage member.
+  why   The reference the screened, grouped build is checked against.
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+
+mderi_quartet  @483b1c27
+  why   One block without building the whole store: for single quartets and
+        for tests.
+  sa    the four shells, in the order of $(ab|cd)$: sa, sb, sc, sd
+  ST    the store of the two pairs
+
+mderi_prim1_size  @5937d122
+  why   The caller allocates the scratch once and passes it to every call.
+  lmax  the highest angular momentum of a component
+  L     the highest total order
+
+mderi_erow  @8898df52
+  why   Where the E values of a pair of powers start in herm_efill's layout.
+  e0    where the table starts
+  la    the power on A
+  lb    the power on B
+
+mderi_prim1  @82ca0cb6
+  why   A second route to single integrals that shares no matrix code with
+        mderi_block [test "one integral at a time agrees with the shell blocks on every prims pick"].
+  PQ    the four functions, a row `(exponent, x, y, z, lx, ly, lz)` each
+  G     the Boys grid
+  W     scratch: six E tables, then two R boxes
+  F     the Boys values
+  a     the four exponents: a, b, c, d
+  p     the bra pair's exponent $a + b$; q the ket's $c + d$
+  lmax  the highest power of any component on any axis
+  es    the size of one E table
+  tx1   the bra's highest $t$ on $x$; ty1, tz1 on $y$, $z$; tx2, ty2, tz2 the ket's
+  Tx    the quartet's highest $t$; Ty, Tz likewise
+  L     the total order
+  X     $P - Q$ on $x$; Y and Z likewise
+  al    $\alpha = pq/(p+q)$
+  s0    where the R boxes start in W
+  DV    the stride of $u$ in the R box; DU of $t$
+  ex1   where the bra's E values on $x$ start; ey1, ez1, ex2, ey2, ez2 likewise
+  tot   the sum over the ket's Hermite functions
+  e2    the ket's E product, with its sign
+  inner the sum over the bra's Hermite functions
+  e1    the bra's E product on $x$ and $y$
+  o     the R offset for this bra and ket Hermite pair, less $v_1$
+  nrm   the product of the four primitives' norms
+  lf    one function's angular momentum
+
+  = es     the size of one E table; the loop after it fills E only for these powers, one table per pair and axis
+  = al     the exponent of the Boys argument; herm_rfill_box then builds R only inside the box these powers need
+  = e2#2   the ket's sign $(-1)^{t'+u'+v'}$
+  = inner#2  the bra's Hermite sum
+  = nrm#2  unit-normalize each primitive component
+
+mderi_schwarz_excess  @3bf75113
+  why   A test that the packed integrals obey the Schwarz inequality, which
+        screening relies on.
+  Gp     the packed integrals
+  n      the number of AOs
+  npair  the AO pairs
+  w      the largest excess so far
+  da     $(aa|aa)$ for AO pair `a`
+  x      $|(ab|cd)|$ for one entry
+  a      the first AO pair, the row of the packed pair matrix
+  b      the second AO pair, $b \le a$
+
+mderi_diag_gap  @72bdaec6
+  why   PySCF's pair diagonal is a reference for the bounds screening uses.
+  Gp    the packed integrals
+  gd    the reference diagonal
+  w     the largest gap so far
+  a     the AO pair whose diagonal entry $(aa|aa)$ is compared
+
+mderi_ref_gaps  @e09bd344
+  why   One call per basis gives the number the basis tests hold: the largest
+        of the two relative checksum gaps and the sample and diagonal gaps.
+  Gp    the packed integrals
+  seed  the seed of the weighted checksum
+  sumsq the reference sum of squares
+  wsum  the reference weighted sum
+  idx   the sampled slots
+  val   their reference values
+  gd    the reference pair diagonal
+  cs    this build's checksums
+  w     the larger checksum gap
+
+mderi_tstore  @32d7d98f
+  why   A quartet's spherical block is its Cartesian block with one matrix
+        on each side; the matrices depend on the pair only, so they are
+        built once per store and read by every quartet the pair is in.
+  ST      the store
+  shells  the shell pack
+  M       the c2s matrix
+  npl     the number of pairs
+  total   the length of the flat array
+  k       a pair
+  d0      its directory entry
+  sa      its first group's first shell; sb the second's
+  ng      the shell pairs of the two groups
+  TS      the flat array of transforms
+  off     where the next transform goes
+  gnb     the shells in the second group
+  na      Cartesian functions of a shell of each group: na, nb
+  ma      spherical functions of a shell of each group: ma, mb
+  nr      the transform's rows, the Cartesian functions of the pair
+  nc      its columns, the spherical ones
+  g       a shell pair of the two groups
+  a       its first shell; b its second
+  ca      the first Cartesian function of a; cb of b
+  pa      the first spherical function of a; pb of b
+  ia      a Cartesian function of a; ib of b
+  ib      a Cartesian function of b
+  r       the transform's row for (ia, ib) of shell pair g
+  qa      a spherical function of a; qb of b
+  c       the transform's column for (qa, qb) of shell pair g
+  v       the entry, `M[ia, qa] M[ib, qb]`
+
+  = total#2  room for each pair with a d or higher shell: the transform and its transpose
+  = TS#3     the entry of `M_a (x) M_b` at the shell pair's own block, the rest of the block diagonal zero
+  = TS#4     the same entry of the transpose, which the bra side multiplies by
+
+mderi_tmat  @959c9894
+  why   `@` needs a matrix; the transforms are stored flat.
+  TS    the flat array of transforms
+  o     where the matrix starts
+  rows  its rows
+  cols  its columns
+  T     the copy
+  r     a row
+  c     a column
+
+mderi_block_sph  @e8ba1c25
+  why   Moving the block to spherical functions as soon as it is computed
+        replaces a second pass that read every quartet back out of a larger
+        Cartesian vector [test "spherical ERIs block by block match the two-pass transform, and PySCF's 5D water 6-31G* set"].
+  ST      the store
+  TS      the pair transforms
+  shells  the shell pack
+  k1      the bra pair; k2 the ket pair
+  G       the Boys grid
+  B       the block, Cartesian, then spherical
+  d1      the bra pair's directory entry; d2 the ket's
+  sa      the bra pair's first shells: sa, sb; sc, sd for the ket
+  ng      the shell pairs of a pair's two groups
+  nr      the bra transform's rows; nc its columns
+
+mderi_sph_do  @dff09feb
+  why   A def of its own so the block's arrays are freed when it returns, on
+        whichever thread ran the row.
+  Gs      the packed spherical integrals
+  ST      the store
+  TS      the pair transforms
+  G       the Boys grid
+  shells  the shell pack
+  QL      the quartet list
+  q       the row to compute
+  k1      its bra pair; k2 its ket pair
+
+mderi_sph_build  @c5034ab4
+  why   The spherical ERIs without the Cartesian ones: store, grid,
+        bounds, list, transforms, then every quartet.
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+  M       the c2s matrix
+  tol     the screening threshold; negative computes every quartet
+  ns      the number of spherical AOs
+  ST      the store
+  G       the Boys grid
+  npl     the number of pairs
+  Q       the Schwarz bounds
+  QL      the quartet list
+  TS      the pair transforms
+  Gs      the packed spherical integrals
+
+mderi_sph  @16441aff
+  why   The production ERIs of a spherical basis (lib/hf/ao).
+  atoms   the atom pack
+  shells  the shell pack
+  prims   the primitive pack
+  M       the c2s matrix

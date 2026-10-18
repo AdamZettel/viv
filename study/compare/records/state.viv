@@ -1,0 +1,44 @@
+# @@ a type that holds state
+record Account {
+    owner: Str
+    balance: Num
+    history: Arr
+}
+
+def open_account(owner, balance) -> Account {
+    return Account { owner: owner, balance: balance, history: [] }
+}
+
+# @@ operations that change it
+def deposit(a: Account, amount) -> Account {
+    history = a.history
+    history = append(history, amount)
+    return Account { balance: a.balance + amount, history: history, ..a }
+}
+
+def withdraw(a: Account, amount) -> Account {
+    if amount > a.balance {
+        print(f"refused: {a.owner} has {a.balance:.2f}, asked for {amount:.2f}")
+        return a
+    }
+    history = a.history
+    history = append(history, -amount)
+    return Account { balance: a.balance - amount, history: history, ..a }
+}
+
+# @@ use it
+acct = open_account("Ada", 100.0)
+acct = acct.deposit(25.5)
+acct = acct.withdraw(40.0)
+acct = acct.withdraw(500.0)
+print(f"{acct.owner}: {acct.balance:.2f}")
+print("history:", fmt(acct.history))
+
+# @@ checks
+test "account" {
+    assert_true(acct.balance == 85.5)
+    assert_true(len(acct.history) == 2)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

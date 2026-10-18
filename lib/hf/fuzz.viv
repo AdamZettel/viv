@@ -1,0 +1,501 @@
+###
+post: Seeded molecules and the transformations the energy must ignore
+agent: claude
+
+A metamorphic check runs the code twice on inputs related by a known
+transformation and compares the answers: rotate a molecule and its energy
+stays put; stretch every length by 1/lambda and every exponent by lambda^2
+and the overlap stays put while the kinetic energy grows by lambda^2. No
+reference value is needed, so the check can run on inputs nobody has
+computed before. This module makes those inputs and those transformations.
+
+**Seeds.** Every generator takes an integer seed and draws from Park-Miller
+MINSTD (`hfz_rng`), the same generator as `lib/hf/eri_store`, so a failure
+reported as "seed 17" can be rerun as seed 17. The first few draws from a
+small seed are small (16807 x 1 / 2^31 is 8e-6), so `hfz_state` discards
+three draws before handing the state out.
+
+**Random bases.** `hfz_random_blob(seed, natm, nsh)` puts `nsh` shells on
+`natm` atoms: each shell has `l` from 0 to 3, 1 to 3 primitives with
+exponents log-uniform in [0.05, 50] and coefficients in [0.2, 1]
+(`hfz_random_basis` takes the largest `l` and primitive count); the atoms
+sit in a 4-bohr box, at least 1 bohr apart, with charges 1 to 9. The packs
+travel in the basis blob of `lib/hf/integrals` (`hfz_atoms`, `hfz_shells`,
+`hfz_prims` read them back out).
+
+**Random molecules.** `hfz_build` makes a molecule out of the atoms of a
+reference system: each new atom copies the shells of one source atom, so a
+water STO-3G source gives O and H in STO-3G wherever they are placed.
+`hfz_water_blob(seed, src_at, src_sh, src_pr)` perturbs water's geometry
+(bond lengths 1.6 to 2.0 bohr, angle 95 to 115 degrees); `hfz_mol_blob`
+builds H2O, OH, H2O+, H3O+ or OH- by kind, with the same kind of spread.
+
+**Transformations.**
+
+- `hfz_rotation(seed)`: a random rotation matrix, from a random unit
+  quaternion; `hfz_rotate(atoms, R)` applies it to every position.
+- `hfz_translate(atoms, t)`.
+- `hfz_perm(seed, n)`: a random permutation (Fisher-Yates);
+  `hfz_permute_atoms` and `hfz_permute_shells` reorder the atoms and put
+  the shells in the new atom order, and `hfz_ao_map` gives, for each AO of
+  the permuted basis, its index in the original one. The prims pack is not
+  touched: each shell keeps its `SH_P0`.
+- `hfz_scale_atoms(atoms, lambda)` divides every position by lambda and
+  `hfz_scale_prims(prims, lambda)` multiplies every exponent by lambda^2.
+  Under the pair, S is unchanged, T is multiplied by lambda^2, V by lambda
+  and every ERI by lambda.
+
+**Failures quote their seed.** `hfz_check(seed, worst, tol)` does nothing
+when `worst < tol`. Otherwise it prints `hfz_seed_failed: [seed, worst,
+tol]` and fails an assertion that reads `assert_lt: <seed> >= 0`, so the
+test's FAIL line names the seed.
+
+Used with `import hf.fuzz`.
+###
+
+from hf.basis import (
+    AT_CHG, AT_LEN, AT_X, AT_Y, AT_Z, bas_nao_cart, bas_ncart, BAS_NDIM, bas_nsph, PR_COEF,
+    PR_EXP, PR_LEN, SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+    SH_SPH0,
+)
+import hf.integrals
+from hf.md_onebody import md1_s
+from hf.jk_direct import (
+    int_basis_blob, INT_BLOB_NATM, INT_BLOB_NPRIM, INT_BLOB_NSH, int_blob_pack, INT_BLOB_TOP,
+)
+
+HFZ_MINSTD_A = 16807.0
+HFZ_MINSTD_M = 2147483647.0
+HFZ_PI = 3.141592653589793
+# draws a new generator state discards before its first use
+HFZ_WARMUP = 3
+# offsets that give each transformation its own stream from one seed: the
+# 1000th, 10000th and 100000th primes
+HFZ_SEED_ROT = 7919
+HFZ_SEED_SHIFT = 104729
+HFZ_SEED_PERM = 1299709
+# random atoms: charges 1 .. HFZ_ZMAX
+HFZ_ZMAX = 9
+# random bases (hfz_random_blob): l up to f, 1 to 3 primitives per shell
+HFZ_LMAX = 3
+HFZ_NPRIM_MAX = 3
+# a quaternion's components w, x, y, z
+HFZ_NQUAT = 4
+# the molecules of hfz_mol_blob, by kind
+HFZ_KIND_H2O = 0
+HFZ_KIND_OH = 1
+HFZ_KIND_H2OP = 2
+HFZ_KIND_H3OP = 3
+HFZ_KIND_OHM = 4
+
+# ---- the generator ------------------------------------------------------------
+
+#| The next draw in (0, 1) from the state in `st[0]`.
+def hfz_rng(st: Arr) {
+    st[0] = mod(HFZ_MINSTD_A * st[0], HFZ_MINSTD_M)
+    return st[0] / HFZ_MINSTD_M
+}
+
+#| A generator state for `seed` (1 .. 2147483646), three draws in.
+def hfz_state(seed) {
+    st = zeros(1)
+    st[0] = seed
+    for k to HFZ_WARMUP {
+        hfz_rng(st)
+    }
+    return st
+}
+
+#| A draw uniform in [lo, hi).
+def hfz_uniform(st: Arr, lo, hi) {
+    return lo + (hi - lo) * hfz_rng(st)
+}
+
+#| An integer draw in lo .. hi - 1.
+def hfz_int(st: Arr, lo, hi) {
+    return lo + floor((hi - lo) * hfz_rng(st))
+}
+
+#| Report one seed of a fuzz check (see the header).
+def hfz_check(seed, worst, tol) {
+    if worst < tol {
+        return 0
+    }
+    print(f"seed {seed:d} failed: worst {worst} is not below {tol}")
+    assert_lt(seed, 0.0)
+    return 1
+}
+
+# ---- blobs --------------------------------------------------------------------
+
+#| The atoms pack of a basis blob.
+def hfz_atoms(b: Arr) {
+    return int_blob_pack(b, INT_BLOB_TOP, round(b[INT_BLOB_NATM]), AT_LEN)
+}
+
+#| The shells pack of a basis blob.
+def hfz_shells(b: Arr) {
+    return int_blob_pack(b, INT_BLOB_TOP + AT_LEN * round(b[INT_BLOB_NATM]), round(b[INT_BLOB_NSH]), SH_LEN)
+}
+
+#| The prims pack of a basis blob.
+def hfz_prims(b: Arr) {
+    k = INT_BLOB_TOP + AT_LEN * round(b[INT_BLOB_NATM]) + SH_LEN * round(b[INT_BLOB_NSH])
+    return int_blob_pack(b, k, round(b[INT_BLOB_NPRIM]), PR_LEN)
+}
+
+#| A Cartesian blob of three packs.
+def hfz_blob(atoms: Arr, shells: Arr, prims: Arr) {
+    return int_basis_blob(atoms, shells, prims, zeros(1, 1), 0)
+}
+
+#| Fill `SH_CART0` and `SH_SPH0` from the shell order; returns nao_cart.
+def hfz_offsets(shells: Arr) {
+    c = 0
+    s = 0
+    for k to len(shells) {
+        shells[k, SH_CART0] = c
+        shells[k, SH_SPH0] = s
+        shells[k, SH_NCART] = bas_ncart(shells[k, SH_L])
+        shells[k, SH_NSPH] = bas_nsph(shells[k, SH_L])
+        c = c + shells[k, SH_NCART]
+        s = s + shells[k, SH_NSPH]
+    }
+    return c
+}
+
+# ---- random bases -------------------------------------------------------------
+
+#| `natm` atoms in a 4-bohr box, pairwise at least 1 bohr apart, charges 1-9.
+def hfz_random_atoms(st: Arr, natm) {
+    at = zeros(natm, AT_LEN)
+    a = 0
+    while a < natm {
+        at[a, AT_CHG] = hfz_int(st, 1, HFZ_ZMAX + 1)
+        at[a, AT_X] = hfz_uniform(st, -2.0, 2.0)
+        at[a, AT_Y] = hfz_uniform(st, -2.0, 2.0)
+        at[a, AT_Z] = hfz_uniform(st, -2.0, 2.0)
+        near = 100.0
+        for b to a {
+            d = at[a, AT_X:AT_Z + 1] - at[b, AT_X:AT_Z + 1]
+            near = min(near, sqrt(sum(d * d)))
+        }
+        if near > 1.0 {
+            a = a + 1
+        }
+    }
+    return at
+}
+
+#| A random basis (see the header), as a blob: `nsh` shells with `l` from 0
+#| to `lmax` and 1 to `npmax` primitives each. Shell `s` sits on atom
+#| `s mod natm`, so every atom carries a shell when `nsh >= natm`.
+def hfz_random_basis(seed, natm, nsh, lmax, npmax) {
+    st = hfz_state(seed)
+    at = hfz_random_atoms(st, natm)
+    sh = zeros(nsh, SH_LEN)
+    total = 0
+    for s to nsh {
+        sh[s, SH_ATOM] = mod(s, natm)
+        sh[s, SH_L] = hfz_int(st, 0, lmax + 1)
+        sh[s, SH_NPRIM] = hfz_int(st, 1, npmax + 1)
+        sh[s, SH_P0] = total
+        total = total + sh[s, SH_NPRIM]
+    }
+    hfz_offsets(sh)
+    pr = zeros(total, PR_LEN)
+    for p to total {
+        pr[p, PR_EXP] = 0.05 * pow(1000.0, hfz_rng(st))
+        pr[p, PR_COEF] = hfz_uniform(st, 0.2, 1.0)
+    }
+    return hfz_blob(at, sh, pr)
+}
+
+#| `hfz_random_basis` with `l <= 3` and 1 to 3 primitives per shell.
+def hfz_random_blob(seed, natm, nsh) {
+    return hfz_random_basis(seed, natm, nsh, HFZ_LMAX, HFZ_NPRIM_MAX)
+}
+
+# ---- molecules from a reference basis -------------------------------------------
+
+#| A molecule made of source atoms: new atom `a` has charge `Z[a]`, position
+#| `pos[a, 0..2]` and the shells of source atom `src[a]` (in their order).
+#| Returns the blob.
+def hfz_build(src_sh: Arr, src_pr: Arr, src: Arr, Z: Arr, pos: Arr) {
+    natm = len(src)
+    at = zeros(natm, AT_LEN)
+    sh = []
+    pr = []
+    for a to natm {
+        at[a, AT_CHG] = Z[a]
+        at[a, AT_X:AT_Z + 1] = pos[a, 0:BAS_NDIM]
+        for s to len(src_sh) {
+            if round(src_sh[s, SH_ATOM]) == round(src[a]) {
+                # the source shell on its new atom, its primitives appended after the others
+                row = src_sh[s, :]
+                row[SH_ATOM] = a
+                row[SH_P0] = len(pr)
+                sh = append(sh, row)
+                p0 = round(src_sh[s, SH_P0])
+                for q to round(src_sh[s, SH_NPRIM]) {
+                    pr = append(pr, src_pr[p0 + q, :])
+                }
+            }
+        }
+    }
+    hfz_offsets(sh)
+    return hfz_blob(at, sh, pr)
+}
+
+#| Positions for an oxygen at the origin and `nh` hydrogens, bond lengths
+#| in [1.6, 2.0] bohr; the hydrogens spread by angles in [95, 115] degrees.
+def hfz_oh_positions(st: Arr, nh) {
+    pos = zeros(nh + 1, BAS_NDIM)
+    for h to nh {
+        r = hfz_uniform(st, 1.6, 2.0)
+        th = HFZ_PI / 180.0 * hfz_uniform(st, 95.0, 115.0) * (h / 2.0 + 0.5)
+        ph = 2.0 * HFZ_PI * h / 3.0
+        if h == 0 {
+            th = 0.0
+        }
+        pos[h + 1, 0] = r * sin(th) * cos(ph)
+        pos[h + 1, 1] = r * sin(th) * sin(ph)
+        pos[h + 1, 2] = r * cos(th)
+    }
+    return pos
+}
+
+#| One of five small O/H molecules, by `kind` (0 H2O, 1 OH, 2 H2O+,
+#| 3 H3O+, 4 OH-), from a source basis whose atom 0 is O and atom 1 is H
+#| (water in lib/hfref). Its charge and spin are `hfz_charge(kind)` and
+#| `hfz_spin(kind)`.
+def hfz_mol_blob(seed, kind, src_sh: Arr, src_pr: Arr) {
+    st = hfz_state(seed)
+    nh = 2
+    if kind == HFZ_KIND_OH or kind == HFZ_KIND_OHM {
+        nh = 1
+    }
+    if kind == HFZ_KIND_H3OP {
+        nh = 3
+    }
+    # source atom 0 (O) for the oxygen, source atom 1 (H) for every hydrogen
+    src = zeros(nh + 1)
+    src[1:nh + 1] = 1
+    Z = zeros(nh + 1)
+    Z[0] = 8
+    Z[1:nh + 1] = 1
+    return hfz_build(src_sh, src_pr, src, Z, hfz_oh_positions(st, nh))
+}
+
+#| The charge of molecule `kind` of `hfz_mol_blob`.
+def hfz_charge(kind) {
+    if kind == HFZ_KIND_H2OP or kind == HFZ_KIND_H3OP {
+        return 1
+    }
+    if kind == HFZ_KIND_OHM {
+        return -1
+    }
+    return 0
+}
+
+#| `Na - Nb` of molecule `kind`: 1 for OH and H2O+, 0 otherwise.
+def hfz_spin(kind) {
+    if kind == HFZ_KIND_OH or kind == HFZ_KIND_H2OP {
+        return 1
+    }
+    return 0
+}
+
+# ---- transformations ----------------------------------------------------------
+
+#| A random rotation matrix from a random unit quaternion.
+def hfz_rotation(seed) {
+    st = hfz_state(seed + HFZ_SEED_ROT)
+    q = zeros(HFZ_NQUAT)
+    for k to HFZ_NQUAT {
+        q[k] = hfz_uniform(st, -1.0, 1.0)
+    }
+    w, x, y, z = q / sqrt(sum(q * q))
+    return [[1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)]]
+}
+
+#| Every position rotated by `R`.
+def hfz_rotate(atoms: Arr, R: Arr) {
+    out = copy(atoms)
+    out[:, AT_X:AT_Z + 1] = atoms[:, AT_X:AT_Z + 1] @ transpose(R)
+    return out
+}
+
+#| Every position moved by `t[0..2]`.
+def hfz_translate(atoms: Arr, t: Arr) {
+    out = copy(atoms)
+    for i to BAS_NDIM {
+        out[:, AT_X + i] = atoms[:, AT_X + i] + t[i]
+    }
+    return out
+}
+
+#| A random translation vector with components in [-3, 3].
+def hfz_shift(seed) {
+    st = hfz_state(seed + HFZ_SEED_SHIFT)
+    t = zeros(BAS_NDIM)
+    for i to BAS_NDIM {
+        t[i] = hfz_uniform(st, -3.0, 3.0)
+    }
+    return t
+}
+
+#| A random permutation of 0 .. n-1 (Fisher-Yates).
+def hfz_perm(seed, n) {
+    st = hfz_state(seed + HFZ_SEED_PERM)
+    p = zeros(n)
+    for i to n {
+        p[i] = i
+    }
+    k = n - 1
+    while k > 0 {
+        j = hfz_int(st, 0, k + 1)
+        t = p[k]
+        p[k] = p[j]
+        p[j] = t
+        k = k - 1
+    }
+    return p
+}
+
+#| The atoms reordered: new atom `k` is old atom `perm[k]`.
+def hfz_permute_atoms(atoms: Arr, perm: Arr) {
+    out = copy(atoms)
+    for k to len(atoms) {
+        out[k, :] = atoms[round(perm[k]), :]
+    }
+    return out
+}
+
+#| The shells in the new atom order: the shells of old atom `perm[0]` first
+#| (in their old order), and so on, with `SH_ATOM` renumbered and the AO
+#| offsets recomputed. `SH_P0` is kept, so the prims pack is unchanged.
+def hfz_permute_shells(shells: Arr, perm: Arr) {
+    out = copy(shells)
+    r = 0
+    for k to len(perm) {
+        for s to len(shells) {
+            if round(shells[s, SH_ATOM]) == round(perm[k]) {
+                out[r, :] = shells[s, :]
+                out[r, SH_ATOM] = k
+                r = r + 1
+            }
+        }
+    }
+    hfz_offsets(out)
+    return out
+}
+
+#| For each Cartesian AO of the permuted basis, its index in the original.
+def hfz_ao_map(shells: Arr, perm: Arr) {
+    m = zeros(bas_nao_cart(shells))
+    r = 0
+    for k to len(perm) {
+        for s to len(shells) {
+            if round(shells[s, SH_ATOM]) == round(perm[k]) {
+                c0 = round(shells[s, SH_CART0])
+                for c to round(shells[s, SH_NCART]) {
+                    m[r] = c0 + c
+                    r = r + 1
+                }
+            }
+        }
+    }
+    return m
+}
+
+#| Positions divided by `lam`.
+def hfz_scale_atoms(atoms: Arr, lam) {
+    out = copy(atoms)
+    out[:, AT_X:AT_Z + 1] = atoms[:, AT_X:AT_Z + 1] / lam
+    return out
+}
+
+#| Exponents multiplied by `lam^2`.
+def hfz_scale_prims(prims: Arr, lam) {
+    out = copy(prims)
+    out[:, PR_EXP] = prims[:, PR_EXP] * lam * lam
+    return out
+}
+
+#| Atoms with atom `a`'s position moved by `h` along axis `d`.
+def hfz_nudge(atoms: Arr, a, d, h) {
+    out = copy(atoms)
+    out[a, AT_X + d] = atoms[a, AT_X + d] + h
+    return out
+}
+
+# ---- tests ----------------------------------------------------------------------
+
+test "the generator is Park-Miller, and a seed gives the same basis every time" {
+    hfz_st = zeros(1)
+    hfz_st[0] = 1
+    assert_near(hfz_rng(hfz_st), 16807.0 / 2147483647.0, 0.0)
+    hfz_natm = 3
+    hfz_nsh = 5
+    hfz_a = hfz_random_blob(17, hfz_natm, hfz_nsh)
+    hfz_b = hfz_random_blob(17, hfz_natm, hfz_nsh)
+    assert_near(len(hfz_a), len(hfz_b), 0.0)
+    assert_true(all(hfz_a == hfz_b))
+    hfz_sh = hfz_shells(hfz_a)
+    hfz_pr = hfz_prims(hfz_a)
+    assert_lt(max(hfz_sh[:, SH_L]), 3.5)
+    assert_lt(0.05 - 1.0e-15, min(hfz_pr[:, PR_EXP]))
+    assert_lt(max(hfz_pr[:, PR_EXP]), 50.0 + 1.0e-12)
+}
+
+test "a rotation is orthogonal with determinant 1, and a permutation lists each index once" {
+    hfz_nseed = 8
+    for hfz_seed to hfz_nseed {
+        hfz_R = hfz_rotation(hfz_seed + 1)
+        hfz_E = transpose(hfz_R) @ hfz_R
+        for hfz_i to len(hfz_R) {
+            hfz_E[hfz_i, hfz_i] = hfz_E[hfz_i, hfz_i] - 1.0
+        }
+        assert_lt(max(abs(hfz_E)), 1.0e-14)
+        hfz_det = hfz_R[0, 0] * (hfz_R[1, 1] * hfz_R[2, 2] - hfz_R[1, 2] * hfz_R[2, 1]) - hfz_R[0, 1] * (hfz_R[1, 0] * hfz_R[2, 2] - hfz_R[1, 2] * hfz_R[2, 0]) + hfz_R[0, 2] * (hfz_R[1, 0] * hfz_R[2, 1] - hfz_R[1, 1] * hfz_R[2, 0])
+        assert_near(hfz_det, 1.0, 1.0e-14)
+        hfz_np = 7
+        hfz_p = hfz_perm(hfz_seed + 1, hfz_np)
+        hfz_seen = zeros(hfz_np)
+        for hfz_i to len(hfz_p) {
+            hfz_seen[round(hfz_p[hfz_i])] = hfz_seen[round(hfz_p[hfz_i])] + 1
+        }
+        assert_true(all(hfz_seen == 1.0))
+    }
+}
+
+test "permuting the atoms permutes the overlap matrix entry for entry" {
+    hfz_natm = 3
+    hfz_nsh = 6
+    hfz_b = hfz_random_blob(5, hfz_natm, hfz_nsh)
+    hfz_at = hfz_atoms(hfz_b)
+    hfz_sh = hfz_shells(hfz_b)
+    hfz_pr = hfz_prims(hfz_b)
+    hfz_p = hfz_perm(5, len(hfz_at))
+
+    hfz_S = md1_s(hfz_at, hfz_sh, hfz_pr)
+    hfz_S2 = md1_s(hfz_permute_atoms(hfz_at, hfz_p), hfz_permute_shells(hfz_sh, hfz_p), hfz_pr)
+    hfz_m = hfz_ao_map(hfz_sh, hfz_p)
+    hfz_w = 0.0
+    for hfz_i to len(hfz_m) {
+        for hfz_j to len(hfz_m) {
+            hfz_w = max(hfz_w, abs(hfz_S2[hfz_i, hfz_j] - hfz_S[round(hfz_m[hfz_i]), round(hfz_m[hfz_j])]))
+        }
+    }
+    assert_lt(hfz_w, 1.0e-15)
+}
+
+test "hfz_check stays silent below the tolerance" {
+    assert_near(hfz_check(3, 1.0e-12, 1.0e-10), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

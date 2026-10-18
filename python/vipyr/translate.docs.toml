@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference pages of vp.translate and vp.jit (python/vipyr/translate.py),
+# in the <name>.docs.toml format of README.md ("Writing a function's
+# reference page"), one entry per function as for a shared file. For the
+# docs generator on branch sitedesign: these are tools, not programs, so
+# they have no manifest; the signatures are in translate.py.
+
+[translate]
+signature = "vp.translate(fn, *, check=True, fast=False, rtol=1e-12, show=False)"
+summary = "A Python function translated to Viv and compiled, with the same signature."
+description = """
+`vp.translate(fn)` hands the source of `fn` to py2viv, Viv's strict Python
+translator, compiles the Viv it writes, and returns a callable with `fn`'s
+signature. Use Viv without learning Viv first: write the loop in Python,
+translate it, and read `.viv_source` to see the same function in Viv.
+
+py2viv's contract is *exact or refused*. A translated function computes
+what CPython and NumPy compute, bit for bit (where an operation's last bits
+come from another library, such as libm or BLAS, it is listed as inexact and
+compared to `rtol`). Anything outside the numeric subset is refused with the
+file, line, construct and what to write instead; nothing is approximated.
+
+Parameters annotated in Python (`x: np.ndarray`, `n: int`, `a: float`) are
+taken as written, and a fully annotated function is translated when
+`translate` is called. Otherwise the argument types of the first call decide
+(floats, ints, bools, float or int arrays, pandas and polars columns), and a
+call with other types compiles another version. Functions `fn` calls from its
+module, and the int and float constants it reads, are translated with it.
+
+The first call of each signature also runs `fn` on copies of the arguments
+and compares (`check=True`); a difference raises `VivTranslationMismatch`.
+"""
+notes = """
+What translates: loops over arrays and ranges, `while`, `if`, `break`,
+arithmetic, comparisons, `math` and most of NumPy's array functions, helper
+functions, several results (`return a, b`). What is refused, among others:
+`try`, `with`, generators, dicts of lists, classes from other modules, list
+methods on shared lists. tools/py2viv/SUBSET.md lists every rule.
+
+Results: numbers as Python floats or ints, arrays as NumPy arrays (after the
+checked call, with the dtype the Python function returned). Without a C
+compiler the Viv runs in Viv's interpreter, with the same results.
+"""
+see_also = ["jit", "load"]
+
+[[translate.examples]]
+caption = "An exponentially weighted moving average, translated and checked"
+code = '''import numpy as np
+import vipyr as vp
+
+def ewma(x, a):
+    y = np.zeros(len(x))
+    s = x[0]
+    for i in range(len(x)):
+        s = a * x[i] + (1.0 - a) * s
+        y[i] = s
+    return y
+
+fast = vp.translate(ewma)
+x = np.random.default_rng(0).random(1_000_000)
+y = fast(x, 0.1)                 # checked against ewma(x, 0.1) on this first call
+print(np.array_equal(y, ewma(x, 0.1)))
+print(fast.viv_source.split("def ewma")[1][:120])'''
+
+[[translate.examples]]
+caption = "A refusal names the line and says what to write instead"
+code = '''import vipyr as vp
+
+def first_ratio(x):
+    try:
+        return x[0] / x[1]
+    except ZeroDivisionError:
+        return 0.0
+
+try:
+    vp.translate(first_ratio)
+except vp.VivTranslationError as e:
+    print(e)'''
+
+[jit]
+signature = "@vp.jit  or  @vp.jit(check=True, fast=False, rtol=1e-12, show=False)"
+summary = "The decorator form of vp.translate: translate at the first call."
+description = """
+`@vp.jit` replaces a function by its translation, made at the first call
+with that call's argument types and cached on disk by the source's hash (a
+second process reuses the compiled library). The first call of each
+signature is checked against the Python function, as with `vp.translate`.
+The original is `.python`; the Viv is `.viv_source`.
+"""
+see_also = ["translate"]
+
+[[jit.examples]]
+caption = "A groupby-style loop on sorted keys, on pandas columns"
+code = '''import numpy as np, pandas as pd
+import vipyr as vp
+
+@vp.jit
+def group_cumsum(keys, vals):
+    out = np.zeros(len(vals))
+    acc = 0.0
+    for i in range(len(vals)):
+        if i > 0 and keys[i] != keys[i - 1]:
+            acc = 0.0
+        acc += vals[i]
+        out[i] = acc
+    return out
+
+df = pd.DataFrame({"k": np.sort(np.random.default_rng(1).integers(0, 50, 10_000)),
+                   "v": np.random.default_rng(2).random(10_000)})
+df["running"] = group_cumsum(df["k"], df["v"])
+print(df.tail(3))'''

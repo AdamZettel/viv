@@ -1,0 +1,188 @@
+###
+title: Ripple-carry delay grows like n, carry-lookahead like log n
+line: At 64 bits the critical path is 132 gate delays for ripple carry and 13 for Kogge-Stone, which uses about twice the gates.
+claim: From 4 to 64 bits, a ripple-carry adder built from nine-NAND full adders has a critical path of exactly $2n + 4$ gate delays (132 at 64 bits) with $9n$ gates, while a Kogge-Stone carry-lookahead adder's critical path is exactly $2 \log_2 n + 1$ gate delays (13 at 64 bits) with more gates (1,154 at 64 bits, about twice the ripple adder's). Both give the correct sum on all 10,000 additions checked.
+topic: hardware
+section: arithmetic circuits
+reference: Exhaustive and random checks against integer addition (exact in doubles to 48 bits; the two adders against each other at 64); the nine-NAND full adder of the four-bit adder gallery entry (gallery/hardware/adder.viv); Kogge and Stone, IEEE Trans. Computers C-22 (1973) 786-793, for the parallel-prefix carry-lookahead adder and its $\log_2 n$ depth.
+scope: Unit delay per two-input gate (NAND, AND, OR, XOR all counted as one gate and one delay); no fan-out, wire or transistor-level effects. The lookahead adder is the Kogge-Stone prefix tree, the fastest and largest of the lookahead designs; others (Brent-Kung, Han-Carlson) trade depth for gates.
+lane: ai
+by: claude
+cost: fast
+###
+
+WIDTHS = [4, 8, 16, 32, 64]
+N_RANDOM: Int = 2000
+SEED: Int = 64
+#: integer addition in doubles is exact below 2^53, so widths up to this are checked against it
+EXACT_WIDTH: Int = 48
+
+#| A gate's output: its value and the time it settles, one unit after its later input.
+def nand(a: Num, ta: Num, b: Num, tb: Num) {
+    return 1.0 - a * b, max(ta, tb) + 1.0
+}
+
+#| Ripple-carry addition of bit arrays a and b (least significant first) by nine-NAND full adders: the sum bits, the carry out, the time the last signal settles, and the gates used.
+def ripple(a: Arr, b: Arr) {
+    n: Int = len(a)
+    s = zeros(n + 1)
+    c = 0.0
+    tc = 0.0
+    latest = 0.0
+    for i to n {
+        n1, t1 = nand(a[i], 0.0, b[i], 0.0)
+        n2, t2 = nand(a[i], 0.0, n1, t1)
+        n3, t3 = nand(b[i], 0.0, n1, t1)
+        x, tx = nand(n2, t2, n3, t3)
+        n5, t5 = nand(x, tx, c, tc)
+        n6, t6 = nand(x, tx, n5, t5)
+        n7, t7 = nand(c, tc, n5, t5)
+        sm, ts = nand(n6, t6, n7, t7)
+        c, tc = nand(n5, t5, n1, t1)
+        s[i] = sm
+        latest = max(latest, max(ts, tc))
+    }
+    s[n] = c
+    return s, latest, 9 * n
+}
+
+#| Kogge-Stone carry-lookahead addition: generate and propagate per bit, a prefix tree of log2(n) levels, then the sum bits; same results as ripple.
+def lookahead(a: Arr, b: Arr) {
+    n: Int = len(a)
+    g = a * b
+    p = zeros(n)
+    for i to n {
+        p[i] = abs(a[i] - b[i])
+    }
+    tg = ones(n)
+    tp = ones(n)
+    gates: Int = 2 * n
+    d: Int = 1
+    while d < n {
+        g2 = copy(g)
+        p2 = copy(p)
+        tg2 = copy(tg)
+        tp2 = copy(tp)
+        for i from d to n {
+            #: G = G_i or (P_i and G_(i-d)): an AND then an OR; P = P_i and P_(i-d)
+            t_and = max(tp[i], tg[i - d]) + 1.0
+            g2[i] = max(g[i], p[i] * g[i - d])
+            tg2[i] = max(tg[i], t_and) + 1.0
+            p2[i] = p[i] * p[i - d]
+            tp2[i] = max(tp[i], tp[i - d]) + 1.0
+            gates = gates + 3
+        }
+        g = g2
+        p = p2
+        tg = tg2
+        tp = tp2
+        d = 2 * d
+    }
+    s = zeros(n + 1)
+    latest = 0.0
+    for i to n {
+        #: the carry into bit i is G over bits 0 .. i-1; the sum is the bit's own propagate XOR that carry
+        own = abs(a[i] - b[i])
+        if i == 0 {
+            s[i] = own
+            latest = max(latest, 1.0)
+        }
+        else {
+            s[i] = abs(own - g[i - 1])
+            latest = max(latest, max(1.0, tg[i - 1]) + 1.0)
+        }
+    }
+    s[n] = g[n - 1]
+    latest = max(latest, tg[n - 1])
+    gates = gates + (n - 1)
+    return s, latest, gates
+}
+
+def value_of(bits: Arr) -> Num {
+    v = 0.0
+    for i to len(bits) {
+        v = v + bits[i] * pow(2.0, i)
+    }
+    return v
+}
+
+srand(SEED)
+n_w: Int = len(WIDTHS)
+depth_ripple = zeros(n_w)
+depth_lookahead = zeros(n_w)
+gates_ripple = zeros(n_w)
+gates_lookahead = zeros(n_w)
+wrong: Int = 0
+checked: Int = 0
+for w to n_w {
+    width: Int = int(WIDTHS[w])
+    for trial to N_RANDOM {
+        xa = zeros(width)
+        xb = zeros(width)
+        for i to width {
+            xa[i] = floor(2.0 * rand())
+            xb[i] = floor(2.0 * rand())
+        }
+        if trial == 0 {
+            #: the longest carry chain: all ones plus one
+            for i to width {
+                xa[i] = 1.0
+                xb[i] = 0.0
+            }
+            xb[0] = 1.0
+        }
+        sr, dr, gr = ripple(xa, xb)
+        sl, dl, gl = lookahead(xa, xb)
+        depth_ripple[w] = max(depth_ripple[w], dr)
+        depth_lookahead[w] = max(depth_lookahead[w], dl)
+        gates_ripple[w] = float(gr)
+        gates_lookahead[w] = float(gl)
+        for i to width + 1 {
+            if sr[i] != sl[i] {
+                wrong = wrong + 1
+            }
+        }
+        if width <= EXACT_WIDTH and value_of(sr) != value_of(xa) + value_of(xb) {
+            wrong = wrong + 1
+        }
+        checked = checked + 1
+    }
+}
+show depth_ripple
+show depth_lookahead
+show gates_ripple
+show gates_lookahead
+show wrong
+show checked
+gate_ratio_at_64 = gates_lookahead[n_w - 1] / gates_ripple[n_w - 1]
+show gate_ratio_at_64
+
+#: the figure: critical path against width for both adders
+figure("Critical path of an n-bit adder", "bits n", "gate delays")
+plot(WIDTHS * 1.0, depth_ripple * 1.0, "ripple carry, 2n + 4")
+style("ripple carry, 2n + 4", "s2 circle")
+plot(WIDTHS * 1.0, depth_lookahead * 1.0, "Kogge-Stone, 2 log2 n + 1")
+style("Kogge-Stone, 2 log2 n + 1", "s1 square")
+
+test "ripple carry: critical path 2n + 4 gate delays and 9n gates" {
+    for w to n_w {
+        assert_near(depth_ripple[w], 2.0 * WIDTHS[w] + 4.0, 0.0)
+        assert_near(gates_ripple[w], 9.0 * WIDTHS[w], 0.0)
+    }
+}
+test "Kogge-Stone: critical path 2 log2(n) + 1 gate delays" {
+    for w to n_w {
+        assert_near(depth_lookahead[w], 2.0 * round(log(WIDTHS[w]) / log(2.0)) + 1.0, 0.0)
+    }
+}
+test "at 64 bits the lookahead adder uses about twice the gates" {
+    assert_gt(gate_ratio_at_64, 1.9)
+    assert_lt(gate_ratio_at_64, 2.1)
+}
+test "both adders are right on all 10,000 additions" {
+    assert_true(wrong == 0)
+    assert_true(checked == 10000)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

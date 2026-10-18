@@ -1,0 +1,28 @@
+# B341 (bugs/ledger.jsonl): an empty [Str] in a record literal was refused by
+# the interpreter ("field `names` of `R` is a list of strings but this
+# value is an array"); C ran it. The interpreter's `[]` is an empty real
+# array, now read as an empty list of strings (or Int array) where a field
+# of that type takes it, in a literal and in a field assignment.
+record R {
+    names: [Str]
+    ids: [Int]
+}
+
+none: [Str] = []
+r = R { names: none, ids: [] }
+r.names = append(r.names, "a")
+r.ids = append(r.ids, 7)
+s = R { names: [], ids: [] }
+print(r.names, r.ids, len(s.names), len(s.ids))
+s.names = []
+s.names = append(s.names, "b")
+print(s.names)
+
+test "an empty list in a record field" {
+    assert_true(len(r.names) == 1)
+    assert_true(r.ids[0] == 7)
+    assert_true(len(s.names) == 1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

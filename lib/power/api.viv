@@ -1,0 +1,136 @@
+###
+post: The power flow, called from Python
+agent: claude
+
+The defs vipyr's `vp.power` calls. A case crosses as MATPOWER's arrays
+(baseMVA and the bus, gen and branch matrices), so a case read from a .m
+file, built in Python or taken from PYPOWER's or pandapower's `ppc` is
+passed the same way. `jacobian_at` and `lu_check` expose the Newton
+Jacobian and the sparse LU on their own, for checks against SciPy.
+###
+
+from power.case import Case
+from power.pf import bus_types, initial_v, internal, jacobian, runpf
+from power.splu import lu_nnz, lu_solve, mindeg_order, splu
+from power.ybus import full_network, make_ybus
+from power.raw import parse_raw
+from power.contingency import Limits, dc_factors, dc_post_flows, n1_ac
+from power.study import study, with_injection
+from power.cpf import cpf
+from power.shortcircuit import ikss
+
+#| Solve the case by method 1 (Newton-Raphson), 2 (fast-decoupled, XB) or
+#| 3 (DC); returns the bus, gen and branch matrices with the result columns
+#| filled, the iteration count, whether it converged and the largest
+#| mismatch left, per unit.
+def runpf_arrays(base_mva: Num, bus: Arr, gen: Arr, branch: Arr, method: Int, enforce_q: Bool, tol: Num,
+                 max_it: Int) {
+    c = Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch }
+    r = runpf(c, method, enforce_q, tol, max_it)
+    return r.bus, r.gen, r.branch, r.iterations, r.success, r.mismatch
+}
+
+#| The Newton Jacobian at the case's starting voltages, in compressed
+#| sparse column form (columns Va(pv), Va(pq), Vm(pq)).
+def jacobian_at(base_mva: Num, bus: Arr, gen: Arr, branch: Arr) {
+    net = internal(Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch })
+    y = make_ybus(net.nb, net.fbus, net.tbus, net.bus, net.branch, net.base, full_network())
+    ref, pv, pq = bus_types(net)
+    return jacobian(y, initial_v(net), pv, pq)
+}
+
+#| Solve A x = b with A in compressed sparse column form, by splu after the
+#| minimum-degree order; returns x, the entries of L and U, and the order.
+def lu_check(n: Int, colptr: [Int], rowind: [Int], vals: Arr, b: Arr, tol: Num) {
+    q = mindeg_order(n, colptr, rowind)
+    f = splu(n, colptr, rowind, vals, q, tol)
+    return lu_solve(f, b), lu_nnz(f), q
+}
+
+#| N-1 by AC power flow: kinds[c] 1 (branch) or 2 (generator), elems[c]
+#| its row; returns per row (base case first) convergence, iterations,
+#| islanded buses, load lost (MW), branch |S| (MVA), bus Vm, and the
+#| violation rows.
+def n1_arrays(base_mva: Num, bus: Arr, gen: Arr, branch: Arr, kinds: [Int], elems: [Int], vmin: Num, vmax: Num,
+              vmin_post: Num, vmax_post: Num, rate_pre: Int, rate_post: Int, tol: Num, max_it: Int) {
+    c = Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch }
+    lim = Limits { vmin: vmin, vmax: vmax, vmin_post: vmin_post, vmax_post: vmax_post, rate_pre: rate_pre,
+                   rate_post: rate_post }
+    r = n1_ac(c, kinds, elems, lim, tol, max_it)
+    return r.converged, r.iterations, r.islanded, r.lost_mw, r.flows, r.vm, r.viol
+}
+
+#| The DC model's PTDF, LODF, bridges and base flows, and the estimated
+#| post-contingency flows (MW) of the contingencies given.
+def dc_arrays(base_mva: Num, bus: Arr, gen: Arr, branch: Arr, kinds: [Int], elems: [Int]) {
+    c = Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch }
+    d = dc_factors(c)
+    return d.ptdf, d.lodf, d.bridge, d.flow, dc_post_flows(c, d, kinds, elems)
+}
+
+#| The interconnection study of a project at bus row poi (power.study):
+#| violations before and after, their status (1 new, 2 worsened), the
+#| distribution factors, the transfer limit and the bisection's steps.
+def study_arrays(base_mva: Num, bus: Arr, gen: Arr, branch: Arr, poi: Int, mw: Num, qmin: Num, qmax: Num,
+                 sink: Int, kinds: [Int], elems: [Int], vmin: Num, vmax: Num, vmin_post: Num, vmax_post: Num,
+                 rate_pre: Int, rate_post: Int, mw_max: Num, tol_mw: Num, worse_pct: Num) {
+    c = Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch }
+    lim = Limits { vmin: vmin, vmax: vmax, vmin_post: vmin_post, vmax_post: vmax_post, rate_pre: rate_pre,
+                   rate_post: rate_post }
+    s = study(c, poi, mw, qmin, qmax, sink, kinds, elems, lim, mw_max, tol_mw, worse_pct)
+    pre = s.pre
+    post = s.post
+    return pre.viol, post.viol, s.status, s.df, s.limit_mw, s.limit_found, s.steps, post.converged, post.flows, post.vm
+}
+
+#| The case's bus and gen matrices with the project added (power.study).
+def inject_arrays(base_mva: Num, bus: Arr, gen: Arr, branch: Arr, poi: Int, mw: Num, vset: Num, qmin: Num,
+                  qmax: Num, sink: Int) {
+    c = with_injection(Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch }, poi, mw, vset, qmin, qmax,
+                       sink)
+    return c.bus, c.gen
+}
+
+#| The PV curve of a transfer into bus row poi (power.cpf).
+def cpf_arrays(base_mva: Num, bus: Arr, gen: Arr, branch: Arr, poi: Int, sink: Int, sigma0: Num, sigma_max: Num,
+               stop_frac: Num, max_steps: Int, tol: Num, nose_tol: Num, with_smin: Bool) {
+    r = cpf(Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch }, poi, sink, sigma0, sigma_max,
+            stop_frac, max_steps, tol, nose_tol, with_smin)
+    return r.lam, r.v_poi, r.v_min, r.vm, r.va, r.lam_max, r.nose, r.smin
+}
+
+#| IEC 60909 three-phase Ik'' (kA), Sk'' (MVA) and Zk at the bus rows
+#| given (power.shortcircuit).
+def sc_arrays(base_mva: Num, bus: Arr, gen: Arr, branch: Arr, machine: Arr, cos_phi: Num, buses: [Int]) {
+    f = ikss(Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch }, machine, cos_phi, true, buses)
+    return f.ikss_ka, f.skss_mva, f.rk, f.xk
+}
+
+#| A PSS/E RAW file given as its character codes (a Str cannot cross from
+#| Python): the MATPOWER arrays, the machines' MBASE, ZR, ZX, the areas
+#| and the RAW revision.
+def raw_arrays(codes: [Int]) {
+    text = join("", [chr(k) for k in codes])
+    r = parse_raw(text, "the RAW text")
+    c = r.case
+    return c.base_mva, c.bus, c.gen, c.branch, r.machine, r.areas, r.rev
+}
+
+#| The bus admittance matrix as dense real and imaginary parts, in the
+#| case's bus order.
+def ybus_dense(base_mva: Num, bus: Arr, gen: Arr, branch: Arr) {
+    net = internal(Case { base_mva: base_mva, bus: bus, gen: gen, branch: branch })
+    y = make_ybus(net.nb, net.fbus, net.tbus, net.bus, net.branch, net.base, full_network())
+    G = zeros(net.nb, net.nb)
+    B = zeros(net.nb, net.nb)
+    for j to net.nb {
+        for p from y.colptr[j] to y.colptr[j + 1] {
+            G[y.rowind[p], j] = re(y.vals[p])
+            B[y.rowind[p], j] = im(y.vals[p])
+        }
+    }
+    return G, B
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

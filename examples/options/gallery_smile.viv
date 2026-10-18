@@ -1,0 +1,71 @@
+###
+post: An implied volatility smile recovered from prices, drawn
+agent: claude
+
+The first figure of vipyr's gallery example plot_option_pricing.py, drawn in
+Viv: 3,000 Black-Scholes prices made from a known smile (volatility
+0.20 - 0.10 k + 0.25 k^2 in the log-moneyness k = log(K/F)) at three
+maturities, inverted back to volatilities by `implied_vols` in
+examples/options/bs.viv. Out-of-the-money options are used on each side of
+the forward. The recovered points sit on the input curves; the test holds
+the worst relative error.
+###
+
+from examples.options.bs import bs_prices, implied_vols
+
+SPOT: Num = 100.0
+RATE: Num = 0.03
+DIVIDEND: Num = 0.01
+K_LO: Num = 60.0
+K_HI: Num = 160.0
+#: strikes per maturity
+N_PER: Int = 1000
+#: the smile: a + b k + c k^2
+VOL_LEVEL: Num = 0.20
+VOL_SKEW: Num = -0.10
+VOL_CURVE: Num = 0.25
+#: every 40th recovered point is drawn
+EVERY: Int = 40
+#: the inversion is to rounding: this run recovers every volatility to 1e-14
+WORST_REL: Num = 1e-12
+
+#| The input smile and the recovered one at maturity t.
+def smile(t: Num) {
+    K = linspace(K_LO, K_HI, N_PER)
+    n = len(K)
+    fwd = SPOT * exp((RATE - DIVIDEND) * t)
+    k = log(K / fwd)
+    vol = VOL_LEVEL + VOL_SKEW * k + VOL_CURVE * k * k
+    is_call = where(K >= fwd, 1.0, 0.0)
+    S = ones(n) * SPOT
+    T = ones(n) * t
+    price = bs_prices(S, K, T, RATE, DIVIDEND, vol, is_call)
+    return K, vol, implied_vols(price, S, K, T, RATE, DIVIDEND, is_call)
+}
+
+K1, v1, iv1 = smile(0.25)
+K2, v2, iv2 = smile(1.0)
+K3, v3, iv3 = smile(2.0)
+worst = max([max(abs(iv1 - v1) / v1), max(abs(iv2 - v2) / v2), max(abs(iv3 - v3) / v3)])
+show worst
+
+figure("Implied volatility smile, recovered from 3,000 prices", "strike K", "implied volatility")
+plot(K1[::EVERY], iv1[::EVERY], "T = 0.25 recovered")
+plot(K1, v1, "T = 0.25 input")
+plot(K2[::EVERY], iv2[::EVERY], "T = 1 recovered")
+plot(K2, v2, "T = 1 input")
+plot(K3[::EVERY], iv3[::EVERY], "T = 2 recovered")
+plot(K3, v3, "T = 2 input")
+style("T = 0.25 recovered", "s1 noline circle")
+style("T = 0.25 input", "s1 dash thin nomarker")
+style("T = 1 recovered", "s2 noline circle")
+style("T = 1 input", "s2 dash thin nomarker")
+style("T = 2 recovered", "s3 noline circle")
+style("T = 2 input", "s3 dash thin nomarker")
+
+test "every price inverts to its volatility" {
+    assert_lt(worst, WORST_REL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

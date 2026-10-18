@@ -1,0 +1,59 @@
+# @@ imports
+# nothing to import: lin_solve is a builtin
+
+# @@ LU factorization with partial pivoting
+def lu_factor(A) {
+    n = shape(A)[0]
+    LU = copy(A)
+    perm = [i for i to n]
+    for k to n - 1 {
+        p = max([i for i from k to n], key=fn(i) -> abs(LU[i, k]))
+        if p != k {
+            LU[k, :], LU[p, :] = LU[p, :], LU[k, :]
+            perm[k], perm[p] = perm[p], perm[k]
+        }
+        for i from k + 1 to n {
+            LU[i, k] /= LU[k, k]
+            LU[i, k + 1:] -= LU[i, k] * LU[k, k + 1:]
+        }
+    }
+    return LU, perm
+}
+
+# @@ forward and back substitution
+def lu_solve(LU, perm, b) {
+    n = len(b)
+    y = [b[j] for j in perm]
+    for i to n {
+        y[i] -= sum(LU[i, :i] * y[:i])
+    }
+    x = copy(y)
+    for i to n reversed {
+        x[i] = (x[i] - sum(LU[i, i + 1:] * x[i + 1:])) / LU[i, i]
+    }
+    return x
+}
+
+# @@ solve a system
+A = [[2.0, 1.0, 1.0],
+     [4.0, -6.0, 0.0],
+     [-2.0, 7.0, 2.0]]
+b = [5.0, -2.0, 9.0]
+LU, perm = lu_factor(A)
+x = lu_solve(LU, perm, b)
+print("pivot order", perm)
+print("x =", fmt(x))
+
+# @@ against the library solver
+x_lib = zeros(len(b))
+lin_solve(A, b, x_lib)
+print("library x =", fmt(x_lib))
+
+# @@ checks
+test "solves" {
+    assert_allclose(A @ x, b, 1e-12)
+    assert_allclose(x, x_lib, 1e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,61 @@
+module lib/basis/basis
+  The table every basis-set module of lib/basis returns, the `Basis` record,
+  and the helpers that read it. A basis set gives each element a list of
+  shells; a shell is one angular momentum `l` and a contraction, a fixed sum
+  of Gaussians $\sum_p c_p e^{-a_p r^2}$ with exponents $a_p$ and coefficients
+  $c_p$. The record keeps shells and their Gaussians (primitives) as two
+  arrays, so a generated module can hold a whole set as two flat lists of
+  numbers.
+
+basis_rows  @1e19e0d9
+  why   The generated modules store each table as one flat list, which is the
+        cheapest thing to write and to parse; the rest of the code indexes
+        rows and columns.
+  v      the flat list, row after row
+  width  how many columns a row has
+  n      how many rows the list holds
+  a      the table, `[n, width]`
+  i      the row being filled
+  j      the column being filled
+
+basis_of  @69c81243
+  why   Every generated module ends in this one call, so the layout of the
+        record is decided in one place.
+  shells_flat  the shell rows `(Z, l, nprim, p0)`, flattened
+  prims_flat   the primitive rows `(exponent, coefficient)`, flattened
+
+basis_first  @769786bc
+  why   A molecule copies an element's shells by starting at its first row
+        and reading while the element stays the same, which works because
+        each element's shells are one run of rows (basis_check holds the
+        table to that).
+  b   the basis set
+  z   the atomic number looked for
+  s   the shell row being tested
+
+basis_count  @fbbb0e29
+  why   Used by this module's test to check a table's layout.
+  b   the basis set
+  z   the atomic number
+
+basis_nao  @563056d6
+  why   A shell of angular momentum `l` gives $(l+1)(l+2)/2$ Cartesian
+        functions and $2l+1$ spherical ones; the counts per atom let the
+        generated tests compare the table with the counts the generator
+        wrote down.
+  b     the basis set
+  z     the atomic number
+  out   `[Cartesian count, spherical count]`, summed over the element's shells
+  mine  1 for each shell row of element `z`, 0 for the others
+  l     each shell row's angular momentum
+
+basis_check  @1d6ea925
+  why   A table that breaks its layout would give a molecule wrong shells
+        without any error: a shell reading another shell's primitives, or an
+        element's shells split so basis_first finds only part of them. Every
+        generated table's test requires this count to be `0`.
+  b     the basis set
+  bad   the number of problems found so far
+  next  the primitive row the next shell must start at, if no row is skipped
+        or shared
+  s     the shell row being checked

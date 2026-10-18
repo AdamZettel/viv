@@ -1,0 +1,72 @@
+# LABELS, NOT FEATURES. A label reads the future by design: it is what a model
+# is trained to predict. vipyr.check_point_in_time rejects every function in
+# this file, and that rejection is tested.
+#
+# Churn label. Input: one row per event, sorted by (user, ts); ts in int64
+# nanoseconds. For a row at time t:
+#
+#   churned  1.0 when the user has no event with t < ts_j <= t + horizon,
+#            0.0 when it has one, NaN when t + horizon is later than the last
+#            timestamp in the data (the window is not fully observed)
+
+from rows import group_end, instant_end
+
+record Churn {
+    churned: Arr
+}
+
+#| The churn label of each row: one when the user is silent for the horizon after
+#| the row, zero when it comes back, NaN when the data ends inside the horizon.
+#|| The next instant of the same user decides it, against the data's end.
+#||| A label must read the future, so this def is kept apart from the features
+#||| and the point-in-time check is expected to refuse it.
+#: user  the entity key, sorted ascending
+#: ts  event time, int64 nanoseconds, ascending within a user
+#: horizon  the silence, in nanoseconds, that counts as churn
+#@ 6ae5180d
+def churn(user: [Int], ts: [Int], horizon: Int) -> Churn {
+    n = len(ts)
+    out = zeros(n)
+    data_end: Int = 0
+    for r to n {
+        if r == 0 or ts[r] > data_end {
+            data_end = ts[r]
+        }
+    }
+    g: Int = 0
+    while g < n {
+        stop_at = group_end(user, ts, g, "churn")
+        i: Int = g
+        while i < stop_at {
+            same = instant_end(ts, i, stop_at)
+            step decide "the user's next instant decides the label" {
+                lab = 0.0 / 0.0
+                if same < stop_at and ts[same] - ts[i] <= horizon {
+                    lab = 0.0
+                }
+                else if ts[i] + horizon <= data_end {
+                    lab = 1.0
+                }
+                for k from i to same {
+                    out[k] = lab
+                }
+            }
+            i = same
+        }
+        g = stop_at
+    }
+    return Churn { churned: out }
+}
+
+test "silent for the horizon is churn; a horizon past the data is unknown" {
+    user: [Int] = [1, 1, 1, 2]
+    ts: [Int] = [0, 10, 30, 40]
+    c = churn(user, ts, 10)
+    assert_near(c.churned[0], 0.0, 0.0)
+    assert_near(c.churned[1], 1.0, 0.0)
+    assert_near(c.churned[2], 1.0, 0.0)
+    assert_true(c.churned[3] != c.churned[3])
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

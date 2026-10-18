@@ -1,0 +1,274 @@
+module lib/nn
+  The pieces a transformer is made of: RMSNorm, ReLU squared, softmax, one
+  head of causal self-attention, the embedding lookup and cross-entropy, each
+  a forward pass. The
+  backward passes come from `value_and_grad` over them,
+  and the tests check each generated gradient against central differences of
+  its forward pass. The backward passes written by hand before
+  `value_and_grad` existed are in lib/nn_adjoints.
+
+  A row of a matrix is a position of the sequence and a column is a feature,
+  so a sequence of `T` tokens in `D` numbers each is a `T` by `D` matrix.
+  Each def reads `T` and `D` from the shapes of what it is given.
+
+row_rms  @ba2b08fa
+  what   The root mean square of each row, with `NN_EPS` inside the root: the
+         divisor RMSNorm uses. The mean runs along the last axis, and the
+         result keeps that axis, of length one, so it divides the rows it came
+         from by broadcasting.
+  why    The epsilon keeps a row of zeros from dividing by zero.
+  X      the rows, `T` by `D` (or `B` by `T` by `D`)
+
+  $$ r_i = \sqrt{\tfrac{1}{D} \textstyle\sum_j x_{ij}^2 + \epsilon} $$
+
+rmsnorm  @e794080d
+  what   RMSNorm with no learnable gain: divide each row by the root mean square of
+         its own entries.
+  why    It fixes the size of each position's vector without changing its
+         direction, so what a layer reads does not depend on how large the stream
+         has grown. Unlike LayerNorm it does not subtract the mean, and the
+         speedrun keeps no gain, so there is nothing to learn.
+  X      the rows to normalize, `T` by `D` (or `B` by `T` by `D`)
+
+  $$ y_{ij} = \frac{x_{ij}}{r_i}, \qquad r_i = \sqrt{\tfrac{1}{D} \textstyle\sum_j x_{ij}^2 + \epsilon} $$
+
+relu2  @7ca0b5e0
+  what  `max(x, 0)^2`, elementwise: ReLU squared, the MLP's nonlinearity.
+  why   Its derivative, `2 max(x, 0)`, is continuous at zero, and it costs one
+        comparison and one multiplication; the speedrun uses it in place of GELU.
+  X     the input
+  R     `max(x, 0)`, entry by entry
+
+softmax_rows  @31f05f6b
+  what   Softmax along each row: exponentiate every entry and divide by the row's
+         sum, so each row becomes positive numbers that add up to one. The row
+         maximum is subtracted first so that nothing overflows. A row is the
+         last axis, so a stack of matrices is done matrix by matrix.
+  why    Subtracting the same number from a whole row does not change its softmax,
+         and after subtracting the maximum the largest exponential is `exp(0)`.
+  X      the scores, `T` by `D`, or a stack of such matrices
+  e      the exponentials, each row shifted by its largest entry
+
+  $$ y_{ij} = \frac{e^{x_{ij} - m_i}}{\sum_k e^{x_{ik} - m_i}}, \qquad m_i = \max_k x_{ik} $$
+
+attention  @3db0c754
+  what    One head of causal self-attention. Each position's row is mapped three
+          ways, to a query, a key and a value. Position i scores every position j
+          by the dot product of its query with j's key, the scores of later
+          positions are hidden, a softmax turns each row of scores into weights,
+          and position i's output is the weighted average of the values. It
+          returns the output; `attention_weights` returns the weights.
+  how     `Q = X Wq`, `K = X Wk`, `V = X Wv`; scores `Q K^T / sqrt(H)`, with
+          `K^T` the last two axes of `K` swapped; everything
+          above the diagonal set to `MASKED`; softmax along each row; output
+          `A V`.
+  why     This is the only place in a transformer where positions exchange
+          information, and the weights are computed from the data, so which
+          position a token draws from depends on what the tokens are. Dividing
+          the scores by `sqrt(H)` keeps them from growing with the head's width,
+          which would make the softmax put all the weight on one position before
+          training starts. The mask is what makes the model causal: a position
+          may not read the token it is being trained to predict.
+  X       the rows attention reads, `T` by `D`, or `B` by `T` by `D` for a
+          batch of sequences, each attended to on its own
+  Wq      the query projection, `D` by `H`
+  Wk      the key projection, `D` by `H`
+  Wv      the value projection, `D` by `H`
+  T       the number of positions
+  Q       the queries, one row per position, `H` columns
+  K       the keys, one row per position
+  V       the values, one row per position
+  S       the scores, `T` by `T`: `S[i, j]` is the dot product of position i's
+          query with position j's key, scaled
+  S@mask  the scores with every entry above the diagonal replaced by `MASKED`
+  future  `1` where j > i, a later position, and `0` elsewhere: the mask as a matrix
+  A       the attention weights: row i is a distribution over the positions i
+          may read
+  Y       the output, `T` by `H`: row i is the average of the values weighted by
+          row i of `A`
+
+  project  compute the queries, keys and values
+    $$ Q = X W_q, \qquad K = X W_k, \qquad V = X W_v $$
+  scores   score every pair of positions: query against key, scaled by the head's width
+    $$ S = \frac{Q K^\top}{\sqrt{H}} $$
+  mask     hide the future: a position may not attend to a later one
+    why      a score of `MASKED` becomes a weight of exactly zero after the softmax
+  weights  turn each row of scores into weights that sum to one
+    $$ A_{ij} = \frac{e^{S_{ij}}}{\sum_k e^{S_{ik}}}, \qquad \sum_j A_{ij} = 1 $$  [hold "each row of attention weights sums to 1"]
+    $$ A_{ij} = 0 \quad \text{for } j > i $$  [hold "no weight falls on a later position"]
+  mix      each position's output: the values averaged with its weights
+    $$ Y = A V $$
+
+attention_weights  @4ac1f4e7
+  what    The weights of one head of causal self-attention, without the output:
+          the first four steps of `attention`, done the same way, so the
+          weights are the ones `attention` mixes the values with. For a reader
+          who wants to see where each position looked, and for the checks.
+  X       the rows attention reads, `T` by `D`, or `B` by `T` by `D`
+  Wq      the query projection, `D` by `H`
+  Wk      the key projection, `D` by `H`
+  Q       the queries, one row per position
+  K       the keys, one row per position
+  S       the scores, scaled
+  future  `1` where j > i, a later position, and `0` elsewhere
+
+cross_entropy  @0fa373fb
+  what    Cross-entropy of `logits` against one target class per row, averaged
+          over the rows: the mean of $-\log p$, where p is the probability the
+          softmax of the row gives its target. The classes run along the last
+          axis, so `logits` is `T` by `V` for a sequence, `B` by `T` by `V` for a
+          batch, with one target per row in `target`.
+  how     The softmax is folded in: the log-probabilities of a row are its logits
+          minus `log(sum exp)`, computed with the row maximum shifted out so a
+          large logit does not overflow. The target's entry of each row is
+          picked out by its flat index, row times `V` plus the target.
+  why     $-\log p$ is zero when the model is certain and right and grows without
+          limit as p goes to zero. A model that spreads its probability evenly
+          over V classes scores $\log V$. Its gradient with respect to the logits
+          is the predicted distribution with one taken off the true class,
+          divided by the number of rows, so each row of the gradient sums to
+          zero.
+  logits   the scores, one row per position
+  target   the right class of each row, a whole number
+  classes  `V`, the number of classes: the length of a row
+  top      each row's largest logit
+  logp     the log-probabilities, row by row
+
+embedding  @7b9051bd
+  what  The rows of a table the ids name, one row per id: the lookup of a
+        token or position embedding. A matrix of ids (a batch of sequences)
+        gives one row per id in the same arrangement.
+  why   A token is a row number. Picking the row is what multiplying a one-hot
+        row by the table computes, without the multiplication; the gradient
+        adds into the rows that were picked and leaves the others at zero.
+  W     the table, one row per id
+  ids   the ids, whole numbers
+
+argmax_rows  @21f93f79
+  what    The class each row of `logits` (`T` by `V`) picks: the index of its largest
+          entry, the first one on a tie. This is the model's guess, which is what an
+          accuracy counts.
+  logits  the scores, `T` by `V`
+  best    each row's pick so far
+  i       a row
+  j       a class
+
+worst_rel  @df55265e
+  what  The largest gap between two matrices of one shape, relative to the larger
+        of the two entries, which is how a gradient check should be scored.
+  A     one matrix
+  B     the other
+
+central  @c15ef617
+  what  The gradient of `f(X, C)` with respect to `X` by central differences: move
+        each entry up and down by `h` and divide the change in `f` by `2h`. The
+        tests hold every generated gradient to it.
+  f     the function, of a matrix and a fixed second argument
+  X     where to take the gradient; each entry is moved and put back
+  C     the second argument, held fixed
+  h     the step
+  num   the gradient, one entry per entry of `X`
+  i     a row
+  j     a column
+  was   the entry before it was moved
+  up    `f` with the entry moved up
+  dn    `f` with the entry moved down
+
+nn_test_matrix  @1de4799b
+  what  A fixed matrix with no structure, `rows` by `cols`: the corner of lib/linalg's
+        square test matrix.
+  rows  its rows
+  cols  its columns
+  seed  which test matrix
+  M     the square test matrix it is cut from
+
+rmsnorm_probe  @be07ee4a
+  what  A probe loss for checking RMSNorm's gradient: the sum of `C * Y` entry by
+        entry, whose gradient with respect to `Y` is `C`. Any fixed `C` with no
+        structure will do.
+  X     the rows normalized
+  C     the fixed weights
+
+relu2_probe  @870d8f11
+  what  The same probe loss for ReLU squared.
+  X     the input
+  C     the fixed weights
+
+softmax_probe  @a9a4513e
+  what  The same probe loss for the row softmax.
+  X     the scores
+  C     the fixed weights
+
+embedding_probe  @7c436b1b
+  what  A weighted sum of an embedding from `W` that looks one row up twice
+        and another never, so the gradient test sees a row that adds two
+        contributions and a row that gets none.
+  W     the table
+  C     the fixed weights
+
+attention_case  @2a8d6431
+  what  The inputs the attention checks share: five positions of width five, and
+        three projections to width three.
+
+attention_probe  @0d4ecc4a
+  what  The probe loss of attention's output, as a function of the whole case:
+        its gradient is an `AttentionCase` holding the gradient with respect to
+        the rows read and to each of the three projections.
+  a     the rows read and the three projections
+  C     the fixed weights
+
+central_into  @172a48fd
+  what  The central difference of the probe loss in every entry of one matrix
+        of the case, written into the same entries of another: what
+        `central_case` calls on each matrix.
+  w     a matrix of the case; each entry is moved and put back
+  nw    the same matrix of the result
+  C     the fixed weights
+  a     the case, which reads `w` where it is
+  h     the step
+  i     a row
+  j     a column
+  was   the entry before it was moved
+  up    the probe loss with the entry moved up
+  dn    the probe loss with it moved down
+
+central_case  @e9677e9e
+  what  The gradient of the probe loss with respect to every matrix of the
+        case, by central differences: an `AttentionCase` of numerical
+        gradients.
+  a     the case
+  C     the fixed weights
+  num   the numerical gradients
+
+central_slab  @512c94e0
+  what  The gradient of `batch_attention_probe` with respect to the matrix of
+        sequence `b` in a batch, by central differences.
+  X     the batch of sequences; each entry of sequence `b` is moved and put back
+  C     the fixed weights
+  b     which sequence
+  h     the step
+  rows  the sequence's positions
+  cols  its features
+  num   the gradient, one entry per entry of the sequence
+  i     a position
+  j     a feature
+  was   the entry before it was moved
+  up    the probe with the entry moved up
+  dn    the probe with it moved down
+
+test_batch  @600b7ce1
+  what  A batch of `NN_TEST_BATCH` fixed matrices with no structure, `rows`
+        by `cols` each, from consecutive seeds: what the batch tests run on.
+  rows  each sequence's positions
+  cols  its features
+  seed  the seed of the first sequence's matrix
+  S     the batch
+  b     a sequence
+
+batch_attention_probe  @6314809b
+  what  The probe loss of attention's output on a batch of sequences, with the
+        projections of `attention_case`: its gradient is the gradient with
+        respect to every sequence of the batch.
+  X     the batch of sequences
+  C     the fixed weights
+  a     the case whose projections are used

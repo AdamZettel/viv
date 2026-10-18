@@ -1,0 +1,35 @@
+# The tests of lib/hf/eigen that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/eigen does not load the references.
+from hf.eigen import eig_jacobi, eig_methods, eig_ql, eig_random_sym, eig_residual
+from hf.sweep import (
+    sw_check3_arr, SW_REP_INDEX, sw_rep_new, SW_REP_NSTRAT, SW_REP_STRAT, sweep3_arr,
+)
+
+#| Test member with a planted bug: member 0's result with the third
+#| eigenvalue raised by `1e-9`.
+def eig_t_bad(A: Arr, B: Arr, opts: Arr) -> Arr {
+    R = eig_ql(A, B, opts)
+    R[0, 2] = R[0, 2] + 1.0e-9
+    return R
+}
+
+test "the sweep over the registry agrees on eigenvalues and blames a planted bug" {
+    # a result is [n + 1, n]: the n eigenvalues, then the vectors; the sweep
+    # compares the eigenvalues
+    eig_ns = 9
+    eig_A = eig_random_sym(eig_ns, 99)
+    eig_rep = sw_rep_new()
+    eig_R = sweep3_arr(eig_methods(), eig_A, eig_A, eig_A, (eig_ns + 1) * eig_ns, eig_ns, 1.0e-12, eig_rep)
+    assert_near(eig_rep[SW_REP_NSTRAT], 3, 0.0)
+    assert_lt(eig_residual(eig_A, eig_R), 1.0e-13)
+    # a bad member listed first: the median still blames it, at eigenvalue 2
+    eig_out = zeros(eig_ns + 1, eig_ns)
+    eig_ok = sw_check3_arr([eig_t_bad, eig_ql, eig_jacobi], eig_A, eig_A, eig_A, (eig_ns + 1) * eig_ns, eig_ns, 1.0e-12, eig_rep, eig_out)
+    assert_near(eig_ok, 0.0, 0.0)
+    assert_near(eig_rep[SW_REP_STRAT], 0.0, 0.0)
+    assert_near(eig_rep[SW_REP_INDEX], 2.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

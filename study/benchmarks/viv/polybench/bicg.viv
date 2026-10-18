@@ -1,0 +1,33 @@
+#! timing
+# PolyBench/C 4.2.1 bicg: the BiCG sub-kernel, s := A^T r and q := A p.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/kernels/bicg/bicg.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+M = 38
+N = 42
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    p = [(i % M) / M for i to M]
+    r = [(i % N) / N for i to N]
+    A = [[(i * (j + 1) % N) / N for j to M] for i to N]
+    return A, r, p
+}
+
+def kernel(A, r, p) {
+    return r @ A, A @ p
+}
+
+A, r, p = init()
+t0 = clock()
+s, q = kernel(A, r, p)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("s", s)
+    dump("q", q)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

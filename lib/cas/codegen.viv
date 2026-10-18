@@ -1,0 +1,373 @@
+###
+post: Straight-line Viv from CAS expressions, with common subexpressions computed once
+agent: claude
+
+A generator states what a kernel computes as expressions in the store
+(lib/cas/store), one per output: `S[12] = X R1 + 2 R2`. This module turns the
+list of outputs into straight-line Viv, one assignment per line.
+
+**Common subexpressions.** The store keeps one node per distinct expression,
+so a subexpression that two outputs share is one node with two parents.
+`cg_emit` counts the parents of every node reachable from the outputs; a node
+with two or more becomes a local (`t1 = ...`) computed once, before its first
+use, and every other node is written inline. Leaves (numbers, symbols) are
+always inline.
+
+**Products.** A product in the store is flat: `ex ey ez w` has four factors and
+no node for `ex ey`. Two products that share a prefix of factors in the term
+order (`ex ey ez w1` and `ex ey ez w2`) would each multiply it out. The
+generator therefore writes a product of `k >= 3` factors as the product of its
+first `k - 1` factors, made a node of its own, times the last one, so
+shared prefixes become shared nodes and are counted like any other. The order
+of the factors is the store's term order (symbols by name), which the caller
+uses to put the factors it wants shared first.
+
+**Numbers.** An integer power `b^n` is written as `n - 1` products; a negative
+one as `1.0 / (...)`. A rational `p/q` is written as the double nearest it,
+which is what the division `p / q` gives. A symbol is written as its name,
+unless `cg_symtext` gave it a text: the generators use that for numeric
+coefficients that are not rational (the Cartesian-to-spherical factors), which
+the store keeps as symbols and the kernel gets as literals.
+
+**Use.**
+
+    cg_reset()
+    cg_out("S[3]", e1)
+    cg_out("S[4]", e2)
+    lines = cg_emit("    ")
+
+`cg_emit` returns the lines, the locals first where they are needed, then the
+assignments in the order they were given. `cg_stats()` is the number of
+locals and of operations (each `+`, `-`, `*`, `/` counted once), for the
+headers the generators write.
+
+Used with `import cas.codegen`.
+###
+from cas.store import (
+    C_ONE, cas_add, cas_addv, cas_int, cas_isint, cas_kid, cas_kids, cas_kind, cas_mul,
+    cas_mulv, cas_name_of, cas_nk, cas_np, cas_nq, cas_num, cas_pow, cas_sym, K_ADD, K_FN,
+    K_MUL, K_NUM, K_POW, K_SYM,
+)
+
+# parents of each node reachable from the outputs, by node id
+CG_USES = map()
+# the local a shared node was written to
+CG_NAME = map()
+# the two factors a product of three or more is written as: prefix, last
+CG_PRE = map()
+CG_LAST = map()
+# texts of symbols that stand for literals, by symbol name
+CG_SYMTXT = map()
+# the outputs (left side text, right side node) and the emitted lines, by
+# position: maps, because a def cannot grow a module's array
+CG_LHS = map()
+CG_RHS = map()
+CG_LINES = map()
+# counters: outputs, locals, operations, lines
+CG_COUNT = zeros(4)
+CG_IN = 0
+CG_LOC = 1
+CG_OPS = 2
+CG_NL = 3
+
+#| Forget the outputs, the counts and the emitted locals (not the store, and
+#| not the symbol texts).
+def cg_reset() {
+    clear(CG_USES)
+    clear(CG_NAME)
+    clear(CG_LHS)
+    clear(CG_RHS)
+    clear(CG_LINES)
+    CG_COUNT[CG_IN] = 0
+    CG_COUNT[CG_LOC] = 0
+    CG_COUNT[CG_OPS] = 0
+    CG_COUNT[CG_NL] = 0
+    return 0
+}
+
+#| Write the symbol named `name` as `text` (a literal, or any Viv expression
+#| that needs no parentheses in a product).
+def cg_symtext(name: Str, text: Str) {
+    CG_SYMTXT[name] = text
+    return 0
+}
+
+#| Add an output: the line `lhs = <e>`.
+def cg_out(lhs: Str, e) {
+    k = CG_COUNT[CG_IN]
+    CG_LHS[k] = lhs
+    CG_RHS[k] = e
+    CG_COUNT[CG_IN] = k + 1
+    return 0
+}
+
+#| A product's non-numeric factors, in the store's order.
+def cg_factors(e) {
+    fs = []
+    for k to cas_nk(e) {
+        f = cas_kid(e, k)
+        if cas_kind(f) != K_NUM {
+            fs = append(fs, f)
+        }
+    }
+    return fs
+}
+
+#| A product's numeric coefficient, `C_ONE` when it has none.
+def cg_coef(e) {
+    f = cas_kid(e, 0)
+    if cas_kind(f) == K_NUM {
+        return f
+    }
+    return C_ONE
+}
+
+#| The prefix and the last factor of a product of three or more factors, as
+#| nodes; for a product with a coefficient, the coefficient times the rest.
+def cg_split(e) {
+    if has(CG_PRE, e) {
+        return 0
+    }
+    c = cg_coef(e)
+    fs = cg_factors(e)
+    n = len(fs)
+    if c != C_ONE {
+        CG_PRE[e] = c
+        if n == 1 {
+            CG_LAST[e] = fs[0]
+        }
+        else {
+            CG_LAST[e] = cas_mulv(fs)
+        }
+        return 0
+    }
+    CG_LAST[e] = fs[n - 1]
+    if n == 2 {
+        CG_PRE[e] = fs[0]
+    }
+    else {
+        CG_PRE[e] = cas_mulv(fs[0:n - 1])
+    }
+    return 0
+}
+
+#| The children of `e` as the emitter sees them.
+def cg_kids(e) {
+    k = cas_kind(e)
+    if k == K_MUL {
+        cg_split(e)
+        return [CG_PRE[e], CG_LAST[e]]
+    }
+    if k == K_POW {
+        return [cas_kid(e, 0)]
+    }
+    if k == K_ADD or k == K_FN {
+        return cas_kids(e)
+    }
+    return []
+}
+
+#| Count parents from `e` down; a node is entered once.
+def cg_count(e) {
+    if has(CG_USES, e) {
+        CG_USES[e] = CG_USES[e] + 1
+        return 0
+    }
+    CG_USES[e] = 1
+    ks = cg_kids(e)
+    for i to len(ks) {
+        cg_count(ks[i])
+    }
+    return 0
+}
+
+#| A double as Viv source that reads back to the same double.
+def cg_lit(x) {
+    s = fmt(x)
+    if s.find(".") < 0 and s.find("e") < 0 and s.find("inf") < 0 and s.find("nan") < 0 {
+        s = s + ".0"
+    }
+    if x < 0.0 {
+        return "(" + s + ")"
+    }
+    return s
+}
+
+#| The text of a leaf.
+def cg_leaf(e) {
+    k = cas_kind(e)
+    if k == K_NUM {
+        return cg_lit(cas_np(e) / cas_nq(e))
+    }
+    if k == K_SYM {
+        nm = cas_name_of(e)
+        if has(CG_SYMTXT, nm) {
+            return CG_SYMTXT[nm]
+        }
+        return nm
+    }
+    stop("cg_leaf: not a leaf (a refusal reached the code generator: " + cas_name_of(e) + ")")
+    return ""
+}
+
+#| The text of `e` as an operand of `*`: a sum in parentheses.
+def cg_factor_text(e) {
+    t = cg_text(e)
+    if cas_kind(e) == K_ADD and not has(CG_NAME, e) {
+        return "(" + t + ")"
+    }
+    return t
+}
+
+#| The text of `e`, emitting the locals it needs first. A node with two or
+#| more parents is written to a local the first time and named after that.
+def cg_text(e) {
+    if has(CG_NAME, e) {
+        return CG_NAME[e]
+    }
+    k = cas_kind(e)
+    if k == K_NUM or k == K_SYM {
+        return cg_leaf(e)
+    }
+    t = ""
+    if k == K_MUL {
+        cg_split(e)
+        a = CG_PRE[e]
+        b = CG_LAST[e]
+        CG_COUNT[CG_OPS] = CG_COUNT[CG_OPS] + 1
+        if cas_kind(a) == K_NUM and cas_np(a) == -1 and cas_nq(a) == 1 {
+            t = "-" + cg_factor_text(b)
+        }
+        else {
+            t = cg_factor_text(a) + " * " + cg_factor_text(b)
+        }
+    }
+    if k == K_ADD {
+        for i to cas_nk(e) {
+            c = cas_kid(e, i)
+            neg = false
+            if i > 0 and cas_kind(c) == K_MUL {
+                cf = cg_coef(c)
+                if cas_np(cf) < 0 {
+                    neg = true
+                }
+            }
+            if neg {
+                cf = cg_coef(c)
+                pos = cas_mul(cas_num(-cas_np(cf), cas_nq(cf)), cas_mulv(cg_factors(c)))
+                # the positive term is a new node: count it as used once here
+                if not has(CG_USES, pos) {
+                    CG_USES[pos] = 1
+                }
+                t = t + " - " + cg_factor_text(pos)
+            }
+            else {
+                if i > 0 {
+                    t = t + " + "
+                }
+                t = t + cg_text(c)
+            }
+            if i > 0 {
+                CG_COUNT[CG_OPS] = CG_COUNT[CG_OPS] + 1
+            }
+        }
+    }
+    if k == K_POW {
+        b = cas_kid(e, 0)
+        x = cas_kid(e, 1)
+        bt = cg_factor_text(b)
+        if cas_isint(x) and cas_np(x) >= 2 {
+            t = bt
+            for i to cas_np(x) - 1 {
+                t = t + " * " + bt
+                CG_COUNT[CG_OPS] = CG_COUNT[CG_OPS] + 1
+            }
+        }
+        else {
+            if cas_isint(x) and cas_np(x) < 0 {
+                t = bt
+                for i to -cas_np(x) - 1 {
+                    t = t + " * " + bt
+                    CG_COUNT[CG_OPS] = CG_COUNT[CG_OPS] + 1
+                }
+                t = "1.0 / (" + t + ")"
+                CG_COUNT[CG_OPS] = CG_COUNT[CG_OPS] + 1
+            }
+            else {
+                t = "pow(" + bt + ", " + cg_leaf(x) + ")"
+            }
+        }
+    }
+    if k == K_FN {
+        t = cas_name_of(e) + "(" + cg_text(cas_kid(e, 0)) + ")"
+    }
+    if CG_USES[e] >= 2 {
+        CG_COUNT[CG_LOC] = CG_COUNT[CG_LOC] + 1
+        nm = "t" + fmt(CG_COUNT[CG_LOC], "d")
+        cg_line(CG_IND["ind"] + nm + " = " + t)
+        CG_NAME[e] = nm
+        return nm
+    }
+    return t
+}
+
+# the indentation of the lines being emitted
+CG_IND = map()
+CG_IND["ind"] = "    "
+
+def cg_line(s: Str) {
+    CG_LINES[CG_COUNT[CG_NL]] = s
+    CG_COUNT[CG_NL] = CG_COUNT[CG_NL] + 1
+    return 0
+}
+
+#| The straight-line code of the outputs given since `cg_reset`, each line
+#| indented by `ind`.
+def cg_emit(ind: Str) {
+    CG_IND["ind"] = ind
+    n = CG_COUNT[CG_IN]
+    for i to n {
+        cg_count(CG_RHS[i])
+    }
+    for i to n {
+        t = cg_text(CG_RHS[i])
+        cg_line(ind + CG_LHS[i] + " = " + t)
+    }
+    return [CG_LINES[i] for i to CG_COUNT[CG_NL]]
+}
+
+#| `[outputs, locals, operations]` of the last `cg_emit`.
+def cg_stats() {
+    return CG_COUNT[CG_IN:CG_OPS + 1]
+}
+
+test "a shared sum is computed once, and products share their prefixes" {
+    cg_reset()
+    x = cas_sym("x")
+    y = cas_sym("y")
+    s = cas_add(x, y)
+    cg_out("a[0]", cas_mul(s, x))
+    cg_out("a[1]", cas_mul(s, y))
+    cg_out("a[2]", cas_mulv([x, y, cas_sym("z1")]))
+    cg_out("a[3]", cas_mulv([x, y, cas_sym("z2")]))
+    ls = cg_emit("")
+    assert_true(ls[0] == "t1 = x + y")
+    assert_true(ls[1] == "a[0] = x * t1")
+    assert_true(ls[3] == "t2 = x * y")
+    assert_true(ls[4] == "a[2] = t2 * z1")
+    assert_true(ls[5] == "a[3] = t2 * z2")
+}
+
+test "numbers, negative terms, powers and literal symbols" {
+    cg_reset()
+    x = cas_sym("x")
+    cg_symtext("c3", "0.5773502691896258")
+    cg_out("v", cas_addv([cas_mul(cas_int(3), x), cas_mul(cas_int(-2), cas_pow(x, cas_int(2))), cas_sym("c3")]))
+    cg_out("u", cas_mul(cas_num(1, 3), x))
+    ls = cg_emit("")
+    assert_true(ls[0] == "v = 0.5773502691896258 + 3.0 * x - 2.0 * x * x")
+    assert_true(ls[1] == "u = 0.3333333333333333 * x")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

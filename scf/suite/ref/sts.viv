@@ -1,0 +1,270 @@
+###
+post: Support for the PySCF suite replay
+agent: claude
+
+Three things every scf/suite program needs:
+
+- `sts_row`, which scores one harvested assertion the way unittest does and
+  prints one line the scorer (tools/hf_score.sh) reads;
+- numpy's random stream. Several PySCF tests call `numpy.random.seed(1)` and
+  feed `numpy.random.random((n, n))` into J/K or the energy. numpy's legacy
+  generator is MT19937 seeded by `init_genrand` and read 53 bits at a time
+  (`genrand_res53`), so the same matrices can be drawn here, entry for
+  entry, instead of being stored;
+- `lib.fp` and the Frobenius norm, the two ways the tests fold a matrix into
+  one number.
+###
+
+import hf.hf
+from hf.eigen import eig_ql, eig_vectors
+from hf.orthogonalize import orth_of, orth_rank
+from hf.density import den_fock
+from hf.jk import jk_packed
+from hf.sweep import sw_flat_index
+
+#| Score one assertion: unittest's `assertAlmostEqual(value, target, places)`
+#| passes when `round(|value - target|, places) == 0`, that is when the gap
+#| is below half a unit in the last place. Prints
+#| `sts_line: [file code, line, pass, decade of the gap]` (the decade is -99
+#| for an exact match) and returns 1 on a pass.
+def sts_row(file, line, value, target, places) {
+    d = abs(value - target)
+    tol = 0.5
+    for k to places {
+        tol = tol * 0.1
+    }
+    ok = 0
+    if d < tol {
+        ok = 1
+    }
+    dec = -99
+    if d > 0.0 {
+        dec = floor(log(d) / log(10.0))
+    }
+    sts_line = [file, line, ok, dec]
+    show sts_line
+    return ok
+}
+
+#| A row that holds an inequality (test_rhf.py:944 asserts `a < b`).
+def sts_row_lt(file, line, a, b) {
+    ok = 0
+    if a < b {
+        ok = 1
+    }
+    sts_line = [file, line, ok, -99]
+    show sts_line
+    return ok
+}
+
+#| `(a * b) mod 2^32` for 32-bit `a` and `b`. A double holds 53 bits, so the
+#| product is split at 16 bits of `a`: each partial product stays below 2^49.
+def sts_mul32(a, b) {
+    ah = floor(a / 65536.0)
+    al = a - ah * 65536.0
+    return u32(al * b + u32(ah * b) * 65536.0)
+}
+
+#| MT19937 state for `seed`, as numpy's `RandomState(seed)`: 624 words
+#| from `init_genrand`, then the read position in slot 624 (624 = regenerate
+#| before the next read).
+def sts_mt_new(seed) {
+    st = zeros(625)
+    st[0] = u32(seed)
+    for k to 623 {
+        p = st[k]
+        st[k + 1] = u32(sts_mul32(1812433253.0, bxor(p, shr(p, 30))) + k + 1)
+    }
+    st[624] = 624
+    return st
+}
+
+#| Regenerate the 624 words (the MT19937 twist).
+def sts_mt_twist(st: Arr) {
+    for i to 624 {
+        y = bor(band(st[i], 2147483648.0), band(st[mod(i + 1, 624)], 2147483647.0))
+        v = bxor(st[mod(i + 397, 624)], shr(y, 1))
+        if band(y, 1) > 0.5 {
+            v = bxor(v, 2567483615.0)
+        }
+        st[i] = v
+    }
+    st[624] = 0
+    return 0
+}
+
+#| The next tempered 32-bit word.
+def sts_mt_u32(st: Arr) {
+    if st[624] > 623.5 {
+        sts_mt_twist(st)
+    }
+    y = st[round(st[624])]
+    st[624] = st[624] + 1
+    y = bxor(y, shr(y, 11))
+    y = bxor(y, band(shl(y, 7), 2636928640.0))
+    y = bxor(y, band(shl(y, 15), 4022730752.0))
+    y = bxor(y, shr(y, 18))
+    return y
+}
+
+#| numpy's `random_sample()`: 27 + 26 bits of two words over 2^53, exact.
+def sts_mt_random(st: Arr) {
+    a = shr(sts_mt_u32(st), 5)
+    b = shr(sts_mt_u32(st), 6)
+    return (a * 67108864.0 + b) / 9007199254740992.0
+}
+
+#| `numpy.random.random((n, n))`, row-major, from the stream `st`.
+def sts_random_matrix(st: Arr, n) {
+    A = zeros(n, n)
+    for i to n {
+        for j to n {
+            A[i, j] = sts_mt_random(st)
+        }
+    }
+    return A
+}
+
+#| `A + A^T`.
+def sts_sym(A: Arr) {
+    return A + transpose(A)
+}
+
+#| `lib.fp(a)`: the entries in row-major order dotted with cos(0), cos(1), ...
+#| Works on any rank through the flat index.
+def sts_fp(A: Arr) {
+    ix = sw_flat_index(numel(A))
+    return sum(take(A, ix) * cos(ix))
+}
+
+#| The Frobenius norm (numpy's `linalg.norm` of an array of any rank).
+def sts_norm(A: Arr) {
+    return sqrt(sum(A * A))
+}
+
+#| The orthonormal basis of `S` from the orthogonalizer `opts[OPT_ORTH]`, as
+#| `[n, m]`: the kept columns of `orth_of`'s X.
+def sts_orth(S: Arr, opts: Arr) {
+    X = orth_of(S, opts)
+    return X[:, 0:orth_rank(X)]
+}
+
+#| `X^T A X` for `X[n, m]`.
+def sts_congruence(A: Arr, X: Arr) {
+    return transpose(X) @ (A @ X)
+}
+
+#| The eigenpairs of `A C = S C e`: `[m + 1, m]`, row 0 the ascending
+#| eigenvalues and rows 1.. the eigenvectors in the orthonormal basis, as
+#| columns. `sts_ao_vectors` takes them back to AOs.
+def sts_eig(A: Arr, S: Arr, opts: Arr) {
+    X = sts_orth(S, opts)
+    return eig_ql(sts_congruence(A, X), X, opts)
+}
+
+#| AO coefficients `C = X V` of the eigenvectors from `sts_eig`, `[n, m]`.
+def sts_ao_vectors(R: Arr, S: Arr, opts: Arr) {
+    return sts_orth(S, opts) @ eig_vectors(R)
+}
+
+#| `sum_ij A_ij B_ji`, numpy's `einsum('ij,ji', A, B)`.
+def sts_dot(A: Arr, B: Arr) {
+    return sum(A * transpose(B))
+}
+
+#| What PySCF's in-core K is for a nonsymmetric density when the caller
+#| passes `hermi=1` (the default of `get_veff` and `energy_elec`): hermi=1
+#| promises a symmetric density, so only the lower triangle of K is
+#| computed and it is mirrored. Measured with PySCF 2.5.0 on water
+#| cc-pVDZ: this matches its K to 4.4e-15, while the true K differs by 1.29.
+def sts_hermi1(K: Arr) {
+    n = len(K)
+    B = zeros(n, n)
+    for i to n {
+        for j to n {
+            if i >= j {
+                B[i, j] = K[i, j]
+            }
+            else {
+                B[i, j] = K[j, i]
+            }
+        }
+    }
+    return B
+}
+
+#| The Fock matrices of densities `D[nd, n, n]` on packed integrals `G`:
+#| `H + J - K/2` for nd = 1 (a total density), `H + J_a + J_b - K_s`
+#| for nd = 2.
+def sts_fock(H: Arr, G: Arr, D: Arr, opts: Arr, nd) {
+    return den_fock(H, jk_packed(G, G, G, D, opts), nd)
+}
+
+#| The largest orbital-gradient element at densities `D[nd, n, n]`, the way
+#| PySCF's `get_grad` defines it: the virtual-occupied block of the Fock
+#| matrix in the orbitals of the density (doubled for a closed shell). The
+#| occupied orbitals are the eigenvectors of the density in the orthonormal
+#| basis, `X^T S D S X`, with eigenvalue 2 (closed shell) or 1 (a spin
+#| density); the virtual ones are the rest.
+def sts_orbital_gradient(H: Arr, S: Arr, G: Arr, D: Arr, opts: Arr, nd) {
+    F = sts_fock(H, G, D, opts, nd)
+    X = sts_orth(S, opts)
+    m = shape(X)[1]
+    w = 1.0
+    if nd < 2 {
+        w = 2.0
+    }
+    g = 0.0
+    for d to nd {
+        R = eig_ql(sts_congruence(S @ slab(D, d) @ S, X), X, opts)
+        Fp = sts_congruence(slab(F, d), X)
+        for a to m {
+            if R[0, a] < 0.5 * w {
+                for i to m {
+                    if R[0, i] > 0.5 * w {
+                        s = 0.0
+                        for p to m {
+                            for q to m {
+                                s = s + R[1 + p, a] * Fp[p, q] * R[1 + q, i]
+                            }
+                        }
+                        g = max(g, w * abs(s))
+                    }
+                }
+            }
+        }
+    }
+    return g
+}
+
+#| The determinant of the leading `k x k` block of `A`, by Gaussian
+#| elimination with partial pivoting.
+def sts_det(A: Arr, k) {
+    B = A[0:k, 0:k]
+    det = 1.0
+    for c to k {
+        p = c
+        for t to k - c - 1 {
+            r = c + 1 + t
+            if abs(B[r, c]) > abs(B[p, c]) {
+                p = r
+            }
+        }
+        if p != c {
+            det = -det
+            row = B[c, :]
+            B[c, :] = B[p, :]
+            B[p, :] = row
+        }
+        det = det * B[c, c]
+        for t to k - c - 1 {
+            r = c + 1 + t
+            f = B[r, c] / B[c, c]
+            B[r, :] = B[r, :] - f * B[c, :]
+        }
+    }
+    return det
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

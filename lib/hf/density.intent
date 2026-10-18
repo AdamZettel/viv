@@ -1,0 +1,201 @@
+module lib/hf/density
+  The SCF's state is a density matrix, and this module holds the small matrix
+  kernels the SCF loop applies to it: building a density from orbitals, the
+  Fock matrices from J and K, moving matrices into the orthonormal basis,
+  the commutator that measures how far a density is from self-consistent,
+  the energy, and the checks a converged density must pass.
+
+  A density matrix says where the electrons are, written on the basis
+  functions: `D_ij = w sum_k c_ik c_jk` over the occupied orbitals k, where
+  `c_ik` is orbital k's coefficient on basis function i and the occupation w
+  is 2 for a closed-shell total density (two electrons per orbital) and 1 for
+  one spin's density. `Tr(D S)`, with S the overlap matrix of the basis
+  functions, is the number of electrons in D.
+
+den_stack1  @b7544a4e
+  why    The J/K builders take every density as one stack `[ndens, n, n]`;
+         a closed shell has one.
+  A      the matrix to wrap, `[n, n]`
+  n      its size
+  D      the stack, `[1, n, n]`
+
+den_stack2  @b00be1ab
+  why    The same for the two spin densities of UHF and ROHF.
+  A      the first matrix (alpha spin), `[n, n]`
+  B      the second matrix (beta spin), `[n, n]`
+  n      their size
+  D      the stack, `[2, n, n]`
+
+den_from_vectors  @31f7e145
+  why    This is the density step of the SCF: after the Fock matrix is
+         diagonalized, its lowest eigenvectors are the occupied orbitals, and
+         the density is the sum of their outer products, `w C C^T` with the
+         orbitals as the columns of C.
+  X      the orthogonalizer, `[n, m]`: takes an orbital from the orthonormal
+         basis back to the basis functions
+  V      the eigenvectors in the orthonormal basis, one per column, `[m, m]`
+  m      the size of the orthonormal basis
+  k0     the first orbital to include
+  k1     one past the last orbital to include
+  w      the occupation of each orbital: 2 or 1
+  n      the number of basis functions
+  C      the orbitals on the basis functions, columns k0 .. k1-1 of `X V`, `[n, k1 - k0]`
+
+den_fock  @1749fdd5
+  why    The Fock matrix is the one-electron Hamiltonian plus the average
+         repulsion of the other electrons. For a closed shell that is
+         `H + J - K/2`: J is the full repulsion of the total density, and
+         half of K removes the exchange part, which acts only between
+         electrons of the same spin. With two spin densities each spin feels
+         the J of both and the K of its own.
+  H      the one-electron Hamiltonian, kinetic energy plus attraction to the
+         nuclei, `[n, n]`
+  JK     J and K of each density, `[2 nd, n, n]`: J at `2 d`, K at `2 d + 1`
+  nd     how many densities: 1 or 2
+  n      the number of basis functions
+  F      the Fock matrices, `[nd, n, n]`
+  jt     the J of the total density: the sum of both spins' J
+
+den_orth  @3b1d698d
+  why    The eigenproblem `F C = S C e` becomes an ordinary symmetric one,
+         `F' V = V e`, in the orthonormal basis: `F' = X^T F X`.
+  X      the orthogonalizer, `[n, m]`
+  A      the matrix to transform, `[n, n]`
+  m      the size of the orthonormal basis
+  Xm     the first m columns of X, `[n, m]`, copied only when X has more
+
+  = Xm   X keeps more columns than m: the product needs the first m
+
+den_orth_density  @ae4d827a
+  why    A density transforms the other way from a Fock matrix: it is
+         `X^T S D S X` in the orthonormal basis, not `X^T D X`. DIIS measures
+         the commutator of F and D there.
+  X      the orthogonalizer, `[n, m]`
+  S      the overlap matrix of the basis functions, `[n, n]`
+  D      the density, `[n, n]`
+  m      the size of the orthonormal basis
+
+den_orth_density_sx  @ab745f47
+  why    The SCF loop moves a new density into the orthonormal basis every
+         iteration, and `S X` does not change, so the loop computes it once
+         and this does the remaining two products.
+  U      `S X`, `[n, m]`
+  D      the density, `[n, n]`
+
+den_commutator  @5a88a197
+  why    At self-consistency the density and the Fock matrix built from it
+         commute, so the commutator is the SCF's error: its largest entry
+         decides convergence, and DIIS mixes past Fock matrices to make it
+         small.
+  Fp     the Fock matrix in the orthonormal basis, `[m, m]`
+  Pp     the density in the orthonormal basis, `[m, m]`
+  m      their size
+  E      the commutator `F' P' - P' F'`, `[m, m]`
+  s      one entry being summed
+
+den_commutator_sym  @843783ba
+  why    The SCF's commutator is between two symmetric matrices, and then
+         `P' F' = (F' P')^T`: one matrix product and a transpose give it, where
+         the definition takes two products' worth of scalar loops, which were
+         most of the DIIS stage's time. `den_commutator` checks it [test "the one-product commutator is the term-by-term one on symmetric matrices"].
+  Fp     the Fock matrix in the orthonormal basis, `[m, m]`, symmetric
+  Pp     the density in the orthonormal basis, `[m, m]`, symmetric
+  A      `F' P'`
+
+den_maxabs  @846905b3
+  why    The convergence test and the checks compare the largest entry of an
+         error matrix with a tolerance.
+  A      the matrix
+
+den_ao_commutator  @f525aef8
+  why    The same stationarity condition as `den_commutator`, written in the
+         original basis, `F D S - S D F`; the SCF reports it in its result so
+         the convergence can be checked without the orthogonalizer.
+  F      the stack of Fock matrices
+  f      which Fock matrix
+  D      the stack of densities
+  d      which density
+  S      the overlap matrix, `[n, n]`
+  FDS    the product `F D S`, `[n, n]`; `S D F` is its transpose when all
+         three matrices are symmetric
+
+den_trace  @7b3f4803
+  why    `Tr(D S)` is the number of electrons a density holds, the first check
+         a density must pass
+         [test "reference RHF densities hold N electrons and D S D = 2 D"].
+  D      the stack of densities
+  d      which density
+  S      the overlap matrix, `[n, n]`
+
+den_trace2  @73190143
+  why    `Tr(D_a S D_b S)` measures how much the alpha and beta orbitals
+         overlap; `den_s2` needs it for the spin of a UHF state.
+  D      the stack of densities
+  a      the first density's index
+  b      the second density's index
+  S      the overlap matrix, `[n, n]`
+  P      `D_a S`, `[n, n]`
+  Q      `D_b S`, `[n, n]`
+
+den_idempotency  @4f79db48
+  why    A density built from orthonormal occupied orbitals satisfies
+         `D S D = w D`; how far it is from that shows whether the orbitals
+         were orthonormal and fully occupied.
+  D      the stack of densities
+  d      which density
+  S      the overlap matrix, `[n, n]`
+  w      the occupation: 2 or 1
+  A      density d, `[n, n]`
+
+den_fnorm  @5e424ca3
+  why    The guess tests compare densities by size.
+  D      the stack of matrices
+  d      which one
+  A      matrix d
+
+den_gap  @1490c63f
+  why    Tests compare two densities entry by entry.
+  A      the first stack
+  a      which matrix of it
+  B      the second stack
+  b      which matrix of it
+
+den_energy  @37e5dc1f
+  why    One formula gives the RHF energy (total density, closed-shell F) and
+         the UHF energy (spin densities, spin F); the half corrects for
+         counting each pair of electrons twice in F.
+  H      the one-electron Hamiltonian, `[n, n]`
+  F      the Fock matrices, `[ndens, n, n]`
+  D      the densities, `[ndens, n, n]`
+  ndens  how many densities
+  enuc   the repulsion between the nuclei, in hartree
+  n      the number of basis functions
+  Hs     H once per density, `[ndens, n, n]`, so the sum runs over the three
+         arrays entry by entry
+  d      a density
+
+den_s2  @a01446d1
+  why    A UHF state can mix in higher spin states; $\langle S^2 \rangle$
+         shows how much. It equals $S(S+1)$ when every beta orbital is also an
+         alpha one
+         [test "reference UHF spin densities: electron counts, projectors and <S^2>"].
+  D      the alpha and beta densities, `[2, n, n]`
+  S      the overlap matrix
+  na     the number of alpha electrons
+  nb     the number of beta electrons
+  sz     the spin's projection $S_z = (N_a - N_b)/2$
+
+den_lowest  @538d7a54
+  why    ROHF fills orbitals by a rule that skips some of them; this picks the
+         lowest ones that remain, with a fixed tie rule so both engines pick
+         the same ones
+         [test "the lowest-k picker skips masked entries and breaks ties low"].
+  v      the values to pick from, such as orbital energies
+  m      how many values
+  k      how many to pick
+  mask   `1` for a value that may not be picked
+  idx    the picked positions, lowest value first
+  taken  `1` for a position already picked
+  c      how many have been picked
+  best   the lowest value's position so far this round, or `-1` for none
+  a      a candidate position

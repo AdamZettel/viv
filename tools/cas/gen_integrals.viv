@@ -1,0 +1,778 @@
+###
+post: The generator of lib/hf/mdg_kernels: McMurchie-Davidson kernels written by lib/cas
+agent: claude
+
+A test project of the CAS. This program states the
+McMurchie-Davidson recurrences as expressions in the CAS's store
+(lib/cas/store), checks them, and prints lib/hf/mdg_kernels.viv: straight-line
+Viv, one def per angular-momentum class, through lib/cas/codegen.
+`tools/cas/gen-integrals.sh` runs it and writes the file;
+`tools/cas/gen-integrals.sh --check` fails when the committed file is not
+what this program prints.
+
+**What it generates.**
+
+- `mdg_r_<L>` for `L = 0 .. 12`, the Hermite integrals `pref R(0; t, u, v)`
+  for `t + u + v <= L`, written into the cube layout of `herm_rfill`
+  (lib/hf/hermite). Each level's entries are locals; the recurrence is
+  `R(n; t, u, v) = X R(n+1; t-1, u, v) + (t-1) R(n+1; t-2, u, v)` and its
+  `u` and `v` forms, as `herm_rfill` runs it. Every sum has two terms and
+  every product two factors, so the order the store puts them in changes no
+  bit: the kernel's values are `herm_rfill`'s, bit for bit.
+- `mdg_e_<la><lb>` for `la, lb <= 3`, the E table of one axis in the layout
+  of `herm_efill`, raised as `herm_efill` raises it (`i` first with
+  `j = 0`, then `j`). The store makes equal entries one node, so
+  `E(1, 0, 1)` and `E(0, 1, 1)`, both `K/(2p)`, are computed once.
+- `mdg_pair_<la><lb>` for `la, lb <= 3`, one primitive pair's Hermite
+  expansion of every Cartesian component pair: the E tables of the three
+  axes from `mdg_e_<la><lb>`, then
+  `V[(i nb + j) nh + h] = N_i N_j E^x E^y E^z` for each component pair and
+  each Hermite function `h = (t, u, v)` the pair reaches, `N` the unit
+  factors of lib/hf/basis. Entries no pair reaches (`t` past `i_x + j_x`)
+  are not written. Products are formed `E^x E^y`, then `E^z`, then `N`, so a
+  prefix shared by several entries is computed once.
+- `mdg_rfill` and `mdg_pair`, which pick the def of a class.
+
+**Why the E tables are arrays and the R levels locals.** C compile time.
+The C compiler takes far longer over one long def whose values all stay
+live than over the same work read from an array: with the E coefficients as
+locals the sixteen pair defs took 52 s of `cc -O2` (the defs alone, at a
+load of about 100); with them in arrays, 20 s at the same load and 7.4 s on
+a quiet machine, where the thirteen R defs take 3.2 s. The R levels are short-lived and
+cost little either way. A generated block of the quartet loop's Hermite
+matrix (`BR` in lib/hf/mdg_eri) was tried and dropped: it ran no faster
+than the loop over offset tables that replaced it, and it added more compile
+time than the rest together.
+
+**What it checks before printing.** Every `E(i, j, t)` with `i, j <= 3` as
+the recurrence builds it is expanded to the canonical form of a polynomial
+in `s = 1/(2p)`, `X_PA`, `X_PB` and `K`, and so is the direct expansion:
+`x_A^i x_B^j = sum C(i,k) C(j,m) X_PA^(i-k) X_PB^(j-m) x_P^(k+m)` with
+`x_P^k exp(-p x_P^2) = sum_t a(k, t) Lambda_t`, where
+`x_P Lambda_t = s Lambda_(t+1) + t Lambda_(t-1)` gives
+`a(k+1, t) = s a(k, t-1) + (t+1) a(k, t+1)`. Equal nodes are a proof
+(`Verdict.Proved`). The program stops before printing if one pair differs.
+###
+import cas.cas
+from cas.calculus import cas_certify, Verdict
+from cas.store import C_ONE, C_ZERO, cas_add, cas_addv, cas_int, cas_mul, cas_mulv, cas_pow, cas_sym
+from cas.codegen import cg_emit, cg_lit, cg_out, cg_reset, cg_stats, cg_symtext
+from hf.basis import bas_nc, bas_powers
+from hf.cart2sph import c2s_block
+
+# the highest angular momentum of a shell: f
+GEN_LMAX = 3
+# the highest total of a shell quartet, (ff|ff)
+GEN_RMAX = 12
+# terms of a contraction sum on one generated line
+GEN_TERMS_PER_LINE = 4
+
+#| `E(i, j, t)`'s symbol on axis `ax` ("x", "y", "z").
+def gen_esym(ax: Str, i, j, t) -> Str {
+    return f"e{ax}_{i:.0f}_{j:.0f}_{t:.0f}"
+}
+
+#| `R(m; t, u, v)`'s symbol: `r<m>` at the origin, `q<m>_<t>_<u>_<v>` elsewhere.
+def gen_rsym(m, t, u, v) -> Str {
+    if t == 0 and u == 0 and v == 0 {
+        return f"r{m:.0f}"
+    }
+    return f"q{m:.0f}_{t:.0f}_{u:.0f}_{v:.0f}"
+}
+
+#| The Hermite functions of order up to `L`.
+def gen_nh(L) {
+    return (L + 1) * (L + 2) * (L + 3) / 6
+}
+
+#| Index of `(t, u, v)` in the Hermite list of order `L` (`herm_tuv`).
+def gen_hidx(L, t, u, v) {
+    h = 0
+    for a to L + 1 {
+        for b to L - a + 1 {
+            for c to L - a - b + 1 {
+                if a == t and b == u and c == v {
+                    return h
+                }
+                h = h + 1
+            }
+        }
+    }
+    return -1
+}
+
+def gen_print(lines) {
+    for l in lines {
+        print(l)
+    }
+    return 0
+}
+
+# ---- R ---------------------------------------------------------------------------
+
+#| `R(n; t, u, v)` from level `n + 1` as `herm_rfill` computes it.
+def gen_rexpr(n, t, u, v) {
+    m = n + 1
+    if t >= 1 {
+        e = cas_mul(cas_sym("X"), cas_sym(gen_rsym(m, t - 1, u, v)))
+        if t >= 2 {
+            e = cas_add(e, cas_mul(cas_int(t - 1), cas_sym(gen_rsym(m, t - 2, u, v))))
+        }
+        return e
+    }
+    if u >= 1 {
+        e = cas_mul(cas_sym("Y"), cas_sym(gen_rsym(m, 0, u - 1, v)))
+        if u >= 2 {
+            e = cas_add(e, cas_mul(cas_int(u - 1), cas_sym(gen_rsym(m, 0, u - 2, v))))
+        }
+        return e
+    }
+    e = cas_mul(cas_sym("Z"), cas_sym(gen_rsym(m, 0, 0, v - 1)))
+    if v >= 2 {
+        e = cas_add(e, cas_mul(cas_int(v - 1), cas_sym(gen_rsym(m, 0, 0, v - 2))))
+    }
+    return e
+}
+
+#| The def `mdg_r_<L>`; returns its number of operations.
+def gen_r(L) {
+    D = L + 1
+    print("")
+    print(f"#| `pref R(0; t, u, v)` for `t + u + v <= {L:.0f}` into `S` at `(t D + u) D + v`, `D = {D:.0f}`:")
+    print(f"#| `herm_rfill(S, {L:.0f}, al, X, Y, Z, F, pref)` without the loops. `F` holds `F_0 .. F_{L:.0f}`.")
+    print(f"def mdg_r_{L:.0f}(S: Arr, al, X, Y, Z, F: Arr, pref) " + "{")
+    ops = 0
+    if L > 0 {
+        print("    m2a = -2.0 * al")
+        ops = ops + 1
+    }
+    print("    r0 = pref * F[0]")
+    ops = ops + 1
+    for n to L {
+        if n == 0 {
+            print("    w1 = pref * m2a")
+        }
+        else {
+            print(f"    w{n + 1:.0f} = w{n:.0f} * m2a")
+        }
+        print(f"    r{n + 1:.0f} = w{n + 1:.0f} * F[{n + 1:.0f}]")
+        ops = ops + 2
+    }
+    cg_reset()
+    for k to L + 1 {
+        n = L - k
+        top = L - n
+        for t to top + 1 {
+            for u to top - t + 1 {
+                for v to top - t - u + 1 {
+                    if t + u + v > 0 {
+                        lhs = gen_rsym(n, t, u, v)
+                        if n == 0 {
+                            lhs = f"S[{(t * D + u) * D + v:.0f}]"
+                        }
+                        cg_out(lhs, gen_rexpr(n, t, u, v))
+                    }
+                }
+            }
+        }
+    }
+    cg_out("S[0]", cas_sym("r0"))
+    gen_print(cg_emit("    "))
+    st = cg_stats()
+    print("    return 0")
+    print("}")
+    return ops + st[2]
+}
+
+# ---- E and the pair expansion -------------------------------------------------------
+
+#| `E(i, j, t)` on axis `ax` from the entry it is raised from, as `herm_efill`
+#| raises it: `i` first with `j = 0`, then `j`.
+def gen_eexpr(ax: Str, i, j, t) {
+    o2p = cas_sym("o2p")
+    terms = []
+    if j == 0 {
+        x = cas_sym("xa" + ax)
+        if t > 0 {
+            terms = append(terms, cas_mul(o2p, cas_sym(gen_esym(ax, i - 1, 0, t - 1))))
+        }
+        if t <= i - 1 {
+            terms = append(terms, cas_mul(x, cas_sym(gen_esym(ax, i - 1, 0, t))))
+        }
+        if t + 1 <= i - 1 {
+            terms = append(terms, cas_mul(cas_int(t + 1), cas_sym(gen_esym(ax, i - 1, 0, t + 1))))
+        }
+        return cas_addv(terms)
+    }
+    x = cas_sym("xb" + ax)
+    if t > 0 {
+        terms = append(terms, cas_mul(o2p, cas_sym(gen_esym(ax, i, j - 1, t - 1))))
+    }
+    if t <= i + j - 1 {
+        terms = append(terms, cas_mul(x, cas_sym(gen_esym(ax, i, j - 1, t))))
+    }
+    if t + 1 <= i + j - 1 {
+        terms = append(terms, cas_mul(cas_int(t + 1), cas_sym(gen_esym(ax, i, j - 1, t + 1))))
+    }
+    return cas_addv(terms)
+}
+
+#| Where `E(i, j, t)` sits in a flat table of `herm_efill`'s layout.
+def gen_eidx(la, lb, i, j, t) {
+    return (i * (lb + 1) + j) * (la + lb + 1) + t
+}
+
+#| The def `mdg_e_<la><lb>`: the E table of one axis, `herm_efill`'s recurrence
+#| without loops; returns its number of operations.
+def gen_e(la, lb) {
+    L = la + lb
+    print("")
+    print(f"#| The E table of one axis for powers up to `({la:.0f}, {lb:.0f})`, exponents `a` and `b`,")
+    print("#| `X = A - B` on the axis: `herm_efill(E, 0, la, lb, a, b, X)` without the loops.")
+    print(f"def mdg_e_{la:.0f}{lb:.0f}(E: Arr, a, b, X) " + "{")
+    print("    p = a + b")
+    if L > 0 {
+        print("    o2p = 0.5 / p")
+    }
+    if la > 0 {
+        print("    xax = -b * X / p")
+    }
+    if lb > 0 {
+        print("    xbx = a * X / p")
+    }
+    print("    E[0] = exp(-a * b / p * X * X)")
+    for i to la + 1 {
+        for j to lb + 1 {
+            for t to i + j + 1 {
+                cg_symtext(gen_esym("x", i, j, t), f"E[{gen_eidx(la, lb, i, j, t):.0f}]")
+            }
+        }
+    }
+    cg_reset()
+    for i to la {
+        for t to i + 2 {
+            cg_out(f"E[{gen_eidx(la, lb, i + 1, 0, t):.0f}]", gen_eexpr("x", i + 1, 0, t))
+        }
+    }
+    for j to lb {
+        for i to la + 1 {
+            for t to i + j + 2 {
+                cg_out(f"E[{gen_eidx(la, lb, i, j + 1, t):.0f}]", gen_eexpr("x", i, j + 1, t))
+            }
+        }
+    }
+    gen_print(cg_emit("    "))
+    print("    return 0")
+    print("}")
+    return 6 + cg_stats()[2]
+}
+
+#| The def `mdg_pair_<la><lb>`; returns `[entries written, operations]`.
+def gen_pair(la, lb) {
+    L = la + lb
+    PA = bas_powers(la)
+    PB = bas_powers(lb)
+    na = len(PA)
+    nb = len(PB)
+    print("")
+    print(f"#| One primitive pair of a `({la:.0f}, {lb:.0f})` shell pair, exponents `a` and `b`, centers")
+    print("#| `A - B = (X, Y, Z)`: `V[(i nb + j) nh + h] = N_i N_j E^x E^y E^z` for component `i` of")
+    print(f"#| the first shell, `j` of the second and Hermite function `h` of order `{L:.0f}`.")
+    print("#| Entries no component pair reaches are left as they are (the caller zeroes `V`).")
+    print("#| `EX`, `EY` and `EZ` are scratch for the E tables, `herm_esize(la, lb)` each.")
+    print(f"def mdg_pair_{la:.0f}{lb:.0f}(V: Arr, EX: Arr, EY: Arr, EZ: Arr, a, b, X, Y, Z) " + "{")
+    axes = ["x", "y", "z"]
+    for k to 3 {
+        ax = axes[k]
+        AX = ["X", "Y", "Z"][k]
+        print(f"    mdg_e_{la:.0f}{lb:.0f}(E{AX}, a, b, {AX})")
+        for i to la + 1 {
+            for j to lb + 1 {
+                for t to i + j + 1 {
+                    cg_symtext(gen_esym(ax, i, j, t), f"E{AX}[{gen_eidx(la, lb, i, j, t):.0f}]")
+                }
+            }
+        }
+    }
+    ops = 0
+    cg_reset()
+    wnames = map()
+    nw = 0
+    nent = 0
+    for i to na {
+        for j to nb {
+            nn = bas_nc(PA[i, 0], PA[i, 1], PA[i, 2]) * bas_nc(PB[j, 0], PB[j, 1], PB[j, 2])
+            w = C_ONE
+            if nn != 1.0 {
+                key = fmt(nn)
+                if not has(wnames, key) {
+                    wnames[key] = f"w{nw:.0f}"
+                    cg_symtext(f"w{nw:.0f}", cg_lit(nn))
+                    nw = nw + 1
+                }
+                w = cas_sym(wnames[key])
+            }
+            tx = PA[i, 0] + PB[j, 0]
+            ty = PA[i, 1] + PB[j, 1]
+            tz = PA[i, 2] + PB[j, 2]
+            for t to tx + 1 {
+                for u to ty + 1 {
+                    for v to tz + 1 {
+                        e = cas_mulv([cas_sym(gen_esym("x", PA[i, 0], PB[j, 0], t)), cas_sym(gen_esym("y", PA[i, 1], PB[j, 1], u)), cas_sym(gen_esym("z", PA[i, 2], PB[j, 2], v)), w])
+                        cg_out(f"V[{(i * nb + j) * gen_nh(L) + gen_hidx(L, t, u, v):.0f}]", e)
+                        nent = nent + 1
+                    }
+                }
+            }
+        }
+    }
+    gen_print(cg_emit("    "))
+    st = cg_stats()
+    print("    return 0")
+    print("}")
+    return [nent, ops + st[2]]
+}
+
+# ---- the contractions ------------------------------------------------------------
+
+#| Which Hermite functions each row of a `(la, lb)` pair's E matrix reaches,
+#| `[rows, nh]`, 1 where the row has an entry: a Cartesian row `(i, j)`
+#| reaches `(t, u, v)` with `t <= i_x + j_x`, `u <= i_y + j_y`,
+#| `v <= i_z + j_z`; with `sph = 1` a spherical row `(qa, qb)` reaches what
+#| any Cartesian row with a nonzero coefficient in its column of
+#| `M_a (x) M_b` reaches (lib/hf/cart2sph's `c2s_block`).
+def gen_reach(la, lb, sph) -> Arr {
+    PA = bas_powers(la)
+    PB = bas_powers(lb)
+    na = len(PA)
+    nb = len(PB)
+    L = la + lb
+    nh = gen_nh(L)
+    P = zeros(na * nb, nh)
+    for i to na {
+        for j to nb {
+            for t to PA[i, 0] + PB[j, 0] + 1 {
+                for u to PA[i, 1] + PB[j, 1] + 1 {
+                    for v to PA[i, 2] + PB[j, 2] + 1 {
+                        P[i * nb + j, gen_hidx(L, t, u, v)] = 1
+                    }
+                }
+            }
+        }
+    }
+    if sph == 0 {
+        return P
+    }
+    Ma = c2s_block(la)
+    Mb = c2s_block(lb)
+    ma = shape(Ma)[1]
+    mb = shape(Mb)[1]
+    Q = zeros(ma * mb, nh)
+    for qa to ma {
+        for qb to mb {
+            for i to na {
+                for j to nb {
+                    if Ma[i, qa] != 0.0 and Mb[j, qb] != 0.0 {
+                        for h to nh {
+                            if P[i * nb + j, h] > 0 {
+                                Q[qa * mb + qb, h] = 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Q
+}
+
+#| `x + c` as text, nothing added for `c = 0`.
+def gen_plus(x: Str, c) -> Str {
+    if c == 0 {
+        return x
+    }
+    return f"{x} + {c:.0f}"
+}
+
+#| `dst += t_0 + t_1 + ...`, summed left to right, written `GEN_TERMS_PER_LINE`
+#| terms to a line through the local `a`, so that no line is long (the C
+#| backend quotes a site's source line in each of its messages).
+def gen_sum(ind: Str, dst: Str, terms) {
+    n = len(terms)
+    if n <= GEN_TERMS_PER_LINE {
+        print(f"{ind}{dst} = {dst} + " + join(" + ", terms))
+        return 0
+    }
+    print(f"{ind}a = {dst} + " + join(" + ", terms[0:GEN_TERMS_PER_LINE]))
+    k = GEN_TERMS_PER_LINE
+    while k < n {
+        print(f"{ind}a = a + " + join(" + ", terms[k:min(n, k + GEN_TERMS_PER_LINE)]))
+        k = k + GEN_TERMS_PER_LINE
+    }
+    print(f"{ind}{dst} = a")
+    return 0
+}
+
+#| The suffix of a class: `<la><lb>`, and `s` for the spherical rows.
+def gen_cls(la, lb, sph) -> Str {
+    if sph > 0 {
+        return f"{la:.0f}{lb:.0f}s"
+    }
+    return f"{la:.0f}{lb:.0f}"
+}
+
+#| The ket contraction of one primitive quartet for a ket pair of class
+#| `(lc, ld)`: `T[r0 + ha, g nr + r] += sum_h E[g nr + r, m nh + h] (-1)^(t+u+v) R[ha + h]`
+#| over the Hermite functions `h = (t, u, v)` row `r` reaches. Returns the
+#| number of terms.
+def gen_kc(lc, ld, sph) {
+    P = gen_reach(lc, ld, sph)
+    nr = len(P)
+    L = lc + ld
+    nh = gen_nh(L)
+    cls = gen_cls(lc, ld, sph)
+    print("")
+    print(f"#| The ket contraction of one primitive quartet, ket pair of class `({lc:.0f}, {ld:.0f})`")
+    if sph > 0 {
+        print("#| with spherical rows,")
+    }
+    print(f"#| {nr:.0f} rows per shell pair of `E`, its primitive pair `m`, `ng` shell pairs of the group:")
+    print("#| `T[r0 + ha, g nr + r] += sum_h E[g nr + r, m nh + h] (-1)^(t+u+v) R[o_ha + o_h]`,")
+    print("#| `R` the cube of side `D` in `S`, `o_ha = HT[ia + ha]` the offsets of the bra")
+    print("#| Hermite functions, the sum over the ket ones `h = (t, u, v)` row `r` reaches,")
+    print("#| in ascending order (the order of `E @ BR` in mdg_eri's `mdg_block_general`).")
+    print(f"def mdg_kc_{cls}(T: Arr, r0: Int, E: Arr, m: Int, ng: Int, S: Arr, HT: Arr, ia: Int, nh1: Int, D: Int) " + "{")
+    print("    D2 = D * D")
+    print(f"    x = m * {nh:.0f}")
+    print("    for ha to nh1 {")
+    print("        oa: Int = int(HT[ia + ha])")
+    print("        rt = r0 + ha")
+    h = 0
+    for t to L + 1 {
+        for u to L - t + 1 {
+            for v to L - t - u + 1 {
+                o = "oa"
+                if t > 0 {
+                    o = o + " + " + ("D2" if t == 1 else f"{t:.0f} * D2")
+                }
+                if u > 0 {
+                    o = o + " + " + ("D" if u == 1 else f"{u:.0f} * D")
+                }
+                o = gen_plus(o, v)
+                sg = "-" if mod(t + u + v, 2) == 1 else ""
+                print(f"        w{h:.0f} = {sg}S[{o}]")
+                h = h + 1
+            }
+        }
+    }
+    print("        for g to ng {")
+    print(f"            e = g * {nr:.0f}")
+    nterm = 0
+    for r to nr {
+        row = gen_plus("e", r)
+        terms = [f"E[{row}, " + gen_plus("x", h2) + f"] * w{h2:.0f}" for h2 to nh if P[r, h2] > 0]
+        nterm = nterm + len(terms)
+        gen_sum("            ", f"T[rt, {row}]", terms)
+    }
+    print("        }")
+    print("    }")
+    print("    return 0")
+    print("}")
+    return nterm
+}
+
+#| The bra contraction of a quartet for a bra pair of class `(la, lb)`:
+#| `O[g nr + r, cd] = sum_k sum_h E[g nr + r, k nh + h] T[k nh + h, cd]`.
+#| Returns the number of terms.
+def gen_bc(la, lb, sph) {
+    P = gen_reach(la, lb, sph)
+    nr = len(P)
+    nh = gen_nh(la + lb)
+    cls = gen_cls(la, lb, sph)
+    print("")
+    print(f"#| The bra contraction of a quartet, bra pair of class `({la:.0f}, {lb:.0f})`")
+    if sph > 0 {
+        print("#| with spherical rows,")
+    }
+    print(f"#| {nr:.0f} rows per shell pair of `E`, `np` primitive pairs, `ng` shell pairs of the group:")
+    print("#| `O[g nr + r, cd] += sum_k sum_h E[g nr + r, k nh + h] T[k nh + h, cd]` over the")
+    print("#| Hermite functions `h` row `r` reaches, `k` and `h` ascending (the order of")
+    print("#| `E @ ZT` in mdg_eri's `mdg_block_general`).")
+    print(f"def mdg_bc_{cls}(O: Arr, E: Arr, T: Arr, np: Int, ng: Int, ncd: Int) " + "{")
+    print("    for g to ng {")
+    print(f"        e = g * {nr:.0f}")
+    print("        for k to np {")
+    print(f"            x = k * {nh:.0f}")
+    print("            for cd to ncd {")
+    nterm = 0
+    for r to nr {
+        row = gen_plus("e", r)
+        terms = [f"E[{row}, " + gen_plus("x", h) + "] * T[" + gen_plus("x", h) + ", cd]" for h to nh if P[r, h] > 0]
+        nterm = nterm + len(terms)
+        gen_sum("                ", f"O[{row}, cd]", terms)
+    }
+    print("            }")
+    print("        }")
+    print("    }")
+    print("    return 0")
+    print("}")
+    return nterm
+}
+
+#| The gather of one primitive quartet's Hermite values for a ket pair of
+#| total order `L2`: `BR[o + h ncol + ha] = (-1)^(t+u+v) R[o_ha + o_h]` for each
+#| bra Hermite function `ha` of order up to `L1` and ket one `h = (t, u, v)`,
+#| `R` the cube of side `D` in `S`. Returns the number of entries per bra function.
+def gen_gather(L2) {
+    nh = gen_nh(L2)
+    print("")
+    print(f"#| The Hermite values of one primitive quartet with a ket pair of total order `{L2:.0f}`,")
+    print("#| signed and gathered for the ket contraction: for each bra Hermite function")
+    print("#| `ha = (ta, ua, va)` of order up to `L1` and each ket one `h = (t, u, v)`,")
+    print("#| `BR[o + h ncol + ha] = (-1)^(t+u+v) R(ta + t, ua + u, va + v)`, `R` the cube of side")
+    print("#| `D` in `S` (`herm_rfill`'s layout). The ket offsets are constants; the bra ones")
+    print("#| are Int arithmetic, where mdg_eri's general gather reads both from a table.")
+    print(f"def mdg_gather_{L2:.0f}(BR: Arr, o: Int, ncol: Int, S: Arr, L1: Int, D: Int) " + "{")
+    print("    D2 = D * D")
+    # the ket functions' cube offsets and rows of BR, once per call
+    h = 0
+    for t to L2 + 1 {
+        for u to L2 - t + 1 {
+            for v to L2 - t - u + 1 {
+                if h > 0 {
+                    off = ""
+                    if t > 0 {
+                        off = "D2" if t == 1 else f"{t:.0f} * D2"
+                    }
+                    if u > 0 {
+                        du = "D" if u == 1 else f"{u:.0f} * D"
+                        off = du if off == "" else off + " + " + du
+                    }
+                    if v > 0 {
+                        off = f"{v:.0f}" if off == "" else off + f" + {v:.0f}"
+                    }
+                    print(f"    c{h:.0f}: Int = {off}")
+                    print("    r" + f"{h:.0f}: Int = " + ("ncol" if h == 1 else f"{h:.0f} * ncol"))
+                }
+                h = h + 1
+            }
+        }
+    }
+    print("    b = o")
+    print("    for ta to L1 + 1 {")
+    print("        for ua to L1 - ta + 1 {")
+    print("            for va to L1 - ta - ua + 1 {")
+    print("                oa = ta * D2 + ua * D + va")
+    h = 0
+    for t to L2 + 1 {
+        for u to L2 - t + 1 {
+            for v to L2 - t - u + 1 {
+                sg = "-" if mod(t + u + v, 2) == 1 else ""
+                if h == 0 {
+                    print(f"                BR[b] = {sg}S[oa]")
+                }
+                else {
+                    print(f"                BR[b + r{h:.0f}] = {sg}S[oa + c{h:.0f}]")
+                }
+                h = h + 1
+            }
+        }
+    }
+    print("                b = b + 1")
+    print("            }")
+    print("        }")
+    print("    }")
+    print("    return 0")
+    print("}")
+    return nh
+}
+
+# ---- the proof that the E recurrence is the definition ---------------------------------
+
+GEN_S = cas_sym("s")
+GEN_XA = cas_sym("X_PA")
+GEN_XB = cas_sym("X_PB")
+GEN_K = cas_sym("K")
+# E by the recurrence of the kernels and by direct expansion: key (i 16 + j) 32 + t
+GEN_ER = map()
+GEN_ED = map()
+# a(k, t): x_P^k in Hermite Gaussians, key k 32 + t
+GEN_A = map()
+
+def gen_ekey(i, j, t) {
+    return (i * 16 + j) * 32 + t
+}
+
+def gen_eget(tab, i, j, t) {
+    if t < 0 or t > i + j {
+        return C_ZERO
+    }
+    return tab[gen_ekey(i, j, t)]
+}
+
+def gen_aget(k, t) {
+    if t < 0 or t > k {
+        return C_ZERO
+    }
+    return GEN_A[k * 32 + t]
+}
+
+#| Both tables for `i, j <= lmax`; returns `[pairs, proved]`.
+def gen_prove_e(lmax) {
+    GEN_ER[gen_ekey(0, 0, 0)] = GEN_K
+    for i to lmax {
+        for t to i + 2 {
+            GEN_ER[gen_ekey(i + 1, 0, t)] = cas_addv([cas_mul(GEN_S, gen_eget(GEN_ER, i, 0, t - 1)), cas_mul(GEN_XA, gen_eget(GEN_ER, i, 0, t)), cas_mul(cas_int(t + 1), gen_eget(GEN_ER, i, 0, t + 1))])
+        }
+    }
+    for j to lmax {
+        for i to lmax + 1 {
+            for t to i + j + 2 {
+                GEN_ER[gen_ekey(i, j + 1, t)] = cas_addv([cas_mul(GEN_S, gen_eget(GEN_ER, i, j, t - 1)), cas_mul(GEN_XB, gen_eget(GEN_ER, i, j, t)), cas_mul(cas_int(t + 1), gen_eget(GEN_ER, i, j, t + 1))])
+            }
+        }
+    }
+    GEN_A[0] = C_ONE
+    for k to 2 * lmax {
+        for t to k + 2 {
+            GEN_A[(k + 1) * 32 + t] = cas_add(cas_mul(GEN_S, gen_aget(k, t - 1)), cas_mul(cas_int(t + 1), gen_aget(k, t + 1)))
+        }
+    }
+    pairs = 0
+    proved = 0
+    for i to lmax + 1 {
+        for j to lmax + 1 {
+            for t to i + j + 1 {
+                terms = []
+                for k to i + 1 {
+                    for m to j + 1 {
+                        c = cas_int(bas_binom(i, k) * bas_binom(j, m))
+                        terms = append(terms, cas_mulv([c, cas_pow(GEN_XA, cas_int(i - k)), cas_pow(GEN_XB, cas_int(j - m)), gen_aget(k + m, t)]))
+                    }
+                }
+                d = cas_mul(GEN_K, cas_addv(terms))
+                v, why = cas_certify(gen_eget(GEN_ER, i, j, t), d)
+                pairs = pairs + 1
+                if v == Verdict.Proved {
+                    proved = proved + 1
+                }
+            }
+        }
+    }
+    return [pairs, proved]
+}
+
+def bas_binom(n, k) {
+    r = 1.0
+    for i to k {
+        r = r * (n - i) / (i + 1)
+    }
+    return r
+}
+
+# ---- the module ------------------------------------------------------------------------
+
+proof = gen_prove_e(GEN_LMAX)
+if proof[1] != proof[0] {
+    stop(f"gen_integrals: {proof[0] - proof[1]:.0f} of {proof[0]:.0f} E(i, j, t) differ from the direct expansion; nothing printed")
+}
+
+print("###")
+print("post: McMurchie-Davidson kernels generated by lib/cas, one def per angular-momentum class")
+print("agent: claude (generated)")
+print("")
+print("Generated by `tools/cas/gen-integrals.sh` from tools/cas/gen_integrals.viv")
+print("through lib/cas/codegen. Do not edit: change the generator and run it again;")
+print("`tools/cas/gen-integrals.sh --check` fails when this file is stale.")
+print("")
+print("- `mdg_r_<L>`, `L = 0 .. 12`: the Hermite integrals `pref R(0; t, u, v)` of")
+print("  `herm_rfill` (lib/hf/hermite), the same recurrence without loops or index")
+print("  arithmetic, bit for bit the same values.")
+print("- `mdg_e_<la><lb>`, `la, lb <= 3` (s to f): the E table of one axis,")
+print("  raised as `herm_efill` raises it.")
+print("- `mdg_pair_<la><lb>`: one primitive pair's Hermite expansion of every")
+print("  Cartesian component pair, `N_i N_j E^x E^y E^z`, only where a pair")
+print("  reaches the Hermite function.")
+print("- `mdg_rfill` and `mdg_pair` pick the def of a class.")
+print("")
+print(f"Before printing, the generator proved that the E recurrence these defs run")
+print(f"is the definition: all {proof[0]:.0f} coefficients `E(i, j, t)` with `i, j <= 3`")
+print("expand to the same canonical polynomial as the direct expansion of")
+print("`x_A^i x_B^j` in Hermite Gaussians (tools/cas/gen_integrals.viv).")
+print("lib/hf/mdg_eri holds the kernels to `herm_rfill` and `herm_efill`.")
+print("")
+print("Used with `import hf.mdg_kernels`.")
+print("###")
+print("")
+print(f"MDG_LMAX = {GEN_LMAX:.0f}")
+print(f"MDG_RMAX = {GEN_RMAX:.0f}")
+rops = 0
+for L to GEN_RMAX + 1 {
+    rops = rops + gen_r(L)
+}
+pent = 0
+pops = 0
+for la to GEN_LMAX + 1 {
+    for lb to GEN_LMAX + 1 {
+        pops = pops + gen_e(la, lb)
+        r = gen_pair(la, lb)
+        pent = pent + r[0]
+        pops = pops + r[1]
+    }
+}
+gent = 0
+for L2 to 2 * GEN_LMAX + 1 {
+    gent = gent + gen_gather(L2)
+}
+print("")
+print("#| `herm_rfill` for `L <= MDG_RMAX` by the def of its class; `-1` and nothing")
+print("#| written above it (no `stop`, so that a `parallel for` may call it).")
+print("def mdg_rfill(S: Arr, L, al, X, Y, Z, F: Arr, pref) {")
+for L to GEN_RMAX + 1 {
+    print(f"    if L == {L:.0f} " + "{")
+    print(f"        return mdg_r_{L:.0f}(S, al, X, Y, Z, F, pref)")
+    print("    }")
+}
+print("    return -1")
+print("}")
+print("")
+print("#| The pair expansion of a `(la, lb)` pair, `la, lb <= MDG_LMAX`, by the def of")
+print("#| its class; `-1` and nothing written above it.")
+print("def mdg_pair(V: Arr, EX: Arr, EY: Arr, EZ: Arr, la, lb, a, b, X, Y, Z) {")
+for la to GEN_LMAX + 1 {
+    for lb to GEN_LMAX + 1 {
+        print(f"    if la == {la:.0f} and lb == {lb:.0f} " + "{")
+        print(f"        return mdg_pair_{la:.0f}{lb:.0f}(V, EX, EY, EZ, a, b, X, Y, Z)")
+        print("    }")
+    }
+}
+print("    return -1")
+print("}")
+print("")
+print("#| The gather of a ket pair of total order `L2 <= 2 MDG_LMAX` by the def of its")
+print("#| order; `-1` and nothing written above it.")
+print("def mdg_gather(BR: Arr, o: Int, ncol: Int, S: Arr, L1: Int, D: Int, L2) {")
+for L2 to 2 * GEN_LMAX + 1 {
+    print(f"    if L2 == {L2:.0f} " + "{")
+    print(f"        return mdg_gather_{L2:.0f}(BR, o, ncol, S, L1, D)")
+    print("    }")
+}
+print("    return -1")
+print("}")
+print("")
+print("test \"the lowest classes by hand: R(0; 0, 0, 1) = Z pref (-2 al) F_1, E(1, 0, 0) = X_PA E(0, 0, 0)\" {")
+print("    mdg_ts = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]")
+print("    mdg_rfill(mdg_ts, 1, 0.7, 0.3, -0.2, 0.5, [0.9, 0.4], 1.5)")
+print("    assert_near(mdg_ts[0], 1.5 * 0.9, 1.0e-15)")
+print("    assert_near(mdg_ts[1], 0.5 * 1.5 * -1.4 * 0.4, 1.0e-15)")
+print("    mdg_te = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]")
+print("    mdg_e_10(mdg_te, 1.2, 0.8, 0.4)")
+print("    assert_near(mdg_te[0], exp(-1.2 * 0.8 / 2.0 * 0.4 * 0.4), 1.0e-15)")
+print("    assert_near(mdg_te[2], -0.8 * 0.4 / 2.0 * mdg_te[0], 1.0e-15)")
+print("    assert_near(mdg_rfill(mdg_ts, MDG_RMAX + 1, 0.7, 0.3, -0.2, 0.5, [0.9, 0.4], 1.5), -1, 0.0)")
+print("}")
+print("")
+print(f"# generated: {GEN_RMAX + 1:.0f} R defs ({rops:.0f} operations), {(GEN_LMAX + 1) * (GEN_LMAX + 1):.0f} pair defs ({pent:.0f} entries, {pops:.0f} operations), {2 * GEN_LMAX + 1:.0f} gather defs ({gent:.0f} entries per bra function)")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

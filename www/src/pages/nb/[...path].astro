@@ -1,0 +1,59 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// Any program in the repository, read as a notebook: posts, lib/, the example
+// programs and the PDE solvers. The page is the file; src/lib/notebook.js cuts
+// it into cells at its `###` prose fences, and a file with none is one cell.
+import { readFileSync } from 'node:fs';
+import Base from '../../layouts/Base.astro';
+import Notebook from '../../components/Notebook.jsx';
+import feed from '../../data/feed.json';
+import { lookInsideLinks } from '../../lib/atlasLink.js';
+import { explorableForPost } from '../../data/explorables.mjs';
+import { notebookFiles, proseHtmlOf, expectedError, EMBED_BYTES } from '../../lib/notebookBuild.js';
+import 'katex/dist/katex.min.css';
+
+export function getStaticPaths() {
+  return notebookFiles().map((f) => ({ params: { path: f.path }, props: { f } }));
+}
+const { f } = Astro.props;
+const src = readFileSync(f.file, 'utf8');
+const embed = f.bytes <= EMBED_BYTES;
+const post = f.head === 'posts' ? feed.posts.find((p) => `posts/${p.slug}` === f.path) : null;
+const day = (iso: string) => new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+const intro = post ? { title: post.title, byline: `${feed.author.name} · ${day(post.date)}${post.agent ? ' · written with an agent' : ''}`, summaryHtml: post.summaryHtml, equationHtml: post.equationHtml } : null;
+const links = [
+  ...(post ? [{ href: `/p/${post.slug}`, label: 'The post' }] : []),
+  { href: f.workbench, label: 'Open in the workbench' },
+  { href: f.url, label: 'Download .viv', download: f.url.split('/').pop() },
+];
+const opened = f.workbench.slice('/workbench?open='.length);
+const explorable = post ? explorableForPost(post.slug) : null;
+const inside = explorable ? lookInsideLinks({ slug: explorable.slug }) : lookInsideLinks({ open: opened });
+const kb = (f.bytes / 1024).toFixed(0);
+---
+
+<Base
+  title={`${post ? post.title : f.path} · notebook · Viv`}
+  description={post ? post.summaryText : `${f.path}.viv, ${kb} KB of Viv, read as a notebook: each cell runs in your browser and shows its output under it.`}>
+  <p class="eyebrow"><a href="/nb">Notebooks</a> · {f.path}</p>
+  {!embed && (
+    <p class="nb-bigfile">This file is {kb} KB, so the page loads it after it opens.</p>
+  )}
+  <Notebook
+    client:load
+    src={embed ? src : null}
+    srcUrl={embed ? null : f.url}
+    name={`${f.path}.viv`}
+    proseHtml={embed ? proseHtmlOf(src) : {}}
+    intro={intro}
+    expectError={expectedError(src)}
+    links={links}
+    inside={inside}
+    problem={post ? post.kind === 'problem' : false}
+  />
+  <style>
+    .nb-bigfile { max-width: 820px; margin: 0 auto 0.6rem; color: var(--text-muted); font-size: 0.9rem; }
+    .eyebrow { max-width: 820px; margin-left: auto; margin-right: auto; overflow-wrap: anywhere; }
+  </style>
+</Base>

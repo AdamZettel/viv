@@ -1,0 +1,45 @@
+# B340 (bugs/ledger.jsonl): appending to an [Int] or Arr that arrived as a
+# parameter and handing it back trapped in wasm after a few dozen calls. A
+# copy of a sealed array was sized by the old block's capacity, which a seal
+# keeps, so each call doubled the block until an allocation failed.
+record Code {
+    xs: [Int]
+}
+
+def put(out: [Int], v: Int) -> [Int] {
+    out = append(out, v)
+    return out
+}
+
+def put_num(out: Arr, v: Num) -> Arr {
+    out = append(out, v)
+    return out
+}
+
+def put_rec(s: Code, v: Int) -> Code {
+    t = s
+    t.xs = append(t.xs, v)
+    return t
+}
+
+calls: Int = 1000
+code: [Int] = []
+nums: Arr = []
+none: [Int] = []
+held = Code { xs: none }
+for k to calls {
+    code = put(code, k)
+    nums = put_num(nums, float(k))
+    held = put_rec(held, 2 * k)
+}
+print(len(code), sum(code), len(nums), sum(nums), len(held.xs), held.xs[calls - 1])
+
+test "an array grown through a parameter keeps every element" {
+    assert_true(len(code) == calls)
+    assert_true(code[calls - 1] == calls - 1)
+    assert_true(len(nums) == calls)
+    assert_true(held.xs[calls - 1] == 2 * (calls - 1))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

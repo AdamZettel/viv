@@ -1,0 +1,55 @@
+# What a phrase calls that is in neither the builtins nor lang/viv/std/contracts.viv.
+#
+# A program that writes `take the root of x^2 - 2 starting at 1 using newton`
+# gets `r_newton` from here: the compiler adds the defs a phrase needs to the
+# program before any engine sees it (lang/viv/src/phrases.rs, `provide`), so
+# the interpreter, C and wasm run them as ordinary defs. `viv phrases` lists
+# the phrase table.
+
+# Newton's method: x <- x - f(x) / f'(x) from x0. The phrase passes `df` as
+# `fn(x) -> deriv(fn(u) -> <expr>, x)`, so f' is the exact forward-mode
+# derivative of the expression, not a difference quotient. Stops when the step
+# is below 1e-15 relative to x, when f(x) is exactly 0, or after 100 steps,
+# and returns the last x.
+def r_newton(f, df, x0) {
+    x = x0
+    k = 0.0
+    while k < 100.0 {
+        fx = f(x)
+        if fx == 0.0 { return x }
+        step = fx / df(x)
+        x = x - step
+        if fabs(step) <= 1.0e-15 * (1.0 + fabs(x)) { return x }
+        k = k + 1.0
+    }
+    return x
+}
+
+# The softmax of a vector: exp of each entry over the sum of them, with the
+# largest entry subtracted first so that no exp overflows.
+def softmax(v: Arr) {
+    e = exp(v - max(v))
+    return e / sum(e)
+}
+
+# The softmax of each row of a matrix (along the last axis of an array of any
+# rank). lib/nn defines the same def with the same text, so a program that
+# uses lib/nn and the phrase gets one def.
+def softmax_rows(X: Arr) {
+    e = exp(X - amax(X, axis=-1, keepdims=true))
+    return e / sum(e, axis=-1, keepdims=true)
+}
+
+# The mean over the rows of the logits of -log of the softmax probability of
+# the target: row i is scored against the column target[i]. The same text as
+# lib/nn's def. The logits may have any rank, with the classes along the last
+# axis and one target per row.
+def cross_entropy(logits: Arr, target: Arr) {
+    classes = numel(logits) / numel(target)
+    top = amax(logits, axis=-1, keepdims=true)
+    logp = logits - top - log(sum(exp(logits - top), axis=-1, keepdims=true))
+    return -mean(take(logp, arange(numel(target)) * classes + ravel(target)))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

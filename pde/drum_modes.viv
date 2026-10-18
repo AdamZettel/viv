@@ -1,0 +1,100 @@
+#! pde The modes of a drum, a Helmholtz eigenproblem
+#! equation -\nabla^2 u = \lambda\,u
+#! kind elliptic
+#! method the five-point Laplacian as a dense symmetric matrix, diagonalized by eig_sym
+#! checks the discrete eigenvalues against their closed form (to rounding), the continuum ones to second order, and the degeneracy a square must have
+#! | Separate variables in the wave equation and what is left is an eigenproblem: the shapes a
+#! | membrane can vibrate in, and the frequencies that go with them. For a unit square fixed at its
+#! | edge the answer is known, $\lambda_{mn} = \pi^2(m^2 + n^2)$ with $u = \sin(m\pi x)\sin(n\pi y)$.
+#! |
+#! | The five-point Laplacian has the same eigenvectors, sampled on the grid, and eigenvalues
+#! | known in closed form as well: $\lambda^h_{mn} = \tfrac{4}{h^2}\left(\sin^2\tfrac{m\pi h}{2} + \sin^2\tfrac{n\pi h}{2}\right)$.
+#! | So there are two checks of different kinds. Against the discrete formula the eigensolver must
+#! | agree to rounding -- that tests `eig_sym`. Against $\pi^2(m^2+n^2)$ it agrees only to $O(h^2)$ --
+#! | that tests the discretization.
+#! |
+#! | A square also forces a degeneracy: $(m,n) = (1,2)$ and $(2,1)$ have the same frequency, so the
+#! | second and third eigenvalues must coincide. Any asymmetry in the assembled matrix would split them.
+
+pi = 3.141592653589793
+
+#| The n^2 x n^2 five-point Laplacian on an n x n interior, Dirichlet, scaled by 1/h^2.
+def laplacian_matrix(n) {
+    h = 1.0 / (n + 1.0)
+    s = 1.0 / (h * h)
+    A = zeros(n * n, n * n)
+    for i to n {
+        for j to n {
+            row = i * n + j
+            A[row, row] = 4.0 * s
+            if i > 0.0 { A[row, row - n] = -s }
+            if i < n - 1.0 { A[row, row + n] = -s }
+            if j > 0.0 { A[row, row - 1.0] = -s }
+            if j < n - 1.0 { A[row, row + 1.0] = -s }
+        }
+    }
+    return A
+}
+
+#| The closed-form discrete eigenvalue for mode (m, n).
+def discrete_lambda(m, n, h) {
+    a = sin(0.5 * m * pi * h)
+    b = sin(0.5 * n * pi * h)
+    return 4.0 / (h * h) * (a * a + b * b)
+}
+
+#| The relative error of the lowest eigenvalue against 2 pi^2, on an n x n grid.
+def fundamental_error(n) {
+    vals = zeros(n * n)
+    vecs = zeros(n * n, n * n)
+    eig_sym(laplacian_matrix(n), vals, vecs)
+    return abs(vals[0] - 2.0 * pi * pi) / (2.0 * pi * pi)
+}
+
+N = 12
+H = 1.0 / (N + 1.0)
+VALS = zeros(N * N)
+VECS = zeros(N * N, N * N)
+eig_sym(laplacian_matrix(N), VALS, VECS)
+lowest = VALS[0] / (pi * pi)
+second = VALS[1] / (pi * pi)
+third = VALS[2] / (pi * pi)
+fourth = VALS[3] / (pi * pi)
+show lowest
+show second
+show third
+show fourth
+order = log(fundamental_error(6.0) / fundamental_error(13.0)) / log(2.0)
+show order
+
+# the (2, 2) mode, the fourth eigenvector, reshaped onto the grid
+MODE = zeros(N, N)
+for i to N {
+    for j to N {
+        MODE[i, j] = VECS[i * N + j, 3.0]
+    }
+}
+# MODE[i, j] is the displacement at x = (i + 1) h, y = (j + 1) h: transposed, x runs
+# across and y up; the mode is signed, so the colors are centered on zero
+figure("The (2, 2) mode of a square drum", "x", "y")
+origin("lower")
+colormap("diverging")
+plot2d(transpose(MODE), "u")
+
+test "the eigensolver reproduces the discrete eigenvalues in closed form, to rounding" {
+    assert_near(VALS[0], discrete_lambda(1.0, 1.0, H), 1.0e-9)
+    assert_near(VALS[1], discrete_lambda(1.0, 2.0, H), 1.0e-9)
+    assert_near(VALS[3], discrete_lambda(2.0, 2.0, H), 1.0e-9)
+    assert_near(VALS[N * N - 1.0], discrete_lambda(N, N, H), 1.0e-8)
+}
+test "a square drum's (1,2) and (2,1) modes are degenerate" {
+    assert_near(VALS[1], VALS[2], 1.0e-9)
+}
+test "the continuum values pi^2 (m^2 + n^2) are approached at second order" {
+    assert_near(lowest, 2.0, 0.02)
+    assert_near(fourth, 8.0, 0.35)
+    assert_near(order, 2.0, 0.1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

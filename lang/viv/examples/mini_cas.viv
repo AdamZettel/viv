@@ -1,0 +1,491 @@
+# A mini computer-algebra system in Viv: symbolic computation written with no
+# pointers, no strings and no Int values, only arrays of numbers.
+#
+# Expression trees live in flat arrays (a "tape"), exactly like the reverse-mode
+# autodiff example: each node is an opcode plus two child INDICES into the same
+# arrays. On that encoding this file does the four things a CAS does:
+#
+#   eval      one forward pass over the tape (a stack machine without the stack)
+#   diff      symbolic differentiation: walk the tape, append derivative nodes
+#             (run it twice and you have exact second derivatives -- something
+#             finite differences can never give you cleanly)
+#   simplify  term rewriting to a fixed point: constant folding, x+0, x*1,
+#             x*0, x-x, x/x, exp(const). Node replacement is a union-find
+#             style representative array -- rewrite by redirection, not surgery.
+#   MDL       complexity of an expression in bits, AI-Feynman style: structure
+#             pays log2(alphabet) per node, integer constants are cheap,
+#             generic floats are expensive -- which makes SNAPPING 1.9999999
+#             to 2 measurably profitable.
+#
+# log2 is built from scratch at the bottom (the point is that the CAS needs
+# (atanh series + range reduction) and verified against known values.
+
+# ── The tape ─────────────────────────────────────────────────────────────────
+# opcodes: 0 CONST  1 VAR(x)  2 ADD  3 SUB  4 MUL  5 DIV  6 EXP
+e_op = zeros(512)
+e_a = zeros(512)
+e_b = zeros(512)
+e_c = zeros(512)
+en = zeros(1)
+
+# union-find representative: rep[k] < k means "node k has been rewritten to rep[k]"
+rep = zeros(512)
+
+ev = zeros(512)
+dd = zeros(512)
+seen = zeros(512)
+
+def reset() {
+    en[0] = 0.0
+    for i to 512 {
+        rep[i] = i
+    }
+}
+
+def push(o, a, b, c) {
+    i = en[0]
+    e_op[i] = o
+    e_a[i] = a
+    e_b[i] = b
+    e_c[i] = c
+    en[0] = i + 1.0
+    return i
+}
+
+def cst(v) {
+    return push(0.0, 0.0, 0.0, v)
+}
+def vx() {
+    return push(1.0, 0.0, 0.0, 0.0)
+}
+def eadd(a, b) {
+    return push(2.0, a, b, 0.0)
+}
+def esub(a, b) {
+    return push(3.0, a, b, 0.0)
+}
+def emul(a, b) {
+    return push(4.0, a, b, 0.0)
+}
+def ediv(a, b) {
+    return push(5.0, a, b, 0.0)
+}
+def eexp(a) {
+    return push(6.0, a, 0.0, 0.0)
+}
+
+# Follow rewrites to the surviving node. Children always precede parents on the
+# tape and rewrites only ever point DOWN the tape, so rep[j] < j terminates.
+def find(i) {
+    j = i
+    while rep[j] < j {
+        j = rep[j]
+    }
+    return j
+}
+
+# ── eval: one forward pass ───────────────────────────────────────────────────
+def eval_at(root, x) {
+    n = en[0]
+    for k to n {
+        o = e_op[k]
+        a = e_a[k]
+        b = e_b[k]
+        if o == 0.0 { ev[k] = e_c[k] }
+        if o == 1.0 { ev[k] = x }
+        if o == 2.0 { ev[k] = ev[a] + ev[b] }
+        if o == 3.0 { ev[k] = ev[a] - ev[b] }
+        if o == 4.0 { ev[k] = ev[a] * ev[b] }
+        if o == 5.0 { ev[k] = ev[a] / ev[b] }
+        if o == 6.0 { ev[k] = exp(ev[a]) }
+    }
+    r = find(root)
+    return ev[r]
+}
+
+# central finite difference, for checking diff() against
+def fdiff(root, x) {
+    h = 0.00001
+    return (eval_at(root, x + h) - eval_at(root, x - h)) / (2.0 * h)
+}
+
+# ── diff: symbolic differentiation, tape to tape ─────────────────────────────
+# dd[k] = index of d(node k)/dx. Children precede parents, so one forward pass
+# suffices; shared subexpressions get ONE derivative node (the tape is a DAG).
+def diff(root) {
+    n = en[0]
+    for k to n {
+        o = e_op[k]
+        a = e_a[k]
+        b = e_b[k]
+        if o == 0.0 { dd[k] = cst(0.0) }
+        if o == 1.0 { dd[k] = cst(1.0) }
+        if o == 2.0 { dd[k] = eadd(dd[a], dd[b]) }
+        if o == 3.0 { dd[k] = esub(dd[a], dd[b]) }
+        if o == 4.0 { dd[k] = eadd(emul(dd[a], b), emul(a, dd[b])) }
+        if o == 5.0 { dd[k] = ediv(esub(emul(dd[a], b), emul(a, dd[b])), emul(b, b)) }
+        if o == 6.0 { dd[k] = emul(dd[a], k) }
+    }
+    return dd[root]
+}
+
+# ── simplify: rewrite rules to a fixed point ─────────────────────────────────
+def is_const(i) {
+    return e_op[i] == 0.0
+}
+
+def fold_binary(o, x, y) {
+    if o == 2.0 { return x + y }
+    if o == 3.0 { return x - y }
+    if o == 4.0 { return x * y }
+    return x / y
+}
+
+def simplify_pass() {
+    n = en[0]
+    changed = false
+
+    for k to n {
+        o = e_op[k]
+
+        # exp(const) -> const
+        if o == 6.0 {
+            a = find(e_a[k])
+            if a < e_a[k] {
+                e_a[k] = a
+                changed = true
+            }
+            if is_const(a) {
+                e_op[k] = 0.0
+                e_c[k] = exp(e_c[a])
+                changed = true
+            }
+        }
+
+        if o >= 2.0 {
+            if o <= 5.0 {
+                l = find(e_a[k])
+                r = find(e_b[k])
+                if l < e_a[k] {
+                    e_a[k] = l
+                    changed = true
+                }
+                if r < e_b[k] {
+                    e_b[k] = r
+                    changed = true
+                }
+
+                # constant folding
+                if is_const(l) {
+                    if is_const(r) {
+                        e_op[k] = 0.0
+                        e_c[k] = fold_binary(o, e_c[l], e_c[r])
+                        changed = true
+                    }
+                }
+            }
+        }
+
+        # identity rules -- rewrite by pointing rep[k] at a child. Guard:
+        # only fire on LIVE nodes (rep[k] == k), else the same match re-fires
+        # every pass and the fixpoint loop never terminates.
+        o = e_op[k]
+        if rep[k] < k { o = -1.0 }
+        if o == 2.0 {
+            l = e_a[k]
+            r = e_b[k]
+            if is_const(l) {
+                if e_c[l] == 0.0 {
+                    rep[k] = r
+                    changed = true
+                }
+            }
+            if is_const(r) {
+                if e_c[r] == 0.0 {
+                    rep[k] = l
+                    changed = true
+                }
+            }
+        }
+        if o == 3.0 {
+            l = e_a[k]
+            r = e_b[k]
+            if is_const(r) {
+                if e_c[r] == 0.0 {
+                    rep[k] = l
+                    changed = true
+                }
+            }
+            if l == r {
+                e_op[k] = 0.0
+                e_c[k] = 0.0
+                changed = true
+            }
+        }
+        if o == 4.0 {
+            l = e_a[k]
+            r = e_b[k]
+            if is_const(l) {
+                if e_c[l] == 0.0 {
+                    e_op[k] = 0.0
+                    e_c[k] = 0.0
+                    changed = true
+                }
+                if e_c[l] == 1.0 {
+                    rep[k] = r
+                    changed = true
+                }
+            }
+            if is_const(r) {
+                if e_c[r] == 0.0 {
+                    e_op[k] = 0.0
+                    e_c[k] = 0.0
+                    changed = true
+                }
+                if e_c[r] == 1.0 {
+                    rep[k] = l
+                    changed = true
+                }
+            }
+        }
+        if o == 5.0 {
+            l = e_a[k]
+            r = e_b[k]
+            if is_const(r) {
+                if e_c[r] == 1.0 {
+                    rep[k] = l
+                    changed = true
+                }
+            }
+            if l == r {
+                e_op[k] = 0.0
+                e_c[k] = 1.0
+                changed = true
+            }
+        }
+    }
+    return changed
+}
+
+def simplify() {
+    go = true
+    while go {
+        go = simplify_pass()
+    }
+}
+
+# ── log2 from scratch: MDL bits without leaning on the log builtin ───────────
+# Range-reduce into [1/sqrt(2), sqrt(2)] by halving/doubling, then the atanh
+# series ln(m) = 2 (z + z^3/3 + z^5/5 + ...), z = (m-1)/(m+1), |z| <= 0.1716.
+def ln(x) {
+    m = x
+    e2 = 0.0
+    while m > 1.4142135623730951 {
+        m = m / 2.0
+        e2 = e2 + 1.0
+    }
+    while m < 0.7071067811865476 {
+        m = m * 2.0
+        e2 = e2 - 1.0
+    }
+    z = (m - 1.0) / (m + 1.0)
+    z2 = z * z
+    t = z
+    s = 0.0
+    for i to 12 {
+        s = s + t / (2.0 * i + 1.0)
+        t = t * z2
+    }
+    return 2.0 * s + e2 * 0.6931471805599453
+}
+
+def lg2(x) {
+    return ln(x) / 0.6931471805599453
+}
+
+# ── MDL complexity in bits ───────────────────────────────────────────────────
+# nearest integer by repeated subtraction (no floor builtin; constants are small)
+def nearest_int(c) {
+    s = 1.0
+    v = c
+    if v < 0.0 {
+        s = -1.0
+        v = -v
+    }
+    m = 0.0
+    while v >= 1.0 {
+        v = v - 1.0
+        m = m + 1.0
+    }
+    if v > 0.5 { m = m + 1.0 }
+    return s * m
+}
+
+# AI-Feynman flavored description length of a constant:
+# integers cost log2(1+|n|) bits; a generic float costs log2(|c|/eps) with
+# eps = 1e-14 -- i.e. "how many bits to pin it down", roughly 47.
+def const_bits(c) {
+    m = nearest_int(c)
+    d = c - m
+    if d < 0.0 { d = -d }
+    if d < 1.0e-9 {
+        a = m
+        if a < 0.0 { a = -a }
+        return lg2(1.0 + a)
+    }
+    a = c
+    if a < 0.0 { a = -a }
+    if a < 1.0e-14 { a = 1.0e-14 }
+    return lg2(a / 1.0e-14)
+}
+
+# every node pays log2(7) for which-of-7-opcodes; constants pay their DL on top
+def bits_walk(i0) {
+    i = find(i0)
+    if seen[i] == 1.0 { return 0.0 }
+    seen[i] = 1.0
+    o = e_op[i]
+    w = lg2(7.0)
+    if o == 0.0 { return w + const_bits(e_c[i]) }
+    if o == 1.0 { return w }
+    if o == 6.0 { return w + bits_walk(e_a[i]) }
+    return w + bits_walk(e_a[i]) + bits_walk(e_b[i])
+}
+
+def complexity_bits(root) {
+    n = en[0]
+    for i to n { seen[i] = 0.0 }
+    return bits_walk(root)
+}
+
+def count_walk(i0) {
+    i = find(i0)
+    if seen[i] == 1.0 { return 0.0 }
+    seen[i] = 1.0
+    o = e_op[i]
+    if o == 0.0 { return 1.0 }
+    if o == 1.0 { return 1.0 }
+    if o == 6.0 { return 1.0 + count_walk(e_a[i]) }
+    return 1.0 + count_walk(e_a[i]) + count_walk(e_b[i])
+}
+
+def node_count(root) {
+    n = en[0]
+    for i to n { seen[i] = 0.0 }
+    return count_walk(root)
+}
+
+# snap constants to the nearest integer when they are within tol of one
+def snap_consts(tol) {
+    n = en[0]
+    for k to n {
+        if e_op[k] == 0.0 {
+            m = nearest_int(e_c[k])
+            d = e_c[k] - m
+            if d < 0.0 { d = -d }
+            if d < tol { e_c[k] = m }
+        }
+    }
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Demo A -- simplify:  (x + 0) * 1  +  exp(0 * x)  +  (x - x)   ==>   x + 1
+# ═════════════════════════════════════════════════════════════════════════════
+narrate "Demo A: simplify (x+0)*1 + exp(0*x) + (x-x)"
+reset()
+ax = vx()
+a_t1 = emul(eadd(ax, cst(0.0)), cst(1.0))
+a_t2 = eexp(emul(cst(0.0), ax))
+a_t3 = esub(ax, ax)
+a_root = eadd(eadd(a_t1, a_t2), a_t3)
+
+a_val_before = eval_at(a_root, 1.7)
+a_nodes_before = node_count(a_root)
+simplify()
+a_val_after = eval_at(a_root, 1.7)
+a_nodes_after = node_count(a_root)
+
+show a_nodes_before
+show a_nodes_after
+show a_val_after
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Demo B -- symbolic derivatives:  g(x) = x*x + exp(2x)
+#   g'  = 2x + 2 exp(2x)      checked against a central finite difference
+#   g'' = 2  + 4 exp(2x)      checked against the ANALYTIC value -- the point:
+#                             diff() composes with itself, finite differences don't
+# ═════════════════════════════════════════════════════════════════════════════
+narrate "Demo B: g = x*x + exp(2x); differentiate symbolically, twice"
+reset()
+bx = vx()
+b_root = eadd(emul(bx, bx), eexp(emul(cst(2.0), bx)))
+
+b_d1 = diff(b_root)
+b_d2 = diff(b_d1)
+
+b_d1_at = eval_at(b_d1, 0.7)
+b_d1_fd = fdiff(b_root, 0.7)
+b_d2_at = eval_at(b_d2, 0.3)
+b_d2_exact = 2.0 + 4.0 * exp(0.6)
+
+b_d1_nodes = node_count(b_d1)
+simplify()
+b_d1_nodes_simplified = node_count(b_d1)
+b_d1_at_simplified = eval_at(b_d1, 0.7)
+
+show b_d1_at
+show b_d1_fd
+show b_d2_at
+show b_d2_exact
+show b_d1_nodes
+show b_d1_nodes_simplified
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Demo C -- snapping onto the MDL frontier:
+#   f(x) = 1.9999999*x + 1.2e-7   is "really"   2x
+#   the float constants cost ~47 bits each; after snapping, 2 costs log2(3)
+# ═════════════════════════════════════════════════════════════════════════════
+narrate "Demo C: snap 1.9999999*x + 1.2e-7 to 2*x, watch the bits drop"
+reset()
+cx = vx()
+c_root = eadd(emul(cst(1.9999999), cx), cst(1.2e-7))
+
+c_bits_before = complexity_bits(c_root)
+snap_consts(1.0e-6)
+simplify()
+c_bits_after = complexity_bits(c_root)
+c_val_after = eval_at(c_root, 3.0)
+
+show c_bits_before
+show c_bits_after
+show c_val_after
+
+# ═════════════════════════════════════════════════════════════════════════════
+test "hand-rolled ln/log2 match known values" {
+    assert_near(ln(10.0), 2.302585092994046, 1.0e-6)
+    assert_near(lg2(1024.0), 10.0, 1.0e-6)
+    assert_near(lg2(7.0), 2.807354922057604, 1.0e-6)
+}
+
+test "simplify preserves value and shrinks the tree" {
+    assert_near(a_val_before, 2.7, 1.0e-12)
+    assert_near(a_val_after, 2.7, 1.0e-12)
+    assert_near(a_nodes_after, 3.0, 0.5)
+}
+
+test "symbolic derivative matches finite difference" {
+    assert_near(b_d1_at, b_d1_fd, 0.0001)
+    assert_near(b_d1_at_simplified, b_d1_at, 1.0e-9)
+}
+
+test "second derivative matches analytic 2 + 4 exp(2x)" {
+    assert_near(b_d2_at, b_d2_exact, 1.0e-9)
+}
+
+test "snapping preserves value within tolerance and cuts bits" {
+    assert_near(c_val_after, 6.0, 0.00001)
+    assert_near(c_bits_before - c_bits_after, 87.0, 15.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

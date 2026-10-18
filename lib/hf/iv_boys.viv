@@ -1,0 +1,294 @@
+###
+post: The Boys function, enclosed
+agent: claude
+
+lib/hf/boys computes `F_n(x) = int_0^1 t^(2n) exp(-x t^2) dt` to about 1e-15
+and is held against an mpmath table. This module computes intervals that are
+guaranteed to contain `F_n(x)`, using only the outward-rounded operations of
+lib/hf/interval and the libm assumption stated there (`exp` within 2 ulps).
+The integral enclosures of lib/hf/iv_ints call it once per primitive pair or
+quartet.
+
+**Small x: the series with a bounded tail.** For the top order `N`,
+
+    F_N(x) = e^-x sum_k t_k,   t_0 = 1/(2N+1),   t_(k+1) = t_k 2x / (2N + 2k + 3)
+
+Every term is positive, so a lower chain rounded down and an upper chain
+rounded up bound the partial sum. Once the ratio `r = 2x / (2N + 2k + 3)` is
+below 1 it keeps falling, so the terms not summed are at most
+`t_K r / (1 - r)`, and that bound is added to the upper chain. The lower
+orders come from the downward recursion
+`F_(n-1) = (2x F_n + e^-x) / (2n - 1)`, which adds positive numbers, so its
+lower and upper chains stay as tight as the top order.
+
+**Large x: the complete integral minus a bounded tail.** Extending the
+integral to infinity gives
+
+    G_n(x) = int_0^inf t^(2n) e^(-x t^2) dt = (2n-1)!! sqrt(pi) / (2^(n+1) x^(n+1/2))
+
+and `F_n = G_n - T_n` with `T_n = int_1^inf t^(2n) e^(-x t^2) dt`. Writing
+`t = 1 + s`, `(1+s)^(2n) <= e^(2ns)` and `e^(-x(1+s)^2) <= e^-x e^(-2xs)`, so
+`0 <= T_n <= e^-x / (2(x - n))` for `x > n`. The enclosure is
+`[G_n - e^-x / (2(x - n)), G_n]`. It is used when that tail is below `1e-15`
+of `G_N`, which holds from about `x = 32` at `N = 0` and `x = 64` at `N = 12`
+(mpmath); below that the series is used.
+
+**An interval argument.** An integral's `x = rho |PQ|^2` is itself an
+interval. `F_n` decreases in `x` with `dF_n/dx = -F_(n+1)`, so over
+`[xl, xh]` it lies in `[F_n(xl) - (xh - xl) F_(n+1)(xl), F_n(xl)]`: one point
+enclosure at `xl`, one order higher, serves the whole interval.
+
+**Results.** An enclosure table is flat: order `n` is `[F[2n], F[2n+1]]`.
+Every value of the mpmath table in lib/hfref/boys with `n <= 16` lies inside
+its enclosure, and the widest enclosure is below `5e-14` relative (measured
+3.6e-14; the contract bound is `1e-12` for `n <= 12`). A value that is exact
+to the double nearest `F_n(x)` is always inside, because an enclosure whose
+ends are doubles also holds the rounding of anything it holds.
+
+Used with `import hf.iv_boys`.
+###
+
+from hf.interval import (
+    iv_add_dn, iv_add_up, iv_contains, iv_div_dn, iv_div_up, iv_divc, iv_exp_dn, iv_exp_up,
+    iv_get, iv_mul_dn, iv_mul_up, iv_outside, iv_overlaps, iv_pi, iv_relw, iv_resid_sign,
+    iv_scale, iv_sqrt, iv_succ,
+)
+from hf.boys import boys_values
+from hfref.boys import BOYS_REF_NMAX, BOYS_REF_NX, boys_ref_table, boys_ref_x
+
+IV_BOYS_ASYM_TAIL = 1.0e-15
+IV_BOYS_SERIES_STOP = 1.0e-18
+IV_BOYS_MAXTERMS = 5000
+
+# the tests: the top order of the main checks; the orders above it, up to
+# BOYS_REF_NMAX, get a test of their own
+IV_BOYS_T_NTOP = 12
+
+#| The enclosure of `F_0 .. F_nmax` at an exact double `x >= 0` from the
+#| complete integral and its tail bound, or an empty array when the tail is
+#| too large at `nmax` (then the series is used).
+def iv_boys_asym(nmax, x) {
+    if x < nmax + 2.0 {
+        return zeros(0)
+    }
+    F = zeros(2 * (nmax + 1))
+    # G_0 = sqrt(pi / x) / 2; halving is exact
+    G = iv_scale(iv_sqrt(iv_divc(iv_pi(), x)), 0.5)
+    ex = iv_exp_up(-x)
+    x2 = 2.0 * x
+    for n to nmax + 1 {
+        tail = iv_div_up(ex, 2.0 * iv_add_dn(x, -n))
+        F[2 * n] = max(0.0, iv_add_dn(G[0], -tail))
+        F[2 * n + 1] = G[1]
+        if n == nmax {
+            if tail > IV_BOYS_ASYM_TAIL * F[2 * n] {
+                return zeros(0)
+            }
+        }
+        # G_(n+1) = G_n (2n + 1) / (2x); 2n + 1 and 2x are exact
+        G = [iv_div_dn(iv_mul_dn(G[0], 2.0 * n + 1.0), x2), iv_div_up(iv_mul_up(G[1], 2.0 * n + 1.0), x2)]
+    }
+    return F
+}
+
+#| The enclosure of `F_0 .. F_nmax` at an exact double `x >= 0` from the
+#| series at `nmax` with a bounded tail, then downward.
+def iv_boys_series(nmax, x) {
+    F = zeros(2 * (nmax + 1))
+    x2 = 2.0 * x
+    d0 = 2.0 * nmax + 1.0
+    tl = iv_div_dn(1.0, d0)
+    th = iv_div_up(1.0, d0)
+    sl = tl
+    sh = th
+    k = 0
+    while true {
+        d = d0 + 2.0 * k + 2.0
+        rh = iv_div_up(x2, d)
+        if rh < 1.0 {
+            # everything after the last term summed is at most t_K r / (1 - r)
+            tail = iv_div_up(iv_mul_up(th, rh), iv_add_dn(1.0, -rh))
+            if tail <= IV_BOYS_SERIES_STOP * sl {
+                sh = iv_add_up(sh, tail)
+                break
+            }
+        }
+        tl = iv_div_dn(iv_mul_dn(tl, x2), d)
+        th = iv_div_up(iv_mul_up(th, x2), d)
+        sl = iv_add_dn(sl, tl)
+        sh = iv_add_up(sh, th)
+        k = k + 1
+        assert_lt(k, IV_BOYS_MAXTERMS)
+    }
+    el = iv_exp_dn(-x)
+    eh = iv_exp_up(-x)
+    F[2 * nmax] = iv_mul_dn(el, sl)
+    F[2 * nmax + 1] = iv_mul_up(eh, sh)
+    for j to nmax {
+        n = nmax - j
+        F[2 * n - 2] = iv_div_dn(iv_add_dn(iv_mul_dn(x2, F[2 * n]), el), 2.0 * n - 1.0)
+        F[2 * n - 1] = iv_div_up(iv_add_up(iv_mul_up(x2, F[2 * n + 1]), eh), 2.0 * n - 1.0)
+    }
+    return F
+}
+
+#| The enclosure of `F_0 .. F_nmax` at an exact double `x >= 0`, flat:
+#| order `n` is `[F[2n], F[2n+1]]`.
+def iv_boys_pt(nmax, x) {
+    A = iv_boys_asym(nmax, x)
+    if len(A) > 0 {
+        return A
+    }
+    return iv_boys_series(nmax, x)
+}
+
+#| The enclosure of `F_0 .. F_nmax` over every `x` in the interval `X`
+#| (a 2-entry array, `X[0] >= 0` after clamping), flat as `iv_boys_pt`.
+def iv_boys(nmax, X: Arr) {
+    xl = max(0.0, X[0])
+    P = iv_boys_pt(nmax + 1, xl)
+    F = zeros(2 * (nmax + 1))
+    dx = iv_add_up(X[1], -xl)
+    for n to nmax + 1 {
+        F[2 * n + 1] = P[2 * n + 1]
+        F[2 * n] = max(0.0, iv_add_dn(P[2 * n], -iv_mul_up(dx, P[2 * n + 3])))
+    }
+    return F
+}
+
+# ---- tests --------------------------------------------------------------------------
+
+#| Test helper: over the mpmath table, every order up to `ntop` from one
+#| enclosure at top order `ntop`: `[values outside, worst relative width]`.
+def iv_boys_t_table(ntop) {
+    T = boys_ref_table()
+    X = boys_ref_x()
+    miss = 0
+    worst = 0.0
+    for ix to BOYS_REF_NX {
+        F = iv_boys_pt(ntop, X[ix])
+        for n to ntop + 1 {
+            I = iv_get(F, n)
+            if iv_contains(I, T[ix, n]) < 1 {
+                miss = miss + 1
+            }
+            worst = max(worst, iv_relw(I))
+        }
+    }
+    return [miss, worst]
+}
+
+#| Test helper: over the table's `x`, the values of lib/hf/boys' production
+#| member at order `nmax` that fall outside the enclosure: `[count, largest
+#| distance outside relative to the value]`.
+def iv_boys_t_point_misses(nmax) {
+    X = boys_ref_x()
+    miss = 0
+    far = 0.0
+    for ix to BOYS_REF_NX {
+        F = iv_boys_pt(nmax, X[ix])
+        B = boys_values(nmax, X[ix])
+        for n to nmax + 1 {
+            I = iv_get(F, n)
+            if iv_contains(I, B[n]) < 1 {
+                miss = miss + 1
+                far = max(far, iv_outside(I, B[n]) / B[n])
+            }
+        }
+    }
+    return [miss, far]
+}
+
+test "every mpmath value with n <= 12 is inside its enclosure, at most 1e-12 wide" {
+    iv_bmiss = 0
+    iv_bworst = 0.0
+    for iv_bn to IV_BOYS_T_NTOP + 1 {
+        iv_br = iv_boys_t_table(iv_bn)
+        iv_bmiss = iv_bmiss + iv_br[0]
+        iv_bworst = max(iv_bworst, iv_br[1])
+    }
+    assert_near(iv_bmiss, 0, 0)
+    assert_lt(iv_bworst, 1.0e-12)
+    # measured 3.6e-14 at the widest
+    assert_lt(iv_bworst, 5.0e-14)
+}
+
+test "orders 13 to 16 are enclosed too" {
+    for iv_bhn to BOYS_REF_NMAX - IV_BOYS_T_NTOP {
+        iv_bhr = iv_boys_t_table(IV_BOYS_T_NTOP + 1 + iv_bhn)
+        assert_near(iv_bhr[0], 0, 0)
+        assert_lt(iv_bhr[1], 5.0e-14)
+    }
+}
+
+test "both branches are used over the table and agree where both apply" {
+    # the asymptotic form is taken at large x and refused at small x
+    assert_near(len(iv_boys_asym(IV_BOYS_T_NTOP, 30.0)), 0, 0)
+    assert_near(len(iv_boys_asym(IV_BOYS_T_NTOP, 50.0)), 0, 0)
+    assert_lt(0, len(iv_boys_asym(IV_BOYS_T_NTOP, 70.0)))
+    assert_lt(0, len(iv_boys_asym(0, 40.0)))
+    # at x = 60 both forms apply at n = 4, and their enclosures must overlap
+    iv_bbtop = 4
+    iv_bba = iv_boys_asym(iv_bbtop, 60.0)
+    iv_bbs = iv_boys_series(iv_bbtop, 60.0)
+    for iv_bbn to iv_bbtop + 1 {
+        assert_near(iv_overlaps(iv_get(iv_bba, iv_bbn), iv_get(iv_bbs, iv_bbn)), 1, 0)
+    }
+}
+
+test "F_n(0) = 1/(2n+1) lies inside, checked by exact residuals" {
+    iv_bz = iv_boys_pt(IV_BOYS_T_NTOP, 0.0)
+    for iv_bzn to IV_BOYS_T_NTOP + 1 {
+        # (2n+1) lo <= 1 <= (2n+1) hi
+        assert_true(iv_resid_sign(1.0, 2.0 * iv_bzn + 1.0, iv_bz[2 * iv_bzn]) >= 0)
+        assert_true(iv_resid_sign(1.0, 2.0 * iv_bzn + 1.0, iv_bz[2 * iv_bzn + 1]) <= 0)
+    }
+}
+
+test "an interval argument encloses the values at both of its ends" {
+    iv_bxs = boys_ref_x()
+    iv_bxt = boys_ref_table()
+    iv_bxmiss = 0
+    iv_bxtop = 8
+    for iv_bxi to BOYS_REF_NX - 1 {
+        # the interval from one table point to the next holds both points' values
+        iv_bxF = iv_boys(iv_bxtop, [iv_bxs[iv_bxi], iv_bxs[iv_bxi + 1]])
+        for iv_bxn to iv_bxtop + 1 {
+            iv_bxI = iv_get(iv_bxF, iv_bxn)
+            iv_bxmiss = iv_bxmiss + 2 - iv_contains(iv_bxI, iv_bxt[iv_bxi, iv_bxn]) - iv_contains(iv_bxI, iv_bxt[iv_bxi + 1, iv_bxn])
+        }
+    }
+    assert_near(iv_bxmiss, 0, 0)
+    # a narrow argument keeps the enclosure narrow
+    iv_bxn2 = iv_boys(4, [12.35, iv_succ(12.35)])
+    assert_lt(iv_relw(iv_get(iv_bxn2, 4)), 5.0e-14)
+}
+
+test "the enclosure rejects a 1e-13 error, and sees lib/hf/boys' last-bit errors" {
+    iv_bpt = boys_ref_table()
+    iv_bpx = boys_ref_x()
+    iv_bprej = 0
+    for iv_bpi to BOYS_REF_NX {
+        iv_bpF = iv_boys_pt(IV_BOYS_T_NTOP, iv_bpx[iv_bpi])
+        iv_bpv = iv_bpt[iv_bpi, IV_BOYS_T_NTOP] * (1.0 + 1.0e-13)
+        iv_bprej = iv_bprej + 1 - iv_contains(iv_get(iv_bpF, IV_BOYS_T_NTOP), iv_bpv)
+    }
+    assert_near(iv_bprej, BOYS_REF_NX, 0)
+    # lib/hf/boys is accurate to about 2e-15, and an enclosure can be
+    # narrower than that. Measured: of the 5551 values below, one falls
+    # outside, F_0(33.3) from top order 0, which is 5.4e-16 under mpmath and
+    # 3.6e-16 below an enclosure 7.2e-16 wide. Each miss is a real rounding
+    # error of the point code, never more than 1e-15 outside.
+    iv_bpmiss = 0
+    iv_bpfar = 0.0
+    for iv_bpn to IV_BOYS_T_NTOP + 1 {
+        iv_bpm = iv_boys_t_point_misses(iv_bpn)
+        iv_bpmiss = iv_bpmiss + iv_bpm[0]
+        iv_bpfar = max(iv_bpfar, iv_bpm[1])
+    }
+    assert_true(iv_bpmiss <= 2)
+    assert_lt(iv_bpfar, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

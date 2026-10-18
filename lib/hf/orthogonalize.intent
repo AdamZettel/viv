@@ -1,0 +1,189 @@
+module lib/hf/orthogonalize
+  Basis functions on neighboring atoms overlap, so the SCF's eigenproblem
+  `F C = S C e` carries the overlap matrix S. An orthogonalizer is a matrix X
+  with `X^T S X = I`; with it the SCF diagonalizes the ordinary symmetric
+  matrix `X^T F X` and maps the eigenvectors back with X. Many X satisfy
+  that, and the energy and density do not depend on which one is used, so
+  the module has four, picked by `opts[OPT_ORTH]`: canonical (production),
+  Lowdin's symmetric one, Cholesky, and Gram-Schmidt. The last two build the
+  same triangular X by different operations, so they check each other.
+
+  Canonical orthogonalization may drop combinations of basis functions that
+  are nearly linearly dependent. Dropped columns are zero and come last, so
+  `orth_rank(X)` gives m, the size of the orthonormal basis the SCF works in.
+
+orth_threshold  @566c5632
+  why    The option column is zero when a caller built the array by hand;
+         zero there means the default, not "drop nothing".
+  opts   the options column array
+
+orth_canon  @c2365ee5
+  why    A near-zero eigenvalue of S means some combination of basis functions
+         is almost the zero function; its column would be divided by the
+         square root of that eigenvalue, amplifying rounding, and it
+         describes nothing the other functions cannot. Dropping it is what
+         PySCF does, with the same default threshold
+         [test "orth_canon drops exactly one vector on the diffuse H4 chain"].
+  S      the overlap matrix of the basis functions, `[n, n]`
+  B      not read: the member signature's second matrix
+  opts   the options column array; its `OPT_LINDEP` column is the threshold
+  n      the number of basis functions
+  R      the eigenvalues of S (row `0`) and its eigenvectors (the rows below), from `eig_ql`
+  thr    the threshold: eigenvalues at or below it are dropped
+  X      the orthogonalizer, `[n, n]`, kept columns first, dropped ones zero
+  c      how many columns have been kept
+  k      the eigenvalue being considered
+
+orth_polish  @1a0684e2
+  why    It corrects the kept columns so `X^T S X = I` holds to rounding even
+         when an eigenvalue of S is small, without changing the space the
+         columns span, so the SCF's answer is unchanged.
+  S      the overlap matrix, `[n, n]`
+  X      the orthogonalizer, corrected in place over its first m columns
+  m      how many columns are kept
+  E      the defect `X^T S X - I`, `[m, m]`, formed with compensated sums
+
+orth_prod_err  @bed9cf88
+  why    The compensated sums in `orth_gram_err` need the exact rounding error
+         of each product; this computes it with ordinary arithmetic, so the
+         interpreter and the compiled program get the same bits.
+  a      the first factor
+  b      the second factor
+  p      the rounded product of a and b
+  ca     a times the splitting constant, used to split a
+  ah     the high half of a's bits
+  al     the low half: `a = ah + al` exactly
+  cb     b times the splitting constant
+  bh     the high half of b's bits
+  bl     the low half of b's bits
+
+orth_gram_err  @8c59533d
+  why    The defect of X is far smaller than the rounding of an ordinary sum
+         of products of X's large entries, so it can only be measured, and
+         corrected, with sums that keep their own rounding error.
+  S      the overlap matrix, `[n, n]`
+  X      the orthogonalizer, `[n, m]` used
+  m      how many columns
+  n      the number of basis functions
+  E      the defect `X^T S X - I`, `[m, m]`
+  th     `S x_b`, the high part, `[n]`
+  tl     `S x_b`, the part th lost to rounding
+  s      a running sum
+  c      the running sum's accumulated rounding error
+  p      one rounded product
+  e      its rounding error
+  t      the rounded sum of s and p
+  z      the part of p that went into t, for the two-sum error
+  h      one entry of `S x_b`, rounded
+
+  = th     `S x_b` as a high part and a correction, so the second product loses nothing
+  = c#4    Knuth's two-sum error of the addition, plus the product's error, plus the correction term's product
+  = s#5    subtract the identity where it is exact
+
+orth_symm  @04c1cf7a
+  why    Lowdin's `S^(-1/2)` is the orthonormal basis closest to the original
+         functions, and it drops nothing, so it is a second eigen-based member
+         to compare with the canonical one.
+  S      the overlap matrix, `[n, n]`
+  B      not read
+  opts   the options column array
+  n      the number of basis functions
+  R      the eigenvalues and eigenvectors of S
+  X      `U s^(-1/2) U^T`, `[n, n]`
+  s      one entry being summed
+  i      the row of X
+  j      the column of X
+  k      the eigenvalue whose term is being added
+
+orth_cholesky  @56bfbf12
+  why    The Cholesky member needs the factor, and it is short enough to write
+         here rather than depend on a builtin.
+  S      the overlap matrix, symmetric positive definite, `[n, n]`
+  n      its size
+  L      the lower triangular factor, `S = L L^T`
+  s      the diagonal entry being reduced
+  t      an entry below the diagonal being reduced
+
+orth_chol  @255fde14
+  why    An orthogonalizer that needs no eigenproblem, so it checks the others
+         independently of the eigensolver.
+  S      the overlap matrix, `[n, n]`
+  B      not read
+  opts   not read
+  n      the number of basis functions
+  L      the Cholesky factor of S
+  X      `L^(-T)`, upper triangular, `[n, n]`
+  c      the column of X being solved for
+  i      the row being solved, from the bottom up
+  t      the right-hand side minus the rows already solved
+  k      a row already solved
+
+orth_sdot  @cb118788
+  why    Gram-Schmidt needs the inner product in the S metric, `u^T S v`.
+  S      the overlap matrix
+  U      the matrix holding u as a column
+  a      u's column
+  V      the matrix holding v as a column
+  b      v's column
+
+orth_gs  @88f0ad17
+  why    In exact arithmetic Gram-Schmidt gives the same triangular X as
+         Cholesky, by different operations, so the two can be compared entry
+         by entry [test "Cholesky and Gram-Schmidt build the same triangular X by different operations"].
+         Each vector is orthogonalized twice, which is enough to remove what
+         the first pass left behind.
+  S      the overlap matrix
+  B      not read
+  opts   not read
+  n      the number of basis functions
+  X      the orthonormalized unit vectors, one per column, `[n, n]`
+  c      the vector being orthonormalized
+  pass   which of the two passes
+  p      an earlier column c is made orthogonal to
+
+orth_methods  @91bdde7b
+  why    The SCF picks its orthogonalizer by number, and the tests loop over
+         every member.
+
+orth_rank  @a3debc69
+  why    Callers need m, the size of the orthonormal basis, and the dropped
+         columns are the zero ones.
+  X      the orthogonalizer, `[n, n]`
+  m      how many columns are nonzero
+  c      the column being examined
+
+orth_of  @31d5b5e5
+  why    The SCF and the guesses call one def whatever orthogonalizer the
+         options pick. It calls each member by name, so the default options
+         reach canonical orthogonalization without a registry.
+  S      the overlap matrix
+  opts   the options column array; `opts[OPT_ORTH]` picks the member
+  k      the member the options name: `ORTH_CANON`, `ORTH_SYMM`, `ORTH_CHOL` or `ORTH_GS`
+
+orth_defect  @efa4721e
+  why    The tests hold every member to `X^T S X = I`; this is the size of the
+         miss, measured accurately enough to test to rounding.
+  S      the overlap matrix
+  X      the orthogonalizer
+  m      how many columns to test
+
+orth_inverse_defect  @eac867c9
+  why    With full rank, `X X^T = S^(-1)` for every orthogonalizer, which
+         compares members without depending on which X each picked
+         [test "with full rank every member's X X^T is S^-1"].
+  S      the overlap matrix
+  X      the orthogonalizer
+  E      `X X^T S - I`
+  i      a diagonal position
+
+orth_check_all  @3c6fa02e
+  why    One call runs every member on one overlap matrix for the tests.
+  S      the overlap matrix
+  mwant  how many columns every member should keep
+  ms     the registry
+  o      the default options
+  worst  the worst defect so far
+  nbad   how many members kept a different number of columns
+  X      one member's orthogonalizer
+  m      how many columns it kept
+  k      the member

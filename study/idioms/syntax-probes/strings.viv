@@ -1,0 +1,72 @@
+###
+Strings: immutable UTF-8 values, indexed and sliced by
+code point as Python indexes them (negative from the end, slice bounds
+clamped), with Python's split, strip, find, replace, upper, lower, float and
+int. `a.f(b)` is `f(a, b)`, so a line reads as it would in Python. A list of
+strings comes from split and grows by `append`, as a vector does.
+###
+
+# a line of numbers
+line = "  C   1.5  -0.25   2e-3  "
+parts = line.split()
+show parts
+x = float(parts[1])
+y = float(parts[2])
+z = float(parts[3])
+print(parts[0], " at ", fmt(x), ", ", fmt(y), ", ", fmt(z), sep="")
+
+# text from values: str is Python's repr for a number, an f-string formats
+label = f"{parts[0]}: r = {sqrt(x * x + y * y):.4f}"
+show label
+show str(0.1 + 0.2)
+
+# code points, not bytes
+word = "wörld"
+show len(word)
+show word[1]
+show word[-1]
+show word[::-1]
+show word[:80]
+
+# a loop over the characters, and one that builds a list
+vowels = 0.0
+for c in "héllo wörld" {
+    if c in "aeiouéö" {
+        vowels += 1
+    }
+}
+show vowels
+caps = []
+for w in "one two three".split() {
+    caps = append(caps, w.upper())
+}
+show caps
+show join("-", caps)
+
+# records and defs hold strings like numbers
+record Atom {
+    sym: Str
+    z: Num
+}
+def describe(a: Atom) -> Str {
+    return f"{a.sym} (Z = {a.z:d})"
+}
+show describe(Atom { sym: "O", z: 8 })
+
+test "strings as Python has them" {
+    assert_true(len("héllo") == 5)
+    assert_true("héllo"[1] == "é")
+    assert_true("a,b,,c".split(",") == ["a", "b", "", "c"])
+    assert_true("  x  ".strip() == "x")
+    assert_true("Straße".upper() == "STRASSE")
+    assert_true("ΑΣ".lower() == "ας")
+    assert_true(float(" 1_000.5 ") == 1000.5)
+    assert_true(int("0x1f", 16) == 31)
+    assert_true("abcabc".count("bc") == 2)
+    assert_true("hello".replace("l", "L", 1) == "heLlo")
+    assert_true(repr("it's") == "\"it's\"")
+    assert_true("b" > "a" and "é" > "z")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

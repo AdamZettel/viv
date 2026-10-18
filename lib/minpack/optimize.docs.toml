@@ -1,0 +1,201 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference prose of vp.optimize.least_squares, curve_fit and root
+# (python -m vipyr.docs reads it into vipyr/spec.json and the /vipyr pages).
+# The parameters and results are listed in vipyr/_registry.py; the solver is
+# lib/minpack/lmder.viv, driven by lib/minpack/fit.viv.
+
+[least_squares]
+summary = "Minimize a sum of squares of nonlinear residuals by MINPACK's Levenberg-Marquardt, with the residuals in Viv."
+description = """
+`vp.optimize.least_squares` is `scipy.optimize.least_squares(method="lm")`
+with the solver and the residuals compiled together: lib/minpack's port of
+MINPACK's `lmder` calls your function directly, with no Python in the loop,
+and takes the steps the Fortran takes. The defaults are SciPy's
+(`ftol = xtol = gtol = 1e-8`, `x_scale = 1`, `max_nfev = 100 n`), so a
+call written for SciPy gives the same iterates.
+
+Give the residuals as
+
+- a def of your own file, `"model.viv:residuals"`, or `k.residuals` after
+  `k = vp.load("model.viv")`;
+- a Python function in py2viv's numeric subset (`tools/py2viv/SUBSET.md`),
+  translated to Viv once and cached.
+
+The function is called as `fun(x, *args)` and returns the m residuals as an
+array. Each of `args` is a number or a 1-D array (data, measurements); they
+are passed to the compiled function on every call, so one compilation
+serves every data set of the same form. The first call for a function
+writes a small driver .viv and compiles it (a few seconds); later calls, in
+this process or the next, load it from vipyr's cache.
+
+The Jacobian is exact by default: the driver differentiates the residuals by
+reverse-mode `grad`, one row per residual, so no step size has to be chosen
+and the iteration does not depend on difference errors. `jac="fd"` takes
+MINPACK's forward differences (fdjac2), which reproduces what SciPy does
+when no Jacobian is given, evaluation for evaluation.
+"""
+notes = """
+**The method.** Each iteration solves the trust-region problem
+
+$$\\min_p \\tfrac12 \\|J p + r\\|^2 \\quad\\text{subject to}\\quad \\|D p\\| \\le \\Delta$$
+
+for the step $p$, with $J$ the Jacobian of the residuals $r$ at the current
+$x$ and $D$ the diagonal scaling (`x_scale`, or the column norms of $J$
+with `x_scale="jac"`). `lmpar` finds the Levenberg-Marquardt parameter
+$\\lambda$ for which $p = -(J^T J + \\lambda D^2)^{-1} J^T r$ has
+$\\|Dp\\| \\approx \\Delta$, from a QR factorization of $J$ with column
+pivoting (`qrfac`) and a Givens update for each $\\lambda$ (`qrsolv`). The
+step is accepted when the actual reduction of $\\|r\\|$ is at least
+$10^{-4}$ of the reduction the linear model predicts; the radius shrinks
+when the ratio is below 1/4 and doubles when it is above 3/4. This is
+Moré's 1978 implementation, unchanged.
+
+**Stopping.** `ftol`: the actual and predicted relative reductions of the
+sum of squares are both at most `ftol`. `xtol`: the relative change of
+$Dx$ is at most `xtol`. `gtol`: the largest cosine between $r$ and a column
+of $J$ is at most `gtol`. `status` says which (SciPy's numbering) and
+`info` gives MINPACK's own code.
+
+**Exactness.** lib/minpack/lmder.viv keeps the Fortran's operations in the
+Fortran's order; on the 24 Moré-Garbow-Hillstrom cases of MINPACK's test
+driver it reproduces a gfortran build of netlib's lmder iterate by iterate
+(lib/minpack/mgh_check.viv). Through vp.optimize the residuals are Viv (or
+py2viv's translation of your Python), so the counts agree with SciPy's
+whenever the residuals round the same way; lib/minpack/bench_optimize.json
+lists every case.
+
+**Limits.** No bounds: MINPACK's lmder has none, and neither has SciPy's
+`method="lm"` (SciPy's bounded methods, 'trf' and 'dogbox', are not
+ported). Dense Jacobians only. With the exact Jacobian, `grad` runs once
+per residual, so a Jacobian costs about m evaluations of the whole residual
+vector; for thousands of residuals `jac="fd"` (n evaluations) is cheaper.
+"""
+see_also = ["optimize.curve_fit", "optimize.root"]
+
+[[least_squares.references]]
+text = "J. J. Moré, The Levenberg-Marquardt algorithm: implementation and theory, in Numerical Analysis (Dundee 1977), Lecture Notes in Mathematics 630, 105-116, Springer (1978)."
+doi = "10.1007/BFb0067700"
+
+[[least_squares.references]]
+text = "J. J. Moré, B. S. Garbow and K. E. Hillstrom, User Guide for MINPACK-1, Argonne National Laboratory report ANL-80-74 (1980); the Fortran is netlib's, in lib/minpack/ref."
+url = "https://www.netlib.org/minpack/"
+
+[[least_squares.references]]
+text = "J. J. Moré, B. S. Garbow and K. E. Hillstrom, Testing unconstrained optimization software, ACM Trans. Math. Softw. 7, 17-41 (1981)."
+doi = "10.1145/355934.355936"
+
+[[least_squares.references]]
+text = "P. Virtanen et al., SciPy 1.0: fundamental algorithms for scientific computing in Python, Nat. Methods 17, 261-272 (2020): scipy.optimize.least_squares, whose interface this follows."
+doi = "10.1038/s41592-019-0686-2"
+
+[[least_squares.examples]]
+caption = "Residuals with data passed through args: one compiled function serves any data set of the same form. Forward differences give SciPy's evaluation count."
+code = '''import numpy as np
+import vipyr as vp
+
+def decay(b, t, y):
+    return b[0] * np.exp(-b[1] * t) + b[2] - y
+
+t = np.linspace(0.0, 4.0, 40)
+y = 3.0 * np.exp(-1.3 * t) + 0.5 + 0.01 * np.sin(7.0 * t)
+for jac in (None, "fd"):
+    r = vp.optimize.least_squares(decay, [1.0, 1.0, 0.0], args=(t, y), jac=jac)
+    print(jac, np.round(r.x, 6), r.nfev, r.njev, r.status)'''
+
+[least_squares.params.fun]
+doc = "the residuals r(x, *args), a Viv def returning an array of m: 'file.viv:def', a def of a module from vp.load, or a Python function in py2viv's subset"
+
+[curve_fit]
+summary = "Fit a model's parameters to data by least squares and estimate their covariance, as SciPy's curve_fit."
+description = """
+`vp.optimize.curve_fit(f, xdata, ydata, p0)` minimizes
+$\\sum_i ((f(x_i) - y_i)/\\sigma_i)^2$ with MINPACK's Levenberg-Marquardt
+and returns the parameters and their covariance. As in SciPy,
+`popt, pcov = vp.optimize.curve_fit(...)` unpacks the two; the result also
+carries the standard errors `perr`, the residuals, and the evaluation
+counts. The defaults are those of `scipy.optimize.leastsq`, which SciPy's
+curve_fit calls for `method="lm"`.
+
+The model is evaluated one point at a time: `f(x, b1, ..., bk)`, SciPy's
+form, or `f(x, p)` with `p` an array (a Viv def `f(x: Num, p: Arr) -> Num`).
+Its Jacobian is exact: reverse-mode `grad` of the model at each point, so a
+Jacobian costs about one model evaluation per point. With a Python model
+written for SciPy (`np.exp`, `**`, arithmetic), py2viv translates it and
+the call is the SciPy call with `vp.optimize` in front.
+
+The covariance is SciPy's: the pseudo-inverse of $J^T J$ for the Jacobian
+$J$ of the weighted residuals at the solution, multiplied by the reduced
+chi-square $\\mathrm{rss}/(m - n)$ unless `absolute_sigma=True`. A
+rank-deficient $J$ gives an infinite covariance and an `OptimizeWarning`.
+A fit that stops without converging raises `RuntimeError`, as SciPy's
+does.
+"""
+notes = """
+**Against NIST.** The 26 single-predictor problems of NIST's Statistical
+Reference Datasets for nonlinear regression, from both certified starting
+points, are fitted in lib/minpack/bench_optimize.py; the table in
+lib/minpack/bench_optimize.json gives each problem's certified digits
+matched (the log relative error of the worst parameter, and of the worst
+standard deviation), its evaluation counts and SciPy's. The gallery's NIST
+page draws one of them.
+
+**Limits.** One independent variable per point; for several (NIST's Nelson,
+`xdata` of shape (k, m) in SciPy) write the residuals for
+`vp.optimize.least_squares` and pass the columns in `args`. `sigma` is a
+vector of standard deviations; a full covariance matrix of the data is not
+taken. No bounds (as SciPy's `method="lm"`).
+"""
+see_also = ["optimize.least_squares"]
+
+[[curve_fit.references]]
+text = "NIST Statistical Reference Datasets, nonlinear regression: 27 problems with certified parameter values and standard deviations, in lib/minpack/data."
+url = "https://www.itl.nist.gov/div898/strd/nls/nls_main.shtml"
+
+[[curve_fit.references]]
+text = "J. J. Moré, The Levenberg-Marquardt algorithm: implementation and theory, in Numerical Analysis (Dundee 1977), Lecture Notes in Mathematics 630, 105-116, Springer (1978)."
+doi = "10.1007/BFb0067700"
+
+[[curve_fit.references]]
+text = "P. Virtanen et al., SciPy 1.0: fundamental algorithms for scientific computing in Python, Nat. Methods 17, 261-272 (2020): scipy.optimize.curve_fit, whose interface and covariance this follows."
+doi = "10.1038/s41592-019-0686-2"
+
+[[curve_fit.examples]]
+caption = "A model written as a Viv def taking its parameters as one array, with measurement errors."
+code = '''import tempfile
+from pathlib import Path
+import numpy as np
+import vipyr as vp
+
+src = Path(tempfile.mkdtemp()) / "peak.viv"
+src.write_text("""
+def peak(x: Num, p: Arr) -> Num {
+    return p[0] * exp(-0.5 * ((x - p[1]) / p[2]) ^ 2) + p[3]
+}
+""")
+x = np.linspace(-3.0, 3.0, 61)
+y = 2.0 * np.exp(-0.5 * ((x - 0.4) / 0.7) ** 2) + 0.1 + 0.02 * np.cos(11.0 * x)
+r = vp.optimize.curve_fit("%s:peak" % src, x, y, [1.0, 0.0, 1.0, 0.0], sigma=np.full(61, 0.02),
+                          absolute_sigma=True)
+print(np.round(r.popt, 5), np.round(r.perr, 5), r.nfev)'''
+
+[root]
+summary = "Solve a square nonlinear system F(x) = 0 by Levenberg-Marquardt, as SciPy's root(method='lm')."
+description = """
+`vp.optimize.root(fun, x0)` minimizes $\\|F(x)\\|^2$ for a system of n
+equations in n unknowns with the same compiled lmder as
+`vp.optimize.least_squares`, under leastsq's defaults; it is SciPy's
+`root(method="lm")`. The function forms, `args` and `jac` are those of
+least_squares.
+
+SciPy's default method, `"hybr"`, is Powell's hybrid method from MINPACK
+(hybrd without a Jacobian, hybrj with one); it is not ported, and `method` takes `"lm"` only. At a root
+the two find the same point; Levenberg-Marquardt also stops at a local
+minimum of $\\|F\\|$ that is not a root, which `success` alone does not
+reveal: check `fun`.
+"""
+see_also = ["optimize.least_squares"]
+
+[[root.references]]
+text = "J. J. Moré, B. S. Garbow and K. E. Hillstrom, Testing unconstrained optimization software, ACM Trans. Math. Softw. 7, 17-41 (1981): the helical valley and the other square problems."
+doi = "10.1145/355934.355936"

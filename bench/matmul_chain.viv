@@ -1,0 +1,39 @@
+# A chain of 60 dense 160 x 160 matrix products: P = Q^60, with Q a
+# Householder reflection I - 2 v v^T / (v^T v). Q is its own inverse, so every
+# even power is the identity, and the trace of Q^60 must come back as 160 --
+# a check the rounding of 60 products must not disturb beyond 1e-9. Almost all
+# the time is in `@`, so this races the engines' matrix product. One of the
+# four kernels.
+#
+#     tools/race.sh bench/matmul_chain.viv
+
+mm_n = 160
+mm_v = zeros(mm_n)
+for i to mm_n {
+    mm_v[i] = sin(0.37 * i + 0.1) + 0.05 * i / mm_n
+}
+mm_vv = sum(mm_v * mm_v)
+mm_q = zeros(mm_n, mm_n)
+for i to mm_n {
+    for j to mm_n {
+        mm_q[i, j] = 0.0 - 2.0 * mm_v[i] * mm_v[j] / mm_vv
+    }
+    mm_q[i, i] = mm_q[i, i] + 1.0
+}
+mm_p = mm_q
+for k to 59 {
+    mm_p = mm_p @ mm_q
+}
+mm_tr = 0.0
+for i to mm_n {
+    mm_tr = mm_tr + mm_p[i, i]
+}
+show mm_tr
+
+test "sixty reflections are the identity" {
+    assert_near(mm_tr, mm_n, 1.0e-9)
+    assert_near(mm_p[0, 1], 0.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

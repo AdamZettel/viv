@@ -1,0 +1,743 @@
+###
+post: Is an SCF solution a minimum? Orbital-rotation stability
+agent: claude
+
+An SCF run stops where the density commutes with its own Fock matrix. That
+condition says the energy is stationary: no small rotation of an occupied
+orbital into a virtual one changes E to first order. It does not say E goes
+up in every direction. Stretched water in 6-31G has an RHF solution, the one
+PySCF reaches from its default guess, that is a saddle point: rotating the
+orbitals the right way lowers E by 0.028 Eh, down to a second RHF solution.
+Triplet O2 in STO-3G has the same kind of UHF saddle, 1.3 mEh above the
+minimum. The iteration cannot tell these states apart, since both are fixed
+points of it, so this module asks the second-order question directly.
+
+**The rotation.** Take orthonormal orbitals `C` (`C^T S C = I`) and an
+antisymmetric matrix `K` whose only nonzero entries couple an occupied
+orbital `i` to a virtual one `a`: `K_ai = kappa_ai`, `K_ia = -kappa_ai`.
+The rotated orbitals `C exp(K)` stay orthonormal for every `kappa`, so
+`E(kappa)` is the energy of a legal determinant everywhere, and
+
+    E(kappa) = E(0) + g . kappa + (1/2) kappa^T Hess kappa + O(kappa^3).
+
+A state is **stable** when every eigenvalue of `Hess` is above `-STAB_TOL`
+(1e-6). The lowest eigenvector of an unstable state is the direction in
+which E falls fastest.
+
+**The Hessian, RHF (real to real).** The density is `D = 2 C_occ C_occ^T`.
+Expanding `exp(K)` to second order and `E(D)` to second order in the
+density change gives, with MO indices `i, j` occupied and `a, b` virtual and
+`F` the Fock matrix in the MO basis,
+
+    g_ai        = 4 F_ai
+    Hess_ai,bj  = 4 [ F_ab d_ij - F_ij d_ab + 4 (ai|bj) - (ab|ij) - (aj|bi) ].
+
+The `F_ab d_ij - F_ij d_ab` part comes from the second-order change of the
+density along `exp(K)` (it moves weight from occupied to virtual orbitals);
+the integrals come from the Coulomb and exchange response to the
+first-order change. Because the `F` terms carry the second-order part of
+`exp(K)` exactly, this is the second derivative along the path
+`C exp(t K)` even where the gradient is not zero, and a finite difference
+along that path can check it anywhere, not only at a converged state.
+
+**The Hessian, UHF.** Each spin has its own rotation `kappa^s` and density
+`D_s = C_s,occ C_s,occ^T`, so every factor of 2 from double occupation goes:
+
+    g^s_ai            = 2 F^s_ai
+    Hess^ss_ai,bj     = 2 (F^s_ab d_ij - F^s_ij d_ab) + 4 (ai|bj) - 2 (ab|ij) - 2 (aj|bi)
+    Hess^ab_ai,bj     = 4 (a_a i_a | b_b j_b)
+
+The alpha-beta block has Coulomb only, because exchange acts within one
+spin. Setting `kappa^a = kappa^b` on a closed shell gives back the RHF
+energy, so the RHF Hessian is the sum of the four UHF blocks; a test
+checks this.
+
+**Two ways to build it.** `stab_hess_mo` transforms the integrals to the MO
+basis and fills the formulas above. `stab_hess_jk` never forms MO
+integrals: it applies the Hessian to each unit vector through a J/K build on
+the symmetric AO matrix `X = C (kappa + kappa^T) C^T`,
+
+    (Hess kappa)_ai = 4 (F_vv kappa - kappa F_oo)_ai + 8 [C^T (J(X) - K(X)/2) C]_ai          RHF
+    (Hess kappa)^s_ai = 2 (F_vv kappa - kappa F_oo)^s_ai + 2 [C_s^T (J(X_a + X_b) - K(X_s)) C_s]_ai   UHF
+
+which is how large codes apply it (PySCF's `gen_response`). The two share
+nothing but the Fock matrix and must agree entry for entry; a third check,
+the finite-difference curvature of `E(C exp(t K))` along the lowest
+eigenvector, involves neither.
+
+**Follow-down.** From an unstable state, `stab_follow` rotates the
+orbitals along the lowest eigenvector, picks the step on a grid of
+`STAB_NSTEP` points per sign (spacing `STAB_DT` radians) that gives the
+lowest energy, and restarts the SCF from the rotated density. It repeats
+until the lowest eigenvalue is above `-STAB_TOL` or `STAB_MAXFOLLOW`
+restarts have run. The first state gets the label `STAB_DEFAULT` (0) when it
+is a saddle and `STAB_STABLE` (1) when it is already a minimum; the end
+state gets its own label.
+
+**Result** of `stab_follow(p, D0)` and `stab_run(p, r)`, a
+`Stability` record:
+
+    lowest       lowest Hessian eigenvalue of the input state
+    label        its label: STAB_DEFAULT or STAB_STABLE
+    energy       E after follow-down (the input E when stable)
+    label_end    label of the end state
+    lowest_end   its lowest eigenvalue
+    steps        SCF restarts taken
+    energy0      E of the input state
+    converged    1 when every restart converged
+    density      the end densities, [nd, n, n]
+
+**Orbital pack.** The orbitals travel as `orb[nd, n + 1, m]`: rows `0..n-1`
+of slab `d` are the MO coefficients of spin `d` (or the closed-shell
+orbitals when `nd = 1`), and row `n` holds 1 for an occupied orbital and 0
+for a virtual one, so a Hessian member needs no other input to know the
+occupations. Occupations are aufbau from `F(D)`, which is what the SCF
+driver uses.
+
+Both Hessian members have the signature `(orb: Arr, H: Arr, Gp: Arr) ->
+[np, np]` and call `jk_packed` directly, so like the guess `gs_avg` they
+assume in-core packed integrals. `ScfOptions.stab_hessian` picks the member
+the follow-down uses. Everything here takes the run's `ScfSetup`
+(lib/hf/scf_loop) for the matrices, the electron counts and the options.
+
+Used with `import hf.stab`.
+###
+
+from hf.scf_loop import scf_densities, scf_iterate, scf_nocc, scf_opts, ScfResult, ScfSetup
+from hf.opts import OPT_EIGEN
+from hf.eri_store import es_unpack8
+from hf.eigen import eig_of, eig_random_sym, eig_vectors
+from hf.orthogonalize import orth_of, orth_rank
+from hf.density import den_energy, den_fock, den_orth
+from hf.jk import jk_of, jk_packed
+
+# A state is stable when its lowest Hessian eigenvalue is above -STAB_TOL.
+STAB_TOL = 1.0e-6
+STAB_DEFAULT = 0
+STAB_STABLE = 1
+STAB_MAXFOLLOW = 6
+# the follow-down step grid: STAB_NSTEP points per sign, STAB_DT radians apart
+STAB_NSTEP = 16
+STAB_DT = 0.1
+# Taylor terms stab_expm sums once K is scaled to row sums of at most 1/4
+STAB_EXPM_TERMS = 18
+
+# ---- orbitals -------------------------------------------------------------------
+
+record Stability {
+    lowest: Num
+    label: Num
+    energy: Num
+    label_end: Num
+    lowest_end: Num
+    steps: Num
+    energy0: Num
+    converged: Num
+    density: Arr
+}
+
+#| The orbital pack `[nd, n + 1, m]` of the densities `D[nd, n, n]`: the
+#| eigenvectors of `F(D)` in the orthonormal basis `X`, as AO coefficients,
+#| with the aufbau occupation flags in row n.
+def stab_orbitals(p: ScfSetup, D: Arr) -> Arr {
+    sh = shape(D)
+    nd = sh[0]
+    n = sh[1]
+    opts = scf_opts(p)
+    X = orth_of(p.s, opts)
+    m = orth_rank(X)
+    F = den_fock(p.h, jk_of(p.eri, D, opts), nd)
+    orb = zeros(nd, n + 1, m)
+    for d to nd {
+        V = eig_vectors(eig_of(den_orth(X, slab(F, d), m), opts[OPT_EIGEN]))
+        orb[d, 0:n, :] = X[:, 0:m] @ V
+        orb[d, n, 0:min(scf_nocc(p, d), m)] = 1.0
+    }
+    return orb
+}
+
+#| Occupied MO indices of spin d into `idx[d, 0 .. no-1]`, then the virtual
+#| ones into `idx[d, no .. m-1]`. Returns `no`.
+#@ 84dbe562
+def stab_split(orb: Arr, d, idx: Arr) {
+    sh = shape(orb)
+    n = sh[1] - 1
+    m = sh[2]
+    no = 0
+    for p to m {
+        if orb[d, n, p] > 0.5 {
+            idx[d, no] = p
+            no = no + 1
+        }
+    }
+    k = no
+    for p to m {
+        if orb[d, n, p] < 0.5 {
+            idx[d, k] = p
+            k = k + 1
+        }
+    }
+    return no
+}
+
+#| Number of rotation parameters: `sum_d no_d (m - no_d)`.
+#@ f6b003a0
+def stab_nparam(orb: Arr) {
+    sh = shape(orb)
+    n = sh[1] - 1
+    m = sh[2]
+    np = 0
+    for d to sh[0] {
+        no = round(sum(orb[d, n, :]))
+        np = np + no * (m - no)
+    }
+    return np
+}
+
+#| The densities of an orbital pack, `[nd, n, n]`: `2 C_occ C_occ^T` for one
+#| closed-shell set, `C_s,occ C_s,occ^T` per spin for two.
+def stab_density(orb: Arr) {
+    sh = shape(orb)
+    nd = sh[0]
+    n = sh[1] - 1
+    m = sh[2]
+    D = zeros(nd, n, n)
+    w = 1.0
+    if nd < 2 {
+        w = 2.0
+    }
+    for d to nd {
+        C = orb[d, 0:n, :]
+        Cf = copy(C)
+        for p to m {
+            Cf[:, p] = orb[d, n, p] * C[:, p]
+        }
+        setslab(D, d, w * (Cf @ transpose(C)))
+    }
+    return D
+}
+
+#| The Fock matrices of an orbital pack in its own MO basis, `[nd, m, m]`:
+#| `C_d^T F_d C_d` with `F` built from the pack's densities.
+def stab_fock_mo(orb: Arr, H: Arr, Gp: Arr) -> Arr {
+    sh = shape(orb)
+    nd = sh[0]
+    n = sh[1] - 1
+    m = sh[2]
+    D = stab_density(orb)
+    F = den_fock(H, jk_packed(Gp, Gp, Gp, D, Gp), nd)
+    Fm = zeros(nd, m, m)
+    for d to nd {
+        C = orb[d, 0:n, :]
+        setslab(Fm, d, transpose(C) @ (slab(F, d) @ C))
+    }
+    return Fm
+}
+
+# ---- the Hessian, from MO integrals ---------------------------------------------
+
+#| `(pq|rs)` in the MO basis, `[m, m, m, m]`, with `p, q` orbitals of spin s
+#| and `r, s` of spin t, from the dense AO tensor `G[n, n, n, n]`. Four
+#| quarter transforms, each `m n^4` or less.
+def stab_mo_eri(G: Arr, orb: Arr, s, t) -> Arr {
+    sh = shape(orb)
+    n = sh[1] - 1
+    m = sh[2]
+    A = zeros(m, n, n, n)
+    for p to m {
+        for j to n {
+            for k to n {
+                for l to n {
+                    v = 0.0
+                    for i to n {
+                        v = v + orb[s, i, p] * G[i, j, k, l]
+                    }
+                    A[p, j, k, l] = v
+                }
+            }
+        }
+    }
+    B = zeros(m, m, n, n)
+    for p to m {
+        for q to m {
+            for k to n {
+                for l to n {
+                    v = 0.0
+                    for j to n {
+                        v = v + orb[s, j, q] * A[p, j, k, l]
+                    }
+                    B[p, q, k, l] = v
+                }
+            }
+        }
+    }
+    C3 = zeros(m, m, m, n)
+    for p to m {
+        for q to m {
+            for r to m {
+                for l to n {
+                    v = 0.0
+                    for k to n {
+                        v = v + orb[t, k, r] * B[p, q, k, l]
+                    }
+                    C3[p, q, r, l] = v
+                }
+            }
+        }
+    }
+    M = zeros(m, m, m, m)
+    for p to m {
+        for q to m {
+            for r to m {
+                for u to m {
+                    v = 0.0
+                    for l to n {
+                        v = v + orb[t, l, u] * C3[p, q, r, l]
+                    }
+                    M[p, q, r, u] = v
+                }
+            }
+        }
+    }
+    return M
+}
+
+#| Fill the (s, t) block of the Hessian from the MO integrals `M` of that
+#| spin pair; `nd = 1` uses the RHF formula. Returns `0`.
+def stab_fill_block(Hs: Arr, M: Arr, Fm: Arr, idx: Arr, no: Arr, off: Arr, m, nd, s, t) {
+    ns = round(no[s])
+    nt = round(no[t])
+    vs = m - ns
+    vt = m - nt
+    for i to ns {
+        for a to vs {
+            oi = round(idx[s, i])
+            va = round(idx[s, ns + a])
+            row = round(off[s]) + i * vs + a
+            for j to nt {
+                for b to vt {
+                    oj = round(idx[t, j])
+                    vb = round(idx[t, nt + b])
+                    col = round(off[t]) + j * vt + b
+                    h = 4.0 * M[va, oi, vb, oj]
+                    if s == t {
+                        f = 0.0
+                        if i == j {
+                            f = f + Fm[s, va, vb]
+                        }
+                        if a == b {
+                            f = f - Fm[s, oi, oj]
+                        }
+                        if nd < 2 {
+                            h = 4.0 * (f + 4.0 * M[va, oi, vb, oj] - M[va, vb, oi, oj] - M[va, oj, vb, oi])
+                        }
+                        else {
+                            h = h + 2.0 * f - 2.0 * M[va, vb, oi, oj] - 2.0 * M[va, oj, vb, oi]
+                        }
+                    }
+                    Hs[row, col] = h
+                }
+            }
+        }
+    }
+    return 0
+}
+
+#| Offsets of each spin's parameters into `off`, occupied counts into `no`
+#| and the index lists into `idx`. Returns the parameter count.
+#@ f70b1a49
+def stab_layout(orb: Arr, idx: Arr, no: Arr, off: Arr) {
+    sh = shape(orb)
+    nd = sh[0]
+    m = sh[2]
+    np = 0
+    for d to nd {
+        no[d] = stab_split(orb, d, idx)
+        off[d] = np
+        np = np + round(no[d]) * (m - round(no[d]))
+    }
+    return np
+}
+
+#| Hessian member `0` (production): the explicit formulas from MO integrals.
+#@ 2b12b67d
+def stab_hess_mo(orb: Arr, H: Arr, Gp: Arr) -> Arr {
+    sh = shape(orb)
+    nd = sh[0]
+    n = sh[1] - 1
+    m = sh[2]
+    Fm = stab_fock_mo(orb, H, Gp)
+    G = es_unpack8(Gp, n)
+    idx = zeros(nd, m)
+    no = zeros(2)
+    off = zeros(2)
+    np = stab_layout(orb, idx, no, off)
+    Hs = zeros(np, np)
+    for s to nd {
+        for t to nd {
+            M = stab_mo_eri(G, orb, s, t)
+            stab_fill_block(Hs, M, Fm, idx, no, off, m, nd, s, t)
+        }
+    }
+    return Hs
+}
+
+# ---- the Hessian, from J/K response ---------------------------------------------
+
+#| `Hess kappa` without MO integrals: one J/K build on the AO matrices
+#| `X_d = C_d (kappa_d + kappa_d^T) C_d^T`. `Fm` is `stab_fock_mo(orb, ...)`
+#| and the layout arrays come from `stab_layout`.
+def stab_hop(orb: Arr, Fm: Arr, Gp: Arr, idx: Arr, no: Arr, off: Arr, kap: Arr) -> Arr {
+    sh = shape(orb)
+    nd = sh[0]
+    n = sh[1] - 1
+    m = sh[2]
+    X = zeros(nd, n, n)
+    for d to nd {
+        nod = round(no[d])
+        v = m - nod
+        for i to nod {
+            oi = round(idx[d, i])
+            for a to v {
+                va = round(idx[d, nod + a])
+                k = kap[round(off[d]) + i * v + a]
+                if k != 0.0 {
+                    for mu to n {
+                        for nu to n {
+                            X[d, mu, nu] = X[d, mu, nu] + k * (orb[d, mu, va] * orb[d, nu, oi] + orb[d, mu, oi] * orb[d, nu, va])
+                        }
+                    }
+                }
+            }
+        }
+    }
+    JK = jk_packed(Gp, Gp, Gp, X, Gp)
+    hk = zeros(len(kap))
+    for d to nd {
+        pref = 2.0
+        if nd < 2 {
+            G = 8.0 * (slab(JK, 0) - 0.5 * slab(JK, 1))
+            pref = 4.0
+        }
+        else {
+            G = 2.0 * (slab(JK, 0) + slab(JK, 2) - slab(JK, 2 * d + 1))
+        }
+        C = orb[d, 0:n, :]
+        GC = G @ C
+        nod = round(no[d])
+        v = m - nod
+        for i to nod {
+            oi = round(idx[d, i])
+            for a to v {
+                va = round(idx[d, nod + a])
+                f = 0.0
+                for b to v {
+                    f = f + Fm[d, va, round(idx[d, nod + b])] * kap[round(off[d]) + i * v + b]
+                }
+                for j to nod {
+                    f = f - kap[round(off[d]) + j * v + a] * Fm[d, round(idx[d, j]), oi]
+                }
+                hk[round(off[d]) + i * v + a] = pref * f + sum(C[:, va] * GC[:, oi])
+            }
+        }
+    }
+    return hk
+}
+
+#| Hessian member `1`: column k is `Hess e_k`, from `stab_hop`.
+#@ aebf84f1
+def stab_hess_jk(orb: Arr, H: Arr, Gp: Arr) -> Arr {
+    sh = shape(orb)
+    nd = sh[0]
+    m = sh[2]
+    Fm = stab_fock_mo(orb, H, Gp)
+    idx = zeros(nd, m)
+    no = zeros(2)
+    off = zeros(2)
+    np = stab_layout(orb, idx, no, off)
+    Hs = zeros(np, np)
+    kap = zeros(np)
+    for k to np {
+        kap[k] = 1.0
+        Hs[:, k] = stab_hop(orb, Fm, Gp, idx, no, off, kap)
+        kap[k] = 0.0
+    }
+    return Hs
+}
+
+#| The Hessian registry, production member first.
+#@ 012e3297
+def stab_hess_methods() {
+    return [stab_hess_mo, stab_hess_jk]
+}
+
+# the members of stab_hess_methods (ScfOptions.stab_hessian)
+STAB_HESS_MO = 0
+STAB_HESS_JK = 1
+
+#| The Hessian of an orbital pack from member `p.options.stab_hessian`.
+#@ 9c185c28
+def stab_hessian(orb: Arr, p: ScfSetup) -> Arr {
+    ms = stab_hess_methods()
+    return apply(ms[round(p.options.stab_hessian)], orb, p.h, p.eri)
+}
+
+#| The gradient `dE/dkappa` of an orbital pack, in the Hessian's layout:
+#| `4 F_ai` (RHF) or `2 F^s_ai` (UHF).
+#@ 0f92c06c
+def stab_gradient(orb: Arr, H: Arr, Gp: Arr) -> Arr {
+    sh = shape(orb)
+    nd = sh[0]
+    m = sh[2]
+    Fm = stab_fock_mo(orb, H, Gp)
+    idx = zeros(nd, m)
+    no = zeros(2)
+    off = zeros(2)
+    np = stab_layout(orb, idx, no, off)
+    g = zeros(np)
+    pref = 2.0
+    if nd < 2 {
+        pref = 4.0
+    }
+    for d to nd {
+        nod = round(no[d])
+        v = m - nod
+        for i to nod {
+            for a to v {
+                g[round(off[d]) + i * v + a] = pref * Fm[d, round(idx[d, nod + a]), round(idx[d, i])]
+            }
+        }
+    }
+    return g
+}
+
+# ---- rotations and energies ------------------------------------------------------
+
+#| `exp(K)` for a square `K`, by scaling and squaring: halve K until its
+#| largest absolute row sum is at most 1/4, sum `STAB_EXPM_TERMS` Taylor
+#| terms after the identity (the first term left out is at most
+#| `0.25^19 / 19! = 3e-29` there), then square back.
+def stab_expm(K: Arr) -> Arr {
+    m = len(K)
+    nrm = 0.0
+    for i to m {
+        nrm = max(nrm, sum(abs(K[i, :])))
+    }
+    sq = 0
+    scale = 1.0
+    while nrm * scale > 0.25 {
+        scale = 0.5 * scale
+        sq = sq + 1
+    }
+    U = zeros(m, m)
+    for i to m {
+        U[i, i] = 1.0
+    }
+    T = copy(U)
+    for k to STAB_EXPM_TERMS {
+        # T <- T (scale K) / (k + 1), U <- U + T
+        T = (T @ K) * scale / (k + 1)
+        U = U + T
+    }
+    for c to sq {
+        U = U @ U
+    }
+    return U
+}
+
+#| The orbital pack rotated by `C_d exp(t K_d)` per spin, where `K_d` holds
+#| `kap` in the Hessian's layout. The occupation row is copied.
+def stab_rotate(orb: Arr, kap: Arr, t) -> Arr {
+    sh = shape(orb)
+    nd = sh[0]
+    n = sh[1] - 1
+    m = sh[2]
+    idx = zeros(nd, m)
+    no = zeros(2)
+    off = zeros(2)
+    stab_layout(orb, idx, no, off)
+    out = zeros(nd, n + 1, m)
+    for d to nd {
+        K = zeros(m, m)
+        nod = round(no[d])
+        v = m - nod
+        for i to nod {
+            for a to v {
+                oi = round(idx[d, i])
+                va = round(idx[d, nod + a])
+                k = t * kap[round(off[d]) + i * v + a]
+                K[va, oi] = k
+                K[oi, va] = -k
+            }
+        }
+        out[d, 0:n, :] = orb[d, 0:n, :] @ stab_expm(K)
+        out[d, n, :] = orb[d, n, :]
+    }
+    return out
+}
+
+#| The energy of the densities `D[nd, n, n]`.
+#@ 4edff80e
+def stab_energy_d(p: ScfSetup, D: Arr) {
+    nd = len(D)
+    F = den_fock(p.h, jk_of(p.eri, D, scf_opts(p)), nd)
+    return den_energy(p.h, F, D, nd, p.enuc)
+}
+
+#| The energy of the determinant(s) of an orbital pack.
+#@ 23d389ab
+def stab_energy(orb: Arr, p: ScfSetup) {
+    return stab_energy_d(p, stab_density(orb))
+}
+
+#| The energy after rotating the pack by `t kap`.
+#@ 2b95161a
+def stab_energy_along(orb: Arr, p: ScfSetup, kap: Arr, t) {
+    return stab_energy(stab_rotate(orb, kap, t), p)
+}
+
+#| `d^2 E(C exp(t K)) / dt^2` at `t = 0` by central differences with steps h
+#| and 2h, combined by Richardson extrapolation so the error is O(h^4).
+#@ 2bd23c05
+def stab_curvature(orb: Arr, p: ScfSetup, kap: Arr, h) {
+    e0 = stab_energy(orb, p)
+    d1 = (stab_energy_along(orb, p, kap, h) - 2.0 * e0 + stab_energy_along(orb, p, kap, -h)) / (h * h)
+    d2 = (stab_energy_along(orb, p, kap, 2.0 * h) - 2.0 * e0 + stab_energy_along(orb, p, kap, -2.0 * h)) / (4.0 * h * h)
+    return (4.0 * d1 - d2) / 3.0
+}
+
+#| `dE(C exp(t K)) / dt` at `t = 0`, central differences with Richardson.
+#@ 7258f564
+def stab_slope(orb: Arr, p: ScfSetup, kap: Arr, h) {
+    d1 = (stab_energy_along(orb, p, kap, h) - stab_energy_along(orb, p, kap, -h)) / (2.0 * h)
+    d2 = (stab_energy_along(orb, p, kap, 2.0 * h) - stab_energy_along(orb, p, kap, -2.0 * h)) / (4.0 * h)
+    return (4.0 * d1 - d2) / 3.0
+}
+
+#| `v^T A v`.
+#@ 090cf209
+def stab_quad(A: Arr, v: Arr) {
+    return sum(v * (A @ v))
+}
+
+#| The lowest eigenvalue of the symmetric `Hs` and its unit eigenvector,
+#| from eigensolver `options.eigensolver`.
+#@ 53d34511
+def stab_lowest(Hs: Arr, p: ScfSetup) {
+    R = eig_of(Hs, p.options.eigensolver)
+    return R[0, 0], R[1:len(R), 0]
+}
+
+#| STAB_STABLE when `lam` is above -STAB_TOL, STAB_DEFAULT otherwise.
+#@ bf3ee4f0
+def stab_label(lam) {
+    if lam > -STAB_TOL {
+        return STAB_STABLE
+    }
+    return STAB_DEFAULT
+}
+
+#| The step along `kap` with the lowest energy on the grid
+#| `+-STAB_DT * (1 .. STAB_NSTEP)`; ties go to the earlier point, positive
+#| steps first.
+#@ 5f11542d
+def stab_line_min(orb: Arr, p: ScfSetup, kap: Arr) {
+    best = 0.0
+    ebest = stab_energy(orb, p)
+    for sgn to 2 {
+        for k to STAB_NSTEP {
+            t = STAB_DT * (k + 1)
+            if sgn > 0 {
+                t = -t
+            }
+            e = stab_energy_along(orb, p, kap, t)
+            if e < ebest {
+                ebest = e
+                best = t
+            }
+        }
+    }
+    return best
+}
+
+# ---- analysis and follow-down ----------------------------------------------------
+
+#| The lowest Hessian eigenvalue of the densities `D[nd, n, n]`, and its
+#| eigenvector.
+#@ 0d26fae7
+def stab_lowest_of(p: ScfSetup, D: Arr) {
+    orb = stab_orbitals(p, D)
+    return stab_lowest(stab_hessian(orb, p), p)
+}
+
+#| Stability analysis and follow-down from the converged densities
+#| `D0[nd, n, n]`. Every restart is an SCF (lib/hf/scf_loop) under the
+#| setup's options.
+#@ 084d6bd3
+def stab_follow(p: ScfSetup, D0: Arr) -> Stability {
+    D = D0
+    e0 = stab_energy_d(p, D)
+    e = e0
+    conv = 1
+    steps = 0
+    lowest = 0.0
+    lam = 0.0
+    while true {
+        orb = stab_orbitals(p, D)
+        lam, v = stab_lowest(stab_hessian(orb, p), p)
+        if steps == 0 {
+            lowest = lam
+        }
+        if lam > -STAB_TOL or steps >= STAB_MAXFOLLOW {
+            break
+        }
+        t = stab_line_min(orb, p, v)
+        r = scf_iterate(p, stab_density(stab_rotate(orb, v, t)))
+        D = scf_densities(r)
+        e = r.energy
+        conv = min(conv, r.converged)
+        steps = steps + 1
+    }
+    return Stability { lowest: lowest, label: stab_label(lowest), energy: e, label_end: stab_label(lam), lowest_end: lam, steps: steps, energy0: e0, converged: conv, density: D }
+}
+
+#| `stab_follow` from an SCF result.
+#@ c26ad5cf
+def stab_run(p: ScfSetup, r: ScfResult) -> Stability {
+    return stab_follow(p, scf_densities(r))
+}
+
+# ---- tests ------------------------------------------------------------------------
+
+test "exp of an antisymmetric matrix is orthogonal and matches the 2x2 rotation" {
+    stab_K = eig_random_sym(9, 4242)
+    for stab_i to len(stab_K) {
+        for stab_j to len(stab_K) {
+            if stab_j > stab_i {
+                stab_K[stab_i, stab_j] = -stab_K[stab_j, stab_i]
+            }
+            if stab_j == stab_i {
+                stab_K[stab_i, stab_j] = 0.0
+            }
+        }
+    }
+    # row sums reach about 5, so the squaring phase runs
+    stab_U = stab_expm(stab_K * 1.0)
+    stab_W = stab_expm(stab_K * -1.0)
+    # U^T U = I and U exp(-K) = I
+    stab_S = transpose(stab_U) @ stab_U
+    stab_P = stab_U @ stab_W
+    for stab_i to len(stab_K) {
+        stab_S[stab_i, stab_i] = stab_S[stab_i, stab_i] - 1.0
+        stab_P[stab_i, stab_i] = stab_P[stab_i, stab_i] - 1.0
+    }
+    assert_lt(max(max(abs(stab_S)), max(abs(stab_P))), 1.0e-13)
+    # exp([[0, -a], [a, 0]]) = [[cos a, -sin a], [sin a, cos a]]
+    stab_R = stab_expm([[0.0, -1.3], [1.3, 0.0]])
+    assert_lt(abs(stab_R[0, 0] - cos(1.3)), 1.0e-15)
+    assert_lt(abs(stab_R[1, 0] - sin(1.3)), 1.0e-15)
+    assert_lt(abs(stab_R[0, 1] + sin(1.3)), 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

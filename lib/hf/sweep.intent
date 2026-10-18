@@ -1,0 +1,533 @@
+module lib/hf/sweep
+  Run every implementation of a stage on the same input and require them to
+  agree. Each member of a registry runs, its result is flattened into one row
+  of a table, and the consensus is the elementwise median of the rows. The
+  member farthest from the median is blamed, with the flat index of the
+  entry where it is farthest, in a report vector. `release_mode()` runs the
+  first member alone. One driver exists per member signature, because a Viv
+  def is typed by the registry it is called with.
+
+sw_rep_new  @abd99b1d
+  why   Every sweep writes its verdict into a report the caller made: the
+        blamed member, the flat index, the worst relative deviation and how
+        many members ran, at the positions the `SW_REP_*` constants name.
+
+sw_rep_release  @ab8e6817
+  why   A caller reads the report the same way after every stage, so a run
+        that compared nothing must still leave one that says so: one member,
+        no deviation.
+  rep  the report vector to overwrite
+
+sw_flat_index  @c4f02769
+  why   `take` and `put` read and write an array of any shape through a list of
+        flat (row-major) positions; this list lets a driver copy a member's
+        result into a row of the table and the consensus back into that shape.
+  N     how many entries a member's result has
+  ix    the list being filled, `[N]`
+  i     the position being written
+
+sw_table_median  @8bc78595
+  why   The consensus must not depend on which member is listed first: a
+        median of three or more members is right as long as most of them are,
+        so a bad member is blamed wherever it sits
+        [test "the same bug is blamed wherever it sits in the registry"].
+        The deviation is divided by `1 + |median|`, so the tolerance is
+        relative for large entries and absolute for small ones.
+  T      the table, one row per member, `[nstrat, N]`
+  nstrat how many members ran
+  N      how many entries each row has
+  ncmp   how many leading entries are compared; the rest are copied from row
+         `0`
+  C      the consensus being written, `[N]`
+  rep    the report: blamed member, flat index, worst deviation, member count
+  col    one column of the table: every member's value of one entry, sorted
+  worst  the largest relative deviation from the median seen so far
+  i      the entry being compared
+  m      the member being read
+  dev    member m's relative deviation from the median at entry i
+
+sw_verdict  @0273bcae
+  why   The `sw_check*` drivers return a verdict instead of asserting, so a
+        test can require that a planted bug is caught.
+  rep   a report a driver filled
+  tol   the largest relative deviation that still counts as agreement
+
+sw_run3_arr  @10786f99
+  why   The one place the members of a three-argument registry are run and
+        compared; `sweep3_arr` and `sw_check3_arr` differ only in what they do
+        with the report. Each member gets copies of the inputs (`x1 + 0.0`)
+        because a member that writes into an input would otherwise change what
+        the next member sees
+        [test "a member that writes into its input cannot corrupt the next one"].
+  ms       the registry: the members, each `(Arr, Arr, Arr) -> Arr`
+  x1       the first input every member gets
+  x2       the second input
+  x3       the third input
+  N        how many entries a member's result has (Viv has no element count)
+  ncmp     how many leading entries are compared
+  rep      the report to fill
+  release  `1` to run member `0` alone and compare nothing
+  nstrat   how many members the registry has
+  ix       the flat positions `0 .. N-1`
+  T        the table of results, one row per member
+  out      member `0`'s result; its shape is the shape returned, and its
+           entries are overwritten by the consensus
+  m        the member being run
+  cur      member m's result
+  C        the consensus, flat
+
+sweep3_arr  @616c4f0b
+  why   The form the library's stages call: in a debug run every member runs
+        and a dissent stops the program at the stage that caused it; in a
+        release run only the production member runs
+        [test "release mode runs member 0 alone and returns it unchanged"].
+  ms       the registry of `(Arr, Arr, Arr) -> Arr` members
+  x1       the first input
+  x2       the second input
+  x3       the third input
+  N        how many entries a result has
+  ncmp     how many leading entries are compared
+  tol      the largest relative deviation allowed
+  rep      the report, filled for the caller to read
+  release  `1` when the program runs in release mode
+  R        the consensus, in the members' shape
+
+sw_check3_arr  @27c0ddd5
+  why   Tests need to see a dissent without the program stopping, to show a
+        planted bug is caught and blamed on the right member and entry
+        [test "a bad member listed first is blamed, at flat index 30, and the median is 2"].
+  ms    the registry of `(Arr, Arr, Arr) -> Arr` members
+  x1    the first input
+  x2    the second input
+  x3    the third input
+  N     how many entries a result has
+  ncmp  how many leading entries are compared
+  tol   the largest relative deviation that counts as agreement
+  rep   the report to fill
+  out   where the consensus is copied, any array with `N` entries
+  R     the consensus
+  ix    the flat positions `0 .. N-1`
+
+sw_run5_arr  @4eab1a07
+  what  Run every member of a five-argument registry (the J/K builders'
+        signature) on copies of the same inputs, or member `0` alone when
+        `release` is `1`, and return the elementwise median in the members'
+        shape, with the dissent recorded in `rep`.
+  why   The same work as `sw_run3_arr` for members that take five arrays. A Viv
+        def is typed by the registry signature it is called with, so each
+        signature needs its own driver
+        [test "the J/K driver compares [2, n, n] results and blames the bad K"].
+  ms       the registry: members `(Arr, Arr, Arr, Arr, Arr) -> Arr`
+  x1       the first input
+  x2       the second input
+  x3       the third input
+  x4       the fourth input (for J/K, the densities)
+  x5       the fifth input (for J/K, the options)
+  N        how many entries a result has
+  ncmp     how many leading entries are compared
+  rep      the report to fill
+  release  `1` to run member `0` alone
+  nstrat   how many members the registry has
+  ix       the flat positions `0 .. N-1`
+  T        the table of results, one row per member
+  out      member `0`'s result, overwritten by the consensus
+  m        the member being run
+  cur      member m's result
+  C        the consensus, flat
+
+sweep5_arr  @b1df06c9
+  what  Run a five-argument registry and assert that its members agree to
+        `tol`, returning the consensus; in release mode, run member `0` alone.
+  why   What the J/K stage calls: a builder that disagrees with the others stops
+        a debug run at the J/K build.
+  ms       the registry of five-argument members
+  x1       the first input
+  x2       the second input
+  x3       the third input
+  x4       the fourth input
+  x5       the fifth input
+  N        how many entries a result has
+  ncmp     how many leading entries are compared
+  tol      the largest relative deviation allowed
+  rep      the report, filled for the caller
+  release  `1` when the program runs in release mode
+  R        the consensus
+
+sw_check5_arr  @0e70f3bf
+  what  Run a five-argument registry, copy the consensus into `out`, and return
+        `1` if the members agree to `tol`, else `0`, without asserting.
+  why   Lets a test show a planted J/K error is caught and blamed
+        [test "the J/K driver compares [2, n, n] results and blames the bad K"].
+  ms    the registry of five-argument members
+  x1    the first input
+  x2    the second input
+  x3    the third input
+  x4    the fourth input
+  x5    the fifth input
+  N     how many entries a result has
+  ncmp  how many leading entries are compared
+  tol   the largest relative deviation that counts as agreement
+  rep   the report to fill
+  out   where the consensus is copied
+  R     the consensus
+  ix    the flat positions `0 .. N-1`
+
+sw_run3_num  @34df77ae
+  what  Run every member of a registry whose members return one number, and
+        return the median of their answers, with the dissent recorded in
+        `rep`; with `release` set, return member `0`'s answer alone.
+  why   Scalar stages (an energy, a norm) need the same check as array stages;
+        a one-column table lets them share `sw_table_median`
+        [test "the scalar and (nmax, x) drivers take medians too"].
+  ms       the registry: members `(Arr, Arr, Arr) -> number`
+  x1       the first input
+  x2       the second input
+  x3       the third input
+  rep      the report to fill
+  release  `1` to run member `0` alone
+  nstrat   how many members the registry has
+  T        the table, one row per member and one column
+  m        the member being run
+  C        the median, one entry
+
+sweep3_num  @cfbdd291
+  what  Run a registry of scalar-valued members and assert that they agree to
+        `tol`, returning the median; in release mode, run member `0` alone.
+  why   The asserting form a scalar stage calls, as `sweep3_arr` is for arrays.
+  ms       the registry of scalar-valued members
+  x1       the first input
+  x2       the second input
+  x3       the third input
+  tol      the largest relative deviation allowed
+  rep      the report, filled for the caller
+  release  `1` when the program runs in release mode
+  v        the median answer
+
+sw_check3_num  @f4bc8ec1
+  why   The non-asserting form, for tests that plant a bad scalar member
+        [test "the scalar and (nmax, x) drivers take medians too"].
+  ms    the registry of scalar-valued members
+  x1    the first input
+  x2    the second input
+  x3    the third input
+  tol   the largest relative deviation that counts as agreement
+  rep   the report to fill
+  out   `out[0]` receives the median
+
+sw_runnx_arr  @ef07bdb3
+  what  Run every member of a registry with the Boys function's signature,
+        `(nmax, x) -> Arr` (values for orders `0 .. nmax` at one argument), and
+        return the elementwise median, with the dissent recorded in `rep`; with
+        `release` set, return member `0`'s result alone.
+  why   The Boys function has several implementations (series, asymptotic
+        form, tables), and this is their signature. Its inputs are numbers, so
+        no copies are needed.
+  ms       the registry: members `(nmax, x) -> Arr`
+  nmax     the highest order wanted
+  x        the argument
+  N        how many entries a result has, `nmax + 1`
+  ncmp     how many leading entries are compared
+  rep      the report to fill
+  release  `1` to run member `0` alone
+  nstrat   how many members the registry has
+  ix       the flat positions `0 .. N-1`
+  T        the table of results, one row per member
+  out      member `0`'s result, overwritten by the consensus
+  m        the member being run
+  cur      member m's result
+  C        the consensus
+
+sweepnx_arr  @d4c8c964
+  what  Run a registry of `(nmax, x) -> Arr` members and assert that they agree
+        to `tol`, returning the consensus; in release mode, run member `0`
+        alone.
+  why   The asserting form the Boys stage calls.
+  ms       the registry of `(nmax, x)` members
+  nmax     the highest order wanted
+  x        the argument
+  N        how many entries a result has
+  ncmp     how many leading entries are compared
+  tol      the largest relative deviation allowed
+  rep      the report, filled for the caller
+  release  `1` when the program runs in release mode
+  R        the consensus
+
+sw_checknx_arr  @c7b1d240
+  what  Run a registry of `(nmax, x) -> Arr` members, copy the consensus into
+        `out`, and return `1` if they agree to `tol`, else `0`, without
+        asserting.
+  why   The non-asserting form, for tests
+        [test "the scalar and (nmax, x) drivers take medians too"].
+  ms    the registry of `(nmax, x)` members
+  nmax  the highest order wanted
+  x     the argument
+  N     how many entries a result has
+  ncmp  how many leading entries are compared
+  tol   the largest relative deviation that counts as agreement
+  rep   the report to fill
+  out   where the consensus is copied
+  R     the consensus
+  ix    the flat positions `0 .. N-1`
+
+sw_id3  @582656d6
+  what  A member of the three-array signature that returns its first input,
+        used only by `sw_anchor` to give `sweep3_arr` and `sw_check3_arr` a
+        registry of the right type.
+  a     returned as it is
+  b     unused
+  c     unused
+
+sw_id5  @582656d6
+  what  A member of the five-array signature that returns its first input, for
+        `sw_anchor`.
+  a     returned as it is
+  b     unused
+  c     unused
+  d     unused
+  e     unused
+
+sw_idn  @f62d31ca
+  what  A member of the scalar signature that returns the first entry of its
+        first input, for `sw_anchor`.
+  a     its first entry is returned
+  b     unused
+  c     unused
+
+sw_idnx  @92909f47
+  what  A member of the `(nmax, x)` signature that returns `x` in entry `0` and
+        zeros after it, for `sw_anchor`.
+  nmax  the highest order: the result has `nmax + 1` entries
+  x     the value put in entry `0`
+  r     the result
+
+sw_anchor  @1b2d4a27
+  what  Call every driver of this module once with a one-member registry of
+        the matching signature. It is never run.
+  why   The compiler types a driver's registry parameter from its call sites.
+        A program that uses `sweep3_arr` but never `sweep5_arr` would leave
+        `sweep5_arr` with no call site, and its registry parameter would be
+        typed as a number, so the program would not compile.
+  entry the compiler, which types each driver's registry parameter from these
+        calls; never run
+  x     a placeholder array for every array argument
+  rep   a report for the calls
+  out   a place for the check drivers' consensus
+  a     the three-array driver's result
+  b     the five-array driver's result
+  c     the `(nmax, x)` driver's result
+  v     the scalar driver's result, then the check drivers' verdicts added
+
+sw_cov_new  @a340c123
+  why   The coverage counters record which strategies checked which classes of
+        input (ERI shell classes, Boys regions, SCF regimes), so a build can
+        fail when a class was checked by only one strategy.
+  nclass  how many classes the table has, one row each
+
+sw_cov_hit  @06cdd362
+  why   Called by a driver's caller after each check, one count per strategy.
+  cov    the coverage table, `[nclass, SW_COV_NSTRAT]`
+  cls    the class that was checked
+  strat  the strategy that checked it
+
+sw_cov_nstrat  @c327565c
+  cov   the coverage table
+  cls   the class asked about
+  n     how many strategies have a nonzero count for it
+  s     the strategy being looked at
+
+sw_cov_covered  @6c862043
+  cov   the coverage table
+  n     how many classes have at least one strategy
+  c     the class being looked at
+
+sw_cov_min_strat  @6f25d7da
+  why   The gate's quantity: the weakest-checked class decides whether the
+        build's coverage is enough.
+  cov   the coverage table
+  best  the fewest strategies found so far behind a covered class
+  c     the class being looked at
+  k     how many strategies checked class c
+
+sw_cov_gate  @b7ef6e4f
+  why   One strategy agreeing with itself proves nothing; a class counts as
+        checked only when at least two independent strategies were compared on
+        it [test "coverage counts strategies per class and gates on at least two"].
+  cov   the coverage table
+
+sw_cov_report  @b5a96dc6
+  cov       the coverage table
+  c         the class being reported
+  k         how many strategies checked it
+  hits      how many checks it had in total
+  s         the strategy being added up
+  coverage  the line shown: class, strategies, total checks
+
+sw_cls_eri  @c23c2fd2
+  why   An integral $(ab|cd)$ has the same value under swapping a with b, c with
+        d, and the two pairs, so the eight orderings are one class of work;
+        counting them apart would split one class's coverage over eight rows
+        [test "ERI classes are canonical under the 8-fold symmetry"].
+  la    the angular momentum of the first function
+  lb    of the second
+  lc    of the third
+  ld    of the fourth
+  a     the larger l of the bra pair
+  b     the smaller l of the bra pair
+  c     the larger l of the ket pair
+  d     the smaller l of the ket pair
+  bra   the bra pair as one index
+  ket   the ket pair as one index
+
+sw_cls_boys  @a57b522c
+  why   The Boys function's implementations switch methods by argument (series
+        for small x, asymptotic form for large x), so coverage must be counted
+        per argument range as well as per order.
+  n     the order
+  x     the argument
+  edges the upper edge of each argument range but the last
+  bin   which argument range x falls in
+
+sw_t_tensor  @5083a4b9
+  why   A test value with distinct entries, so a planted error at one entry is
+        found at that entry and nowhere else.
+  G     the tensor, `[SW_T_DIM, SW_T_DIM, SW_T_DIM, SW_T_DIM]`
+  i     the first index
+  j     the second index
+  k     the third index
+  l     the fourth index
+
+sw_t_good  @558df4fb
+  what  A correct test member: returns `sw_t_tensor()` and ignores its inputs.
+  a     unused
+  b     unused
+  c     unused
+
+sw_t_good2  @286bae58
+  why   A second correct member computed a different way, so a sweep of good
+        members compares two computations and not one twice.
+  a     unused
+  b     unused
+  c     unused
+  G     the tensor being filled
+  i     the first index
+  j     the second index
+  k     the third index
+  l     the fourth index
+
+sw_t_bad  @bbccd011
+  why   The tests check that this member is blamed at its flat index wherever
+        it is listed [test "the same bug is blamed wherever it sits in the registry"].
+  a     unused
+  b     unused
+  c     unused
+  G     the tensor with the planted error
+
+sw_t_tailbad  @953801fd
+  why   Shows that entries past `ncmp` are not compared
+        [test "an entry past ncmp is never compared and carries member 0's value"].
+  a     unused
+  b     unused
+  c     unused
+  G     the tensor with its last entry wrong
+
+sw_t_never  @845ec0fa
+  why   Listed after member `0` in a release run, it shows that only member `0`
+        runs [test "release mode runs member 0 alone and returns it unchanged"].
+  a     unused
+  b     unused
+  c     unused
+
+sw_t_clobber  @75779fac
+  why   Shows that the drivers give each member its own copy of the inputs
+        [test "a member that writes into its input cannot corrupt the next one"].
+  a     the input it writes into
+  b     unused
+  c     unused
+
+sw_t_first  @6a7fe8cb
+  what  A test member that returns the test tensor with entry `[0,0,0,0]` set to
+        the first entry of its first input, so a test can see what input a
+        member received.
+  a     the input whose first entry is copied
+  b     unused
+  c     unused
+  G     the tensor returned
+
+sw_t_jk  @2addd78f
+  why   A stand-in for a J/K builder with a known answer, for the
+        five-argument driver's tests.
+  a     unused
+  b     unused
+  c     unused
+  D     the density, `[n, n]`
+  o     the options, unused
+  n     the size of D
+  R     the result, `[2, n, n]`: J then K
+  i     the row
+  j     the column
+
+sw_t_jk2  @22eecfae
+  what  The same J and K as `sw_t_jk`, `J = 2D` and `K = D`, computed with K
+        first and J from it, as a second correct member.
+  a     unused
+  b     unused
+  c     unused
+  D     the density, `[n, n]`
+  o     the options, unused
+  n     the size of D
+  R     the result, `[2, n, n]`
+  i     the row
+  j     the column
+
+sw_t_jkbad  @6f5cc1fd
+  what  `sw_t_jk` with one entry of K scaled by `1 + 1e-6`: the planted error
+        the J/K driver's test must blame.
+  a     unused
+  b     unused
+  c     unused
+  D     the density
+  o     the options, unused
+  R     the result with the planted error
+
+sw_t_sum  @0dd3065c
+  why   Scalar members for the scalar driver's tests: summing in two orders
+        gives answers that agree to rounding.
+  a     the numbers summed
+  b     unused
+  c     unused
+  s     the running sum
+  i     the entry being added
+
+sw_t_sumrev  @09fa6f7c
+  what  The sum of `a`'s entries taken from the last to the first: a second
+        correct scalar member.
+  a     the numbers summed
+  b     unused
+  c     unused
+  s     the running sum
+  i     how many entries have been added
+
+sw_t_sumoff  @025f8079
+  what  The sum of `a`'s entries plus `1e-3`: the scalar member the tests plant
+        as wrong.
+  a     the numbers summed
+  b     unused
+  c     unused
+
+sw_t_powrec  @63580bed
+  why   Two ways to compute the same table, for the `(nmax, x)` driver's tests
+        [test "the scalar and (nmax, x) drivers take medians too"].
+  nmax  the highest power
+  x     the base
+  r     the table, `[nmax + 1]`: $x^k / k!$ at entry k
+  k     the entry being raised from
+
+sw_t_powdir  @ef2bdf98
+  what  $x^k / k!$ for `k = 0 .. nmax` computed directly with `pow` and a
+        running factorial: the second member for the `(nmax, x)` driver's
+        tests.
+  nmax  the highest power
+  x     the base
+  r     the table, `[nmax + 1]`
+  f     $k!$
+  k     the entry being computed

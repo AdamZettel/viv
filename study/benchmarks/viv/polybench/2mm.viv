@@ -1,0 +1,38 @@
+#! timing
+# PolyBench/C 4.2.1 2mm: D := alpha*A*B*C + beta*D.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/kernels/2mm/2mm.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+NI = 16
+NJ = 18
+NK = 22
+NL = 24
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    A = [[((i * j + 1) % NI) / NI for j to NK] for i to NI]
+    B = [[(i * (j + 1) % NJ) / NJ for j to NJ] for i to NK]
+    C = [[((i * (j + 3) + 1) % NL) / NL for j to NL] for i to NJ]
+    D = [[(i * (j + 2) % NK) / NK for j to NL] for i to NI]
+    return A, B, C, D
+}
+
+def kernel(alpha, beta, A, B, C, D) {
+    tmp = alpha * (A @ B)
+    return beta * D + tmp @ C
+}
+
+alpha = 1.5
+beta = 1.2
+A, B, C, D = init()
+t0 = clock()
+D = kernel(alpha, beta, A, B, C, D)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("D", D)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

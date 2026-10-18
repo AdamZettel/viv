@@ -1,0 +1,199 @@
+# Performance: release builds, the blocked `@`, `parallel for`, memory per
+# loop pass, and how function values compile.
+
+== release-mode
+title: Release mode: select instead of verify
+what: A default (checked) run verifies: a contracted solve such as `spectrum_sym(A, vals)`
+  runs two independent methods and stops on dissent, array accesses are bounds-checked, holds
+  and `disjoint` pins are tested, and steps are recorded. `viv run --release` and a C build
+  with `-DVIV_RELEASE` run the selected method alone and drop those checks.
+  `release_mode()` says which build is running.
+when: Develop and test in the default mode; time and ship in release mode. `-DVIV_NO_BOUNDS`
+  drops only the bounds checks.
+example: release-mode
+see: native-builds, contracts, disjoint-pins, run, spectrum_sym
+keywords: release debug --release VIV_RELEASE bounds checks contract select verify optimize fast
+usage: call:release_mode
+
+== fast-mode
+title: Fast mode: fused multiply-add, the platform libm and BLAS, checked against the exact engines
+what: `viv build --fast` compiles the same C with fused multiply-add (`-ffp-contract=fast`),
+  the platform's libm for `exp`, `log`, `pow`, `sin` and the rest, and on macOS Accelerate for
+  `@` on large finite operands and for `lin_solve`; `viv run --fast` builds and runs it. Its
+  numbers differ from the exact engines' in the last bits. `viv check --fast` runs the
+  interpreter and the exact C build (and the direct wasm with `--wasm`), requires them to agree
+  byte for byte, runs the fast build, and compares the outputs number by number: text, integers
+  and test results must be the same, and every other number within a stated tolerance (an ulp
+  budget, widened by the condition number of the worst solve). The report names each number
+  that differs, by how many ulps and what share of its tolerance; `--without contract,libm,blas`
+  tells which freedom moves it. Exact stays the default everywhere, and the browser runs exact.
+when: Time and ship a long native run once `viv check --fast` passes on it. Develop, test and
+  publish with the exact engines; a port's correctness is judged on them. Fast mode keeps the
+  bounds checks; add `--release` to drop them as well.
+example: none: a fast build needs a C compiler; `viv check --fast scf/lock_water.viv` shows the report
+see: release-mode, native-builds, three-engine-identity, blocked-matmul
+keywords: fast fma contract libm blas lapack accelerate openblas tolerance ulps check --fast build
+verb: build
+
+== blocked-matmul
+title: The cache-blocked `@`, with the plain loop's bits
+what: `A @ B` runs over blocks of `b` that stay in the cache and keeps tiles of four rows by
+  eight columns of the result in registers. For each entry the terms are still added in the
+  order of the inner index, with separate multiplies and adds, so the result is the same bit
+  for bit as the plain i-p-j loop and the same in every engine. NumPy calls BLAS, which agrees
+  to rounding.
+when: Write the product as `@` rather than a triple loop: the loop gives the same numbers and
+  runs without the blocking.
+example: blocked-matmul
+doc: lang/viv/src/interp/matmul.rs
+see: batched-matmul, three-engine-identity, native-builds
+keywords: matmul blocked cache tiling gemm performance bits deterministic fma
+
+== gpu-kernels
+title: GPU kernels, run by a CPU emulator that checks them
+what: `kernel def` declares a GPU kernel. One whose body is a single `return` of an
+  elementwise expression (`return a * x + exp(z)`) is one thread per element, the tree
+  fused. An explicit kernel uses `thread_id()`, `block_id()`, `block_size()`,
+  `grid_size()`, `s = shared(N)` for a block's shared array and `barrier()`. Both are
+  called like defs, `y = k(x, y)`, and the call returns the array parameters the kernel
+  writes. The grid is 256 threads to a block and the blocks that cover the first array
+  parameter, unless a top-level line `schedule k(blocks = 2, threads = 8)` gives it (an
+  integer expression of literals, the kernel's Int parameters, `len` of its arrays and
+  global constants; one per axis for a 2-D grid, gpu-2d-grids). Every engine runs a kernel as a loop over blocks and,
+  between barriers, over threads (MCUDA), and stops with the block, thread, element and
+  line on an index out of range, a shared element read before it is written, two threads
+  touching one element with no barrier between, or two blocks touching one element. A
+  barrier under a per-thread condition, a per-thread value kept across a barrier,
+  allocation, strings, I/O and calls of defs are refused before the run. `viv cuda`
+  writes the CUDA C.
+when: To write a kernel for a GPU and check it on a machine without one: its values in
+  the emulator are the CPU's (a contract with `agree ... exactly` against the array code),
+  and examples/cuda holds an elementwise tree, a `parallel for` and `sum` in the canonical
+  order.
+example: gpu-kernels
+doc: lang/viv/src/cuda.rs
+see: cuda, gpu-2d-grids, parallel-for, contract-declarations
+keywords: gpu cuda kernel thread block shared barrier emulator race syncthreads device schedule grid
+usage: call:thread_id, call:barrier, call:shared
+
+== gpu-2d-grids
+title: 2-D grids for GPU kernels
+what: A kernel's grid can have two axes. `thread_id(1)`, `block_id(1)`, `block_size(1)` and
+  `grid_size(1)` are the y axis (CUDA's `threadIdx.y` and the rest), `thread_id(0)` and
+  `thread_id()` the x axis. A schedule key takes one value per axis, `threads = [32, 8]` and
+  `blocks = [bx, by]`, and `cover = [w, h]` gives the index space the threads must cover,
+  from which the blocks are derived (`(w + 32 - 1) // 32` along x); `cover` and `blocks`
+  exclude each other. A thread of a stencil or a matrix product then has its column and row
+  without dividing a flat index. The emulator numbers threads and blocks x first, as CUDA
+  does, so every check (races, indices, shared memory) works as in 1-D; `viv cuda` launches
+  with `dim3`.
+when: For kernels over a 2-D index space: stencils on a grid, matrix products, transposes.
+example: gpu-2d-grids
+doc: examples/cuda/heat2d.viv; examples/cuda/matmul.viv
+see: gpu-kernels, cuda, device-arrays
+keywords: gpu cuda 2d grid dim3 threadIdx.y blockIdx.y block shape tile matmul stencil cover schedule
+usage: call:thread_id, call:block_id
+
+== device-arrays
+title: Arrays kept on the GPU across kernel calls: `on device`
+what: `on device u, v { ... }` keeps the named arrays on the device while the block
+  runs: each is copied there once on entry and back once on exit, and kernel calls inside
+  read and write them in place, so a time loop of launches makes no copies. `u, v = v, u`
+  swaps two device buffers. Inside the block a named array may only be a kernel's array
+  argument, a kernel's result (`v = k(u, v)`, the array the kernel writes), part of a swap,
+  or `len(u)`; reading it on the host, a call of a def, `return`, and `break` out of the
+  block are refused before the run, so no stale copy can be read. The arrays the names held
+  before the block are not changed by it. `device_transfers()` is `[to device, to host,
+  launches]` so far, the same in every engine; `viv cuda` writes the block as one host
+  function with its copies at the two ends.
+when: For a time-stepping solver or any loop of kernel launches over the same arrays.
+example: device-arrays
+doc: lang/viv/src/cuda.rs; examples/cuda/heat2d.viv
+see: gpu-kernels, cuda, unpacking
+keywords: device resident residency on device transfers copies cudaMemcpy double buffer swap time loop gpu
+usage: call:device_transfers
+
+== parallel-for
+title: `parallel for`, checked for disjoint writes
+what: `parallel for i to n { }` runs its passes on several threads in a C build compiled with
+  OpenMP, and in order everywhere else. Each pass may write a shared array only at elements
+  indexed by `i` in one fixed position (`a[i]`, `m[i, j]`, `setslab(W, i, s)`, a def given `i`
+  as the index it writes), or by `i` plus a constant (`a[i + 1]`, or `a[j]` after `j = i + 1`
+  at the top of the pass), and may read a shared array it writes only there. A write two
+  passes could share, a global written through a def, `break` and `return` are refused before
+  the run in every engine, with the write named and a fix suggested. A scalar total is a
+  reduction.
+when: For independent work per index (rows of a matrix, integrals per shell pair, samples)
+  in a native build. Only the plain form: no `from`, `by` or `reversed`.
+example: parallel-for
+doc: lang/viv/src/parallel.rs
+see: disjoint-pins, native-builds, memory-lens, autodiff-limits
+keywords: parallel for openmp threads multicore disjoint race data race reduction omp
+usage: form:parallel-for
+
+== disjoint-pins
+title: Pinning a `parallel for` as disjoint in the memory lens
+what: When the passes write different elements for a reason the compiler cannot see (a
+  permutation, a list of unique pairs), a line `disjoint  parallel for i: out  "why"` under
+  the def in the module's `.memory` file lets the loop compile. Every checked build records
+  each element a pass writes and stops the run naming both passes if two write the same one;
+  a release build trusts the pin.
+when: Instead of rewriting a scatter loop as a serial loop, after the compiler refuses it.
+example: disjoint-pins
+doc: lang/viv/src/memory_lens.rs; lib/hf/md_eri.memory
+see: parallel-for, memory-lens, release-mode
+keywords: disjoint pin memory lens .memory parallel scatter permutation race checked
+usage: file:memory
+
+== loop-arena
+title: Each loop pass frees what it allocated
+what: In C and wasm, when a loop's body can allocate, the end of each pass frees everything
+  allocated since the loop began except what the variables the body assigns hold now. A def
+  returning a record keeps the record's arrays and frees the rest. The interpreter counts
+  references, so all three engines run a loop of temporaries in bounded memory.
+when: Write temporaries inside the loop as plain expressions. Preallocating every array
+  before the loop and passing it down as an output argument is no longer needed for memory.
+example: loop-arena
+see: aliasing-and-copies, memcheck, growable-arrays
+keywords: memory arena free allocation leak temporaries loop garbage bounded
+
+== native-builds
+title: Native and wasm builds
+what: `viv prog.viv -o prog.c` writes portable C99 and `cc -std=c99 -O2 prog.c -lm` builds it;
+  add `-fopenmp` (on macOS `-Xpreprocessor -fopenmp` with libomp) for `parallel for`, and
+  `-DVIV_RELEASE` for a release build. `viv prog.viv -o prog.wasm` writes a wasm module
+  directly. All three engines compute `sin`, `exp`, `pow` with Viv's own libm, so the outputs
+  agree byte for byte.
+when: For runs longer than a few seconds: the interpreter walks the tree, and the compiled
+  program runs the same code natively.
+example: none: a build needs a C compiler and writes files; tools/three-engines.sh shows the commands
+doc: lang/viv/examples/README.md
+see: compile, release-mode, parallel-for, three-engines, three-engine-identity
+keywords: compile c native binary cc gcc clang wasm webassembly -o build O2 openmp speed
+
+== separate-compilation
+title: Each module compiled once, its object cached
+what: `viv build` writes the C as one translation unit per imported module (a large
+  module in parts) and one for the program (`viv prog.viv --split <dir>`), compiles each
+  unit once per distinct text, flags and compiler, and keeps the object under its SHA-256 in `~/.cache/viv` (or
+  `$VIV_CACHE_DIR`); the next program that loads the module links the kept object. The exact
+  build is `cc -O3`. The output is the one-file build's, byte for byte.
+when: Always, through `viv build`; `--single` builds one C file, `--no-cache` skips the
+  cache, `--cache-clear` empties it.
+example: none: a build needs a C compiler and writes files; lang/viv/tests/split_build.rs runs one
+see: native-builds, release-mode, fast-mode
+keywords: separate compilation object cache module unit link compile time ccache incremental build
+
+== monomorphization
+title: Function values compile by specialization
+what: A def or a lambda passed to a def is a value in the interpreter. For C and wasm the
+  compiler specializes the callee per function argument (`apply_twice(triple, x)` becomes
+  `apply_twice__triple(x)`), and lifts lambdas to defs, so the compiled code has only direct
+  calls. A lambda passed to a def may read only its parameters, top-level names and defs,
+  not the caller's locals.
+when: Pass a def where an algorithm takes a function (a root finder, an integrand, a key);
+  the compiled call costs what a direct call costs.
+example: monomorphization
+doc: lang/viv/src/defun.rs
+see: function-values, method-registries, contracts
+keywords: monomorphization specialization defunctionalization function value lambda closure higher-order callback

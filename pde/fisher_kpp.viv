@@ -1,0 +1,98 @@
+#! pde The Fisher-KPP equation
+#! equation u_t = u_{xx} + u\,(1 - u)
+#! kind nonlinear parabolic
+#! method Strang splitting: the logistic reaction solved exactly, diffusion by Crank-Nicolson
+#! checks the front speed against the KPP value 2, approached from below with Bramson's logarithmic correction
+#! | A population that grows logistically and spreads by diffusion: a gene through a species,
+#! | a flame, an invading plant. Behind the front $u = 1$, ahead of it $u = 0$, and the front
+#! | advances at a constant speed.
+#! |
+#! | Which speed is the subtle part. Travelling waves exist for every $c \ge 2$; what is selected,
+#! | from any initial condition that starts out compact, is the slowest, $c^* = 2\sqrt{rD} = 2$ -- set
+#! | entirely by the linearized growth at the front's leading edge, where $u$ is tiny.
+#! |
+#! | And it is approached slowly. Bramson showed the front sits at
+#! | $X(t) = 2t - \tfrac32\ln t + O(1)$, so the speed measured between two times is
+#! | $2 - \tfrac32\ln(t_2/t_1)/(t_2 - t_1)$, *below* 2 by an amount that dies only like $1/t$. Measure
+#! | between $t = 20$ and $40$ and the prediction is $1.948$, not $2$.
+#! |
+#! | The reaction alone is the logistic equation, which has a closed form, so that half of the
+#! | split has no time-stepping error at all.
+
+XMAX = 140.0
+N = 700
+H = XMAX / (N + 1.0)
+X = linspace(H, XMAX - H, N)
+DT = 0.05
+R = DT / (H * H)
+
+#| The logistic equation u' = u (1 - u), solved exactly over a time dt.
+def react(u, dt) {
+    g = exp(dt)
+    return u * g / (1.0 + u * (g - 1.0))
+}
+
+LO = zeros(N) - 0.5 * R
+DI = zeros(N) + (1.0 + R)
+UP = zeros(N) - 0.5 * R
+
+#| One Crank-Nicolson diffusion step, with u = 1 held at the left wall and 0 at the right.
+def diffuse(u) {
+    rhs = (1.0 - R) * u + 0.5 * R * (roll(u, 1.0) + roll(u, -1.0))
+    # roll wraps around: put the true boundary neighbors back, for both time levels
+    rhs[0] = (1.0 - R) * u[0] + 0.5 * R * (1.0 + u[1]) + 0.5 * R
+    rhs[N - 1.0] = (1.0 - R) * u[N - 1.0] + 0.5 * R * u[N - 2.0]
+    return tridiag_solve(LO, DI, UP, rhs)
+}
+
+#| Where the front is: the u = 1/2 crossing, by linear interpolation.
+def front(u) {
+    pos = 0.0
+    for i to N - 1.0 {
+        if u[i] >= 0.5 and u[i + 1.0] < 0.5 {
+            pos = X[i] + H * (u[i] - 0.5) / (u[i] - u[i + 1.0])
+        }
+    }
+    return pos
+}
+
+u = zeros(N)
+for i to N {
+    if X[i] < 5.0 { u[i] = 1.0 }
+}
+T1 = 20.0
+T2 = 40.0
+x1 = 0.0
+snapshot = u
+steps = T2 / DT
+for s to steps {
+    u = react(diffuse(react(u, 0.5 * DT)), 0.5 * DT)
+    if s + 1.0 == T1 / DT {
+        x1 = front(u)
+        snapshot = u
+    }
+}
+x2 = front(u)
+speed = (x2 - x1) / (T2 - T1)
+bramson = 2.0 - 1.5 * log(T2 / T1) / (T2 - T1)
+show x1
+show x2
+show speed
+show bramson
+
+figure("A Fisher-KPP front, twenty time units apart", "x", "u")
+plot(X, snapshot, "t = 20")
+plot(X, u, "t = 40")
+
+test "the front advances at the KPP speed 2, to within four percent" {
+    assert_near(speed, 2.0, 0.08)
+}
+test "and from BELOW: the selected front is the slowest one, approached slowly" {
+    assert_lt(speed, 2.0)
+}
+test "the shortfall is Bramson's logarithmic correction: 2 - (3/2) ln(t2/t1) / (t2 - t1)" {
+    assert_near(speed, bramson, 0.01)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

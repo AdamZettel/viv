@@ -1,0 +1,42 @@
+# Every tensor of one GGUF file whose type is in TYPES, read by lib/gguf and
+# compared number for number with gguf-py's dequantize of it, which
+# tools/gguf/ref.py wrote to REFDIR/<k>.f32 (tools/gguf/check.sh runs both):
+#     viv run --set 'MODEL="m.gguf"' --set 'REFDIR="dir"' --set 'TYPES="F32,Q8_0"' tools/gguf/values.viv
+# One line per tensor: its name, type, count, and how many numbers differ.
+from gguf.tensors import read_gguf, f32_values, row_len, GGML_NAMES
+from gguf.quants import tensor_rows
+
+MODEL = "lib/gguf/tests/tiny.gguf"
+REFDIR = "lib/gguf/tests"
+TYPES = "F32,F16,BF16"
+# rows compared at a time, so that a 32000-row embedding is never all in memory
+CHUNK_ROWS: Int = 256
+F32_BYTES: Int = 4
+
+g = read_gguf(MODEL)
+types = split(TYPES, ",")
+for k to len(g.tensors) {
+    t = g.tensors[k]
+    if not (GGML_NAMES[t.ggml_type] in types) {
+        continue
+    }
+    n_rows = t.n_elems // row_len(t)
+    differ: Int = 0
+    r0: Int = 0
+    while r0 < n_rows {
+        n = min(CHUNK_ROWS, n_rows - r0)
+        x = tensor_rows(MODEL, t, r0, n)
+        m = n * row_len(t)
+        ref = f32_values(read_bytes(f"{REFDIR}/{int(k):d}.f32", r0 * row_len(t) * F32_BYTES, m * F32_BYTES), m)
+        for i to m {
+            if x[i] != ref[i] {
+                differ = differ + 1
+            }
+        }
+        r0 = r0 + n
+    }
+    print(f"{t.name} {GGML_NAMES[t.ggml_type]} {t.n_elems} differ {differ}")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

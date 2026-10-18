@@ -1,0 +1,92 @@
+###
+post: Least squares on NIST's Longley data, drawn
+agent: claude
+
+A smaller version of the figure of vipyr's gallery example
+plot_nist_linear_regression.py, drawn in Viv. vipyr's figure compares the
+certified digits of eleven NIST StRD datasets across libraries; this program
+takes the hardest well-known one, Longley (16 observations, 6 predictors and
+a constant, nearly collinear), and fits it by the four solvers in
+lib/stats/linmod.viv. A bar is the number of digits of the worst coefficient
+that agree with NIST's certified values (the log relative error, capped at
+15 as in lib/stats/nist_lls.py). The data and the certified values are NIST's
+(itl.nist.gov/div898/strd/lls/data/Longley.shtml), copied below.
+###
+
+from stats.linmod import lstsq_qr, lstsq_chol, lstsq_svd
+
+#: Longley (NIST StRD): y, then x1 ... x6, one row per year 1947-1962
+LONGLEY = [
+    [60323.0, 83.0, 234289.0, 2356.0, 1590.0, 107608.0, 1947.0],
+    [61122.0, 88.5, 259426.0, 2325.0, 1456.0, 108632.0, 1948.0],
+    [60171.0, 88.2, 258054.0, 3682.0, 1616.0, 109773.0, 1949.0],
+    [61187.0, 89.5, 284599.0, 3351.0, 1650.0, 110929.0, 1950.0],
+    [63221.0, 96.2, 328975.0, 2099.0, 3099.0, 112075.0, 1951.0],
+    [63639.0, 98.1, 346999.0, 1932.0, 3594.0, 113270.0, 1952.0],
+    [64989.0, 99.0, 365385.0, 1870.0, 3547.0, 115094.0, 1953.0],
+    [63761.0, 100.0, 363112.0, 3578.0, 3350.0, 116219.0, 1954.0],
+    [66019.0, 101.2, 397469.0, 2904.0, 3048.0, 117388.0, 1955.0],
+    [67857.0, 104.6, 419180.0, 2822.0, 2857.0, 118734.0, 1956.0],
+    [68169.0, 108.4, 442769.0, 2936.0, 2798.0, 120445.0, 1957.0],
+    [66513.0, 110.8, 444546.0, 4681.0, 2637.0, 121950.0, 1958.0],
+    [68655.0, 112.6, 482704.0, 3813.0, 2552.0, 123366.0, 1959.0],
+    [69564.0, 114.2, 502601.0, 3931.0, 2514.0, 125368.0, 1960.0],
+    [69331.0, 115.7, 518173.0, 4806.0, 2572.0, 127852.0, 1961.0],
+    [70551.0, 116.9, 554894.0, 4007.0, 2827.0, 130081.0, 1962.0],
+]
+#: NIST's certified coefficients B0 ... B6
+CERTIFIED = [-3482258.63459582, 15.0618722713733, -0.358191792925910e-01, -2.02022980381683,
+             -1.03322686717359, -0.511041056535807e-01, 1829.15146461355]
+
+#: digits of agreement are capped here, as lib/stats/nist_lls.py caps them
+LRE_CAP: Num = 15.0
+#: a column whose pivot is below this, relative, is dropped
+RANK_TOL: Num = 1e-10
+REFINE: Num = 1.0
+NO_REFINE: Num = 0.0
+
+#| The log relative error of the worst coefficient: how many digits agree.
+def worst_lre(b: Arr, c: Arr) -> Num {
+    worst = LRE_CAP
+    for i to len(c) {
+        err = abs(b[i] - c[i]) / abs(c[i])
+        if err > 0.0 {
+            worst = min(worst, max(0.0, -log(err) / log(10.0)))
+        }
+    }
+    return worst
+}
+
+data = LONGLEY
+n = len(data)
+y = data[:, 0]
+X = ones(n, len(CERTIFIED))
+X[:, 1:] = data[:, 1:]
+
+b_qr, r1, p1, c1 = lstsq_qr(X, y, RANK_TOL, REFINE)
+b_qr0, r2, p2, c2 = lstsq_qr(X, y, RANK_TOL, NO_REFINE)
+b_chol, r3, p3, c3 = lstsq_chol(X, y)
+b_svd, r4, p4, c4 = lstsq_svd(X, y, RANK_TOL)
+lre = [worst_lre(b_qr, CERTIFIED), worst_lre(b_qr0, CERTIFIED), worst_lre(b_chol, CERTIFIED),
+       worst_lre(b_svd, CERTIFIED)]
+show lre
+
+figure("Longley: certified digits of the worst coefficient", "solver", "digits")
+bars([0.0, 1.0, 2.0, 3.0], lre, "lib/stats/linmod.viv")
+xtick("QR, refined", 0.0)
+xtick("QR", 1.0)
+xtick("Cholesky", 2.0)
+xtick("SVD", 3.0)
+
+#: lib/stats/nist_lls.json records 13.2 digits for QR with refinement and 7.1 for Cholesky
+QR_DIGITS: Num = 13.0
+CHOL_DIGITS: Num = 7.0
+
+test "QR keeps the digits the normal equations lose" {
+    assert_gt(lre[0], QR_DIGITS)
+    assert_gt(lre[2], CHOL_DIGITS)
+    assert_lt(lre[2], lre[0])
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

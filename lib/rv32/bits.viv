@@ -1,0 +1,91 @@
+# 32-bit words held in Viv's 64-bit Int.
+#
+# A register of RV32 holds 32 bits. Here a register value is an Int in
+# 0 .. 2^32 - 1, the bits read as an unsigned number; `signed` reads the same
+# bits as two's complement. Field extraction and sign extension are integer
+# division and remainder by powers of two, so every step is plain arithmetic.
+
+TWO: Int = 2
+WORD_BITS: Int = 32
+WORD: Int = 4294967296          # 2^32: one more than the largest register value
+SIGN_BIT: Int = 2147483648      # 2^31: the sign bit of a 32-bit word
+
+#| 2^k as an Int.
+def pow2(k: Int) -> Int {
+    return TWO ^ k
+}
+
+#| x reduced to 32 bits: what a 32-bit register keeps of any integer.
+def wrap(x: Int) -> Int {
+    return x % WORD
+}
+
+#| The 32-bit word w read as a two's-complement number.
+def signed(w: Int) -> Int {
+    if w >= SIGN_BIT {
+        return w - WORD
+    }
+    return w
+}
+
+#| n bits of w starting at bit lo (bit 0 is the least significant).
+def bits(w: Int, lo: Int, n: Int) -> Int {
+    return (w // pow2(lo)) % pow2(n)
+}
+
+#| An n-bit field v read as two's complement: its top bit is the sign.
+def sext(v: Int, n: Int) -> Int {
+    if v >= pow2(n - 1) {
+        return v - pow2(n)
+    }
+    return v
+}
+
+#| Does the signed value v fit in an n-bit two's-complement field?
+def fits_signed(v: Int, n: Int) -> Bool {
+    return v >= -pow2(n - 1) and v < pow2(n - 1)
+}
+
+#| Bitwise and, or and xor of two 32-bit words (Viv's band, bor, bxor work on
+#| numbers; the result of each is a 32-bit value, exact as an Int).
+def and32(a: Int, b: Int) -> Int {
+    return int(band(a, b))
+}
+
+#| Bitwise or of two 32-bit words.
+def or32(a: Int, b: Int) -> Int {
+    return int(bor(a, b))
+}
+
+#| Bitwise exclusive or of two 32-bit words.
+def xor32(a: Int, b: Int) -> Int {
+    return int(bxor(a, b))
+}
+
+HEX_DIGITS = "0123456789abcdef"
+NIBBLE: Int = 4                 # bits per hex digit
+
+#| The word as eight hex digits, for listings.
+def hex32(w: Int) -> Str {
+    v = wrap(w)
+    out = ""
+    for k to WORD_BITS // NIBBLE {
+        out = HEX_DIGITS[v % pow2(NIBBLE)] + out
+        v = v // pow2(NIBBLE)
+    }
+    return out
+}
+
+test "a word and its signed reading" {
+    assert_true(wrap(-1) == WORD - 1)
+    assert_true(signed(WORD - 1) == -1)
+    assert_true(signed(SIGN_BIT) == -SIGN_BIT)
+    assert_true(bits(0xdeadbeef, 8, 8) == 0xbe)
+    assert_true(sext(0xfff, 12) == -1)
+    assert_true(sext(0x7ff, 12) == 2047)
+    assert_true(xor32(0xff00ff00, 0x0ff00ff0) == 0xf0f0f0f0)
+    assert_true(hex32(-2) == "fffffffe")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

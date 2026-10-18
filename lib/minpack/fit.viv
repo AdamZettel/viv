@@ -1,0 +1,179 @@
+###
+post: Residuals, Jacobians and forward differences driving lmder for vp.optimize
+agent: claude
+
+The pieces vipyr's `vp.optimize` drivers (python/vipyr/_optimize.py) call
+around lmder: `lm_fit` runs lmder on a function of lmder's form and returns
+what SciPy's `least_squares(method="lm")` reports, and `lm_fd_jac` is
+MINPACK's `fdjac2` (ref/fdjac2.f), the forward-difference Jacobian that
+`lmdif` uses. With `lm_fd_jac` in the Jacobian branch of the function, lmder
+takes the same steps as lmdif, which is what `scipy.optimize.leastsq` and
+`curve_fit` call when no Jacobian is given.
+
+The test blocks fit NIST's Misra1a (Statistical Reference Datasets,
+nonlinear regression, lower difficulty) from its two certified starting
+points, with a `grad` Jacobian and with forward differences, and compare
+with NIST's certified values.
+
+Used with `import minpack.fit`.
+###
+
+from minpack.lmder import lmder, H_X
+from minpack.enorm import EPSMCH
+
+# lmder's `mode`: 1 scales the variables by the column norms of the
+# Jacobian, 2 by the `diag` the caller gives.
+LM_MODE_JAC = 1.0
+LM_MODE_DIAG = 2.0
+
+#| fdjac2: the forward-difference Jacobian of `res` at x into fjac, given the
+#| residuals fvec at x. `res(data, x, out)` writes the residuals at x into
+#| out. Each column takes one evaluation with x[j] moved by
+#| h = sqrt(max(epsfcn, eps)) |x[j]| (or by sqrt(max(epsfcn, eps)) when x[j] is 0).
+def lm_fd_jac(res, data: Arr, x: Arr, fvec: Arr, fjac: Arr, epsfcn) {
+    m = len(fvec)
+    n = len(x)
+    wa = zeros(m)
+    eps = sqrt(max(epsfcn, EPSMCH))
+    for j to n {
+        temp = x[j]
+        h = eps * abs(temp)
+        if h == 0.0 {
+            h = eps
+        }
+        x[j] = temp + h
+        res(data, x, wa)
+        x[j] = temp
+        fjac[:, j] = (wa - fvec) / h
+    }
+}
+
+#| lmder from x0 on `fcn` (lmder's form: fcn(data, x, fvec, fjac, iflag)) with
+#| m residuals. Returns the solution x, the residuals there, the Jacobian
+#| there (one more Jacobian evaluation, not counted), lmder's info, and the
+#| counts of residual and Jacobian evaluations. `diag` is used when mode is
+#| LM_MODE_DIAG and overwritten with the scales lmder used.
+def lm_fit(fcn, data: Arr, x0: Arr, m, ftol, xtol, gtol, maxfev, diag: Arr, mode, factor) {
+    n = len(x0)
+    x = copy(x0)
+    fvec = zeros(m)
+    fjac = zeros(m, n)
+    ipvt = zeros(n)
+    qtf = zeros(n)
+    counts = zeros(len([0.0, 0.0]))
+    hist = zeros(1, H_X + n)
+    info = lmder(fcn, data, x, fvec, fjac, ftol, xtol, gtol, maxfev, diag, mode, factor, 0.0, ipvt, qtf, counts, hist)
+    jac = zeros(m, n)
+    if info > 0 {
+        fcn(data, x, fvec, jac, 2.0)
+    }
+    return x, fvec, jac, info, counts[0], counts[1]
+}
+
+# ---- tests --------------------------------------------------------------
+
+# NIST StRD Misra1a (lib/minpack/data/Misra1a.dat): y = b1 (1 - exp(-b2 x)),
+# 14 observations, certified to 11 digits.
+#~ test
+MISRA1A_X = [77.6, 114.9, 141.1, 190.8, 239.9, 289.0, 332.8, 378.4, 434.8, 477.3, 536.8, 593.1, 689.1, 760.0]
+#~ test
+MISRA1A_Y = [10.07, 14.73, 17.94, 23.93, 29.61, 35.18, 40.02, 44.82, 50.76, 55.05, 61.01, 66.40, 75.47, 81.78]
+#~ test
+MISRA1A_CERT = [2.3894212918e+02, 5.5015643181e-04]
+#~ test
+MISRA1A_RSS = 1.2455138894e-01
+#~ test
+MISRA1A_START1 = [500.0, 1.0e-4]
+#~ test
+MISRA1A_START2 = [250.0, 5.0e-4]
+
+#~ test
+def misra1a_point(b: Arr, xi: Num, yi: Num) -> Num {
+    return b[0] * (1.0 - exp(-b[1] * xi)) - yi
+}
+
+#~ test
+def misra1a_res(data: Arr, b: Arr, out: Arr) {
+    out[:] = b[0] * (1.0 - exp(-b[1] * MISRA1A_X)) - MISRA1A_Y
+}
+
+#~ test
+def misra1a_grad(data: Arr, b: Arr, fvec: Arr, fjac: Arr, iflag) {
+    if iflag == 1 {
+        misra1a_res(data, b, fvec)
+    }
+    if iflag == 2 {
+        for i to len(fvec) {
+            fjac[i, :] = grad(misra1a_point, b, MISRA1A_X[i], MISRA1A_Y[i])
+        }
+    }
+    return iflag
+}
+
+#~ test
+def misra1a_fd(data: Arr, b: Arr, fvec: Arr, fjac: Arr, iflag) {
+    if iflag == 1 {
+        misra1a_res(data, b, fvec)
+    }
+    if iflag == 2 {
+        lm_fd_jac(misra1a_res, data, b, fvec, fjac, 0.0)
+    }
+    return iflag
+}
+
+# leastsq's settings: ftol = xtol = 1.49012e-8, gtol = 0, factor 100, mode 1
+#~ test
+LEASTSQ_TOL = 1.49012e-08
+#~ test
+LEASTSQ_FACTOR = 100.0
+
+#~ test
+def misra1a_check(fcn, start: Arr, nfev_scipy, njev_scipy, fd) {
+    m = len(MISRA1A_X)
+    n = len(start)
+    maxfev = 100.0 * (n + 1)
+    x, f, J, info, nfev, njev = lm_fit(fcn, [0.0], start, m, LEASTSQ_TOL, LEASTSQ_TOL, 0.0, maxfev, zeros(n), LM_MODE_JAC, LEASTSQ_FACTOR)
+    assert_true(info >= 1 and info <= 4)
+    # certified to 11 digits; lmder stops at xtol 1.5e-8: 9 digits with
+    # grad's Jacobian, 8 with differences
+    xtol_got = 1e-9
+    if fd {
+        xtol_got = 1e-8
+    }
+    assert_allclose(x / MISRA1A_CERT, ones(n), xtol_got)
+    assert_near(sum(f * f), MISRA1A_RSS, 1e-9 * MISRA1A_RSS)
+    # the Jacobian at the solution: grad's is the model's derivative
+    for i to m {
+        e = exp(-x[1] * MISRA1A_X[i])
+        d = [1.0 - e, x[0] * MISRA1A_X[i] * e]
+        if fd {
+            assert_allclose(J[i, :] / d, ones(n), 1e-6)
+        } else {
+            assert_allclose(J[i, :] / d, ones(n), 1e-14)
+        }
+    }
+    # scipy.optimize.leastsq 1.12 (MINPACK's Fortran) takes the same steps;
+    # lmdif counts the n evaluations of each difference Jacobian in nfev
+    if fd {
+        assert_near(nfev + n * njev, nfev_scipy, 0.0)
+    } else {
+        assert_near(nfev, nfev_scipy, 0.0)
+        assert_near(njev, njev_scipy, 0.0)
+    }
+}
+
+test "Misra1a from NIST's first start, grad Jacobian, as leastsq with Dfun" {
+    misra1a_check(misra1a_grad, MISRA1A_START1, 19.0, 15.0, false)
+}
+
+test "Misra1a from NIST's second start, grad Jacobian" {
+    misra1a_check(misra1a_grad, MISRA1A_START2, 5.0, 4.0, false)
+}
+
+test "Misra1a by forward differences, as leastsq without Dfun (lmdif)" {
+    misra1a_check(misra1a_fd, MISRA1A_START1, 49.0, 0.0, true)
+}
+
+# SPDX-License-Identifier: LicenseRef-Minpack
+# SPDX-FileCopyrightText: 1999 University of Chicago (Argonne National Laboratory, MINPACK)
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,82 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// A documentation page in the scikit-learn / PyData manner: the section tree on
+// the left, the page in the middle, "On this page" on the right. The tree comes
+// from src/lib/site.ts; the page passes its own contents list.
+//
+//   <DocPage title=… description=… tree={vipyrTree(path)} toc={[['id', 'Label'], …]}>
+import Base from './Base.astro';
+import Toc from '../components/Toc.astro';
+import type { Tree, TreeItem } from '../lib/site';
+
+export interface Props {
+  title: string;
+  description: string;
+  tree: Tree;
+  toc?: [string, string][];
+  icon?: string;
+  image?: string;
+  /** breadcrumb trail above the title: [href, label] */
+  crumbs?: [string, string][];
+}
+const { title, description, tree, toc = [], icon, image, crumbs = [] } = Astro.props;
+const path = Astro.url.pathname.replace(/\/$/, '') || '/';
+const here = (it: TreeItem) => it.href === path;
+const inside = (it: TreeItem): boolean => here(it) || (it.children || []).some(inside);
+---
+
+<Base title={title} description={description} icon={icon} image={image} bleed={true} warp={false}>
+  <div class="docgrid">
+    <aside class="sidetree" aria-label="Section">
+      <details class="sidetree-fold" open>
+        <summary>Section navigation</summary>
+        {
+          tree.map((g) => (
+            <div class="st-group">
+              <p class="st-title">{g.title}</p>
+              <ul>
+                {g.items.map((it) => (
+                  <li>
+                    <a href={it.href} aria-current={here(it) ? 'page' : undefined} class:list={{ 'st-in': !here(it) && inside(it) }}>
+                      {it.code ? <code>{it.label}</code> : it.label}
+                      {it.badge && <span class="st-badge">{it.badge}</span>}
+                    </a>
+                    {it.children && it.children.length > 0 && (inside(it) || it.children.length <= 0) && (
+                      <ul>
+                        {it.children.map((c) => (
+                          <li>
+                            <a href={c.href} aria-current={here(c) ? 'page' : undefined}>
+                              {c.code ? <code>{c.label}</code> : c.label}
+                              {c.badge && <span class="st-badge">{c.badge}</span>}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        }
+      </details>
+    </aside>
+    <article class="docmain" id="doc">
+      {
+        crumbs.length > 0 && (
+          <nav class="crumbs" aria-label="Breadcrumb">
+            {crumbs.map(([href, label], i) => (
+              <>
+                {i > 0 && <span aria-hidden="true">/</span>}
+                <a href={href}>{label}</a>
+              </>
+            ))}
+          </nav>
+        )
+      }
+      <slot />
+    </article>
+    {toc.length > 0 ? <Toc items={toc} /> : <div class="toc-empty" />}
+  </div>
+</Base>

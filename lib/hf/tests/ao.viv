@@ -1,0 +1,27 @@
+# The tests of lib/hf/ao against PySCF's integrals (lib/hfref): a molecule's
+# S, H and ERIs by their production members, in Cartesian and in spherical
+# functions. They live here so that a program that uses lib/hf/ao does not
+# load the references.
+from hf.ao import ao_eri, ao_hcore, ao_overlap
+from hf.molecule import Molecule, molecule_packs
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_eri8_cart, water631gs_cart_prims,
+    water631gs_cart_s_unit, water631gs_cart_shells,
+)
+from hfref.water_631gs_sph import (
+    water631gs_sph_atoms, water631gs_sph_eri8_sph, water631gs_sph_prims, water631gs_sph_s_sph,
+    water631gs_sph_shells, water631gs_sph_t_sph, water631gs_sph_v_sph,
+)
+
+test "a molecule's S, H and ERIs are PySCF's, in Cartesian and in spherical functions" {
+    ao_sph = molecule_packs(water631gs_sph_atoms(), water631gs_sph_shells(), water631gs_sph_prims())
+    assert_lt(max(abs(ao_overlap(ao_sph) - water631gs_sph_s_sph())), 1.0e-13)
+    assert_lt(max(abs(ao_hcore(ao_sph) - (water631gs_sph_t_sph() + water631gs_sph_v_sph()))), 1.0e-12)
+    assert_lt(max(abs(ao_eri(ao_sph) - water631gs_sph_eri8_sph())), 1.0e-12)
+    ao_cart = Molecule { cart: 1, ..molecule_packs(water631gs_cart_atoms(), water631gs_cart_shells(), water631gs_cart_prims()) }
+    assert_lt(max(abs(ao_overlap(ao_cart) - water631gs_cart_s_unit())), 1.0e-12)
+    assert_lt(max(abs(ao_eri(ao_cart) - water631gs_cart_eri8_cart())), 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

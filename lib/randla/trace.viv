@@ -1,0 +1,92 @@
+###
+post: Trace estimation from matrix-vector products by Hutchinson and Hutch++
+agent: claude
+
+Both estimators see the matrix only through `apply(X)`, which returns A X
+for an n-by-s block X: a def or a lambda, so A can be an operator never
+stored (a Hessian, a matrix function applied by Lanczos, an inverse applied
+by a solver).
+
+- `hutchinson_fn(apply, n, m, seed, stream)`: (1/m) sum of w^T A w over m
+  Rademacher vectors w. Unbiased, with variance 2 (|A|_F^2 - sum a_ii^2) / m,
+  so the error falls like 1/sqrt(m): 100 times the products for one more
+  digit.
+- `hutchpp_fn(apply, n, m, seed, stream)`: Hutch++ (Meyer, Musco, Musco and
+  Woodruff, SOSA 2021). A third of the budget finds the dominant range Q of
+  A (from A S), the trace of Q^T A Q is taken exactly, and Hutchinson runs
+  on the rest, (I - Q Q^T) A (I - Q Q^T), whose Frobenius norm is small when
+  A's spectrum decays. For PSD A the error falls like 1/m.
+
+When not to use them: for a matrix you hold, `trace(A)` is exact and costs
+n reads. When the spectrum is flat (A near a multiple of I), Hutch++ spends
+a third of its products on a range that captures nothing, and plain
+Hutchinson with all m products does better.
+
+Used with `from randla.trace import ...`.
+###
+
+from randla.sketch import gaussian, rademacher
+from randla.dense import orth
+
+#| Hutchinson's estimate of tr(A) from m Rademacher probes, A given by
+#| apply(X) = A X.
+def hutchinson_fn(apply, n: Int, m: Int, seed: Int, stream: Int) -> Num {
+    W = rademacher(n, m, seed, stream)
+    return sum(W * apply(W)) / float(m)
+}
+
+#| Hutch++'s estimate of tr(A) from m products with A (m / 3 for the range,
+#| m / 3 for Q^T A Q, the rest for Hutchinson on the deflated matrix).
+def hutchpp_fn(apply, n: Int, m: Int, seed: Int, stream: Int) -> Num {
+    #: a third of the queries find the dominant range Q
+    s: Int = m // 3
+    g: Int = m - 2 * s
+    S = rademacher(n, s, seed, stream)
+    Q = orth(apply(S))
+    #: the trace on Q, exactly
+    t1 = sum(Q * apply(Q))
+    #: Hutchinson on the rest, its queries projected off Q
+    G = rademacher(n, g, seed, stream + 1)
+    G = G - Q @ (transpose(Q) @ G)
+    t2 = sum(G * apply(G)) / float(g)
+    return t1 + t2
+}
+
+#| Hutchinson's estimate for a matrix A.
+def hutchinson(A: Arr, m: Int, seed: Int, stream: Int) -> Num {
+    n: Int = int(shape(A)[0])
+    return hutchinson_fn(fn(X) -> A @ X, n, m, seed, stream)
+}
+
+#| Hutch++'s estimate for a matrix A.
+def hutchpp(A: Arr, m: Int, seed: Int, stream: Int) -> Num {
+    n: Int = int(shape(A)[0])
+    return hutchpp_fn(fn(X) -> A @ X, n, m, seed, stream)
+}
+
+test "Hutch++ beats Hutchinson on a decaying spectrum, by more as m grows" {
+    n: Int = 150
+    V = orth(gaussian(n, n, 31, 0))
+    lam = pow(arange(1.0, float(n) + 1.0), -2.0)
+    A = (V * lam) @ transpose(V)
+    t = sum(lam)
+    trials: Int = 6
+    e1_small = 0.0
+    e2_small = 0.0
+    e1_big = 0.0
+    e2_big = 0.0
+    for r to trials {
+        e1_small += abs(hutchinson(A, 30, r, 0) - t) / t
+        e2_small += abs(hutchpp(A, 30, r, 0) - t) / t
+        e1_big += abs(hutchinson(A, 240, r, 0) - t) / t
+        e2_big += abs(hutchpp(A, 240, r, 0) - t) / t
+    }
+    show e1_small / trials, e2_small / trials, e1_big / trials, e2_big / trials
+    assert_lt(e2_small, e1_small)
+    assert_lt(e2_big, 0.1 * e1_big)
+    # eight times the products: Hutchinson gains about sqrt(8), Hutch++ more
+    assert_lt(e2_big, e2_small / 6.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

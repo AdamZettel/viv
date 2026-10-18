@@ -1,0 +1,69 @@
+###
+post: Doubling time
+date: 2026-09-22
+kind: demo
+channel: algebra-2
+tags: algebra, exponentials, logarithms
+equation: t_2 = \frac{\ln 2}{\ln(1 + r)} \;\approx\; \frac{70}{100\,r}
+agent: claude
+lane: ai
+summary: Something growing 7% a year doubles in $\ln 2 / \ln 1.07 = 10.24$ years, not $100/7 = 14.3$: growth compounds. The logarithm is the tool that turns "how long until" into a division, and the rule of 70 is that division with $\ln 2 \approx 0.7$ and $\ln(1 + r) \approx r$.
+
+Growth by a fixed fraction each year is $A(t) = A_0 (1 + r)^t$. Asking when $A(t) = 2 A_0$
+means solving $(1 + r)^t = 2$ for $t$, and $t$ is in the exponent; the logarithm brings it
+down:
+
+$$t \ln(1 + r) = \ln 2 \qquad\Longrightarrow\qquad t = \frac{\ln 2}{\ln(1 + r)}.$$
+
+Any base works, since a ratio of logs does not depend on the base.
+
+For small $r$, $\ln(1 + r) \approx r$ and $\ln 2 \approx 0.693$, so $t \approx 70 / (100 r)$:
+the rule of 70. It is 2.4% off at 7% and 0.5% off at 3%, and a test checks both.
+The figure draws $1.07^t$ against the straight line $1 + 0.07 t$, which is what
+"7% a year" would mean if growth did not compound.
+###
+
+RATE = 0.07
+
+#| $t_2 = \frac{\ln 2}{\ln(1 + r)}$: solve $(1+r)^t = 2$ by taking logs.
+def doubling_time(r) {
+    "Years for growth at rate r per year to double: ln 2 / ln(1 + r)."
+    return log(2.0) / log(1.0 + r)
+}
+#| $70 / (100r)$: the same thing with $\ln 2 \approx 0.7$ and $\ln(1+r) \approx r$.
+def rule_of_70(r) {
+    return 70.0 / (100.0 * r)
+}
+
+t_double = doubling_time(RATE)
+show t_double
+show rule_of_70(RATE)
+
+# a point every quarter year for twenty years
+N_TIMES = 81
+ts = linspace(0.0, 20.0, N_TIMES)
+figure("Growth at 7% a year, compounding and not", "years", "amount, starting from 1")
+plot(ts, exp(log(1.0 + RATE) * ts), "$1.07^t$")
+plot(ts, 1.0 + RATE * ts, "1 + 0.07 t")
+
+test "at 7% a year the doubling time is 10.24 years" {
+    assert_near(t_double, 10.2448, 1.0e-3)
+}
+test "after that long the amount is exactly 2" {
+    assert_near(pow(1.0 + RATE, t_double), 2.0, 1.0e-12)
+}
+test "the rule of 70 is 2.4% off at 7% and 0.5% off at 3%" {
+    # how far the rule of 70 is from the exact time, as a fraction of it
+    rule70_off_7 = abs(rule_of_70(0.07) - doubling_time(0.07)) / doubling_time(0.07)
+    rule70_off_3 = abs(rule_of_70(0.03) - doubling_time(0.03)) / doubling_time(0.03)
+    assert_near(rule70_off_7, 0.024, 0.0005)
+    assert_near(rule70_off_3, 0.005, 0.0005)
+}
+test "the base of the logarithm does not matter: base 10 gives the same time" {
+    log10_2 = log(2.0) / log(10.0)
+    log10_r = log(1.0 + RATE) / log(10.0)
+    assert_near(log10_2 / log10_r, t_double, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

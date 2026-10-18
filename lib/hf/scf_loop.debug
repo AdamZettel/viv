@@ -1,0 +1,21 @@
+# What to check while the SCF runs. Nothing
+# here prints. The watches and holds go into the story (`viv story
+# scf/story_water.viv`), and a failed hold fails the run.
+#
+# Per iteration: the energy e, its change de from the last iteration (taken
+# at the energy step, before the loop records e as the previous energy), the
+# commutator norm err (the largest element of the commutator in the
+# orthonormal basis; for ROHF, of the effective matrix with P_c + P_o/2) and
+# nhist, the number of matrices DIIS is mixing. de, err and nhist are not
+# variables of the loop: the lens computes them, in a debug build only.
+#
+# The holds read the loop's own values: each Fock matrix against its
+# transpose, and each new density's electron count Tr(D S) against the count
+# it should hold (2 nalpha for the one RHF density, nalpha and nbeta for the
+# two spin densities).
+scf_iterate  @297271d8
+  watch at energy         de = e - eprev
+  watch per iteration     e, de, err = comm.norm, nhist = diis.meta[ACCEL_M_COUNT]
+  hold at fock            F - swapaxes(F, 1, 2) == 0.0 within 1e-12       "the Fock matrices are symmetric"
+  hold at new_density     [sum(slab(D, 0) * transpose(setup.s)) - setup.nalpha * (3 - len(D)), sum(slab(D, len(D) - 1) * transpose(setup.s)) - (setup.nbeta * (len(D) - 1) + 2 * setup.nalpha * (2 - len(D)))] == 0.0 within 1e-9      "each new density holds its electrons: Tr(D S) = N"
+  hold at commutator      comm.norm >= 0.0                      "the commutator norm is a norm"

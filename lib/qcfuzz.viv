@@ -1,0 +1,245 @@
+###
+post: Two ways of computing the same integral, raced on random molecules
+agent: claude
+
+A contract is a claim about what a stage of a calculation must produce, not
+about how. `lib/gto` computes two-electron integrals from the closed form for
+s-type Gaussians; `lib/gto_md` expands the same product in Hermite Gaussians and
+sums against Boys functions. They share no arithmetic. On any molecule made of
+s functions they must agree to the last few bits, and if they ever do not, one
+of them is wrong and the disagreement says which molecule to look at.
+
+The method is meant to be used at every stage. Every stage gets a
+contract, then more than one implementation of it, then random inputs to argue
+over. An implementation may be as clever as it likes so
+long as it still satisfies the contract; the fastest one that does is the one
+that ships. PySCF settles the real molecules; the fuzzer settles the ones nobody
+thought to write down.
+
+The geometries here are random and deliberately awkward -- atoms placed close
+enough to overlap strongly but never on top of each other, because two basis
+functions at the same point make the overlap matrix singular and that is a
+different bug than the one being looked for.
+
+Used with `import qcfuzz`.
+###
+
+from gto_md import (
+    md_eri_fast, md_one_electron, md_prep_center, md_prep_cn, md_prep_expo, md_prep_nprim,
+)
+from gto import gto_contraction, GTO_DIM, gto_eri, gto_kinetic, gto_nuclear, gto_overlap
+from qcref import NPRIM, sto3g_h_coef, sto3g_h_expo
+
+FUZZ_MIN_SEP = 0.9
+
+#| How many random positions `fuzz_geometry` may try before it gives up
+#| placing atoms; a handful of hydrogens in the box needs far fewer.
+FUZZ_MAX_ATTEMPTS = 4000
+
+#| The one-electron operators `md_one_electron` knows, by number: overlap,
+#| kinetic energy, nuclear attraction.
+FUZZ_ONE_ELECTRON_OPS = 3
+
+#| A random arrangement of `natm` hydrogens in a box, no two closer than
+#| `FUZZ_MIN_SEP`. The generator is the same linear congruential one the rest of
+#| the library tests with, so a disagreement found here can be reproduced by
+#| quoting its seed.
+def fuzz_geometry(natm, seed) {
+    R = zeros(natm, GTO_DIM)
+    x = seed
+    placed = 0
+    for attempt to FUZZ_MAX_ATTEMPTS {
+        if placed < natm {
+            p = zeros(GTO_DIM)
+            for d to GTO_DIM {
+                x = mod(1103515245.0 * x + 12345.0, 2147483648.0)
+                p[d] = 5.0 * (x / 1073741824.0 - 1.0)
+            }
+            ok = 1.0
+            for j to placed {
+                d2 = 0.0
+                for d to GTO_DIM {
+                    dd = R[j, d] - p[d]
+                    d2 = d2 + dd * dd
+                }
+                if d2 < FUZZ_MIN_SEP * FUZZ_MIN_SEP {
+                    ok = 0.0
+                }
+            }
+            if ok > 0.5 {
+                for d to GTO_DIM {
+                    R[placed, d] = p[d]
+                }
+                placed = placed + 1
+            }
+        }
+    }
+    return R
+}
+
+#| The shell description of `n` hydrogens in STO-3G, which is what the
+#| McMurchie-Davidson side needs and the closed-form side does not. One s shell
+#| per atom, three primitives, no angular momentum.
+def fuzz_shell_atom(natm) {
+    out = zeros(natm)
+    for i to natm {
+        out[i] = 1.0 * i
+    }
+    return out
+}
+def fuzz_shell_expo(natm) {
+    e = sto3g_h_expo()
+    out = zeros(natm, NPRIM)
+    for i to natm {
+        for j to NPRIM {
+            out[i, j] = e[j]
+        }
+    }
+    return out
+}
+def fuzz_shell_coef(natm) {
+    c = sto3g_h_coef()
+    out = zeros(natm, NPRIM)
+    for i to natm {
+        for j to NPRIM {
+            out[i, j] = c[j]
+        }
+    }
+    return out
+}
+def fuzz_shell_nprim(natm) {
+    out = zeros(natm)
+    for i to natm {
+        out[i] = NPRIM
+    }
+    return out
+}
+def fuzz_bf_pow(natm) {
+    return zeros(natm, GTO_DIM)
+}
+def fuzz_charges(natm) {
+    out = zeros(natm)
+    for i to natm {
+        out[i] = 1.0
+    }
+    return out
+}
+
+#| The contract for the one-electron integrals: the closed form and the Hermite
+#| expansion, on the same molecule, must give the same matrix. Runs overlap,
+#| kinetic and nuclear attraction, and returns the worst entry-by-entry
+#| disagreement found in any of them.
+def fuzz_one_electron_gap(R: Arr, natm) {
+    nbf = natm
+    Z = fuzz_charges(natm)
+    bfa = fuzz_shell_atom(natm)
+    bp = fuzz_bf_pow(natm)
+    se = fuzz_shell_expo(natm)
+    sc = fuzz_shell_coef(natm)
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    worst = 0.0
+    for which to FUZZ_ONE_ELECTRON_OPS {
+        A = zeros(nbf, nbf)
+        if which == 0 {
+            A = gto_overlap(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+        }
+        if which == 1 {
+            A = gto_kinetic(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+        }
+        if which == 2 {
+            A = gto_nuclear(R, Z, bfa, sto3g_h_expo(), cn, nbf, NPRIM, natm)
+        }
+        B = md_one_electron(R, Z, bfa, bp, bfa, se, sc, nbf, NPRIM, natm, which)
+        for i to nbf {
+            for j to nbf {
+                worst = max(worst, abs(A[i, j] - B[i, j]))
+            }
+        }
+    }
+    return worst
+}
+
+#| The contract for the two-electron integrals, the same way. This is the one
+#| that matters: it is the expensive stage, so it is the one that will get more
+#| implementations, and every one of them has to come back here.
+def fuzz_eri_gap(R: Arr, natm) {
+    nbf = natm
+    bfa = fuzz_shell_atom(natm)
+    bp = fuzz_bf_pow(natm)
+    se = fuzz_shell_expo(natm)
+    sc = fuzz_shell_coef(natm)
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    A = gto_eri(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    CEN = md_prep_center(bfa, bfa, R, nbf)
+    EXP = md_prep_expo(bfa, se, nbf, NPRIM)
+    CN = md_prep_cn(bfa, bp, se, sc, nbf, NPRIM)
+    NP = md_prep_nprim(bfa, fuzz_shell_nprim(natm), nbf)
+    B = md_eri_fast(CEN, EXP, CN, NP, bp, nbf)
+    worst = 0.0
+    for u to nbf {
+        for v to nbf {
+            for l to nbf {
+                for t to nbf {
+                    worst = max(worst, abs(A[u, v, l, t] - B[u, v, l, t]))
+                }
+            }
+        }
+    }
+    return worst
+}
+
+test "the two integral codes agree on molecules nobody chose" {
+    worst1 = 0.0
+    worst2 = 0.0
+    ncases = 12
+    for k to ncases {
+        natm = 2 + mod(k, 3.0)
+        R = fuzz_geometry(natm, 17.0 + 31.0 * k)
+        worst1 = max(worst1, fuzz_one_electron_gap(R, natm))
+        worst2 = max(worst2, fuzz_eri_gap(R, natm))
+    }
+    # the closed form and the Hermite expansion share no arithmetic, so this is
+    # two independent answers meeting, not one answer checked against itself
+    assert_lt(worst1, 1.0e-13)
+    assert_lt(worst2, 1.0e-13)
+}
+
+test "the fuzzer makes molecules, not piles of atoms on one spot" {
+    # if two functions sat at the same point the overlap would be singular and
+    # every implementation would fail together, which proves nothing
+    ncases = 8
+    for k to ncases {
+        natm = 2 + mod(k, 4.0)
+        R = fuzz_geometry(natm, 5.0 + 13.0 * k)
+        for i to natm {
+            for j to i {
+                d2 = 0.0
+                for d to GTO_DIM {
+                    dd = R[i, d] - R[j, d]
+                    d2 = d2 + dd * dd
+                }
+                assert_lt(FUZZ_MIN_SEP * FUZZ_MIN_SEP, d2)
+            }
+        }
+    }
+}
+
+test "the same seed gives the same molecule, so a failure can be quoted back" {
+    natm = 3
+    a = fuzz_geometry(natm, 99.0)
+    b = fuzz_geometry(natm, 99.0)
+    c = fuzz_geometry(natm, 100.0)
+    same = 0.0
+    differs = 0.0
+    for i to natm {
+        for d to GTO_DIM {
+            same = max(same, abs(a[i, d] - b[i, d]))
+            differs = max(differs, abs(a[i, d] - c[i, d]))
+        }
+    }
+    assert_near(same, 0.0, 1.0e-300)
+    assert_lt(0.01, differs)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

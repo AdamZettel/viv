@@ -1,0 +1,181 @@
+#! pde The Korteweg-de Vries equation
+#! equation u_t + 6\,u\,u_x + u_{xxx} = 0
+#! kind dispersive
+#! method Fourier pseudo-spectral in space; Strang splitting in time, with the dispersive step exact
+#! checks a soliton against its exact solution: shape, speed, conserved mass, and the measured order
+#! | Shallow-water waves, and the equation solitons were discovered in. Nonlinearity steepens a
+#! | hump; third-order dispersion spreads it; and for exactly one family of shapes the two cancel:
+#! | $u = \tfrac{c}{2}\,\mathrm{sech}^2\!\left(\tfrac{\sqrt c}{2}(x - ct - x_0)\right)$. Taller solitons are
+#! | narrower and faster -- the speed $c$ is twice the height.
+#! |
+#! | $u_{xxx}$ is the hard part for finite differences: an explicit scheme needs $\Delta t \sim \Delta x^3$.
+#! | In Fourier space it is trivial -- each mode just turns, $\hat u_k \to \hat u_k\,e^{i k^3 \Delta t}$,
+#! | exactly, for any $\Delta t$. So split: half a dispersive step, a full step of the nonlinear
+#! | part $u_t = -3(u^2)_x$ (spectral derivative, fourth-order Runge-Kutta), half a dispersive step.
+#! |
+#! | The Nyquist mode is zeroed in the derivative. On an even grid it has no well-defined sign,
+#! | and leaving it in makes the derivative of a real field complex.
+
+pi = 3.141592653589793
+N = 256
+L = 40.0
+DX = L / N
+X = linspace(-0.5 * L, 0.5 * L - DX, N)
+K = zeros(N)
+for j to N {
+    K[j] = 2.0 * pi * j / L
+    if j >= N / 2.0 { K[j] = 2.0 * pi * (j - N) / L }
+}
+K[N / 2.0] = 0.0
+ZERO = zeros(N)
+IK = complex(ZERO, K)
+
+C = 2.0
+X0 = -6.0
+
+#| The soliton of speed C at time t.
+def soliton(t) {
+    s = 1.0 / cosh(0.5 * sqrt(C) * (X - C * t - X0))
+    return 0.5 * C * s * s
+}
+
+#| The nonlinear rate, -3 d/dx (u^2), with the derivative taken in Fourier space.
+def nonlinear_rate(u) {
+    d = complex(u * u, ZERO)
+    fft(d)
+    d = d * IK
+    ifft(d)
+    return -3.0 * re(d)
+}
+
+#| The dispersive step, exact: every mode turns by exp(i k^3 dt).
+def disperse(u, dt) {
+    v = complex(u, ZERO)
+    fft(v)
+    theta = K * K * K * dt
+    v = v * complex(cos(theta), sin(theta))
+    ifft(v)
+    return re(v)
+}
+
+#| March the soliton to t_end in `steps` Strang steps.
+def march(t_end, steps) {
+    dt = t_end / steps
+    u = soliton(0.0)
+    for s to steps {
+        u = disperse(u, 0.5 * dt)
+        k1 = nonlinear_rate(u)
+        k2 = nonlinear_rate(u + 0.5 * dt * k1)
+        k3 = nonlinear_rate(u + 0.5 * dt * k2)
+        k4 = nonlinear_rate(u + dt * k3)
+        u = u + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        u = disperse(u, 0.5 * dt)
+    }
+    return u
+}
+
+#| Where the hump is: its center of mass. A sum over a periodic grid is spectrally accurate
+#| for a pulse that has decayed before the edges, so this locates it far below the spacing
+#| (a parabola through the top three points is off by 2e-4 here, and no time step fixes that).
+def center(u) {
+    return sum(X * u) / sum(u)
+}
+
+T_END = 2.0
+u = march(T_END, 1600.0)
+d = u - soliton(T_END)
+shape_error = sqrt(sum(d * d) * DX)
+mass_drift = abs(sum(u) - sum(soliton(0.0))) * DX
+speed = (center(u) - X0) / T_END
+d1 = march(T_END, 200.0) - soliton(T_END)
+d2 = march(T_END, 400.0) - soliton(T_END)
+order = log(sqrt(sum(d1 * d1)) / sqrt(sum(d2 * d2))) / log(2.0)
+show shape_error
+show mass_drift
+show speed
+show order
+
+figure("A soliton of speed 2: it moves, and nothing else happens", "x", "u")
+plot(X, soliton(0.0), "t = 0")
+plot(X, u, "t = 2, computed")
+plot(X, soliton(T_END), "t = 2, exact")
+style("t = 2, exact", "dash")
+
+test "the soliton keeps its shape" {
+    assert_lt(shape_error, 1.0e-5)
+}
+test "it moves at c, twice its height" {
+    assert_near(speed, C, 1.0e-4)
+}
+test "mass is conserved to rounding: a spectral derivative has exactly zero mean" {
+    assert_lt(mass_drift, 1.0e-12)
+}
+test "the splitting is second order" {
+    assert_near(order, 2.0, 0.1)
+}
+
+
+# Two solitons: the taller one starts behind, catches the shorter, and passes through it.
+# Hirota's exact two-soliton solution is u = 2 (log tau)_xx with
+# tau = 1 + e^eta1 + e^eta2 + A e^(eta1 + eta2), eta_i = k_i (x - x_i) - k_i^3 t and
+# A = ((k1 - k2) / (k1 + k2))^2; soliton i has speed k_i^2 and height k_i^2 / 2.
+# After the collision each is where it would be, shifted: the taller ahead, the shorter behind.
+K1 = 1.6
+K2 = 1.0
+X1 = -13.0
+X2 = -5.0
+T2_END = 8.0
+T2_STEPS = 1600
+# a row of the waterfall every this many steps, every other grid point
+T2_EVERY = 40
+X_STRIDE = 2
+
+#| Hirota's exact two-soliton solution on the grid X at time t.
+#@ 5cc5e18a
+def two_solitons(t) {
+    A = (K1 - K2) * (K1 - K2) / ((K1 + K2) * (K1 + K2))
+    e1 = exp(K1 * (X - X1) - K1 * K1 * K1 * t)
+    e2 = exp(K2 * (X - X2) - K2 * K2 * K2 * t)
+    e12 = A * e1 * e2
+    tau = 1.0 + e1 + e2 + e12
+    d1 = K1 * e1 + K2 * e2 + (K1 + K2) * e12
+    d2 = K1 * K1 * e1 + K2 * K2 * e2 + (K1 + K2) * (K1 + K2) * e12
+    return 2.0 * (d2 * tau - d1 * d1) / (tau * tau)
+}
+
+n_rows = T2_STEPS / T2_EVERY + 1
+n_cols = N / X_STRIDE
+waterfall = zeros(n_rows, n_cols)
+w = two_solitons(0.0)
+dt2 = T2_END / T2_STEPS
+for s to T2_STEPS + 1 {
+    if mod(s, T2_EVERY) == 0 {
+        for c to n_cols {
+            waterfall[s / T2_EVERY, c] = round(1.0e4 * w[c * X_STRIDE]) / 1.0e4
+        }
+    }
+    if s < T2_STEPS {
+        w = disperse(w, 0.5 * dt2)
+        q1 = nonlinear_rate(w)
+        q2 = nonlinear_rate(w + 0.5 * dt2 * q1)
+        q3 = nonlinear_rate(w + 0.5 * dt2 * q2)
+        q4 = nonlinear_rate(w + dt2 * q3)
+        w = w + (dt2 / 6.0) * (q1 + 2.0 * q2 + 2.0 * q3 + q4)
+        w = disperse(w, 0.5 * dt2)
+    }
+}
+dw = w - two_solitons(T2_END)
+collision_error = max(abs(dw))
+show collision_error
+
+figure("Two solitons collide and pass through each other", "x", "t", -0.5 * L, 0.5 * L - DX, 0.0, T2_END)
+origin("lower")
+plot2d(waterfall, "u")
+
+test "after the collision the two solitons are Hirota's exact solution, phase shifts included" {
+    # the splitting's second-order error at dt = 0.005 is 3.2e-4; at dt = 0.0025 it is 7.8e-5
+    assert_lt(collision_error, 5.0e-4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

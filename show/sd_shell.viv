@@ -1,0 +1,87 @@
+###
+post: The lowest states of neon-20 in the sd-shell model
+equation: H = \sum_a \varepsilon_a\, \hat n_a + \tfrac14 \sum_{abcd} V_{ab,cd}\, a^\dagger_a a^\dagger_b a_d a_c, \qquad H\,\psi_k = E_k\,\psi_k
+summary: Two protons and two neutrons outside an oxygen-16 core, in the $0d_{5/2}$, $1s_{1/2}$ and $0d_{3/2}$ orbits, with the USDB interaction. Lanczos on the 640-dimensional M-scheme basis finds the five lowest states; their energies match BIGSTICK, the shell-model code of C. W. Johnson, W. E. Ormand and collaborators, to $10^{-5}$ MeV, and their spins come out $0, 2, 4, 0, 2$.
+
+Neon-20 is oxygen-16, a closed core, plus two protons and two neutrons.
+The shell model keeps the core frozen and lets the four valence nucleons
+move among the three orbits of the sd shell, twelve single-particle states
+for each kind. A basis state is a Slater determinant: which of the twelve
+proton states are filled and which of the twelve neutron states. Keeping only
+the determinants with total angular-momentum projection $M = 0$ leaves 640
+of them.
+
+The Hamiltonian is single-particle energies plus a two-body interaction,
+USDB (Brown and Richter 2006), fitted to sd-shell data. In this basis it is
+a sparse $640 \times 640$ matrix that the program never forms: `apply_h` in
+`lib/nuclear/shell/shell.viv` applies it to a vector, and Lanczos
+(`lib/eigen/lowest`) builds the lowest eigenvectors from those products.
+Each state's spin $J$ comes from $\langle J^2\rangle = J(J+1)$.
+
+The reference is BIGSTICK (github.com/cwjsdsu/BigstickPublick), run on the
+same space and interaction; `lib/nuclear/shell/bigstick_compare.py` runs both
+and wrote the energies this program checks against.
+###
+
+from nuclear.shell.shell import ShellH, apply_h, j_from_j2, j_squared, lowest_m2, make_basis, make_species, mass_scale, mscheme_tables, popcounts, read_space, species_h, species_jumps
+from nuclear.shell.interactions import SD_SPS, USDB_INT
+from eigen.lowest import lanczos
+
+# valence protons and neutrons outside oxygen-16
+Z_VAL: Int = 2
+N_VAL: Int = 2
+NSTATES: Int = 5
+TOL = 1.0e-8
+# BIGSTICK on neon-20 with USDB (lib/nuclear/shell/bigstick_reference.json)
+BIGSTICK_E = [-40.4723307639, -38.7256410855, -36.297059274, -33.7741524841, -32.9293732156]
+BIGSTICK_J = [0.0, 2.0, 4.0, 0.0, 2.0]
+BIGSTICK_DIM = 640
+# energies must agree to this many MeV
+E_TOL = 1.0e-5
+
+space = read_space(SD_SPS, USDB_INT)
+m2: Int = lowest_m2(Z_VAL, N_VAL)
+same, pn = mscheme_tables(space, mass_scale(space, Z_VAL, N_VAL))
+pc = popcounts(space.ns)
+protons = make_species(space, pc, Z_VAL)
+neutrons = make_species(space, pc, N_VAL)
+basis = make_basis(protons, neutrons, m2)
+dim: Int = basis.dim
+show dim
+
+jp = species_jumps(space, pc, protons)
+jn = species_jumps(space, pc, neutrons)
+H = ShellH { b: basis, p: protons, n: neutrons, hp: species_h(space, pc, same, protons), hn: species_h(space, pc, same, neutrons), jp: jp, jn: jn, pn: pn, ns: space.ns }
+energies, psi = lanczos(fn(x) -> apply_h(H, x), dim, NSTATES, tol = TOL)
+show energies
+
+basis_up = make_basis(protons, neutrons, m2 + 2)
+spins = zeros(NSTATES)
+for k to NSTATES {
+    spins[k] = j_from_j2(j_squared(space, basis, basis_up, protons, neutrons, jp, jn, psi, k))
+}
+show spins
+energy_gap = amax(abs(energies - BIGSTICK_E))
+show energy_gap
+
+#: the level scheme: each state's excitation energy against its spin
+excite = energies - energies[0]
+ref_excite = BIGSTICK_E - BIGSTICK_E[0]
+figure("Neon-20 in the sd shell with USDB", "J (angular momentum)", "excitation energy (MeV)")
+scatter(BIGSTICK_J, ref_excite, "BIGSTICK")
+style("BIGSTICK", "ring s2")
+scatter(spins, excite, "Viv, Lanczos")
+style("Viv, Lanczos", "cross s1")
+
+test "the M = 0 basis has BIGSTICK's 640 Slater determinants" {
+    assert_near(dim, BIGSTICK_DIM, 0.0)
+}
+test "the five lowest energies are BIGSTICK's to 1e-5 MeV" {
+    assert_lt(energy_gap, E_TOL)
+}
+test "their spins are BIGSTICK's: 0, 2, 4, 0, 2" {
+    assert_lt(amax(abs(spins - BIGSTICK_J)), 1.0e-5)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

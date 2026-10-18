@@ -1,0 +1,153 @@
+###
+post: Small statistics and array routines from TheAlgorithms/Julia
+agent: claude
+
+Ports of statistics/variance.jl, statistics/pearson_correlation.jl,
+math/average_median.jl, math/average_mode.jl, basic/prefix_sum.jl and
+basic/difference_arr.jl. The dot-broadcast lines (a .- avg, x .* y) read the
+same in Viv without the dots. mode is the one that needed rework: Julia
+counts with a Dict and collects the modes with push!/empty!; here the counts
+sit in two parallel arrays and the result is copied into an array of the
+right length at the end.
+###
+
+from ref_values import (
+    REF_DIFF_ARR, REF_MEDIAN, REF_MEDIAN_ODD, REF_MODE, REF_MODE_MULTI, REF_PEARSON, REF_PREFIX,
+    REF_VAR,
+)
+
+def mean(a) {
+    return sum(a) / len(a)
+}
+
+def variance(a) {
+    d = a - mean(a)
+    return sum(d * d) / (len(a) - 1.0)
+}
+
+def pearson_correlation(x, y) {
+    dx = x - mean(x)
+    dy = y - mean(y)
+    return sum(dx * dy) / sqrt(sum(dx * dx) * sum(dy * dy))
+}
+
+def median(nums) {
+    sorted = nums + 0.0
+    sort(sorted)
+    n = len(sorted)
+    mid = floor(n / 2.0)
+    if mod(n, 2.0) == 0.0 {
+        return (sorted[mid] + sorted[mid - 1.0]) / 2.0
+    }
+    return sorted[mid]
+}
+
+#| Every value that occurs the most times, in the order the original reports
+#| them: a value joins the list when its count first reaches the running max.
+def mode(nums) {
+    n = len(nums)
+    keys = zeros(n)
+    counts = zeros(n)
+    distinct = 0.0
+    result = zeros(n)
+    found = 0.0
+    most = 0.0
+    for i to n {
+        slot = -1.0
+        for s to distinct {
+            if keys[s] == nums[i] {
+                slot = s
+            }
+        }
+        if slot < 0.0 {
+            slot = distinct
+            keys[slot] = nums[i]
+            distinct += 1.0
+        }
+        counts[slot] = counts[slot] + 1.0
+        if counts[slot] >= most {
+            if counts[slot] > most {
+                found = 0.0
+                most += 1.0
+            }
+            result[found] = nums[i]
+            found += 1.0
+        }
+    }
+    out = zeros(found)
+    for i to found {
+        out[i] = result[i]
+    }
+    return out
+}
+
+def prefix_sum(arr) {
+    pre = zeros(len(arr))
+    running = 0.0
+    for i to len(arr) {
+        running += arr[i]
+        pre[i] = running
+    }
+    return pre
+}
+
+def create_diff_arr(original) {
+    d = original + 0.0
+    for i to len(original) - 1.0 {
+        d[i + 1.0] = original[i + 1.0] - original[i]
+    }
+    return d
+}
+
+def calculate_arr(diff_arr) {
+    arr = diff_arr + 0.0
+    for i to len(arr) - 1.0 {
+        arr[i + 1.0] = diff_arr[i + 1.0] + arr[i]
+    }
+    return arr
+}
+
+#| Add x to every element in positions l..r (1-based, as in the original).
+def add_to_arr(diff_arr, l, r, x) {
+    diff_arr[l - 1.0] = diff_arr[l - 1.0] + x
+    if r < len(diff_arr) {
+        diff_arr[r] = diff_arr[r] - x
+    }
+}
+
+data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0, 3.0, 6.0]
+data2 = [1.0, 3.0, 2.0, 5.0, 4.0, 6.0, 8.0, 7.0, 9.0, 10.0]
+first9 = zeros(9)
+for i to 9 {
+    first9[i] = data[i]
+}
+show variance(data)
+show pearson_correlation(data, data2)
+
+test "variance and Pearson correlation" {
+    assert_near(variance(data), REF_VAR, 1.0e-15)
+    assert_near(pearson_correlation(data, data2), REF_PEARSON, 1.0e-15)
+}
+
+test "median of an even and an odd count, input left unsorted" {
+    assert_near(median(data), REF_MEDIAN, 0.0)
+    assert_near(median(first9), REF_MEDIAN_ODD, 0.0)
+    assert_near(data[0], 2.0, 0.0)
+    assert_near(data[9], 6.0, 0.0)
+}
+
+test "mode, single and several" {
+    assert_allclose(mode(data), REF_MODE, 0.0)
+    assert_allclose(mode([1.0, 2.0, 2.0, 3.0, 3.0, 1.0, 5.0]), REF_MODE_MULTI, 0.0)
+}
+
+test "prefix sums and a difference array with two range updates" {
+    assert_allclose(prefix_sum(data), REF_PREFIX, 0.0)
+    d = create_diff_arr(data)
+    add_to_arr(d, 3.0, 6.0, 10.0)
+    add_to_arr(d, 1.0, 10.0, -1.0)
+    assert_allclose(calculate_arr(d), REF_DIFF_ARR, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

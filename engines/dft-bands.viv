@@ -1,0 +1,124 @@
+#! engine dft-bands
+#! title Band structure of a crystal, from a POSCAR, a CIF or a pw.x input
+#! program dft/pwdft_it
+#! input crystal: poscar | cif | qe-pw | xyz+cell
+#! input settings: ecut, kmesh, smearing, bands (defaults from dft/ref/materials.py)
+#! output bands, total-energy
+#! limit tab: fcc lattices, up to 8 atoms, an estimated 90 s of compiled wasm; larger runs natively with dft/run.sh
+#! validated si: dft/si_it_check.viv
+#! validated gaas: dft/gaas_it_check.viv
+#
+# The DFT engine as a program you feed a crystal. An adapter (www/src/lib/engines/)
+# turns a POSCAR, a CIF, a Quantum ESPRESSO pw.x input or an extended XYZ file
+# into an input deck of the kind dft/ref/make_deck.py writes, and this program
+# runs it through the iterative engine, dft/pwdft_it.viv.
+#
+# The deck arrives in one of two ways:
+#
+#   interpreted  the adapter's deck text replaces the input block below
+#   compiled     this program is compiled once, with silicon's deck in that place,
+#                and engines/build-wasm.mjs adds a loader at the DECK_LOADED line:
+#                it reads the reader's deck from standard input and overwrites
+#                every deck variable by name, so one module runs any deck. With
+#                nothing on standard input it computes silicon.
+
+# ---- input: the page replaces everything from here to "end of input"
+from dft.si import EIG_TOL, MAXIT, NBANDS, NSEG, SMEAR
+# the reference: set by the page when the crystal and settings are exactly a deck dft/ has
+#: HAS_REF   1 when the values below are dft/'s numpy reference for this very deck
+#: REF_ETOT  its total energy, hartree (from dft/<material>_it_check.viv)
+#: REFPATH   its lowest REF_NB bands at every path point, eV
+HAS_REF = 0.0
+REF_ETOT = 0.0
+REF_NB = 0.0
+REFPATH = zeros(1, 1)
+# ---- end of input
+#: DECK_LOADED  marks where the deck ends: the compiled engine loads the reader's deck here
+DECK_LOADED = 1.0
+import dft.kmesh
+from dft.pw_common import NELEC, NPTS, PATHX
+from dft.pwdft_it import BANDRES, DRHO, EIGRES, EREF, ETOT, EVB, ITER, NVAL
+from engines.precise import precise_hi, precise_lo, precise_mid
+
+# ---- the report: what the page reads ----------------------------------------
+#
+# ETOT is the engine's total energy, which leaves out the ion-ion (Ewald) term
+# (dft/README.md): it is comparable between runs on the same atoms, not between
+# structures.
+show ETOT
+ETOT_HI = precise_hi(ETOT)
+ETOT_MID = precise_mid(ETOT)
+ETOT_LO = precise_lo(ETOT)
+show ETOT_HI
+show ETOT_MID
+show ETOT_LO
+show EREF
+show NELEC
+show NBANDS
+show BANDRES
+
+#: GAP  for an insulator, the lowest empty band along the path, from the
+#:      valence-band top: the gap along L - Gamma - X (0 for a metal)
+GAP = 0.0
+if SMEAR <= 0.0 and NVAL < NBANDS {
+    GAP = 1.0e9
+    for p to NPTS {
+        if EVB[p, NVAL] < GAP { GAP = EVB[p, NVAL] }
+    }
+}
+show GAP
+
+#: REF_DE     |ETOT - REF_ETOT|, when there is a reference
+#: REF_DBAND  the largest |band - reference band| anywhere on the path, eV
+if HAS_REF > 0.5 {
+    REF_DE = abs(ETOT - REF_ETOT)
+    REF_DBAND = 0.0
+    for p to NPTS {
+        for b to REF_NB {
+            d = abs(EVB[p, b] - REFPATH[p, b])
+            if d > REF_DBAND { REF_DBAND = d }
+        }
+    }
+    show REF_DE
+    show REF_DBAND
+}
+
+test "SCF converged: density, energy, and every occupied band's residual" {
+    assert_lt(DRHO, 1.0e-8)
+    assert_lt(EIGRES, EIG_TOL)
+    assert_lt(ITER, MAXIT)
+}
+test "every band-path point converged" {
+    assert_lt(BANDRES, EIG_TOL)
+}
+
+figure("LDA band structure", "wavevector along the path", "energy (eV)")
+for b to NBANDS {
+    e = zeros(NPTS)
+    for p to NPTS {
+        e[p] = EVB[p, b]
+    }
+    plot(PATHX, e, "band")
+}
+#| The path's corners, where PATHX puts them: corner c is point c * NSEG.
+xtick("L", PATHX[0])
+xtick("Γ", PATHX[NSEG])
+xtick("X", PATHX[NPTS - 1])
+#| Energies are measured from zero: the Fermi level for a metal, the
+#| valence-band top for an insulator.
+XEND = PATHX[NPTS - 1]
+hline("zero", 0.0)
+if SMEAR > 0.0 {
+    label("zero-label", "Fermi level", 0.86 * XEND, 0.0)
+}
+else {
+    label("zero-label", "valence band top", 0.84 * XEND, 0.0)
+}
+#| An insulator's gap: from the valence-band top to the lowest empty band.
+if GAP > 0.0 {
+    fill_between("gap", PATHX, zeros(NPTS), zeros(NPTS) + GAP)
+    label("gap-label", "gap", 0.25 * XEND, 0.5 * GAP)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

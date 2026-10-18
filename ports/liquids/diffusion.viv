@@ -1,0 +1,91 @@
+###
+Time correlation functions of a trajectory and the diffusion coefficient
+they give: the velocity autocorrelation function <v(0) . v(t)>, the
+mean-square displacement <|r(t) - r(0)|^2> and the cross-correlation
+<v(0) . (r(t) - r(0))>, each averaged over atoms and over time origins
+spaced along the trajectory. Positions are unfolded across the periodic
+boundaries frame by frame. By the Green-Kubo and Einstein relations,
+
+    D = (1/3) int_0^inf <v(0) . v(t)> dt = lim (1/6) d<|r(t) - r(0)|^2>/dt.
+
+This is diffusion of Allen and Tildesley's examples for Computer
+Simulation of Liquids (2nd ed., Oxford University Press, 2017;
+https://github.com/Allen-Tildesley/examples), ported to Viv. Upstream reads
+the frames from files cnf.000, cnf.001, ...; here they come as arrays. The
+two estimates of D are this port's addition.
+###
+# The program behind `vp.liquids.diffusion` (diffusion.export.toml).
+#
+#     viv run ports/liquids/diffusion.viv
+#
+# Derived from diffusion.f90 of https://github.com/Allen-Tildesley/examples
+# (commit 4818bc82), by Michael P. Allen and Dominic J. Tildesley, CC0-1.0;
+# see ports/liquids/LICENSE.
+from ports.liquids.setup import DIM
+from ports.liquids.analysis import correlations, correlations_add, correlations_result, diffusion_coefficients
+
+#| The default trajectory: two atoms crossing the box at constant velocities
+#| (1, 0, 0) and (0, -1/2, 0), a frame every delta.
+def ballistic_frames(nframes: Int, delta: Num, box: Num) {
+    fr = zeros(2 * nframes, DIM)
+    fv = zeros(2 * nframes, DIM)
+    for t to nframes {
+        fv[2 * t, 0] = 1.0
+        fv[2 * t + 1, 1] = -0.5
+        fr[2 * t, 0] = t * delta * fv[2 * t, 0]
+        fr[2 * t + 1, 1] = t * delta * fv[2 * t + 1, 1]
+    }
+    return fr - box * round(fr / box), fv
+}
+
+#: n  the atoms in each frame
+n: Int = 2
+#: box  the box side, in sigma
+box = 4.0
+#: delta  the time between frames
+delta = 0.05
+#: frames_r  the positions of every frame one after another, (frames x n, 3), in sigma, each inside the box; by default two atoms crossing the box at constant velocity for 41 frames
+#: frames_v  the velocities of every frame, the same shape
+frames_r, frames_v = ballistic_frames(41, 0.05, 4.0)
+#: nt  the functions run over 0 to nt frames apart
+nt: Int = 20
+#: origin_interval  a time origin every this many frames
+origin_interval: Int = 5
+
+nrows: Int = int(shape(frames_r)[0])
+if int(shape(frames_v)[0]) != nrows or n < 1 or nrows % n != 0 {
+    stop(f"frames_r and frames_v must have the same number of rows, a whole number of frames of n = {n} atoms")
+}
+nframes: Int = nrows // n
+c = correlations(n, nt, origin_interval)
+for t to nframes {
+    correlations_add(c, frames_r[t * n:(t + 1) * n, :], frames_v[t * n:(t + 1) * n, :], box)
+}
+#: vacf  <v(0) . v(t)> per atom at 0 to nt frames apart
+vacf = zeros(0)
+#: rvcf  <v(0) . (r(t) - r(0))> per atom
+rvcf = zeros(0)
+#: msd  <|r(t) - r(0)|^2> per atom
+msd = zeros(0)
+vacf, rvcf, msd = correlations_result(c, n)
+#: time  the times, 0 to nt delta
+time = linspace(0.0, nt * delta, nt + 1)
+#: d_vacf  D as one third of the integral of the VACF over the range (trapezoids)
+d_vacf = 0.0
+#: d_msd  D as one sixth of the slope of the MSD over the second half of the range (least squares)
+d_msd = 0.0
+d_vacf, d_msd = diffusion_coefficients(vacf, msd, delta)
+
+print(f"{nframes} frames of {n} atoms; D from the VACF {fmt(d_vacf, '.6f')}, from the MSD {fmt(d_msd, '.6f')}")
+
+test "the VACF at t = 0 is the mean square velocity" {
+    s = 0.0
+    for i to nrows {
+        s += dot(frames_v[i, :], frames_v[i, :])
+    }
+    assert_near(vacf[0], s / nrows, 1.0e-12 * s / nrows)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

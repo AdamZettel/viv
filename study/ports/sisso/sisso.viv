@@ -1,0 +1,1372 @@
+###
+SISSO, sure independence screening and sparsifying operator, ported from
+the reference Fortran (SISSO 3.5, Runhai Ouyang, github.com/rouyang2017/SISSO,
+Apache-2.0; Ouyang et al., Phys. Rev. Materials 2, 083802 (2018)).
+
+The program builds a space of formulas from primary features with an
+operator set, rung by rung, keeping units consistent; it ranks the formulas
+by their correlation with the target (SIS); then it tries every descriptor
+of dimension 1..desc_dim_in built from the ranked formulas, fitting each by least
+squares, and keeps the one with the smallest RMSE (L0). Each new dimension
+screens against the residual of the previous model.
+
+Formulas are integer-coded trees, never strings: a node is an operator code
+and the indices of its operands. Names are rendered (as character codes)
+only where the Fortran compares names: the A*B/B check and tie breaks.
+Regression only; classification (ptype=2) is not ported.
+###
+
+# Derived from SISSO 3.5 (src/FC.f90, src/DI.f90, src/libsisso.f90; commit
+# bc18cae), Copyright Runhai Ouyang, licensed under the Apache License,
+# Version 2.0 (study/ports/sisso/upstream/LICENSE). Changed from the
+# original: rewritten in Viv for one process, regression only, formulas
+# held as integer trees instead of strings, and the L0 search reuses the
+# Gram-Schmidt state of a descriptor's unchanged columns. It follows the
+# Fortran's order of operations so that the feature spaces, screened
+# subspaces and models match; study/ports/sisso/NOTES.md lists the rest.
+
+# Operator codes. OP_NO wraps a primary feature as a selected feature
+# "(name)", as the Fortran's rung-0 pass does.
+OP_PRIMARY: Int = 0
+OP_ADD: Int = 1
+OP_SUB: Int = 2
+OP_MUL: Int = 3
+OP_DIV: Int = 4
+OP_EXP: Int = 5
+OP_EXPM: Int = 6
+OP_INV: Int = 7
+OP_SQ: Int = 8
+OP_CUBE: Int = 9
+OP_SQRT: Int = 10
+OP_CBRT: Int = 11
+OP_LOG: Int = 12
+OP_ABSDIFF: Int = 13
+OP_SCD: Int = 14
+OP_SIXTH: Int = 15
+OP_SIN: Int = 16
+OP_COS: Int = 17
+OP_NO: Int = 18
+N_OPS: Int = 19
+
+# The Fortran's fixed order of unary operators within one feature.
+UNARY_ORDER: [Int] = [5, 6, 7, 14, 8, 9, 15, 10, 11, 12, 16, 17]
+
+# Fortran constants (var_global.f90, FC.f90)
+PI_F = 3.14159265
+SMALL_ABS = 1.0e-50
+BIG_ABS = 1.0e50
+SAME = 1.0e-8
+CORR_SAME = 0.99
+NEXTRA_MAX: Int = 50000
+# 10^k is exact in binary64 for k <= 22: the table of exact powers
+EXACT_POW10: Int = 23
+
+#: x_data          primary features, one row per feature [nsf, n]
+x_data = reshape([0.8626, 0.7260, 0.4943, 0.0106, 0.0970, 0.7043, 0.7818, 0.0044, 0.0399, 0.3199, 0.6312, 0.6119, 0.4420, 0.9877, 0.5504], 3, 5)
+#: y_data          the target property, one per sample
+y_data = [3.0862, 2.8854, 0.6907, 0.9902, 0.7242]
+#: unit_exps       unit exponents, one row per feature [nsf, nunit]
+unit_exps = reshape([1.0, 0.0, 1.0, 0.0, 0.0, 1.0], 3, 2)
+#: label_codes     the primary features' names as character codes, one after another
+label_codes: [Int] = [102, 101, 97, 116, 117, 114, 101, 49, 102, 101, 97, 116, 117, 114, 101, 50, 102, 101, 97, 116, 117, 114, 101, 51]
+#: label_starts    where each name starts in label_codes, then the total length [nsf + 1]
+label_starts: [Int] = [0, 8, 16, 24]
+#: op_codes        the operator codes allowed at every rung
+op_codes: [Int] = [1, 2, 3, 4]
+#: fcomplexity_in  the most operators in one feature
+fcomplexity_in: Int = 3
+#: desc_dim_in     the largest descriptor dimension
+desc_dim_in: Int = 2
+#: nf_sis_in       features screened into the subspace at each dimension
+nf_sis_in: Int = 50000
+#: fmax_min        a feature whose largest magnitude is below this is not screened
+fmax_min = 1.0e-3
+#: fmax_max        a feature whose largest magnitude is above this is not screened
+fmax_max = 1.0e5
+#: max_values_in   the most feature values held in memory (a cap on the stored space)
+max_values_in: Int = 100000000
+
+# ------------------------------------------------------------------ records
+
+record Space {
+    count: Int
+    data: Arr
+    unit: Arr
+    op: [Int]
+    a: [Int]
+    b: [Int]
+    comp: [Int]
+    nlen: [Int]
+}
+
+record Names {
+    op: [Int]
+    a: [Int]
+    b: [Int]
+    pc: [Int]
+    ps: [Int]
+}
+
+record Cands {
+    count: Int
+    data: Arr
+    unit: Arr
+    op: [Int]
+    a: [Int]
+    b: [Int]
+    comp: [Int]
+    nlen: [Int]
+    key: Arr
+}
+
+record Fc {
+    nodes: Space
+    us_op: [Int]
+    us_a: [Int]
+    us_b: [Int]
+    us_score: Arr
+    us_data: Arr
+    phi: [Int]
+    skipped: Bool
+}
+
+record Model {
+    idx: [Int]
+    coef: Arr
+    c0: Num
+    rmse: Num
+    maxae: Num
+}
+
+# ------------------------------------------------------------------ helpers
+
+#| The number of rungs for complexity fc: the smallest r with 2^r > fc.
+def rung_of(fc: Int) -> Int {
+    # SISSO.f90: the tier of the space from the largest complexity
+    r: Int = 0
+    while fc >= 2 ^ r {
+        r += 1
+    }
+    return r
+}
+
+#| Whether operator o is on in mask.
+def has(mask: [Int], o: Int) -> Bool {
+    return mask[o] == 1
+}
+
+#| An empty feature space with room for cap features.
+def new_space(cap: Int, n: Int, nu: Int) -> Space {
+    return Space { count: 0, data: zeros(cap * n), unit: zeros(cap * nu), op: int_zeros(cap), a: int_zeros(cap),
+                   b: int_zeros(cap), comp: int_zeros(cap), nlen: int_zeros(cap) }
+}
+
+#| An empty candidate list with room for cap entries.
+def new_cands(cap: Int, n: Int, nu: Int) -> Cands {
+    return Cands { count: 0, data: zeros(cap * n), unit: zeros(cap * nu), op: int_zeros(cap), a: int_zeros(cap),
+                   b: int_zeros(cap), comp: int_zeros(cap), nlen: int_zeros(cap), key: zeros(cap) }
+}
+
+#| src cut or zero-padded to m entries.
+def copy_int(src: [Int], m: Int) -> [Int] {
+    k = min(len(src), m)
+    zero: Int = 0
+    out: [Int] = [src[t] if t < k else zero for t to m]
+    return out
+}
+
+#| src copied into a zero array of m entries.
+def copy_num(src: Arr, m: Int) -> Arr {
+    out = zeros(m)
+    out[0:len(src)] = src
+    return out
+}
+
+#| The candidates copied into arrays of cap entries.
+def grow_cands(c: Cands, cap: Int, n: Int, nu: Int) -> Cands {
+    return Cands { count: c.count, data: copy_num(c.data, cap * n), unit: copy_num(c.unit, cap * nu),
+                   op: copy_int(c.op, cap), a: copy_int(c.a, cap), b: copy_int(c.b, cap),
+                   comp: copy_int(c.comp, cap), nlen: copy_int(c.nlen, cap), key: copy_num(c.key, cap) }
+}
+
+#| The space copied into arrays of cap features.
+def grow_space(s: Space, cap: Int, n: Int, nu: Int) -> Space {
+    return Space { count: s.count, data: copy_num(s.data, cap * n), unit: copy_num(s.unit, cap * nu),
+                   op: copy_int(s.op, cap), a: copy_int(s.a, cap), b: copy_int(s.b, cap),
+                   comp: copy_int(s.comp, cap), nlen: copy_int(s.nlen, cap) }
+}
+
+# The length of a feature's name, from its operator and operands' lengths
+# (FC.f90 combine: the strings it builds).
+def name_len(o: Int, la: Int, lb: Int) -> Int {
+    if o == OP_ADD or o == OP_SUB or o == OP_MUL or o == OP_DIV {
+        return la + lb + 3
+    }
+    if o == OP_ABSDIFF {
+        return la + lb + 6
+    }
+    if o == OP_EXPM or o == OP_SQRT or o == OP_CBRT {
+        return la + 6
+    }
+    if o == OP_SQ or o == OP_CUBE or o == OP_SIXTH {
+        return la + 4
+    }
+    if o == OP_NO {
+        return la + 2
+    }
+    return la + 5
+}
+
+#| x followed by y.
+def cat(x: [Int], y: [Int]) -> [Int] {
+    nx = len(x)
+    out: [Int] = [x[t] if t < nx else y[t - nx] for t to nx + len(y)]
+    return out
+}
+
+#| The character codes printed before an operand of operator o, such as "exp(".
+def word(o: Int) -> [Int] {
+    # the text before an operand: exp( exp(- scd( sqrt( cbrt( log( sin( cos( abs(
+    if o == OP_EXP {
+        w: [Int] = [101, 120, 112, 40]
+        return w
+    }
+    if o == OP_EXPM {
+        w: [Int] = [101, 120, 112, 40, 45]
+        return w
+    }
+    if o == OP_SCD {
+        w: [Int] = [115, 99, 100, 40]
+        return w
+    }
+    if o == OP_SQRT {
+        w: [Int] = [115, 113, 114, 116, 40]
+        return w
+    }
+    if o == OP_CBRT {
+        w: [Int] = [99, 98, 114, 116, 40]
+        return w
+    }
+    if o == OP_LOG {
+        w: [Int] = [108, 111, 103, 40]
+        return w
+    }
+    if o == OP_SIN {
+        w: [Int] = [115, 105, 110, 40]
+        return w
+    }
+    if o == OP_COS {
+        w: [Int] = [99, 111, 115, 40]
+        return w
+    }
+    w: [Int] = [97, 98, 115, 40]
+    return w
+}
+
+# The name of a node of the stored space, as character codes.
+def render_node(nm: Names, k: Int) -> [Int] {
+    return render(nm, nm.op[k], nm.a[k], nm.b[k])
+}
+
+# The name of the feature (o, a, b), as the Fortran writes it.
+def render(nm: Names, o: Int, a: Int, b: Int) -> [Int] {
+    lp: [Int] = [40]
+    rp: [Int] = [41]
+    if o == OP_PRIMARY or o == OP_NO {
+        raw: [Int] = []
+        for t from nm.ps[a] to nm.ps[a + 1] {
+            raw = append(raw, nm.pc[t])
+        }
+        if o == OP_NO {
+            return cat(cat(lp, raw), rp)
+        }
+        return raw
+    }
+    sa = render_node(nm, a)
+    if o == OP_ADD or o == OP_SUB or o == OP_MUL or o == OP_DIV or o == OP_ABSDIFF {
+        sb = render_node(nm, b)
+        mid: [Int] = [43]
+        if o == OP_SUB or o == OP_ABSDIFF {
+            mid[0] = 45
+        }
+        if o == OP_MUL {
+            mid[0] = 42
+        }
+        if o == OP_DIV {
+            mid[0] = 47
+        }
+        head = lp
+        if o == OP_ABSDIFF {
+            head = word(o)
+        }
+        return cat(cat(cat(cat(head, sa), mid), sb), rp)
+    }
+    if o == OP_INV or o == OP_SQ or o == OP_CUBE or o == OP_SIXTH {
+        tail: [Int] = [41, 94, 50]
+        if o == OP_INV {
+            tail = [41, 94, 45, 49]
+        }
+        if o == OP_CUBE {
+            tail[2] = 51
+        }
+        if o == OP_SIXTH {
+            tail[2] = 54
+        }
+        return cat(cat(lp, sa), tail)
+    }
+    return cat(cat(word(o), sa), rp)
+}
+
+# Fortran's trim(name1) <= trim(name2) for names of equal length.
+def codes_le(x: [Int], y: [Int]) -> Bool {
+    for t to len(x) {
+        if x[t] < y[t] {
+            return true
+        }
+        if x[t] > y[t] {
+            return false
+        }
+    }
+    return true
+}
+
+# FC.f90 simpler(): 1 when the first feature is the simpler one, else 2.
+def simpler(nm: Names, c1: Int, l1: Int, o1: Int, a1: Int, b1: Int, c2: Int, l2: Int, o2: Int, a2: Int, b2: Int) -> Int {
+    if c1 < c2 {
+        return 1
+    }
+    if c1 > c2 {
+        return 2
+    }
+    if l1 < l2 {
+        return 1
+    }
+    if l1 > l2 {
+        return 2
+    }
+    if codes_le(render(nm, o1, a1, b1), render(nm, o2, a2, b2)) {
+        return 1
+    }
+    return 2
+}
+
+# The first position of y in x, or -1 (Fortran's index(), from 0).
+def find_codes(x: [Int], y: [Int]) -> Int {
+    for p from 0 to len(x) - len(y) + 1 {
+        hit = true
+        for t to len(y) {
+            if x[p + t] != y[t] {
+                hit = false
+                break
+            }
+        }
+        if hit {
+            return int(p)
+        }
+    }
+    return -1
+}
+
+# FC.f90 ffcorr(): Pearson correlation of two features in flat arrays.
+def ffcorr(d1: Arr, o1: Int, d2: Arr, o2: Int, n: Int) -> Num {
+    # the Fortran adds left to right: ordered sums keep its last digits
+    x1 = d1[o1:o1 + n]
+    x2 = d2[o2:o2 + n]
+    m1 = sum(x1, ordered=true) / n
+    m2 = sum(x2, ordered=true) / n
+    sd1 = sqrt(sum((x1 - m1) ^ 2, ordered=true) / n)
+    sd2 = sqrt(sum((x2 - m2) ^ 2, ordered=true) / n)
+    c = dot(x1 - m1, x2 - m2, ordered=true)
+    r = c / n / sd1 / sd2
+    if r > 1.0 {
+        r = 1.0
+    }
+    if r < -1.0 {
+        r = -1.0
+    }
+    return r
+}
+
+# FC.f90 dup_scheck() and update_select(): insert each candidate into a list
+# ordered by key (best first) by bisection; a candidate equivalent to the one
+# it meets (keys within 1e-8, |correlation| > 0.99) keeps only the simpler.
+# Returns the order (candidate indices) and the 0/1 survivors.
+def rank_cands(c: Cands, n: Int, nm: Names) {
+    num = c.count
+    order = int_zeros(num + 1)
+    avail = int_zeros(num)
+    for t to num {
+        avail[t] = 1
+    }
+    m: Int = 0
+    if num > 0 {
+        order[0] = 0
+        m = 1
+    }
+    for i from 1 to num {
+        l: Int = 0
+        ll: Int = m
+        j: Int = l + (ll - l + 1) // 2
+        placed = false
+        while not placed {
+            oj = order[j - 1]
+            sr = simpler(nm, c.comp[i], c.nlen[i], c.op[i], c.a[i], c.b[i], c.comp[oj], c.nlen[oj], c.op[oj], c.a[oj], c.b[oj])
+            if abs(c.key[i] - c.key[oj]) <= SAME and abs(ffcorr(c.data, i * n, c.data, oj * n, n)) > CORR_SAME {
+                if sr == 1 {
+                    avail[oj] = 0
+                    order[j - 1] = i
+                }
+                else {
+                    avail[i] = 0
+                }
+                placed = true
+            }
+            else if c.key[i] > c.key[oj] or (c.key[i] == c.key[oj] and sr == 1) {
+                ll = j
+                if j == l + (ll - l + 1) // 2 {
+                    for q from m to j - 1 by -1 {
+                        order[q] = order[q - 1]
+                    }
+                    order[j - 1] = i
+                    m += 1
+                    placed = true
+                }
+            }
+            else {
+                l = j
+                if j == l + (ll - l + 1) // 2 {
+                    for q from m to j by -1 {
+                        order[q] = order[q - 1]
+                    }
+                    order[j] = i
+                    m += 1
+                    placed = true
+                }
+            }
+            if not placed {
+                j = l + (ll - l + 1) // 2
+            }
+        }
+    }
+    order[num] = m
+    return order, avail
+}
+
+# FC.f90 sis_score() for regression: |correlation| of the feature with the
+# centered target, from the feature at offset o of d.
+def sis_score(d: Arr, o: Int, n: Int, yc: Arr, ynorm: Num) -> Num {
+    x = d[o:o + n]
+    xmean = sum(x, ordered=true) / n
+    xc = x - xmean
+    xnorm = sqrt(dot(xc, xc, ordered=true))
+    tmp = 0.0
+    if xnorm > SMALL_ABS {
+        tmp = abs(dot(xc / xnorm, yc, ordered=true))
+    }
+    return sqrt(tmp ^ 2) / ynorm
+}
+
+# FC.f90 goodf(), first part: 0 for a constant, infinite or zero feature
+# (not kept); 1 for a kept feature outside [fmax_min, fmax_max] (kept, not
+# screened); 2 for a kept feature that is screened. gfortran's maxval skips
+# NaN (and gives NaN when every value is NaN), and a comparison with NaN is
+# false: a feature with some NaN values is kept, as in the Fortran, and its
+# SIS score is 0 (its norm is NaN, so the norm test fails).
+def good_status(d: Arr, o: Int, n: Int) -> Int {
+    maxdev = 0.0
+    maxabs = 0.0
+    seen_dev = false
+    seen_abs = false
+    for s to n {
+        v = d[o + s]
+        dv = abs(v - d[o])
+        if dv == dv and (not seen_dev or dv > maxdev) {
+            maxdev = dv
+            seen_dev = true
+        }
+        av = abs(v)
+        if av == av and (not seen_abs or av > maxabs) {
+            maxabs = av
+            seen_abs = true
+        }
+    }
+    if not seen_dev {
+        maxdev = sqrt(-1.0)
+    }
+    if not seen_abs {
+        maxabs = sqrt(-1.0)
+    }
+    if maxdev <= SAME {
+        return 0
+    }
+    if maxabs > BIG_ABS or maxabs <= SMALL_ABS {
+        return 0
+    }
+    if maxabs > fmax_max or maxabs < fmax_min {
+        return 1
+    }
+    return 2
+}
+
+# gfortran's minval: the smallest value that is not NaN (NaN when all are).
+def nan_min(d: Arr, o: Int, n: Int, absolute: Bool) -> Num {
+    m = sqrt(-1.0)
+    seen = false
+    for s to n {
+        v = d[o + s]
+        if absolute {
+            v = abs(v)
+        }
+        if v == v and (not seen or v < m) {
+            m = v
+            seen = true
+        }
+    }
+    return m
+}
+
+#| Whether k is in the sorted list keys, by binary search.
+def search_key(keys: [Int], k: Int) -> Bool {
+    lo: Int = 0
+    hi: Int = len(keys)
+    while lo < hi {
+        mid = (lo + hi) // 2
+        if keys[mid] == k {
+            return true
+        }
+        if keys[mid] < k {
+            lo = mid + 1
+        }
+        else {
+            hi = mid
+        }
+    }
+    return false
+}
+
+# Shell sort of an [Int] (sort takes Arr only).
+def sort_ints(x: [Int]) -> [Int] {
+    v = copy_int(x, len(x))
+    gap: Int = len(v) // 2
+    while gap > 0 {
+        for i from gap to len(v) {
+            t = v[i]
+            j: Int = int(i)
+            while j >= gap and v[j - gap] > t {
+                v[j] = v[j - gap]
+                j -= gap
+            }
+            v[j] = t
+        }
+        gap = gap // 2
+    }
+    return v
+}
+
+#| One integer naming a formula by its operator and operands, for duplicate lookups.
+def tree_key(o: Int, a: Int, b: Int, base: Int) -> Int {
+    return (o * base + a) * base + b
+}
+
+# FC.f90 update_select(): when the buffer of screened candidates is full,
+# keep the best nbasic of them and raise the score threshold.
+def prune_select(sel: Cands, n: Int, nu: Int, nbasic: Int, nm: Names) {
+    order, avail = rank_cands(sel, n, nm)
+    m = order[sel.count]
+    keep = min(m, nbasic)
+    out = new_cands(len(sel.key), n, nu)
+    for t to keep {
+        k = order[t]
+        out.op[t] = sel.op[k]
+        out.a[t] = sel.a[k]
+        out.b[t] = sel.b[k]
+        out.comp[t] = sel.comp[k]
+        out.nlen[t] = sel.nlen[k]
+        out.key[t] = sel.key[k]
+        out.data[t * n:(t + 1) * n] = sel.data[k * n:(k + 1) * n]
+    }
+    out.count = keep
+    return out, out.key[keep - 1]
+}
+
+# ------------------------------------------------------- feature construction
+
+# The candidates one feature i of the newest rung makes, in the Fortran's
+# order (FC.f90 combine), as (op, a, b) triples. j runs over every stored
+# feature that is not between the newest rung's start s1 and i.
+def candidates(sp: Space, nm: Names, mabs: Arr, i: Int, s1: Int, mask: [Int], fcomplexity: Int, final: Bool, n: Int, nu: Int) {
+    co: [Int] = []
+    ca: [Int] = []
+    cb: [Int] = []
+    li = sp.op[i]
+    minv = nan_min(sp.data, i * n, n, false)
+    minabs = mabs[i]
+    if sp.comp[i] + 1 <= fcomplexity {
+        for o in UNARY_ORDER {
+            if not has(mask, o) {
+                continue
+            }
+            ok = true
+            if o == OP_EXP or o == OP_EXPM {
+                ok = li != OP_EXP and li != OP_EXPM and li != OP_LOG
+            }
+            if o == OP_INV {
+                ok = minabs > SMALL_ABS
+            }
+            if o == OP_SQ {
+                ok = li != OP_SQRT
+            }
+            if o == OP_CUBE {
+                ok = li != OP_CBRT
+            }
+            if o == OP_SQRT {
+                ok = li != OP_SQ and minv > 0.0
+            }
+            if o == OP_CBRT {
+                ok = li != OP_CUBE
+            }
+            if o == OP_LOG {
+                ok = li != OP_EXP and li != OP_EXPM and li != OP_LOG and minv > 0.0
+            }
+            if ok {
+                co = append(co, o)
+                ca = append(ca, i)
+                cb = append(cb, 0)
+            }
+        }
+    }
+    linear = has(mask, OP_ADD) or has(mask, OP_SUB) or has(mask, OP_ABSDIFF)
+    for j to sp.count {
+        if j >= s1 and j <= i {
+            continue
+        }
+        if sp.comp[i] + sp.comp[j] + 1 > fcomplexity {
+            continue
+        }
+        lj = sp.op[j]
+        if linear {
+            same = true
+            for u to nu {
+                if abs(sp.unit[i * nu + u] - sp.unit[j * nu + u]) > SAME {
+                    same = false
+                }
+            }
+            if same {
+                if has(mask, OP_ADD) {
+                    co = append(co, OP_ADD)
+                    ca = append(ca, i)
+                    cb = append(cb, j)
+                }
+                if has(mask, OP_SUB) {
+                    co = append(co, OP_SUB)
+                    ca = append(ca, i)
+                    cb = append(cb, j)
+                    if not final {
+                        co = append(co, OP_SUB)
+                        ca = append(ca, j)
+                        cb = append(cb, i)
+                    }
+                }
+                if has(mask, OP_ABSDIFF) {
+                    co = append(co, OP_ABSDIFF)
+                    ca = append(ca, i)
+                    cb = append(cb, j)
+                }
+            }
+        }
+        if has(mask, OP_MUL) {
+            co = append(co, OP_MUL)
+            ca = append(ca, i)
+            cb = append(cb, j)
+        }
+        if not has(mask, OP_DIV) {
+            continue
+        }
+        # A/(B/C) and (A/B)/C exist already through (*)
+        if has(mask, OP_MUL) and (li == OP_DIV or lj == OP_DIV) and not final {
+            continue
+        }
+        do_ij = true
+        do_ji = true
+        decided = false
+        # A*B/B and A*B/A
+        if li == OP_MUL and part_of(nm, i, j) {
+            decided = true
+            do_ij = false
+            if has(mask, OP_INV) {
+                do_ji = false
+            }
+        }
+        # A/(A*B) and B/(A*B)
+        if not decided and lj == OP_MUL and part_of(nm, j, i) {
+            do_ji = false
+            if has(mask, OP_INV) {
+                do_ij = false
+            }
+        }
+        if do_ij and mabs[j] > SMALL_ABS {
+            co = append(co, OP_DIV)
+            ca = append(ca, i)
+            cb = append(cb, j)
+        }
+        if do_ji and mabs[i] > SMALL_ABS {
+            co = append(co, OP_DIV)
+            ca = append(ca, j)
+            cb = append(cb, i)
+        }
+    }
+    return co, ca, cb
+}
+
+# FC.f90's name test for a product p = (L*R) and a feature q: q is the left
+# factor, or the right factor and q's name does not occur earlier in p's.
+def part_of(nm: Names, p: Int, q: Int) -> Bool {
+    if nm.a[p] == q {
+        return true
+    }
+    if nm.b[p] != q {
+        return false
+    }
+    sp_ = render_node(nm, p)
+    sq = render_node(nm, q)
+    k = find_codes(sp_, sq)
+    return k + len(sq) + 1 == len(sp_) and sp_[k - 1] == 42
+}
+
+# The values of the feature (o, a, b) into t[0:n].
+def evaluate(sp: Space, o: Int, a: Int, b: Int, n: Int, t: Arr) {
+    da = a * n
+    db = b * n
+    for s to n {
+        x = sp.data[da + s]
+        if o == OP_ADD {
+            t[s] = x + sp.data[db + s]
+        }
+        else if o == OP_SUB {
+            t[s] = x - sp.data[db + s]
+        }
+        else if o == OP_MUL {
+            t[s] = x * sp.data[db + s]
+        }
+        else if o == OP_DIV {
+            t[s] = x / sp.data[db + s]
+        }
+        else if o == OP_ABSDIFF {
+            t[s] = abs(x - sp.data[db + s])
+        }
+        else if o == OP_EXP {
+            t[s] = exp(x)
+        }
+        else if o == OP_EXPM {
+            t[s] = exp(-x)
+        }
+        else if o == OP_INV {
+            t[s] = 1.0 / x
+        }
+        else if o == OP_SQ {
+            t[s] = x * x
+        }
+        else if o == OP_CUBE {
+            t[s] = x * x * x
+        }
+        else if o == OP_SIXTH {
+            # gfortran's x**6: x3 * x3 with x3 = (x * x) * x
+            x3 = x * x * x
+            t[s] = x3 * x3
+        }
+        else if o == OP_SQRT {
+            t[s] = sqrt(x)
+        }
+        else if o == OP_CBRT {
+            t[s] = x ^ (1.0 / 3.0)
+        }
+        else if o == OP_LOG {
+            t[s] = log(x)
+        }
+        else if o == OP_SCD {
+            t[s] = 1.0 / (PI_F * (1.0 + x ^ 2))
+        }
+        else if o == OP_SIN {
+            t[s] = sin(x)
+        }
+        else if o == OP_COS {
+            t[s] = cos(x)
+        }
+        else {
+            t[s] = x
+        }
+    }
+}
+
+# FC.f90 dimcomb(): the unit of (o, a, b) into u[0:nu].
+def unit_of(sp: Space, o: Int, a: Int, b: Int, nu: Int, u: Arr) {
+    for k to nu {
+        x = sp.unit[a * nu + k]
+        if o == OP_MUL {
+            u[k] = x + sp.unit[b * nu + k]
+        }
+        else if o == OP_DIV {
+            u[k] = x - sp.unit[b * nu + k]
+        }
+        else if o == OP_EXP or o == OP_EXPM or o == OP_LOG or o == OP_SCD or o == OP_SIN or o == OP_COS {
+            u[k] = 0.0
+        }
+        else if o == OP_INV {
+            u[k] = x * -1.0
+        }
+        else if o == OP_SQ {
+            u[k] = x * 2.0
+        }
+        else if o == OP_CUBE {
+            u[k] = x * 3.0
+        }
+        else if o == OP_SIXTH {
+            u[k] = x * 6.0
+        }
+        else if o == OP_SQRT {
+            u[k] = x / 2.0
+        }
+        else if o == OP_CBRT {
+            u[k] = x / 3.0
+        }
+        else {
+            u[k] = x
+        }
+    }
+}
+
+# FC.f90 feature_construction() for one dimension: build the space rung by
+# rung, screen every kept feature against the residual res, drop
+# duplicates, and select the nf_sis best (SIS). reject holds the tree keys
+# of the features already in the subspace.
+def feature_construction(Xp: Arr, units: Arr, nm0: Names, res: Arr, mask: [Int], fcomplexity: Int, nf_sis: Int,
+                         reject: [Int], max_values: Int) -> Fc {
+    nsf = int(shape(Xp)[0])
+    n = int(shape(Xp)[1])
+    nu = int(shape(units)[1])
+    nrung = rung_of(fcomplexity)
+    base = 1 + max_values // n
+    cap0 = int(max(1000, nsf))
+    sp = new_space(cap0, n, nu)
+    for f to nsf {
+        for s to n {
+            sp.data[f * n + s] = Xp[f, s]
+        }
+        for k to nu {
+            sp.unit[f * nu + k] = units[f, k]
+        }
+        sp.op[f] = OP_PRIMARY
+        sp.a[f] = f
+        sp.nlen[f] = nm0.ps[f + 1] - nm0.ps[f]
+    }
+    sp.count = nsf
+    tag = zeros(n)
+    for s to n {
+        tag[s] = 1.0 + 0.001 * (s + 1)
+    }
+    ymean = sum(res, ordered=true) / n
+    yc = res - ymean
+    ynorm = sqrt(sum(yc ^ 2, ordered=true))
+    nbasic = 2 * nf_sis
+    nsel = nbasic + min(nf_sis, NEXTRA_MAX)
+    sel = new_cands(nsel, n, nu)
+    threshold = -1.0
+    phi: [Int] = [nsf]
+    t = zeros(n)
+    u = zeros(nu)
+    # rung 0: the primary features themselves, screened as "(name)"
+    for f to nsf {
+        if good_status(sp.data, f * n, n) == 2 {
+            sc = sis_score(sp.data, f * n, n, yc, ynorm)
+            if not (sc < threshold) and not search_key(reject, tree_key(OP_NO, f, 0, base)) {
+                k = sel.count
+                sel.data[k * n:(k + 1) * n] = sp.data[f * n:(f + 1) * n]
+                sel.op[k] = OP_NO
+                sel.a[k] = f
+                sel.comp[k] = 0
+                sel.nlen[k] = sp.nlen[f] + 2
+                sel.key[k] = sc
+                sel.count = k + 1
+            }
+        }
+    }
+    nthis = nsf
+    for icomb from 1 to nrung + 1 {
+        final = icomb == nrung
+        s1 = sp.count - nthis
+        e1 = sp.count
+        gen = new_cands(1000, n, nu)
+        ngen: Int = 0
+        mabs = zeros(sp.count)
+        for f to sp.count {
+            mabs[f] = nan_min(sp.data, f * n, n, true)
+        }
+        for i from s1 to e1 {
+            nm = Names { op: sp.op, a: sp.a, b: sp.b, pc: nm0.pc, ps: nm0.ps }
+            co, ca, cb = candidates(sp, nm, mabs, i, s1, mask, fcomplexity, final, n, nu)
+            if not final and gen.count + len(co) > len(gen.key) {
+                gen = grow_cands(gen, 2 * (gen.count + len(co)), n, nu)
+            }
+            for c to len(co) {
+                o = co[c]
+                a = ca[c]
+                b = cb[c]
+                evaluate(sp, o, a, b, n, t)
+                st = good_status(t, 0, n)
+                if st == 0 {
+                    continue
+                }
+                ngen += 1
+                cm = sp.comp[a] + 1
+                ln = name_len(o, sp.nlen[a], 0)
+                if o == OP_ADD or o == OP_SUB or o == OP_MUL or o == OP_DIV or o == OP_ABSDIFF {
+                    cm = sp.comp[a] + sp.comp[b] + 1
+                    ln = name_len(o, sp.nlen[a], sp.nlen[b])
+                }
+                if not final {
+                    unit_of(sp, o, a, b, nu, u)
+                    k = gen.count
+                    gen.data[k * n:(k + 1) * n] = t
+                    gen.unit[k * nu:(k + 1) * nu] = u
+                    gen.op[k] = o
+                    gen.a[k] = a
+                    gen.b[k] = b
+                    gen.comp[k] = cm
+                    gen.nlen[k] = ln
+                    gen.key[k] = sqrt(sum((tag + t) ^ 2, ordered=true))
+                    gen.count = k + 1
+                }
+                if st == 2 {
+                    sc = sis_score(t, 0, n, yc, ynorm)
+                    if not (sc < threshold) and not search_key(reject, tree_key(o, a, b, base)) {
+                        k = sel.count
+                        sel.data[k * n:(k + 1) * n] = t
+                        sel.op[k] = o
+                        sel.a[k] = a
+                        sel.b[k] = b
+                        sel.comp[k] = cm
+                        sel.nlen[k] = ln
+                        sel.key[k] = sc
+                        sel.count = k + 1
+                        if sel.count == nsel {
+                            nm2 = Names { op: sp.op, a: sp.a, b: sp.b, pc: nm0.pc, ps: nm0.ps }
+                            sel, threshold = prune_select(sel, n, nu, nbasic, nm2)
+                        }
+                    }
+                }
+            }
+        }
+        if final {
+            phi = append(phi, sp.count + ngen)
+        }
+        else {
+            # drop the new features equivalent to one another (dup_scheck), then store them
+            nmg = Names { op: sp.op, a: sp.a, b: sp.b, pc: nm0.pc, ps: nm0.ps }
+            gorder, gavail = rank_cands(gen, n, nmg)
+            kept: Int = len([g for g to gen.count if gavail[g] != 0])
+            if (sp.count + kept) * n > max_values {
+                stop("sisso: the stored feature space would exceed max_values_in; lower fcomplexity_in or raise max_values_in")
+            }
+            if sp.count + kept > len(sp.op) {
+                sp = grow_space(sp, sp.count + kept, n, nu)
+            }
+            for g to gen.count {
+                if gavail[g] == 1 {
+                    k = sp.count
+                    sp.data[k * n:(k + 1) * n] = gen.data[g * n:(g + 1) * n]
+                    sp.unit[k * nu:(k + 1) * nu] = gen.unit[g * nu:(g + 1) * nu]
+                    sp.op[k] = gen.op[g]
+                    sp.a[k] = gen.a[g]
+                    sp.b[k] = gen.b[g]
+                    sp.comp[k] = gen.comp[g]
+                    sp.nlen[k] = gen.nlen[g]
+                    sp.count = k + 1
+                }
+            }
+            nthis = kept
+            phi = append(phi, sp.count)
+        }
+    }
+    # duplicates among the screened candidates, then SIS
+    nmf = Names { op: sp.op, a: sp.a, b: sp.b, pc: nm0.pc, ps: nm0.ps }
+    sorder, savail = rank_cands(sel, n, nmf)
+    score = zeros(sel.count)
+    for k to sel.count {
+        score[k] = sel.key[k]
+        if savail[k] == 0 {
+            score[k] = -1.0
+        }
+    }
+    left: Int = len([k for k to sel.count if savail[k] != 0])
+    us_op: [Int] = []
+    us_a: [Int] = []
+    us_b: [Int] = []
+    us_score: Arr = []
+    us_data: Arr = []
+    while left > 0 and len(us_op) < nf_sis {
+        # gfortran's maxloc: the first largest value that is not NaN
+        best: Int = -1
+        for k to sel.count {
+            if score[k] == score[k] and (best < 0 or score[k] > score[best]) {
+                best = k
+            }
+        }
+        if best < 0 {
+            best = 0
+        }
+        top = score[best]
+        for k to sel.count {
+            if abs(top - score[k]) <= SAME {
+                if simpler(nmf, sel.comp[k], sel.nlen[k], sel.op[k], sel.a[k], sel.b[k],
+                           sel.comp[best], sel.nlen[best], sel.op[best], sel.a[best], sel.b[best]) == 1 {
+                    best = k
+                }
+            }
+        }
+        us_op = append(us_op, sel.op[best])
+        us_a = append(us_a, sel.a[best])
+        us_b = append(us_b, sel.b[best])
+        us_score = append(us_score, sel.key[best])
+        us_data = extend(us_data, sel.data[best * n:(best + 1) * n])
+        if savail[best] == 1 {
+            left -= 1
+        }
+        savail[best] = 0
+        score[best] = -1.0
+    }
+    return Fc { nodes: sp, us_op: us_op, us_a: us_a, us_b: us_b, us_score: us_score, us_data: us_data, phi: phi, skipped: false }
+}
+
+# ------------------------------------------------------- descriptor identification
+
+# What Fortran's e20.10 output then read back gives: ten significant digits.
+def round10(x: Num, p10: Arr) -> Num {
+    if x == 0.0 {
+        return 0.0
+    }
+    ax = abs(x)
+    e = int(floor(log(ax) / log(10.0))) + 1
+    if e - 1 >= -300 and e - 1 <= 300 {
+        while ax >= pow10(e, p10) {
+            e += 1
+        }
+        while ax < pow10(e - 1, p10) {
+            e -= 1
+        }
+    }
+    k = 10 - e
+    v = 0.0
+    if k >= 0 {
+        m = round(ax * pow10(k, p10))
+        v = m / pow10(k, p10)
+    }
+    else {
+        m = round(ax / pow10(-k, p10))
+        v = m * pow10(-k, p10)
+    }
+    if x < 0.0 {
+        return -v
+    }
+    return v
+}
+
+#| 10^k, from the exact table p10 when k is inside it.
+def pow10(k: Int, p10: Arr) -> Num {
+    if k >= 0 and k < len(p10) {
+        return p10[k]
+    }
+    return 10.0 ^ k
+}
+
+# libsisso.f90 orth_de() and qr_de(), for the columns idx of the centered
+# subspace xp [nf * n]: classical Gram-Schmidt (u_i = a_i - sum_j (u_j.a_i /
+# u_j.u_j) u_j, e_i = u_i / |u_i|), R = E^T A, beta from R beta = E^T y, then
+# the RMSE and the intercept. The descriptors are visited in lexicographic
+# order, so only the columns from position p on are new: the state of
+# columns before p (u, e, u.u, the columns of R and E^T y) is kept from the
+# previous descriptor. Each kept number is what the Fortran recomputes, by
+# the same operations in the same order, so the results are its bits.
+record Qr {
+    u: Arr
+    e: Arr
+    uu: Arr
+    r: Arr
+    qty: Arr
+    beta: Arr
+}
+
+#| Gram-Schmidt QR of the chosen columns, recomputed from column p on.
+def qr_from(q: Qr, xp: Arr, idx: [Int], yp: Arr, p: Int, n: Int) {
+    d = int(len(idx))
+    for i from p to d {
+        xi = xp[idx[i] * n:(idx[i] + 1) * n]
+        ui = xi
+        for j to i {
+            uj = q.u[j * n:(j + 1) * n]
+            c = dot(uj, xi, ordered=true) / q.uu[j]
+            ui = ui - c * uj
+        }
+        q.u[i * n:(i + 1) * n] = ui
+        nn = dot(ui, ui, ordered=true)
+        q.uu[i] = nn
+        ei = ui / sqrt(nn)
+        q.e[i * n:(i + 1) * n] = ei
+        q.qty[i] = dot(ei, yp, ordered=true)
+    }
+    for j from p to d {
+        xj = xp[idx[j] * n:(idx[j] + 1) * n]
+        for i from 0 to j + 1 {
+            q.r[i * d + j] = dot(q.e[i * n:(i + 1) * n], xj, ordered=true)
+        }
+    }
+}
+
+#| The least-squares coefficients by back substitution, and the fit's RMSE.
+def solve_rmse(q: Qr, XP: Arr, nf: Int, idx: [Int], yp: Arr, n: Int) -> Num {
+    d = int(len(idx))
+    for i from d - 1 to -1 by -1 {
+        bi = q.qty[i]
+        for j from i + 1 to d {
+            bi = bi - q.r[i * d + j] * q.beta[j]
+        }
+        q.beta[i] = bi / q.r[i * d + i]
+    }
+    # the coefficients spread over every feature of the subspace: `@` adds
+    # each sample's terms in the order of the rows and skips the zero ones,
+    # so the fit adds the descriptor's terms in the order of k (idx rises),
+    # as the Fortran's does
+    b = zeros(nf)
+    for k to d {
+        b[idx[k]] = q.beta[k]
+    }
+    fit = b @ XP
+    return sqrt(sum((yp - fit) ^ 2, ordered=true) / n)
+}
+
+# DI.f90 model(): every descriptor of dimension d from the subspace, in the
+# Fortran's order; the smallest RMSE wins (the first on a tie).
+def l0_search(xr: Arr, nf: Int, yr: Arr, d: Int, n: Int) -> Model {
+    xmean = zeros(nf)
+    xp = zeros(nf * n)
+    for f to nf {
+        xf = xr[f * n:(f + 1) * n]
+        xmean[f] = sum(xf, ordered=true) / n
+        xp[f * n:(f + 1) * n] = xf - xmean[f]
+    }
+    XP = reshape(xp, nf, n)
+    acc = 0.0
+    ymax = 0.0
+    for s to n {
+        acc += yr[s]
+        ymax = max(ymax, abs(yr[s]))
+    }
+    ymean = acc / n
+    yp = yr - ymean
+    ysd = sqrt(sum(yp ^ 2, ordered=true) / n)
+    best_rmse = 10.0 * ymax
+    best = Model { idx: int_zeros(d), coef: zeros(d), c0: 0.0, rmse: best_rmse, maxae: 0.0 }
+    q = Qr { u: zeros(d * n), e: zeros(d * n), uu: zeros(d), r: zeros(d * d), qty: zeros(d), beta: zeros(d) }
+    idx = int_zeros(d)
+    for k to d {
+        idx[k] = k
+    }
+    more = d <= nf
+    p: Int = 0
+    while more {
+        qr_from(q, xp, idx, yp, p, n)
+        rmse = solve_rmse(q, XP, nf, idx, yp, n)
+        if rmse < best_rmse or rmse != rmse {
+            beta = copy(q.beta)
+            c0 = ymean - dot([xmean[idx[k]] for k to d], beta, ordered=true)
+            if rmse != rmse {
+                rmse = ysd
+                c0 = ymean
+                beta = zeros(d)
+            }
+            if rmse < best_rmse {
+                best_rmse = rmse
+                best = Model { idx: copy_int(idx, d), coef: beta, c0: c0, rmse: rmse, maxae: 0.0 }
+            }
+        }
+        # the next combination in lexicographic order; p is its first new position
+        p = d - 1
+        while p >= 0 and idx[p] == nf - d + p {
+            p -= 1
+        }
+        if p < 0 {
+            more = false
+        }
+        else {
+            idx[p] += 1
+            for k from p + 1 to d {
+                idx[k] = idx[k - 1] + 1
+            }
+        }
+    }
+    mae = 0.0
+    for s to n {
+        fit = dot([xr[best.idx[k] * n + s] for k to d], best.coef, ordered=true)
+        mae = max(mae, abs(yr[s] - (best.c0 + fit)))
+    }
+    best.maxae = mae
+    return best
+}
+
+# ------------------------------------------------------------------ the run
+
+#| A 0/1 flag per operator code: the operators this run may use.
+def ops_mask(ops: [Int]) -> [Int] {
+    mask = int_zeros(N_OPS)
+    for o in ops {
+        mask[o] = 1
+    }
+    return mask
+}
+
+record Run {
+    fc: Fc
+    us_op: [Int]
+    us_a: [Int]
+    us_b: [Int]
+    us_score: Arr
+    phi: [Int]
+    sis: [Int]
+    midx: [Int]
+    mcoef: Arr
+    mc0: Arr
+    mrmse: Arr
+    mmaxae: Arr
+}
+
+#| SISSO end to end: grow the formula space, screen it, fit the best descriptor of each dimension.
+def run_sisso(Xp: Arr, y: Arr, units: Arr, ncodes: [Int], nstarts: [Int], ops: [Int], fcomplexity: Int, desc_dim: Int,
+              nf_sis: Int, max_values: Int) -> Run {
+    n = int(len(y))
+    nm0 = Names { op: [], a: [], b: [], pc: ncodes, ps: nstarts }
+    mask = ops_mask(ops)
+    p10 = zeros(EXACT_POW10)
+    p10[0] = 1.0
+    for q from 1 to EXACT_POW10 {
+        p10[q] = p10[q - 1] * 10.0
+    }
+    yr = [round10(v, p10) for v in y]
+    base = 1 + max_values // n
+    res = copy(y)
+    us_op: [Int] = []
+    us_a: [Int] = []
+    us_b: [Int] = []
+    us_score: Arr = []
+    xr: Arr = []
+    phi: [Int] = []
+    sis: [Int] = []
+    midx: [Int] = []
+    mcoef: Arr = []
+    mc0: Arr = []
+    mrmse: Arr = []
+    mmaxae: Arr = []
+    fc = feature_construction(Xp, units, nm0, res, mask, fcomplexity, nf_sis, [], max_values)
+    last_new: Int = nf_sis
+    for d from 1 to desc_dim + 1 {
+        if d > 1 {
+            if last_new < nf_sis {
+                # the whole space is in the subspace already (FC.f90)
+                none: [Int] = [-1 for r to rung_of(fcomplexity) + 1]
+                phi = cat(phi, none)
+                sis = append(sis, 0)
+                last_new = 0
+            }
+            else {
+                keys: [Int] = [tree_key(us_op[k], us_a[k], us_b[k], base) for k to len(us_op)]
+                keys = sort_ints(keys)
+                fc = feature_construction(Xp, units, nm0, res, mask, fcomplexity, nf_sis, keys, max_values)
+            }
+        }
+        if d == 1 or last_new >= nf_sis {
+            phi = cat(phi, fc.phi)
+            for k to len(fc.us_op) {
+                us_op = append(us_op, fc.us_op[k])
+                us_a = append(us_a, fc.us_a[k])
+                us_b = append(us_b, fc.us_b[k])
+                us_score = append(us_score, fc.us_score[k])
+            }
+            xr = extend(xr, [round10(xv, p10) for xv in fc.us_data])
+            sis = append(sis, len(fc.us_op))
+            last_new = len(fc.us_op)
+        }
+        m = l0_search(xr, len(us_op), yr, d, n)
+        for kd to d {
+            midx = append(midx, m.idx[kd])
+            mcoef = append(mcoef, m.coef[kd])
+        }
+        mc0 = append(mc0, m.c0)
+        mrmse = append(mrmse, m.rmse)
+        mmaxae = append(mmaxae, m.maxae)
+        for s to n {
+            fit = dot([xr[m.idx[kd] * n + s] for kd to d], m.coef, ordered=true)
+            res[s] = y[s] - (m.c0 + fit)
+        }
+    }
+    return Run { fc: fc, us_op: us_op, us_a: us_a, us_b: us_b, us_score: us_score, phi: phi, sis: sis,
+                 midx: midx, mcoef: mcoef, mc0: mc0, mrmse: mrmse, mmaxae: mmaxae }
+}
+
+# Integer results go out as Arr (exact below 2^53): the export's
+# report, which tools/export/check.py compares across engines, prints Arr
+# results but not [Int] ones.
+def as_nums(v: [Int]) -> Arr {
+    return [float(t) for t in v]
+}
+
+run = run_sisso(x_data, y_data, unit_exps, label_codes, label_starts, op_codes, fcomplexity_in, desc_dim_in, nf_sis_in, max_values_in)
+
+#: PHI_SIZES    features in each space Phi_0..Phi_rung, per dimension (-1: no construction)
+PHI_SIZES = as_nums(run.phi)
+#: SIS_SIZES    features screened into the subspace at each dimension
+SIS_SIZES = as_nums(run.sis)
+#: NODE_OP      the stored space's operator codes
+NODE_OP = as_nums(copy_int(run.fc.nodes.op, run.fc.nodes.count))
+#: NODE_A       the stored space's first operands (a primary feature's index for OP_PRIMARY)
+NODE_A = as_nums(copy_int(run.fc.nodes.a, run.fc.nodes.count))
+#: NODE_B       the stored space's second operands
+NODE_B = as_nums(copy_int(run.fc.nodes.b, run.fc.nodes.count))
+#: US_OP        the subspace's operator codes, in screening order
+US_OP = as_nums(run.us_op)
+#: US_A         the subspace's first operands (stored-space indices)
+US_A = as_nums(run.us_a)
+#: US_B         the subspace's second operands
+US_B = as_nums(run.us_b)
+#: US_SCORE     each subspace feature's SIS score
+US_SCORE = run.us_score
+#: MODEL_IDX    subspace indices of each dimension's descriptor, dimension 1 first
+MODEL_IDX = as_nums(run.midx)
+#: MODEL_COEF   the coefficients, in the order of MODEL_IDX
+MODEL_COEF = run.mcoef
+#: MODEL_C0     each dimension's intercept
+MODEL_C0 = run.mc0
+#: MODEL_RMSE   each dimension's training RMSE
+MODEL_RMSE = run.mrmse
+#: MODEL_MAXAE  each dimension's largest absolute training error
+MODEL_MAXAE = run.mmaxae
+
+show PHI_SIZES, SIS_SIZES, MODEL_IDX, MODEL_COEF, MODEL_C0, MODEL_RMSE
+
+# Tests that hold for any input (they run with each exported run's parameters);
+# the comparisons with the Fortran are in study/ports/sisso/compare_fortran.py.
+test "a larger descriptor never fits worse" {
+    for t_dim from 1 to len(MODEL_RMSE) {
+        assert_true(MODEL_RMSE[t_dim] <= MODEL_RMSE[t_dim - 1] * (1.0 + 1.0e-12))
+    }
+}
+
+test "the subspace is at most nf_sis_in per dimension and the models index into it" {
+    for t_s to len(SIS_SIZES) {
+        assert_true(SIS_SIZES[t_s] <= nf_sis_in)
+    }
+    for t_m to len(MODEL_IDX) {
+        assert_true(MODEL_IDX[t_m] >= 0.0 and MODEL_IDX[t_m] < len(US_OP))
+    }
+}
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Runhai Ouyang (SISSO, github.com/rouyang2017/SISSO)
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,256 @@
+###
+post: Electron mobility fitted to NIST's certified digits
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: least squares, levenberg-marquardt, minpack, curve fitting, nist
+equation: \min_b \sum_i \left( \frac{b_1 + b_2 x_i + b_3 x_i^2 + b_4 x_i^3}{1 + b_5 x_i + b_6 x_i^2 + b_7 x_i^3} - y_i \right)^2
+summary: A seven-parameter rational model fitted to NIST's semiconductor electron-mobility data by lmder, the Levenberg-Marquardt routine of MINPACK, translated to Viv step by step. Every trial step matches a gfortran build of the original Fortran to the last bit, the answer matches scipy.optimize.leastsq, and the parameters land within 0.001 standard deviations of NIST's certified values.
+agent: claude
+lane: ai
+
+The data are 37 measurements from a NIST study of electron mobility in a
+semiconductor, as a function of the natural log of the carrier density
+(the Thurber data set of NIST's Statistical Reference Datasets). NIST rates
+the fit "higher difficulty" and publishes certified parameter values to 11
+digits. The model is a ratio of two cubics in x with seven parameters,
+
+$$ y(x) = \frac{b_1 + b_2 x + b_3 x^2 + b_4 x^3}{1 + b_5 x + b_6 x^2 + b_7 x^3}, $$
+
+and the fit minimizes the sum of squares of the 37 residuals
+$f_i = y(x_i) - y_i$.
+
+The fit is done by `lmder` from `lib/minpack`: a port of MINPACK's
+Levenberg-Marquardt code (Moré, Garbow and Hillstrom, Argonne, 1980), the
+same code scipy.optimize.leastsq calls. Each pass computes the Jacobian
+$J_{ik} = \partial f_i / \partial b_k$, factors it, and tries steps $p$ inside
+a trust region $\lVert D p \rVert \le \Delta$, a radius around the current
+parameters where the linear model $f(b + p) \approx f(b) + J p$ of the
+residuals is trusted. A
+step that reduces the sum of squares about as much as the model predicted
+grows the radius; a step that does worse shrinks it and is retried. The
+library's intent files (`lib/minpack/*.intent`) explain each step, and
+`viv story lib/minpack/story_osborne1.viv` prints one run iteration by
+iteration.
+
+Three references check the result:
+
+1. the original Fortran, built with gfortran and instrumented to record
+   every trial step (`lib/minpack/oracle`); the port does the same
+   operations in the same order, and on this problem, which uses only
+   arithmetic, every recorded number agrees to the last bit;
+2. scipy.optimize.leastsq, with the same settings;
+3. NIST's certified values.
+###
+
+from minpack.lmder import H_ACCEPT, H_DELTA, H_FNORM, H_X, lmder1, lmder1_maxfev
+from minpack.enorm import EPSMCH
+
+TH_Y = [80.574, 84.248, 87.264, 87.195, 89.076, 89.608, 89.868, 90.101, 92.405, 95.854,
+        100.696, 101.06, 401.672, 390.724, 567.534, 635.316, 733.054, 759.087, 894.206,
+        990.785, 1090.109, 1080.914, 1122.643, 1178.351, 1260.531, 1273.514, 1288.339,
+        1327.543, 1353.863, 1414.509, 1425.208, 1421.384, 1442.962, 1464.35, 1468.705,
+        1447.894, 1457.628]
+TH_X = [-3.067, -2.981, -2.921, -2.912, -2.84, -2.797, -2.702, -2.699, -2.633, -2.481,
+        -2.363, -2.322, -1.501, -1.46, -1.274, -1.212, -1.1, -1.046, -0.915, -0.714,
+        -0.566, -0.545, -0.4, -0.309, -0.109, -0.103, 0.01, 0.119, 0.377, 0.79, 0.963,
+        1.006, 1.115, 1.572, 1.841, 2.047, 2.2]
+NOBS = len(TH_Y)
+
+def th_model(b: Arr, x) {
+    x2 = x * x
+    x3 = x2 * x
+    num = b[0] + b[1] * x + b[2] * x2 + b[3] * x3
+    den = 1.0 + b[4] * x + b[5] * x2 + b[6] * x3
+    return num / den
+}
+
+# The function lmder calls: residuals model - y for iflag 1, the Jacobian for
+# iflag 2. The operations are those of lib/minpack/oracle/thurber.f.
+def th_fcn(data: Arr, b: Arr, fvec: Arr, fjac: Arr, iflag) {
+    for i to len(TH_X) {
+        x = TH_X[i]
+        x2 = x * x
+        x3 = x2 * x
+        num = b[0] + b[1] * x + b[2] * x2 + b[3] * x3
+        den = 1.0 + b[4] * x + b[5] * x2 + b[6] * x3
+        if iflag == 1 {
+            fvec[i] = num / den - TH_Y[i]
+        }
+        if iflag == 2 {
+            fjac[i, 0] = 1.0 / den
+            fjac[i, 1] = x / den
+            fjac[i, 2] = x2 / den
+            fjac[i, 3] = x3 / den
+            t = num / (den * den)
+            fjac[i, 4] = -(x * t)
+            fjac[i, 5] = -(x2 * t)
+            fjac[i, 6] = -(x3 * t)
+        }
+    }
+    return iflag
+}
+
+# NIST's first starting point, and lmder1 at MINPACK's usual tolerance
+b = [1000.0, 1000.0, 400.0, 40.0, 0.7, 0.3, 0.03]
+NPAR = len(b)
+fvec = zeros(NOBS)
+counts = zeros(2)
+# one row per trial step; lmder1 stops after lmder1_maxfev(n) evaluations of
+# f, and every trial step after the first evaluation is one of them, so this
+# many rows hold every step lmder1 can take
+hist = zeros(lmder1_maxfev(NPAR), H_X + NPAR)
+# the tolerance on the relative reduction of the sum of squares
+LM_TOL = sqrt(EPSMCH)
+info = lmder1(th_fcn, [0.0], b, fvec, zeros(NOBS, NPAR), LM_TOL, zeros(NPAR), counts, hist)
+fnorm = sqrt(sum(fvec * fvec))
+ntrial = counts[0] - 1.0
+show info
+show LM_TOL
+show ntrial
+show counts
+show b
+show fnorm * fnorm
+
+###
+## The fit
+
+`info` 1 means lmder stopped because both the actual and the predicted
+relative reduction of the sum of squares fell below the tolerance
+$\sqrt{\varepsilon} \approx 1.5 \times 10^{-8}$, where $\varepsilon$ is the
+machine precision. It took 33 evaluations of the residuals and 27 of the
+Jacobian; each of the 32 trial steps after the first evaluation is one row
+of `hist`.
+###
+
+# points on the drawn curve
+N_CURVE = 200
+xs = linspace(-3.1, 2.25, N_CURVE)
+ys = zeros(len(xs))
+for k to len(xs) {
+    ys[k] = th_model(b, xs[k])
+}
+figure("NIST's electron mobility data with the fitted rational model", "x = ln(density)", "mobility")
+scatter(TH_X, TH_Y, "NIST's measurements")
+plot(xs, ys, "the fitted rational model")
+
+###
+## How it converged
+
+The first two trial steps, starting with the Gauss-Newton step, make the
+fit worse and are rejected, and each rejection shrinks the trust radius.
+Three more are rejected in the next few passes, 5 of the 32 in all. After
+that every step is accepted, and the norm of the residuals approaches its
+final value roughly geometrically, with the trust radius no longer the
+limit: the plot shows, on a log scale, how far the norm still is from its
+final value.
+###
+
+steps = zeros(ntrial - 1.0)
+gap = zeros(ntrial - 1.0)
+radius = zeros(ntrial - 1.0)
+for k to ntrial - 1.0 {
+    steps[k] = k + 1.0
+    gap[k] = hist[k, H_FNORM] - fnorm
+    radius[k] = hist[k, H_DELTA]
+}
+grid("Convergence, one point per trial step", 2, 1)
+share("x")
+figure("How far the norm of the residuals is from its final value", "", "norm - final norm")
+yscale("log")
+plot(steps, gap, "norm of residuals - final norm")
+figure("The trust radius", "trial step", "$\\delta$")
+yscale("log")
+plot(steps, radius, "trust radius $\\delta$")
+
+# The Fortran oracle's norm of the residuals after each trial step
+# (lib/minpack/oracle/build.sh, thurber.txt), start 1.
+def th_oracle_fnorm() {
+    return [2127.939050719074, 2127.939050719074, 815.449452321453, 815.449452321453,
+            189.31766695516637, 189.31766695516637, 117.26179318645498, 116.03640053244132,
+            88.38951214357165, 84.65876020732587, 79.61247384664468, 79.61247384664468,
+            78.05138302015897, 75.68668267948662, 75.39032188806856, 75.15983386791349,
+            75.14384770860137, 75.12649548519988, 75.12255433097445, 75.11978683271543,
+            75.11885950157328, 75.11834621655328, 75.11814299306808, 75.11804207927656,
+            75.11799903552608, 75.11797869266978, 75.11796971921879, 75.11796557256598,
+            75.1179637154151, 75.11796286593855, 75.11796248285563, 75.11796230844033]
+}
+
+# What the Fortran oracle reports for this fit (lib/minpack/oracle/build.sh,
+# thurber.txt) and what NIST certifies: the claims the tests below check.
+F_INFO = 1.0
+F_NFEV = 33.0
+F_NJEV = 27.0
+F_REJECTED = 5.0
+NIST_RSS = 5642.7082397
+
+test "the Fortran stops the same way: info 1, 33 evaluations of f and 27 of J" {
+    assert_near(info, F_INFO, 0.0)
+    assert_near(counts[0], F_NFEV, 0.0)
+    assert_near(counts[1], F_NJEV, 0.0)
+}
+
+test "NIST's data has 37 points, and the tolerance sqrt(eps) is 1.5e-8" {
+    assert_near(NOBS, 37, 0.0)
+    # MINPACK's machine precision is 2.22e-16, so its square root is 1.4901e-8
+    assert_near(LM_TOL, 1.4901e-8, 1.0e-12)
+}
+
+test "the norm after each of the 32 trial steps equals the Fortran's to the last bit" {
+    assert_near(ntrial, 32, 0.0)
+    ref = th_oracle_fnorm()
+    assert_near(len(ref), ntrial, 0.0)
+    for k to ntrial {
+        assert_near(hist[k, H_FNORM], ref[k], 0.0)
+    }
+}
+
+test "the parameters equal the Fortran's to the last bit" {
+    ref = [1288.1397251341202, 1491.0709811884574, 583.2325961156678, 75.41551584219629,
+           0.9662894535993325, 0.39797031628908064, 0.0497256353121443]
+    for j to len(b) {
+        assert_near(b[j], ref[j], 0.0)
+    }
+}
+
+test "scipy.optimize.leastsq stops with the same info and counts, at parameters within 1e-13" {
+    # lib/minpack/oracle/scipy_thurber.py, scipy 1.12
+    sp = [1288.1397251341205, 1491.0709811884399, 583.2325961156553, 75.41551584219386,
+          0.9662894535993198, 0.39797031628907475, 0.049725635312141414]
+    for j to len(b) {
+        assert_lt(abs(b[j] - sp[j]) / abs(sp[j]), 1.0e-13)
+    }
+    assert_near(counts[0], F_NFEV, 0.0)
+    assert_near(counts[1], F_NJEV, 0.0)
+    assert_near(fnorm, 75.11796230844008, 1.0e-12)
+}
+
+test "every parameter is within 0.001 standard deviations of NIST's certified value" {
+    cert = [1288.13968, 1491.0792535, 583.23836877, 75.416644291, 0.96629502864,
+            0.39797285797, 0.049727297349]
+    sd = [4.6647963344, 39.571156086, 28.698696102, 5.5675370270, 0.031333340687,
+          0.014984928198, 0.0065842344623]
+    for j to len(b) {
+        assert_lt(abs(b[j] - cert[j]) / sd[j], 0.001)
+    }
+}
+
+test "the residual sum of squares is NIST's 5642.7082397 to 1e-8" {
+    assert_lt(abs(fnorm * fnorm - NIST_RSS) / NIST_RSS, 1.0e-8)
+}
+
+test "5 of the 32 trial steps are rejected, and the norm never rises" {
+    rejected = 0.0
+    for k to ntrial {
+        if hist[k, H_ACCEPT] == 0.0 {
+            rejected = rejected + 1.0
+        }
+        if k > 0 {
+            assert_true(hist[k, H_FNORM] <= hist[k - 1, H_FNORM])
+        }
+    }
+    assert_near(rejected, F_REJECTED, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

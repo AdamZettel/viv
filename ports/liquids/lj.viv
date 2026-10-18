@@ -1,0 +1,778 @@
+###
+The Lennard-Jones pair potential in a periodic cubic box, as Allen and
+Tildesley's example programs compute it: forces, energy, virial and
+Laplacian for molecular dynamics (cut and shifted at r_cut), the energy of
+one atom with all the others for Monte Carlo (cut, not shifted), the
+long-range corrections that turn either into an estimate for the full
+potential, and the two ways of finding neighbors faster than all pairs:
+link lists (cells of side r_cut or more) and Verlet lists (a list of pairs
+within r_cut plus a skin, rebuilt when some atom has moved half the skin).
+
+In reduced units sigma = epsilon = 1, the potential is
+
+    v(r) = 4 (r^-12 - r^-6),
+
+and every routine here works with positions in units of the box, each
+coordinate in [-1/2, 1/2), so the nearest periodic image of a separation
+d is d - round(d).
+###
+# Derived from md_lj_module.f90, md_lj_ll_module.f90, md_lj_vl_module.f90,
+# mc_lj_module.f90, lrc_lj_module.f90, link_list_module.f90 and
+# verlet_list_module.f90 of https://github.com/Allen-Tildesley/examples
+# (commit 4818bc82), by Michael P. Allen and Dominic J. Tildesley, CC0-1.0;
+# see ports/liquids/LICENSE. The arithmetic is upstream's, in upstream's
+# order, so a run gives upstream's numbers to the last bit.
+#
+# Arrays: positions, velocities and forces are (n, 3), row i one atom,
+# which is upstream's (3, n) in the same memory order. Atoms are numbered
+# from 0; the link and Verlet lists mark an end with NONE.
+
+from setup import random_translate, metropolis, DIM
+
+#| v(r) above this value of (sigma / r)^2, about 1.77, means two atoms
+#| overlap (the pair energy is then above 100): upstream's sr2_ovr
+SR2_OVR = 1.77
+#| the end of a chain in the link list and of a cell's list
+NONE: Int = -1
+#| a link-list cell must be at least r_cut wide, and there must be at least
+#| this many cells along each side for the 27-cell search to be right
+MIN_CELLS: Int = 3
+#| the Verlet list holds pairs within r_cut times this
+VERLET_LIST_FACTOR = 1.2
+
+#| The sums a pair loop returns, before and after its prefactors: the
+#| potential cut (not shifted) at r_cut, the same cut and shifted so that it
+#| is zero at r_cut, the virial W = -(1/3) sum r . f (so that P = rho T +
+#| W / V), the Laplacian of the potential (for the configurational
+#| temperature), and whether two atoms overlapped.
+record Pot {
+    cut: Num
+    pot: Num
+    vir: Num
+    lap: Num
+    ovr: Bool
+}
+
+def zero_pot() -> Pot {
+    return Pot { cut: 0.0, pot: 0.0, vir: 0.0, lap: 0.0, ovr: false }
+}
+
+# ---- long-range corrections (lrc_lj_module.f90)
+
+#| The energy per atom the potential beyond r_cut would add, for g(r) = 1
+#| there: (8/9) pi rho r_c^-9 - (8/3) pi rho r_c^-3.
+def potential_lrc(density: Num, r_cut: Num) -> Num {
+    sr3 = 1.0 / (r_cut * r_cut * r_cut)
+    return pi * ((8.0 / 9.0) * (sr3 * sr3 * sr3) - (8.0 / 3.0) * sr3) * density
+}
+
+#| The pressure the potential beyond r_cut would add.
+def pressure_lrc(density: Num, r_cut: Num) -> Num {
+    sr3 = 1.0 / (r_cut * r_cut * r_cut)
+    return pi * ((32.0 / 9.0) * (sr3 * sr3 * sr3) - (16.0 / 3.0) * sr3) * (density * density)
+}
+
+#| The pressure correction for the step of a cut (not shifted) potential at
+#| r_cut, which the virial misses: the impulsive force there.
+def pressure_delta(density: Num, r_cut: Num) -> Num {
+    sr3 = 1.0 / (r_cut * r_cut * r_cut)
+    return pi * (8.0 / 3.0) * (sr3 * sr3 * sr3 - sr3) * (density * density)
+}
+
+# ---- shared pieces of the pair loops
+
+def check_box(box: Num, r_cut: Num) {
+    if r_cut / box > 0.5 {
+        stop(f"r_cut / box is {r_cut / box}: the box must be at least twice r_cut wide")
+    }
+}
+
+#| Puts every coordinate back in [-1/2, 1/2] (box units).
+def wrap(r: Arr) {
+    nat: Int = int(shape(r)[0])
+    for i to nat {
+        for k to DIM {
+            r[i, k] = r[i, k] - round(r[i, k])
+        }
+    }
+}
+
+#| Scales the four sums of a pair loop by their prefactors: 4 epsilon for the
+#| energies, 24 epsilon / 3 for the virial, 24 epsilon times 2 (each pair
+#| counts for i and for j) for the Laplacian.
+def scale_sums(cut: Num, pot: Num, vir: Num, lap: Num, ovr: Bool) -> Pot {
+    return Pot { cut: cut * 4.0, pot: pot * 4.0, vir: vir * 24.0 / 3.0, lap: lap * 24.0 * 2.0, ovr: ovr }
+}
+
+# ---- molecular dynamics forces (md_lj_module.f90)
+
+#| Forces on every atom, into f (n, 3), and the totals, summed over all
+#| pairs i < j: upstream's force in md_lj_module.
+def force_all(r: Arr, f: Arr, box: Num, r_cut: Num) -> Pot {
+    nat: Int = int(shape(r)[0])
+    check_box(box, r_cut)
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    sc2 = 1.0 / (r_cut * r_cut)
+    sc6 = sc2 * sc2 * sc2
+    pot_cut = sc6 * sc6 - sc6
+    for i to nat {
+        for k to DIM {
+            f[i, k] = 0.0
+        }
+    }
+    cut = 0.0
+    pot = 0.0
+    vir = 0.0
+    lap = 0.0
+    ovr = false
+    for i to nat - 1 {
+        for j from i + 1 to nat {
+            dx = r[i, 0] - r[j, 0]
+            dy = r[i, 1] - r[j, 1]
+            dz = r[i, 2] - r[j, 2]
+            dx = dx - round(dx)
+            dy = dy - round(dy)
+            dz = dz - round(dz)
+            rij_sq = dx * dx + dy * dy + dz * dz
+            if rij_sq < r_cut_box_sq {
+                rij_sq = rij_sq * box_sq
+                dx = dx * box
+                dy = dy * box
+                dz = dz * box
+                sr2 = 1.0 / rij_sq
+                ovr = ovr or sr2 > SR2_OVR
+                sr6 = sr2 * sr2 * sr2
+                sr12 = sr6 * sr6
+                pair_cut = sr12 - sr6
+                pair_vir = pair_cut + sr12
+                cut += pair_cut
+                pot += pair_cut - pot_cut
+                vir += pair_vir
+                lap += (22.0 * sr12 - 5.0 * sr6) * sr2
+                fx = dx * pair_vir * sr2
+                fy = dy * pair_vir * sr2
+                fz = dz * pair_vir * sr2
+                f[i, 0] = f[i, 0] + fx
+                f[i, 1] = f[i, 1] + fy
+                f[i, 2] = f[i, 2] + fz
+                f[j, 0] = f[j, 0] - fx
+                f[j, 1] = f[j, 1] - fy
+                f[j, 2] = f[j, 2] - fz
+            }
+        }
+    }
+    scale_forces(f)
+    return scale_sums(cut, pot, vir, lap, ovr)
+}
+
+#| The pair forces were summed without their factor 24 epsilon.
+def scale_forces(f: Arr) {
+    nat: Int = int(shape(f)[0])
+    for i to nat {
+        for k to DIM {
+            f[i, k] = f[i, k] * 24.0
+        }
+    }
+}
+
+#| The sum over pairs of f_ij . H_ij . f_ij, where H is the pair potential's
+#| Hessian: the correction to the configurational temperature for a finite
+#| system (upstream's hessian, which needs the forces of force_all in f).
+def hessian(r: Arr, f: Arr, box: Num, r_cut: Num) -> Num {
+    nat: Int = int(shape(r)[0])
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    hes = 0.0
+    for i to nat - 1 {
+        for j from i + 1 to nat {
+            dx = r[i, 0] - r[j, 0]
+            dy = r[i, 1] - r[j, 1]
+            dz = r[i, 2] - r[j, 2]
+            dx = dx - round(dx)
+            dy = dy - round(dy)
+            dz = dz - round(dz)
+            rij_sq = dx * dx + dy * dy + dz * dz
+            if rij_sq < r_cut_box_sq {
+                rij_sq = rij_sq * box_sq
+                dx = dx * box
+                dy = dy * box
+                dz = dz * box
+                hes = add_pair_hessian(hes, rij_sq, dx, dy, dz, f, i, j)
+            }
+        }
+    }
+    return hes
+}
+
+# ---- link lists (link_list_module.f90, md_lj_ll_module.f90)
+
+#| The cell lists of a configuration: sc cells along each side, head[c] the
+#| last atom put in cell c (NONE if it is empty), next[i] the atom put in
+#| i's cell before i, cell[i, k] the cell of atom i along axis k.
+record LinkList {
+    sc: Int
+    head: [Int]
+    next: [Int]
+    cell: [Int]
+}
+
+#| How many cells of side r_cut or more fit along the box; stops below 3.
+def cells_per_side(r_cut_box: Num) -> Int {
+    sc: Int = int(floor(1.0 / r_cut_box))
+    if sc < MIN_CELLS {
+        stop(f"the box holds {sc} link-list cells along a side; it needs {MIN_CELLS} (a box of 3 r_cut or more)")
+    }
+    return sc
+}
+
+#| The cell of one coordinate, from 0 to sc - 1.
+def cell_index(x: Num, sc: Int) -> Int {
+    c: Int = int(floor((x + 0.5) * sc))
+    if c < 0 {
+        c = 0
+    }
+    if c > sc - 1 {
+        c = sc - 1
+    }
+    return c
+}
+
+#| Sorts the atoms into cells: upstream's make_list, which pushes atom 0,
+#| 1, ..., n - 1 onto the front of its cell's list in turn.
+def make_link_list(r: Arr, r_cut_box: Num) -> LinkList {
+    nat: Int = int(shape(r)[0])
+    sc: Int = cells_per_side(r_cut_box)
+    head = int_zeros(sc * sc * sc)
+    for c to sc * sc * sc {
+        head[c] = NONE
+    }
+    nxt = int_zeros(nat)
+    cell = int_zeros(3 * nat)
+    for i to nat {
+        for k to DIM {
+            if abs(r[i, k]) > 0.5 {
+                stop(f"atom {i} is outside the box: coordinate {k} is {r[i, k]} box lengths")
+            }
+            cell[3 * i + k] = cell_index(r[i, k], sc)
+        }
+        c: Int = (cell[3 * i] * sc + cell[3 * i + 1]) * sc + cell[3 * i + 2]
+        nxt[i] = head[c]
+        head[c] = i
+    }
+    return LinkList { sc: sc, head: head, next: nxt, cell: cell }
+}
+
+#| The 13 neighbor cells of a cell that the search visits besides the cell
+#| itself, so that each pair of neighboring cells is visited once, as
+#| upstream's d(:, 1:13): offsets along x, y and z.
+NEIGHBOR_DX: [Int] = [1, 1, -1, 0, 0, -1, 1, -1, 0, 1, -1, 0, 1]
+NEIGHBOR_DY: [Int] = [0, 1, 1, 1, 0, 0, 0, -1, -1, -1, 1, 1, 1]
+NEIGHBOR_DZ: [Int] = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+#| The first atom of the list the search for atom i's partners walks at step
+#| nb (0 to 13) from cell (ci1, ci2, ci3): at 0, the atoms after i in its
+#| own cell; then the whole of the nb-th forward neighbor cell.
+def link_start(ll: LinkList, i: Int, nb: Int, ci1: Int, ci2: Int, ci3: Int) -> Int {
+    if nb == 0 {
+        return ll.next[i]
+    }
+    sc: Int = ll.sc
+    cj1: Int = (ci1 + NEIGHBOR_DX[nb - 1]) % sc
+    cj2: Int = (ci2 + NEIGHBOR_DY[nb - 1]) % sc
+    cj3: Int = (ci3 + NEIGHBOR_DZ[nb - 1]) % sc
+    return ll.head[(cj1 * sc + cj2) * sc + cj3]
+}
+
+#| Forces and totals as force_all, from the link list: upstream's force in
+#| md_lj_ll_module, which visits cell by cell (x slowest), each atom i of a
+#| cell in list order, and for it the atoms after i in its own cell and then
+#| every atom of the 13 forward neighbor cells. It wraps r into the box
+#| first, as upstream does.
+def force_link(r: Arr, f: Arr, box: Num, r_cut: Num) -> Pot {
+    nat: Int = int(shape(r)[0])
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    sc2 = 1.0 / (r_cut * r_cut)
+    sc6 = sc2 * sc2 * sc2
+    pot_cut = sc6 * sc6 - sc6
+    wrap(r)
+    ll = make_link_list(r, r_cut_box)
+    sc: Int = ll.sc
+    nk: Int = len(NEIGHBOR_DX)
+    for i to nat {
+        for k to DIM {
+            f[i, k] = 0.0
+        }
+    }
+    cut = 0.0
+    pot = 0.0
+    vir = 0.0
+    lap = 0.0
+    ovr = false
+    for ci1 to sc {
+        for ci2 to sc {
+            for ci3 to sc {
+                i: Int = ll.head[(ci1 * sc + ci2) * sc + ci3]
+                while i != NONE {
+                    for nb to nk + 1 {
+                        j: Int = link_start(ll, i, nb, ci1, ci2, ci3)
+                        while j != NONE {
+                            dx = r[i, 0] - r[j, 0]
+                            dy = r[i, 1] - r[j, 1]
+                            dz = r[i, 2] - r[j, 2]
+                            dx = dx - round(dx)
+                            dy = dy - round(dy)
+                            dz = dz - round(dz)
+                            rij_sq = dx * dx + dy * dy + dz * dz
+                            if rij_sq < r_cut_box_sq {
+                                rij_sq = rij_sq * box_sq
+                                dx = dx * box
+                                dy = dy * box
+                                dz = dz * box
+                                sr2 = 1.0 / rij_sq
+                                ovr = ovr or sr2 > SR2_OVR
+                                sr6 = sr2 * sr2 * sr2
+                                sr12 = sr6 * sr6
+                                pair_cut = sr12 - sr6
+                                pair_vir = pair_cut + sr12
+                                cut += pair_cut
+                                pot += pair_cut - pot_cut
+                                vir += pair_vir
+                                lap += (22.0 * sr12 - 5.0 * sr6) * sr2
+                                fx = dx * pair_vir * sr2
+                                fy = dy * pair_vir * sr2
+                                fz = dz * pair_vir * sr2
+                                f[i, 0] = f[i, 0] + fx
+                                f[i, 1] = f[i, 1] + fy
+                                f[i, 2] = f[i, 2] + fz
+                                f[j, 0] = f[j, 0] - fx
+                                f[j, 1] = f[j, 1] - fy
+                                f[j, 2] = f[j, 2] - fz
+                            }
+                            j = ll.next[j]
+                        }
+                    }
+                    i = ll.next[i]
+                }
+            }
+        }
+    }
+    scale_forces(f)
+    return scale_sums(cut, pot, vir, lap, ovr)
+}
+
+#| The Hessian sum of `hessian` from the link list, in force_link's order:
+#| upstream's hessian in md_lj_ll_module, which wraps r and rebuilds the
+#| list first.
+def hessian_link(r: Arr, f: Arr, box: Num, r_cut: Num) -> Num {
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    wrap(r)
+    ll = make_link_list(r, r_cut_box)
+    sc: Int = ll.sc
+    nk: Int = len(NEIGHBOR_DX)
+    hes = 0.0
+    for ci1 to sc {
+        for ci2 to sc {
+            for ci3 to sc {
+                i: Int = ll.head[(ci1 * sc + ci2) * sc + ci3]
+                while i != NONE {
+                    for nb to nk + 1 {
+                        j: Int = link_start(ll, i, nb, ci1, ci2, ci3)
+                        while j != NONE {
+                            dx = r[i, 0] - r[j, 0]
+                            dy = r[i, 1] - r[j, 1]
+                            dz = r[i, 2] - r[j, 2]
+                            dx = dx - round(dx)
+                            dy = dy - round(dy)
+                            dz = dz - round(dz)
+                            rij_sq = dx * dx + dy * dy + dz * dz
+                            if rij_sq < r_cut_box_sq {
+                                hes = add_pair_hessian(hes, rij_sq * box_sq, dx * box, dy * box, dz * box, f, i, j)
+                            }
+                            j = ll.next[j]
+                        }
+                    }
+                    i = ll.next[i]
+                }
+            }
+        }
+    }
+    return hes
+}
+
+#| Forces and totals as force_all, over the pairs (pair_i[p], pair_j[p]) in
+#| their order: the force loop of md_lj_vl_module.
+def force_pairs(r: Arr, f: Arr, box: Num, r_cut: Num, pair_i: [Int], pair_j: [Int]) -> Pot {
+    nat: Int = int(shape(r)[0])
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    sc2 = 1.0 / (r_cut * r_cut)
+    sc6 = sc2 * sc2 * sc2
+    pot_cut = sc6 * sc6 - sc6
+    for i to nat {
+        for k to DIM {
+            f[i, k] = 0.0
+        }
+    }
+    cut = 0.0
+    pot = 0.0
+    vir = 0.0
+    lap = 0.0
+    ovr = false
+    for p to len(pair_i) {
+        i: Int = pair_i[p]
+        j: Int = pair_j[p]
+        dx = r[i, 0] - r[j, 0]
+        dy = r[i, 1] - r[j, 1]
+        dz = r[i, 2] - r[j, 2]
+        dx = dx - round(dx)
+        dy = dy - round(dy)
+        dz = dz - round(dz)
+        rij_sq = dx * dx + dy * dy + dz * dz
+        if rij_sq < r_cut_box_sq {
+            rij_sq = rij_sq * box_sq
+            dx = dx * box
+            dy = dy * box
+            dz = dz * box
+            sr2 = 1.0 / rij_sq
+            ovr = ovr or sr2 > SR2_OVR
+            sr6 = sr2 * sr2 * sr2
+            sr12 = sr6 * sr6
+            pair_cut = sr12 - sr6
+            pair_vir = pair_cut + sr12
+            cut += pair_cut
+            pot += pair_cut - pot_cut
+            vir += pair_vir
+            lap += (22.0 * sr12 - 5.0 * sr6) * sr2
+            fx = dx * pair_vir * sr2
+            fy = dy * pair_vir * sr2
+            fz = dz * pair_vir * sr2
+            f[i, 0] = f[i, 0] + fx
+            f[i, 1] = f[i, 1] + fy
+            f[i, 2] = f[i, 2] + fz
+            f[j, 0] = f[j, 0] - fx
+            f[j, 1] = f[j, 1] - fy
+            f[j, 2] = f[j, 2] - fz
+        }
+    }
+    scale_forces(f)
+    return scale_sums(cut, pot, vir, lap, ovr)
+}
+
+#| The Hessian sum of `hessian`, over the pairs (pair_i[p], pair_j[p]) in their order.
+def hessian_pairs(r: Arr, f: Arr, box: Num, r_cut: Num, pair_i: [Int], pair_j: [Int]) -> Num {
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    hes = 0.0
+    for p to len(pair_i) {
+        i: Int = pair_i[p]
+        j: Int = pair_j[p]
+        dx = r[i, 0] - r[j, 0]
+        dy = r[i, 1] - r[j, 1]
+        dz = r[i, 2] - r[j, 2]
+        dx = dx - round(dx)
+        dy = dy - round(dy)
+        dz = dz - round(dz)
+        rij_sq = dx * dx + dy * dy + dz * dz
+        if rij_sq < r_cut_box_sq {
+            hes = add_pair_hessian(hes, rij_sq * box_sq, dx * box, dy * box, dz * box, f, i, j)
+        }
+    }
+    return hes
+}
+
+#| The Hessian sum hes plus one pair's term, at squared separation rij_sq
+#| (in sigma) along (dx, dy, dz): v1 |f_ij|^2 + v2 (r_ij . f_ij)^2, added
+#| in upstream's order.
+def add_pair_hessian(hes: Num, rij_sq: Num, dx: Num, dy: Num, dz: Num, f: Arr, i: Int, j: Int) -> Num {
+    gx = f[i, 0] - f[j, 0]
+    gy = f[i, 1] - f[j, 1]
+    gz = f[i, 2] - f[j, 2]
+    ff = gx * gx + gy * gy + gz * gz
+    rf = dx * gx + dy * gy + dz * gz
+    sr2 = 1.0 / rij_sq
+    sr6 = sr2 * sr2 * sr2
+    sr8 = sr6 * sr2
+    sr10 = sr8 * sr2
+    v1 = 24.0 * (1.0 - 2.0 * sr6) * sr8
+    v2 = 96.0 * (7.0 * sr6 - 2.0) * sr10
+    return hes + v1 * ff + v2 * (rf * rf)
+}
+
+# ---- Verlet lists (verlet_list_module.f90, md_lj_vl_module.f90)
+
+#| A Verlet list: the pairs (pair_i[p], pair_j[p]) within r_list, i < j, in
+#| upstream's order; r_save holds the positions when it was built, and
+#| rebuilds counts the builds.
+record VerletList {
+    r_list_box: Num
+    r_skin_box: Num
+    r_save: Arr
+    pair_i: [Int]
+    pair_j: [Int]
+    built: Bool
+    rebuilds: Int
+}
+
+#| An empty list for n atoms; the first update builds it, and stops if the
+#| list radius is more than half the box.
+def verlet_list(nat: Int, r_cut_box: Num) -> VerletList {
+    r_list_box = r_cut_box * VERLET_LIST_FACTOR
+    empty: [Int] = []
+    return VerletList { r_list_box: r_list_box, r_skin_box: r_list_box - r_cut_box, r_save: zeros(nat, DIM),
+                        pair_i: empty, pair_j: empty, built: false, rebuilds: 0 }
+}
+
+#| Rebuilds the list when some atom has moved more than half the skin since
+#| the last build (or it was never built): upstream's make_list.
+def verlet_update(vl: VerletList, r: Arr) -> VerletList {
+    nat: Int = int(shape(r)[0])
+    if vl.r_list_box > 0.5 {
+        stop(f"the Verlet list radius is {vl.r_list_box} box lengths; it must be at most 1/2")
+    }
+    if vl.built {
+        dr_sq_max = 0.0
+        for i to nat {
+            dx = r[i, 0] - vl.r_save[i, 0]
+            dy = r[i, 1] - vl.r_save[i, 1]
+            dz = r[i, 2] - vl.r_save[i, 2]
+            dx = dx - round(dx)
+            dy = dy - round(dy)
+            dz = dz - round(dz)
+            dr_sq_max = max(dr_sq_max, dx * dx + dy * dy + dz * dz)
+        }
+        if 4.0 * dr_sq_max < vl.r_skin_box * vl.r_skin_box {
+            return vl
+        }
+    }
+    r_list_box_sq = vl.r_list_box * vl.r_list_box
+    pair_i: [Int] = []
+    pair_j: [Int] = []
+    for i to nat - 1 {
+        for j from i + 1 to nat {
+            dx = r[i, 0] - r[j, 0]
+            dy = r[i, 1] - r[j, 1]
+            dz = r[i, 2] - r[j, 2]
+            dx = dx - round(dx)
+            dy = dy - round(dy)
+            dz = dz - round(dz)
+            if dx * dx + dy * dy + dz * dz < r_list_box_sq {
+                pair_i = append(pair_i, i)
+                pair_j = append(pair_j, j)
+            }
+        }
+    }
+    return VerletList { r_list_box: vl.r_list_box, r_skin_box: vl.r_skin_box, r_save: copy(r), pair_i: pair_i, pair_j: pair_j,
+                        built: true, rebuilds: vl.rebuilds + 1 }
+}
+
+# ---- Monte Carlo energies (mc_lj_module.f90)
+
+#| Which partners potential_1 sums over: every j != i, only j > i, or only
+#| j < i (upstream's j_range absent, gt, lt).
+J_ALL: Int = 0
+J_ABOVE: Int = 1
+J_BELOW: Int = 2
+
+#| The interaction of an atom at ri (box units) with the atoms of r other
+#| than i, cut (not shifted) at r_cut: upstream's potential_1. It stops at
+#| the first overlap and returns ovr = true with the sums so far left out.
+def potential_1(ri: Arr, i: Int, r: Arr, box: Num, r_cut: Num, j_range: Int) -> Pot {
+    nat: Int = int(shape(r)[0])
+    j1: Int = 0
+    j2: Int = nat
+    if j_range == J_ABOVE {
+        j1 = i + 1
+    }
+    if j_range == J_BELOW {
+        j2 = i
+    }
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    pot = 0.0
+    vir = 0.0
+    lap = 0.0
+    for j from j1 to j2 {
+        if j != i {
+            dx = ri[0] - r[j, 0]
+            dy = ri[1] - r[j, 1]
+            dz = ri[2] - r[j, 2]
+            dx = dx - round(dx)
+            dy = dy - round(dy)
+            dz = dz - round(dz)
+            rij_sq = dx * dx + dy * dy + dz * dz
+            if rij_sq < r_cut_box_sq {
+                rij_sq = rij_sq * box_sq
+                sr2 = 1.0 / rij_sq
+                if sr2 > SR2_OVR {
+                    return Pot { cut: 0.0, pot: 0.0, vir: 0.0, lap: 0.0, ovr: true }
+                }
+                sr6 = sr2 * sr2 * sr2
+                sr12 = sr6 * sr6
+                pair_pot = sr12 - sr6
+                pot += pair_pot
+                vir += pair_pot + sr12
+                lap += (22.0 * sr12 - 5.0 * sr6) * sr2
+            }
+        }
+    }
+    s = scale_sums(0.0, pot, vir, lap, false)
+    return Pot { cut: s.pot, pot: s.pot, vir: s.vir, lap: s.lap, ovr: false }
+}
+
+#| The whole configuration's energy, virial and Laplacian, as the sum over
+#| i of potential_1 with j > i: upstream's potential. Stops at the first
+#| overlap with ovr = true.
+def potential(r: Arr, box: Num, r_cut: Num) -> Pot {
+    nat: Int = int(shape(r)[0])
+    check_box(box, r_cut)
+    pot = 0.0
+    vir = 0.0
+    lap = 0.0
+    ri = zeros(DIM)
+    for i to nat - 1 {
+        ri[0] = r[i, 0]
+        ri[1] = r[i, 1]
+        ri[2] = r[i, 2]
+        partial = potential_1(ri, i, r, box, r_cut, J_ABOVE)
+        if partial.ovr {
+            return Pot { cut: 0.0, pot: 0.0, vir: 0.0, lap: 0.0, ovr: true }
+        }
+        pot += partial.pot
+        vir += partial.vir
+        lap += partial.lap
+    }
+    return Pot { cut: pot, pot: pot, vir: vir, lap: lap, ovr: false }
+}
+
+#| One Monte Carlo sweep at temperature T: a trial displacement of each atom
+#| in turn, uniform in a cube of half-side dr_max (in sigma), accepted by
+#| the Metropolis test on the change of its energy with the others.
+#| Returns the configuration's updated totals and how many moves were
+#| accepted (upstream's loop over atoms in mc_nvt_lj and mc_npt_lj).
+def mc_sweep(r: Arr, total: Pot, box: Num, r_cut: Num, temperature: Num, dr_max: Num) {
+    nat: Int = int(shape(r)[0])
+    t = total
+    moves: Int = 0
+    ri_old = zeros(DIM)
+    for i to nat {
+        ri_old[0] = r[i, 0]
+        ri_old[1] = r[i, 1]
+        ri_old[2] = r[i, 2]
+        partial_old = potential_1(ri_old, i, r, box, r_cut, J_ALL)
+        if partial_old.ovr {
+            stop(f"atom {i} overlaps another in the current configuration")
+        }
+        ri = random_translate(dr_max / box, ri_old)
+        for k to DIM {
+            ri[k] = ri[k] - round(ri[k])
+        }
+        partial_new = potential_1(ri, i, r, box, r_cut, J_ALL)
+        if not partial_new.ovr {
+            delta = partial_new.pot - partial_old.pot
+            delta = delta / temperature
+            if metropolis(delta) {
+                t = Pot { cut: t.cut + partial_new.cut - partial_old.cut, pot: t.pot + partial_new.pot - partial_old.pot,
+                          vir: t.vir + partial_new.vir - partial_old.vir, lap: t.lap + partial_new.lap - partial_old.lap,
+                          ovr: false }
+                r[i, 0] = ri[0]
+                r[i, 1] = ri[1]
+                r[i, 2] = ri[2]
+                moves = moves + 1
+            }
+        }
+    }
+    return t, moves
+}
+
+#| The sum of the squared forces on all atoms, for the configurational
+#| temperature of a Monte Carlo run: upstream's force_sq. f is scratch.
+def force_sq(r: Arr, f: Arr, box: Num, r_cut: Num) -> Num {
+    nat: Int = int(shape(r)[0])
+    check_box(box, r_cut)
+    r_cut_box = r_cut / box
+    r_cut_box_sq = r_cut_box * r_cut_box
+    box_sq = box * box
+    for i to nat {
+        for k to DIM {
+            f[i, k] = 0.0
+        }
+    }
+    for i to nat - 1 {
+        for j from i + 1 to nat {
+            dx = r[i, 0] - r[j, 0]
+            dy = r[i, 1] - r[j, 1]
+            dz = r[i, 2] - r[j, 2]
+            dx = dx - round(dx)
+            dy = dy - round(dy)
+            dz = dz - round(dz)
+            rij_sq = dx * dx + dy * dy + dz * dz
+            if rij_sq < r_cut_box_sq {
+                rij_sq = rij_sq * box_sq
+                dx = dx * box
+                dy = dy * box
+                dz = dz * box
+                sr2 = 1.0 / rij_sq
+                sr6 = sr2 * sr2 * sr2
+                sr12 = sr6 * sr6
+                w = (2.0 * sr12 - sr6)
+                fx = dx * w * sr2
+                fy = dy * w * sr2
+                fz = dz * w * sr2
+                f[i, 0] = f[i, 0] + fx
+                f[i, 1] = f[i, 1] + fy
+                f[i, 2] = f[i, 2] + fz
+                f[j, 0] = f[j, 0] - fx
+                f[j, 1] = f[j, 1] - fy
+                f[j, 2] = f[j, 2] - fz
+            }
+        }
+    }
+    scale_forces(f)
+    return sum_sq(f)
+}
+
+#| The sum of the squares of every element of a (n, 3) array, atom by atom
+#| and x, y, z within an atom: Fortran's SUM(a**2) on upstream's (3, n).
+def sum_sq(a: Arr) -> Num {
+    nat: Int = int(shape(a)[0])
+    s = 0.0
+    for i to nat {
+        for k to DIM {
+            s += a[i, k] * a[i, k]
+        }
+    }
+    return s
+}
+
+test "the long-range corrections at r_cut = 2.5, rho = 0.75 against the closed forms" {
+    rc = 2.5
+    rho = 0.75
+    assert_near(potential_lrc(rho, rc), 8.0 / 3.0 * pi * rho * (1.0 / (3.0 * rc ^ 9.0) - 1.0 / rc ^ 3.0), 1.0e-15)
+    assert_near(pressure_lrc(rho, rc), 16.0 / 3.0 * pi * rho * rho * (2.0 / (3.0 * rc ^ 9.0) - 1.0 / rc ^ 3.0), 1.0e-15)
+}
+
+test "two atoms at the potential minimum feel no force and have energy -1 (cut) " {
+    box = 10.0
+    r = zeros(2, DIM)
+    r[1, 0] = 2.0 ^ (1.0 / 6.0) / box
+    f = zeros(2, DIM)
+    t = force_all(r, f, box, 2.5)
+    assert_near(t.cut, -1.0, 1.0e-14)
+    assert_near(f[0, 0], 0.0, 1.0e-13)
+    e = potential(r, box, 2.5)
+    assert_near(e.pot, t.cut, 1.0e-14)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

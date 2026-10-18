@@ -1,0 +1,181 @@
+module lib/hf/guess
+  Where the SCF starts. The SCF is a fixed-point iteration, so it needs a
+  starting density, and when a molecule has more than one SCF solution the
+  start decides which one it reaches. The guess therefore has members of its
+  own, picked by `opts[OPT_GUESS]` (`gs_of`): the spin-averaged SCF
+  (production), the core Hamiltonian, the generalized Wolfsberg-Helmholz
+  matrix, zero, and a density the caller imports.
+
+  Every member returns two spin densities, `[2, n, n]`, each built from
+  orbitals occupied once; a closed-shell driver adds them.
+
+gs_eig  @b7e80d2e
+  why    Every guess that occupies orbitals diagonalizes some matrix in the
+         orthonormal basis with the eigensolver the run picked; this is that
+         one call.
+  A      the matrix to diagonalize, on the basis functions, `[n, n]`
+  X      the orthogonalizer, `[n, m]`
+  m      how many of X's columns are kept
+  opts   the options column array; `opts[OPT_EIGEN]` picks the eigensolver
+
+gs_spins  @e62b11b2
+  why    A guess ends by filling the lowest orbitals with the alpha and beta
+         electrons, one electron per orbital per spin.
+  X      the orthogonalizer, `[n, m]`
+  V      the eigenvectors in the orthonormal basis, lowest first, `[m, m]`
+  m      the size of the orthonormal basis
+  na     the number of alpha (spin-up) electrons
+  nb     the number of beta (spin-down) electrons
+
+gs_occupy  @6b8d68d9
+  why    The core and GWH guesses differ only in the matrix they diagonalize;
+         this is everything after that choice.
+  A      the matrix whose eigenvectors become the orbitals, `[n, n]`
+  S      the overlap matrix of the basis functions, `[n, n]`
+  opts   the options column array: electron counts, orthogonalizer, eigensolver
+  X      the orthogonalizer the run picked, `[n, m]`
+  m      how many independent combinations of basis functions X keeps
+  R      the eigensolver's result: eigenvalues and eigenvectors, `[m + 1, m]`
+
+gs_fractional  @b38a6316
+  why    In the spin-averaged SCF all electrons share one set of orbitals.
+         When the highest occupied level is degenerate and only partly
+         filled, such as a pair of pi orbitals holding three electrons,
+         filling one of them and not the other would break a symmetry the
+         molecule has; sharing the electrons equally keeps the degenerate
+         orbitals equivalent
+         [test "fractional occupations share the partly filled level equally"].
+  vals   the orbital energies, ascending, `[m]`
+  N      how many electrons, both spins together
+  m      how many orbitals
+  f      the occupation of each orbital, `[m]`
+  top    the orbital the last electron goes into
+  lo     the lowest orbital of the partly filled level
+  hi     the highest orbital of the partly filled level
+
+  = lo#2     widen the level down over orbitals within `GS_AVG_DEGEN` of the top one
+  = hi#2     and up
+
+gs_frac_density  @2f121245
+  why    The spin-averaged SCF's density has fractional occupations, so each
+         orbital is weighted by its own occupation: `C diag(f) C^T`.
+  X      the orthogonalizer, `[n, m]`
+  V      the eigenvectors in the orthonormal basis, `[m, m]`
+  m      the size of the orthonormal basis
+  f      the occupation of each orbital
+  nocc   how many orbitals have electrons
+  C      the occupied orbitals on the basis functions, `[n, nocc]`
+  Cf     C with each column times its occupation
+  k      an orbital
+
+gs_avg  @8c4b7a62
+  why    A guess that fills orbitals one spin at a time can commit an
+         unpaired electron to the wrong one of two degenerate orbitals, and the
+         SCF then converges to an excited state. Solving the SCF first with the
+         electrons spread evenly over the partly filled level avoids that
+         choice. From this guess UHF on OH reaches PySCF's ground state; from
+         the core guess it reaches the same state with DIIS leaving out the
+         guess's Fock matrix (`diis_start = 1`, the default) and an excited
+         one with the guess's matrix in the history; lib/hf/uhf's tests check
+         all three.
+  how    Start from the GWH matrix, occupy with fractional numbers, and
+         iterate a closed-shell SCF with DIIS until the commutator is below
+         `GS_AVG_GTOL` or `GS_AVG_MAXIT` steps have run. Then fill the lowest
+         `na` orbitals for alpha and the lowest `nb` for beta.
+  H      the one-electron Hamiltonian, kinetic energy plus nuclear
+         attraction, `[n, n]`
+  S      the overlap matrix, `[n, n]`
+  Gp     the packed electron repulsion integrals, which the averaged SCF needs
+         to build J and K
+  D0     not read
+  opts   the options column array of the run
+  X      the orthogonalizer, `[n, m]`
+  m      the size of the orthonormal basis
+  N      the number of electrons, both spins
+  o      a copy of opts with DIIS on and no level shift, whatever the run asked for
+  diis   the DIIS history of the averaged SCF
+  U      `S X` over the kept columns, which moves each density into the orthonormal basis
+  R      the latest eigenvalues and eigenvectors
+  V      the latest eigenvectors, `[m, m]`
+  f      the fractional occupations
+  nocc   how many orbitals hold electrons
+  D      the averaged total density, `[n, n]`
+  it     iterations run
+  err    the largest entry of the commutator: the averaged SCF's error
+  JK     J and K of the averaged density
+  F      its Fock matrix `H + J - K/2`
+  Fp     that Fock matrix in the orthonormal basis
+  E      the commutator of Fp and the density in the orthonormal basis
+  Fx     the Fock matrix DIIS extrapolated
+
+  = o        the averaged SCF always uses DIIS and no level shift, so the guess does not change with the run's accelerator
+  = D        the starting density: GWH orbitals with fractional occupations
+  = Fx       mix the recent Fock matrices by DIIS
+  = D#2      the next averaged density
+
+gs_core  @55bdeb8f
+  why    The simplest guess: ignore the repulsion between electrons and fill
+         the orbitals of the core Hamiltonian. It needs only H and S, and it is
+         PySCF's `1e` guess, so it reproduces PySCF's starting density
+         [test "the core guess on water 6-31G has PySCF's norm under every orthogonalizer and eigensolver"].
+  H      the one-electron Hamiltonian
+  S      the overlap matrix
+  Gp     not read
+  D0     not read
+  opts   the options column array
+
+gs_gwh_matrix  @bfe512ac
+  why    Diagonal elements of H are atomic-orbital energies; the GWH rule
+         estimates the coupling of two functions as their overlap times the
+         mean of those energies, scaled by `GS_GWH_K`. That builds in some of
+         the bonding the core Hamiltonian's eigenvectors miss.
+  H      the one-electron Hamiltonian, `[n, n]`
+  S      the overlap matrix, `[n, n]`
+  n      the number of basis functions
+  A      the GWH matrix, `[n, n]`
+  i      a row of A
+  j      a column of A
+
+gs_gwh  @f102bdcd
+  why    A second cheap guess, different from the core one
+         [test "the core and GWH guesses differ, and every guess works on a basis with a dropped vector"].
+  H      the one-electron Hamiltonian
+  S      the overlap matrix
+  Gp     not read
+  D0     not read
+  opts   the options column array
+
+gs_zero  @7a127848
+  why    With zero densities the first Fock matrix is H, so the first
+         iteration does what the core guess does; it tests that the loop
+         starts correctly from empty densities.
+  H      the one-electron Hamiltonian, read for its size
+  S      not read
+  Gp     not read
+  D0     not read
+  opts   not read
+  n      the number of basis functions
+
+gs_import  @75673c05
+  why    How a density from elsewhere, such as PySCF's, enters an SCF run.
+         It returns a copy, so the run cannot change the caller's array.
+  H      not read
+  S      not read
+  Gp     not read
+  D0     the caller's spin densities, `[2, n, n]`
+  opts   not read
+
+gs_methods  @934a4c8c
+  why    The SCF picks its guess by number (`OPT_GUESS`), and tests loop over
+         every member.
+
+gs_of  @f391cb3c
+  why    The SCF calls one def whatever guess the options pick, and this def
+         calls each member by name, so the default options reach `gs_avg`
+         without a registry.
+  H      the one-electron Hamiltonian
+  S      the overlap matrix
+  Gp     the packed integrals, for `gs_avg`
+  D0     the densities to import, for `gs_import`
+  opts   the options column array; `opts[OPT_GUESS]` picks the member
+  k      the member the options name: `GS_AVG`, `GS_CORE`, `GS_GWH`, `GS_ZERO` or `GS_IMPORT`

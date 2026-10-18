@@ -1,0 +1,34 @@
+#! timing
+# PolyBench/C 4.2.1 mvt: x1 := x1 + A y1 and x2 := x2 + A^T y2.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/kernels/mvt/mvt.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+N = 40
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    x1 = [(i % N) / N for i to N]
+    x2 = [((i + 1) % N) / N for i to N]
+    y1 = [((i + 3) % N) / N for i to N]
+    y2 = [((i + 4) % N) / N for i to N]
+    A = [[(i * j % N) / N for j to N] for i to N]
+    return x1, x2, y1, y2, A
+}
+
+def kernel(x1, x2, y1, y2, A) {
+    return x1 + A @ y1, x2 + y2 @ A
+}
+
+x1, x2, y1, y2, A = init()
+t0 = clock()
+x1, x2 = kernel(x1, x2, y1, y2, A)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("x1", x1)
+    dump("x2", x2)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

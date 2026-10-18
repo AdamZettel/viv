@@ -1,0 +1,122 @@
+###
+title: Finite differences stay second order away from a jump
+line: Away from the jumps the central difference error falls by 3.9 to 4.1 per doubling of $N$; the spectral error stays above 0.7.
+claim: For $\sin x$ plus a unit step (jumps at $x = 0$ and $x = \pi$), at the grid points at least $\pi/4$ from either jump, the second-order central difference's largest derivative error falls by a factor between 3.9 and 4.1 each time $N$ doubles from 32 to 256 and is below $3 \times 10^{-4}$ at $N = 128$, while the Fourier (spectral) derivative's error at the same points stays above 0.7 for every $N$ from 32 to 256.
+topic: math
+section: approximation
+reference: The exact derivative $\cos x$ away from the jumps; Trefethen, Spectral Methods in MATLAB (2000), chapter 3 (the periodic spectral differentiation matrix has entries $\tfrac{1}{2}(-1)^{i-j}\cot\bigl((x_i - x_j)/2\bigr)$, which do not shrink as N grows) and Fornberg, A Practical Guide to Pseudospectral Methods (1996), on the loss of accuracy for nonsmooth data.
+scope: One function, two jumps of size 1, N from 32 to 256 equally spaced points, the spectral derivative by a direct discrete Fourier transform ($O(N^2)$, no FFT) with the Nyquist mode set to zero. Near the jumps both methods fail (the largest error over all points grows like $N$ for both); this is about the points away from them. Filtering or a domain split at the jump restores spectral accuracy and is not tested here.
+lane: ai
+by: claude
+cost: fast
+###
+
+#: pi
+PI_K = 4.0 * atan(1.0)
+SIZES = [32, 64, 128, 256]
+#: the grid points this claim is about: at least FAR from either jump
+FAR = PI_K / 4.0
+#: the size the "below 3e-4" bound is stated at
+AT_N = 128
+
+#| sin x, plus 1 on [0, pi): jumps of +1 at x = 0 and -1 at x = pi.
+def f(x: Num) -> Num {
+    step = 0.0
+    if x < PI_K {
+        step = 1.0
+    }
+    return sin(x) + step
+}
+
+#| Distance from x in [0, 2 pi) to the nearer jump.
+def jump_distance(x: Num) -> Num {
+    return min(abs(x - PI_K), min(x, 2.0 * PI_K - x))
+}
+
+#| The largest error of the spectral derivative on n points, over the points at least FAR from a jump.
+def spectral_far_error(n: Int) -> Num {
+    h = 2.0 * PI_K / n
+    re = zeros(n)
+    im = zeros(n)
+    for k to n {
+        for j to n {
+            re[k] = re[k] + f(j * h) * cos(k * j * h)
+            im[k] = im[k] - f(j * h) * sin(k * j * h)
+        }
+    }
+    worst = 0.0
+    for j to n {
+        if jump_distance(j * h) >= FAR {
+            d = 0.0
+            for k to n {
+                #: the wavenumber of mode k: k below n / 2, k - n above, the Nyquist mode dropped
+                w = 0.0
+                if 2 * k < n {
+                    w = k * 1.0
+                }
+                if 2 * k > n {
+                    w = k - n * 1.0
+                }
+                c = cos(k * j * h)
+                s = sin(k * j * h)
+                d = d + w * (-im[k] * c - re[k] * s)
+            }
+            worst = max(worst, abs(d / n - cos(j * h)))
+        }
+    }
+    return worst
+}
+
+#| The largest error of (f(x + h) - f(x - h)) / (2 h) on n points, over the same points.
+def fd_far_error(n: Int) -> Num {
+    h = 2.0 * PI_K / n
+    worst = 0.0
+    for j to n {
+        if jump_distance(j * h) >= FAR {
+            worst = max(worst, abs((f((j + 1) * h) - f((j - 1) * h)) / (2.0 * h) - cos(j * h)))
+        }
+    }
+    return worst
+}
+
+n_sizes: Int = len(SIZES)
+err_spectral = zeros(n_sizes)
+err_fd = zeros(n_sizes)
+fd_at_n = 0.0
+for k to n_sizes {
+    err_spectral[k] = spectral_far_error(int(SIZES[k]))
+    err_fd[k] = fd_far_error(int(SIZES[k]))
+    if int(SIZES[k]) == AT_N {
+        fd_at_n = err_fd[k]
+    }
+}
+show err_spectral
+show err_fd
+show fd_at_n
+spectral_smallest = min(err_spectral)
+show spectral_smallest
+
+#: the figure: both errors at the points away from the jumps, against N
+figure("Derivative error away from a jump", "grid points N", "largest error at least pi/4 from a jump")
+xscale("log")
+yscale("log")
+plot(SIZES * 1.0, err_fd, "central difference")
+style("central difference", "s1 circle")
+plot(SIZES * 1.0, err_spectral, "spectral (Fourier)")
+style("spectral (Fourier)", "s2 square")
+
+test "away from the jumps the central difference's error falls by 3.9 to 4.1 per doubling" {
+    for k to n_sizes - 1 {
+        assert_gt(err_fd[k] / err_fd[k + 1], 3.9)
+        assert_lt(err_fd[k] / err_fd[k + 1], 4.1)
+    }
+}
+test "and is below 3e-4 at N = 128" {
+    assert_lt(fd_at_n, 3.0e-4)
+}
+test "the spectral derivative's error at the same points stays above 0.7 for every N" {
+    assert_gt(spectral_smallest, 0.7)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

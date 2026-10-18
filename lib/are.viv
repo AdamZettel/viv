@@ -1,0 +1,488 @@
+###
+post: The algebraic Riccati equation, by the Schur method
+agent: claude
+
+The continuous-time algebraic Riccati equation
+
+    A^T P + P A - P B R^-1 B^T P + W = 0
+
+is quadratic in `P`, and the thing you want is not just any solution but the one
+that stabilizes: the symmetric `P` for which `A - B R^-1 B^T P` has every
+eigenvalue in the left half plane. This module computes it the way SLICOT's
+SB02MD does, which is Laub's method of 1979.
+
+The idea is that the quadratic equation is a linear one in disguise. Build the
+2n by 2n Hamiltonian
+
+    H = [[A, -B R^-1 B^T], [-W, -A^T]]
+
+and the stabilizing `P` is read off its stable invariant subspace. If the
+columns of `[X1; X2]` are a basis for the eigenvectors of `H` belonging to the
+eigenvalues with negative real part, then `P = X2 X1^-1`. A Hamiltonian's
+spectrum is symmetric about the imaginary axis, so exactly `n` of its `2n`
+eigenvalues are stable, and the subspace has exactly the right dimension.
+
+Nothing here forms an eigenvector. `lib/schur` reduces `H` to real Schur form,
+reorders the stable blocks to the top left, and the first `n` columns of the
+orthogonal factor are an orthonormal basis for that subspace -- better
+conditioned than eigenvectors, and available whether or not `H` is
+diagonalizable.
+
+`are_sign` solves the same equation by a completely different route, Roberts's
+matrix sign function, and the two are checked against each other. Two unrelated
+algorithms landing on the same matrix is a much stronger argument than either
+one looking right on its own.
+
+They do not land on it equally well, and the test below measures the gap. Over
+the systems it tries, the Schur method's relative residual stays under 4e-15
+while the sign function's reaches 7e-13, and where the two answers differ it is
+the sign function that has moved. Its last step solves an overdetermined system
+through its normal equations, which squares the condition number; that is the
+price of not computing a Schur form, and it is why SB02MD is the Schur one.
+
+Used with `import are`.
+###
+
+from schur import reorder_stable, schur
+from linalg import inverse, test_matrix
+
+ARE_SIGN_STEPS = 60
+
+#| `B R^-1 B^T`, formed by solving `R Y = B^T` rather than inverting `R`. `B` is
+#| `n` by `m` and `R` is `m` by `m`.
+def are_gram(B: Arr, R: Arr) {
+    n = len(B)
+    m = len(R)
+    Y = zeros(m, n)
+    rhs = zeros(m)
+    col = zeros(m)
+    for j to n {
+        for i to m {
+            rhs[i] = B[j, i]
+        }
+        lin_solve(R, rhs, col)
+        for i to m {
+            Y[i, j] = col[i]
+        }
+    }
+    return B @ Y
+}
+
+#| The Hamiltonian whose stable invariant subspace carries the answer.
+def are_hamiltonian(A: Arr, B: Arr, R: Arr, W: Arr) {
+    n = len(A)
+    #: H = [[A, -G], [-W, -A^T]]
+    G = are_gram(B, R)
+    H = zeros(2 * n, 2 * n)
+    for i to n {
+        for j to n {
+            H[i, j] = A[i, j]
+            H[i, n + j] = -G[i, j]
+            H[n + i, j] = -W[i, j]
+            H[n + i, n + j] = -A[j, i]
+        }
+    }
+    return H
+}
+
+#| Solve the Riccati equation into `P`. Returns the dimension of the stable
+#| subspace that was found, which had better be `n`: anything else means the
+#| Hamiltonian has an eigenvalue on the imaginary axis, and then there is no
+#| stabilizing solution to find.
+def are_solve(A: Arr, B: Arr, R: Arr, W: Arr, P: Arr) {
+    n = len(A)
+    #: stable eigenvalues first; a cut other than n means no stabilizing solution
+    H = are_hamiltonian(A, B, R, W)
+    T = zeros(2 * n, 2 * n)
+    Z = zeros(2 * n, 2 * n)
+    junk = schur(H, T, Z)
+    cut = reorder_stable(T, Z)
+    if cut != n {
+        return cut
+    }
+    # the first n columns of Z are the subspace; split them and solve P X1 = X2
+    X1t = zeros(n, n)
+    rhs = zeros(n)
+    sol = zeros(n)
+    for i to n {
+        for j to n {
+            X1t[i, j] = Z[j, i]
+        }
+    }
+    for c to n {
+        for i to n {
+            rhs[i] = Z[n + c, i]
+        }
+        lin_solve(X1t, rhs, sol)
+        for i to n {
+            P[c, i] = sol[i]
+        }
+    }
+    # the true solution is symmetric; average away the rounding that is not
+    for i to n {
+        for j to n {
+            if j > i {
+                mid = 0.5 * (P[i, j] + P[j, i])
+                P[i, j] = mid
+                P[j, i] = mid
+            }
+        }
+    }
+    return cut
+}
+
+#| The same equation by Roberts's method: Newton's iteration
+#| `Z <- (Z + Z^-1) / 2` drives the Hamiltonian to its matrix sign, whose stable
+#| invariant subspace is the null space of `S + I`. `P` then comes out of an
+#| overdetermined system, solved here through its normal equations. Quadratic
+#| convergence, and no Schur decomposition anywhere in it.
+def are_sign(A: Arr, B: Arr, R: Arr, W: Arr, P: Arr) {
+    n = len(A)
+    nn = 2 * n
+    Z = are_hamiltonian(A, B, R, W)
+    #: scaled Newton for sign(H): Z = (c Z + Z^-1 / c) / 2
+    for step to ARE_SIGN_STEPS {
+        Zi = inverse(Z)
+        # scale the two terms to the same size, or the first steps waste digits
+        nz = 0.0
+        ni = 0.0
+        for i to nn {
+            for j to nn {
+                nz = nz + Z[i, j] * Z[i, j]
+                ni = ni + Zi[i, j] * Zi[i, j]
+            }
+        }
+        c = 1.0
+        if nz > 0.0 {
+            c = sqrt(sqrt(ni / nz))
+        }
+        moved = 0.0
+        for i to nn {
+            for j to nn {
+                was = Z[i, j]
+                Z[i, j] = 0.5 * (c * was + Zi[i, j] / c)
+                moved = max(moved, abs(Z[i, j] - was))
+            }
+        }
+        if moved < 1.0e-14 {
+            break
+        }
+    }
+    # [S12 ; S22 + I] P = -[S11 + I ; S21], as normal equations
+    M = zeros(nn, n)
+    rhs = zeros(nn, n)
+    for i to n {
+        for j to n {
+            M[i, j] = Z[i, n + j]
+            M[n + i, j] = Z[n + i, n + j]
+            rhs[i, j] = -Z[i, j]
+            rhs[n + i, j] = -Z[n + i, j]
+        }
+        M[n + i, i] = M[n + i, i] + 1.0
+        rhs[i, i] = rhs[i, i] - 1.0
+    }
+    Mt = transpose(M)
+    normal = Mt @ M
+    load = Mt @ rhs
+    col = zeros(n)
+    sol = zeros(n)
+    for j to n {
+        for i to n {
+            col[i] = load[i, j]
+        }
+        lin_solve(normal, col, sol)
+        for i to n {
+            P[i, j] = sol[i]
+        }
+    }
+    #: symmetrize away rounding
+    for i to n {
+        for j to n {
+            if j > i {
+                mid = 0.5 * (P[i, j] + P[j, i])
+                P[i, j] = mid
+                P[j, i] = mid
+            }
+        }
+    }
+    return 0.0
+}
+
+#| Put `P` back into the equation and report the largest entry of what is left.
+#| This is the number to look at before believing any of it.
+def are_residual(A: Arr, B: Arr, R: Arr, W: Arr, P: Arr) {
+    n = len(A)
+    G = are_gram(B, R)
+    res = transpose(A) @ P + P @ A - P @ G @ P + W
+    worst = 0.0
+    for i to n {
+        for j to n {
+            worst = max(worst, abs(res[i, j]))
+        }
+    }
+    return worst
+}
+
+#| The residual measured against the size of the terms that produced it. This is
+#| the number that means something: the equation contains `P G P`, so a nearly
+#| uncontrollable system with a huge `P` has a huge absolute residual while
+#| still being solved to the last bit. Backward stability says this ratio sits
+#| at machine epsilon whatever the conditioning, and the tests below hold it
+#| under 1e-14 on systems where the absolute residual reaches 4e-6.
+def are_residual_rel(A: Arr, B: Arr, R: Arr, W: Arr, P: Arr) {
+    n = len(A)
+    G = are_gram(B, R)
+    res = transpose(A) @ P + P @ A - P @ G @ P + W
+    worst = 0.0
+    na = 0.0
+    npp = 0.0
+    ng = 0.0
+    nw = 0.0
+    for i to n {
+        for j to n {
+            worst = max(worst, abs(res[i, j]))
+            na = max(na, abs(A[i, j]))
+            npp = max(npp, abs(P[i, j]))
+            ng = max(ng, abs(G[i, j]))
+            nw = max(nw, abs(W[i, j]))
+        }
+    }
+    #: scale: 2 |A| |P| + |P|^2 |G| + |W|
+    scale = 2.0 * na * npp + npp * npp * ng + nw
+    if scale == 0.0 {
+        return worst
+    }
+    return worst / scale
+}
+
+#| The gains `K = R^-1 B^T P`, `m` by `n`: the input that goes with them is
+#| `u = -K z`.
+def are_gains(B: Arr, R: Arr, P: Arr) {
+    n = len(P)
+    m = len(R)
+    K = zeros(m, n)
+    bp = transpose(B) @ P
+    rhs = zeros(m)
+    sol = zeros(m)
+    for j to n {
+        for i to m {
+            rhs[i] = bp[i, j]
+        }
+        lin_solve(R, rhs, sol)
+        for i to m {
+            K[i, j] = sol[i]
+        }
+    }
+    return K
+}
+
+#| The largest real part among the eigenvalues of the closed loop `A - B K`.
+#| Negative is the whole point of solving the equation.
+def are_closed_slowest(A: Arr, B: Arr, K: Arr) {
+    n = len(A)
+    cl = A - B @ K
+    re = zeros(n)
+    im = zeros(n)
+    eig_general(cl, re, im)
+    worst = -1.0e30
+    for i to n {
+        worst = max(worst, re[i])
+    }
+    return worst
+}
+
+#| A controllable test system of order `n`: a companion-form `A` that is
+#| unstable, a single input at the last state, and unit weights.
+def are_test_system(n, seed) {
+    A = test_matrix(n, seed)
+    for i to n {
+        A[i, i] = A[i, i] + 0.6
+    }
+    return A
+}
+
+test "the scalar equation lands where the quadratic formula says it does" {
+    A = [[0.7]]
+    B = [[1.3]]
+    R = [[0.4]]
+    W = [[2.5]]
+    P = zeros(1, 1)
+    cut = are_solve(A, B, R, W, P)
+    assert_near(cut, 1.0, 1.0e-12)
+    expected = (0.7 + sqrt(0.7 * 0.7 + 1.3 * 1.3 * 2.5 / 0.4)) * 0.4 / (1.3 * 1.3)
+    assert_near(P[0, 0], expected, 1.0e-13)
+    assert_lt(are_residual(A, B, R, W, P), 1.0e-13)
+}
+
+test "a double integrator with unit weights wants gains of 1 and root 3" {
+    A = [[0.0, 1.0], [0.0, 0.0]]
+    B = [[0.0], [1.0]]
+    R = [[1.0]]
+    W = [[1.0, 0.0], [0.0, 1.0]]
+    P = zeros(2, 2)
+    cut = are_solve(A, B, R, W, P)
+    assert_near(cut, 2.0, 1.0e-12)
+    K = are_gains(B, R, P)
+    assert_near(K[0, 0], 1.0, 1.0e-13)
+    assert_near(K[0, 1], sqrt(3.0), 1.0e-13)
+    assert_lt(are_residual(A, B, R, W, P), 1.0e-14)
+}
+
+test "P is symmetric and positive definite, as a cost-to-go has to be" {
+    n = 6
+    A = are_test_system(n, 91.0)
+    B = zeros(n, 2)
+    B[n - 1, 0] = 1.0
+    B[0, 1] = 1.0
+    R = [[0.8, 0.0], [0.0, 1.4]]
+    W = zeros(n, n)
+    for i to n {
+        W[i, i] = 1.0 + 0.3 * i
+    }
+    P = zeros(n, n)
+    cut = are_solve(A, B, R, W, P)
+    assert_near(cut, n, 1.0e-12)
+    for i to n {
+        for j to n {
+            assert_near(P[i, j], P[j, i], 1.0e-12)
+        }
+    }
+    vals = zeros(n)
+    vecs = zeros(n, n)
+    eig_sym(P, vals, vecs)
+    assert_lt(0.0, vals[0])
+}
+
+test "with the gains it returns, every closed-loop eigenvalue has real part below -1e-8" {
+    ncases = 8
+    for si to ncases {
+        n = 3 + mod(si, 4.0)
+        A = are_test_system(n, 17.0 + 11.0 * si)
+        B = zeros(n, 1)
+        for i to n {
+            B[i, 0] = 1.0 / (1.0 + i)
+        }
+        R = [[0.5]]
+        W = zeros(n, n)
+        for i to n {
+            W[i, i] = 1.0
+        }
+        P = zeros(n, n)
+        cut = are_solve(A, B, R, W, P)
+        assert_near(cut, n, 1.0e-12)
+        K = are_gains(B, R, P)
+        assert_lt(are_closed_slowest(A, B, K), -1.0e-8)
+    }
+}
+
+test "the relative residual stays at rounding level across a spread of systems" {
+    worst = 0.0
+    biggest = 0.0
+    ncases = 10
+    for si to ncases {
+        n = 2 + mod(si, 6.0)
+        A = are_test_system(n, 3.0 + 29.0 * si)
+        B = zeros(n, 1)
+        B[n - 1, 0] = 1.0
+        for i to n {
+            B[i, 0] = B[i, 0] + 0.2 * cos(1.0 * i + si)
+        }
+        R = [[0.3 + 0.1 * mod(si, 3.0)]]
+        W = zeros(n, n)
+        for i to n {
+            W[i, i] = 0.5 + 0.4 * mod(i, 3.0)
+        }
+        P = zeros(n, n)
+        cut = are_solve(A, B, R, W, P)
+        assert_near(cut, n, 1.0e-12)
+        worst = max(worst, are_residual_rel(A, B, R, W, P))
+        for i to n {
+            for j to n {
+                biggest = max(biggest, abs(P[i, j]))
+            }
+        }
+    }
+    # some of these are close to uncontrollable, and P runs to five figures
+    assert_lt(10000.0, biggest)
+    assert_lt(worst, 1.0e-14)
+}
+
+test "the sign function reaches the same matrix, and the Schur method gets there better" {
+    apart_most = 0.0
+    schur_worst = 0.0
+    sign_worst = 0.0
+    ncases = 6
+    for si to ncases {
+        n = 2 + mod(si, 5.0)
+        A = are_test_system(n, 55.0 + 13.0 * si)
+        B = zeros(n, 1)
+        for i to n {
+            B[i, 0] = 0.4 + 0.3 * mod(i, 2.0)
+        }
+        R = [[0.7]]
+        W = zeros(n, n)
+        for i to n {
+            W[i, i] = 1.0
+        }
+        Ps = zeros(n, n)
+        Pn = zeros(n, n)
+        cut = are_solve(A, B, R, W, Ps)
+        assert_near(cut, n, 1.0e-12)
+        junk = are_sign(A, B, R, W, Pn)
+        scale = 0.0
+        for i to n {
+            for j to n {
+                scale = max(scale, abs(Ps[i, j]))
+            }
+        }
+        for i to n {
+            for j to n {
+                apart_most = max(apart_most, abs(Ps[i, j] - Pn[i, j]) / scale)
+            }
+        }
+        schur_worst = max(schur_worst, are_residual_rel(A, B, R, W, Ps))
+        sign_worst = max(sign_worst, are_residual_rel(A, B, R, W, Pn))
+    }
+    # both solve the equation, and they agree to the accuracy of the worse one
+    assert_lt(schur_worst, 4.0e-15)
+    assert_lt(sign_worst, 1.0e-11)
+    assert_lt(apart_most, 1.0e-9)
+    # and it is the sign function that moved: the normal equations cost it
+    # roughly two orders of magnitude on the badly conditioned systems
+    assert_lt(50.0 * schur_worst, sign_worst)
+}
+
+test "the Hamiltonian's spectrum is symmetric about the imaginary axis" {
+    n = 5
+    A = are_test_system(n, 202.0)
+    B = zeros(n, 1)
+    for i to n {
+        B[i, 0] = 1.0 - 0.15 * i
+    }
+    R = [[0.6]]
+    W = zeros(n, n)
+    for i to n {
+        W[i, i] = 1.0
+    }
+    H = are_hamiltonian(A, B, R, W)
+    re = zeros(2 * n)
+    im = zeros(2 * n)
+    eig_general(H, re, im)
+    # every eigenvalue has a partner at minus itself
+    for i to 2 * n {
+        near = 1.0e30
+        for j to 2 * n {
+            near = min(near, abs(re[i] + re[j]) + abs(im[i] - im[j]))
+        }
+        assert_lt(near, 1.0e-9)
+    }
+    # and the trace is zero, since they cancel in pairs
+    tr = 0.0
+    for i to 2 * n {
+        tr = tr + H[i, i]
+    }
+    assert_near(tr, 0.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

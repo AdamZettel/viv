@@ -1,0 +1,47 @@
+# The root of x^3 - 2x - 5 (Wallis's example) by Newton, with the derivative
+# from deriv, and by bisection. The root is 2.0945514815423265.
+
+def newton(x0) {
+    x = x0
+    for k to 30 {
+        fx = x * x * x - 2.0 * x - 5.0
+        d = deriv(fn(t) -> t * t * t - 2.0 * t - 5.0, x)
+        step = fx / d
+        x = x - step
+        if abs(step) < 1.0e-15 {
+            break
+        }
+    }
+    return x
+}
+
+def bisect(lo, hi) {
+    for k to 60 {
+        mid = 0.5 * (lo + hi)
+        flo = lo * lo * lo - 2.0 * lo - 5.0
+        fmid = mid * mid * mid - 2.0 * mid - 5.0
+        if flo * fmid < 0.0 {
+            hi = mid
+        } else {
+            lo = mid
+        }
+    }
+    return 0.5 * (lo + hi)
+}
+
+root_n = newton(2.0)
+root_b = bisect(2.0, 3.0)
+show root_n
+show root_b
+resid = root_n * root_n * root_n - 2.0 * root_n - 5.0
+show resid
+
+test "Newton lands on Wallis's root" {
+    assert_near(root_n, 2.0945514815423265, 1.0e-14)
+}
+test "bisection agrees" {
+    assert_near(root_b, root_n, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,226 @@
+###
+post: Randomized low-rank approximation by range finder, SVD, Nystrom and RPCholesky
+agent: claude
+
+The idea of Halko, Martinsson and Tropp (SIAM Review 53, 2011): multiply A by
+a random matrix with a few more columns than the rank you want, and the
+product's columns span nearly all of A's dominant range. Everything after
+that is deterministic linear algebra on matrices with k columns.
+
+- `range_finder(A, l, power, seed, stream)`: an m-by-l orthonormal Q with
+  A ~ Q Q^T A (HMT Algorithm 4.4, with `power` rounds of subspace iteration,
+  each re-orthonormalized).
+- `qb(A, l, power, seed, stream)`: Q and B = Q^T A, so A ~ Q B (RandLAPACK's
+  QB).
+- `rsvd(A, k, oversample, power, seed)`: the rank-k truncated SVD, U s Vt,
+  from the SVD of the small B (HMT Algorithm 5.1; RandLAPACK's RSVD).
+- `nystrom(A, l, seed, stream)` and `nystrom_fn(apply, n, l, seed, stream)`:
+  for A symmetric positive semidefinite, U and lam with A ~ U diag(lam) U^T,
+  from one product A Omega, with the shift that keeps the Cholesky step
+  stable in floating point (Tropp, Yurtsever, Udell and Cevher, "Fixed-rank
+  approximation of a positive-semidefinite matrix from streaming data",
+  NeurIPS 2017; Martinsson and Tropp, Acta Numerica 2020, Algorithm 16).
+- `rpcholesky(A, k, seed, stream)` and `rpcholesky_fn(diag, column, k,
+  seed, stream)`: randomly pivoted Cholesky (Chen, Epperly, Tropp and
+  Webber 2022): F with A ~ F F^T after reading only k columns of A and its
+  diagonal. Pivot i is drawn with probability proportional to the diagonal
+  of what is left, A - F F^T.
+
+Used with `from randla.lowrank import ...`.
+###
+
+from randla.philox import block, unit_open
+from randla.sketch import gaussian
+from randla.dense import householder_qr, orth, solve_lower_rows
+
+# the Nystrom shift is this many unit roundoffs times |Y|_F (Tropp et al.)
+NYSTROM_SHIFT_EPS = 2.220446049250313e-16
+
+#| An m-by-l orthonormal basis Q whose span nearly holds A's dominant
+#| l-dimensional range: Q = orth(A Omega), then `power` rounds of
+#| Q = orth(A orth(A^T Q)). Omega is n by l, Gaussian, from `stream`.
+def range_finder(A: Arr, l: Int, power: Int, seed: Int, stream: Int) -> Arr {
+    n: Int = int(shape(A)[1])
+    Omega = gaussian(n, l, seed, stream)
+    Q = orth(A @ Omega)
+    #: power iterations sharpen the basis toward the top singular directions
+    if power > 0 {
+        At = transpose(A)
+        for p to power {
+            Z = orth(At @ Q)
+            Q = orth(A @ Z)
+        }
+    }
+    return Q
+}
+
+#| Q (m by l, orthonormal) and B = Q^T A (l by n), with A ~ Q B.
+def qb(A: Arr, l: Int, power: Int, seed: Int, stream: Int) {
+    Q = range_finder(A, l, power, seed, stream)
+    return Q, transpose(Q) @ A
+}
+
+#| The rank-k truncated SVD of A, A ~ U diag(s) Vt, from a sketch with
+#| k + oversample columns and `power` subspace iterations. U is m by k, s has
+#| k entries, descending, and Vt is k by n.
+def rsvd(A: Arr, k: Int, oversample: Int = 10, power: Int = 2, seed: Int = 0) {
+    m: Int = int(shape(A)[0])
+    n: Int = int(shape(A)[1])
+    l: Int = min(k + oversample, min(m, n))
+    Q, B = qb(A, l, power, seed, 0)
+    # B^T is n by l: its SVD costs O(n l^2) by one-sided Jacobi on l columns
+    W, s, Zt = svd(transpose(B))
+    # B = Zt^T diag(s) W^T, so A ~ (Q Zt^T) diag(s) W^T
+    U = Q @ transpose(Zt)
+    return U[:, 0:k], s[0:k], transpose(W[:, 0:k])
+}
+
+#| Nystrom approximation of the n-by-n positive semidefinite operator `apply` (apply(X) = A X)
+#| from one product with an l-column test matrix: returns U (n by l,
+#| orthonormal) and lam (l, descending, nonnegative) with A ~ U diag(lam) U^T.
+def nystrom_fn(apply, n: Int, l: Int, seed: Int, stream: Int) {
+    #: the shift nu Omega keeps the core positive definite
+    Omega = orth(gaussian(n, l, seed, stream))
+    Y = apply(Omega)
+    nu = sqrt(float(n)) * NYSTROM_SHIFT_EPS * norm(Y)
+    Ynu = Y + nu * Omega
+    #: B = Y_nu C^-T, C the Cholesky factor of Omega^T Y_nu
+    M = transpose(Omega) @ Ynu
+    C = cholesky(0.5 * (M + transpose(M)))
+    # B = Ynu C^{-T}: solve C B^T = Ynu^T
+    B = transpose(solve_lower_rows(C, transpose(Ynu)))
+    #: eigenvalues: s^2 minus the shift, clipped at zero
+    U, s, Vt = svd(B)
+    lam = s * s - nu
+    lam = where(lam > 0.0, lam, 0.0)
+    return U, lam
+}
+
+#| Nystrom approximation of the positive semidefinite matrix A (see nystrom_fn).
+def nystrom(A: Arr, l: Int, seed: Int, stream: Int) {
+    n: Int = int(shape(A)[0])
+    return nystrom_fn(fn(X) -> A @ X, n, l, seed, stream)
+}
+
+#| Randomly pivoted Cholesky on a positive semidefinite matrix given by its diagonal and a
+#| def `column(s)` that returns column s: k pivots, each drawn with
+#| probability proportional to the diagonal of the residual A - F F^T.
+#| Returns F (n by k) and the pivots. Reads k columns and the diagonal only.
+#| Pivot i uses block i of `stream`.
+def rpcholesky_fn(diag0: Arr, column, k: Int, seed: Int, stream: Int) {
+    n: Int = len(diag0)
+    F = zeros(n, k)
+    d = copy(diag0)
+    pivots: [Int] = []
+    for i to k {
+        #: pivot drawn with probability proportional to the residual diagonal
+        total = sum(d)
+        if total <= 0.0 {
+            break
+        }
+        w0, w1, w2, w3 = block(seed, stream, i, 0)
+        target = unit_open(w0, w1) * total
+        c = cumsum(d)
+        s: Int = 0
+        while s < n - 1 and c[s] <= target {
+            s += 1
+        }
+        # a pivot whose residual diagonal is zero cannot be drawn; walk back
+        # to the last positive one if rounding in the scan landed on one
+        while d[s] <= 0.0 and s > 0 {
+            s -= 1
+        }
+        g = column(s)
+        if i > 0 {
+            g = g - F[:, 0:i] @ F[s, 0:i]
+        }
+        F[:, i] = g / sqrt(g[s])
+        d = d - F[:, i] * F[:, i]
+        d = where(d > 0.0, d, 0.0)
+        pivots = append(pivots, s)
+    }
+    return F, pivots
+}
+
+#| Randomly pivoted Cholesky on the positive semidefinite matrix A (see rpcholesky_fn).
+def rpcholesky(A: Arr, k: Int, seed: Int, stream: Int) {
+    return rpcholesky_fn(diag(A), fn(s) -> A[:, s], k, seed, stream)
+}
+
+#| A test matrix with chosen singular values: U diag(s) V^T with U and V
+#| the Q factors of Gaussian matrices (streams 101 and 102 of `seed`).
+def with_spectrum(m: Int, n: Int, s: Arr, seed: Int) -> Arr {
+    r: Int = len(s)
+    U = orth(gaussian(m, r, seed, 101))
+    V = orth(gaussian(n, r, seed, 102))
+    return (U * s) @ transpose(V)
+}
+
+#| The singular values 1, 2^-a, 3^-a, ...: polynomial decay of order a.
+def poly_decay(r: Int, a: Num) -> Arr {
+    return pow(arange(1.0, float(r) + 1.0), -a)
+}
+
+test "rSVD is near the Eckart-Young optimum on a decaying spectrum" {
+    s = poly_decay(60, 2.0)
+    A = with_spectrum(120, 80, s, 3)
+    k: Int = 10
+    U, sk, Vt = rsvd(A, k)
+    E = A - (U * sk) @ Vt
+    # the best rank-10 errors: s[10] in the spectral norm, the tail in Frobenius
+    best_fro = norm(s[k:])
+    assert_lt(norm(E), 1.01 * best_fro)
+    assert_allclose(sk, s[0:k], 1.0e-6)
+    Us, ss, Vs = svd(E)
+    assert_lt(ss[0], 1.05 * s[k])
+}
+
+test "without power iterations the range error is within HMT's bound" {
+    s = poly_decay(60, 1.0)
+    A = with_spectrum(120, 80, s, 4)
+    k: Int = 10
+    p: Int = 10
+    Q = range_finder(A, k + p, 0, 4, 0)
+    Us, ss, Vs = svd(A - Q @ (transpose(Q) @ A))
+    # HMT eq. (1.9): with probability at least 1 - 6 p^-p,
+    # |A - Q Q^T A| <= (1 + 11 sqrt(k + p) sqrt(min(m, n))) s[k]
+    assert_lt(ss[0], (1.0 + 11.0 * sqrt(float(k + p)) * sqrt(80.0)) * s[k])
+    # and HMT Theorem 10.5's mean Frobenius bound, (1 + k/(p - 1))^(1/2)
+    # times the tail, holds for this draw with room to spare
+    EF = A - Q @ (transpose(Q) @ A)
+    assert_lt(norm(EF), sqrt(1.0 + k / (p - 1.0)) * norm(s[k:]))
+}
+
+test "the Nystrom trace error is within the mean bound and its eigenvalues come from below" {
+    s = poly_decay(40, 3.0)
+    V = orth(gaussian(90, 40, 5, 0))
+    A = (V * s) @ transpose(V)
+    U, lam = nystrom(A, 20, 5, 1)
+    # A - Ahat is positive semidefinite, so its trace is its nuclear norm. The mean bound for
+    # Nystrom with l = k + p Gaussian columns (Martinsson and Tropp 2020,
+    # the section on Nystrom) is E tr(A - Ahat) <= (1 + k/(p - 1)) times the
+    # sum of the eigenvalues past k; this draw sits below it for k = p = 10
+    err = trace(A - (U * lam) @ transpose(U))
+    assert_lt(err, (1.0 + 10.0 / 9.0) * sum(s[10:]))
+    # Ahat <= A in the semidefinite order, so each eigenvalue comes from below
+    assert_true(all(lam[i] <= s[i] + 1.0e-14 for i to len(lam)))
+    assert_lt(s[0] - lam[0], err)
+}
+
+test "the randomly pivoted Cholesky trace error tracks the eigenvalue tail" {
+    # a Gaussian kernel on 200 points of the line: fast spectral decay
+    n: Int = 200
+    x = linspace(0.0, 1.0, n)
+    D = reshape(x, n, 1) - reshape(x, 1, n)
+    K = exp(-0.5 * D * D / 0.01)
+    F, piv = rpcholesky(K, 30, 9, 0)
+    err = trace(K) - sum(F * F)
+    ev, evecs = eig_sym(K)
+    best = sum(ev[0:n - 30])
+    assert_lt(err, 10.0 * best + 1.0e-12 * trace(K))
+    assert_allclose(diag(K - F @ transpose(F)) >= -1.0e-12, ones(n), 0.0)
+    assert_true(len(piv) == 30)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

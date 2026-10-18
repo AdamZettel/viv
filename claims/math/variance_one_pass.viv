@@ -1,0 +1,86 @@
+###
+title: The one-pass variance comes out negative on four numbers
+line: For $10^{9} + 4$, $+7$, $+13$, $+16$ (variance 30) the one-pass formula gives $-171$; Welford's update gives 30.
+claim: For the four values $10^{9} + 4$, $10^{9} + 7$, $10^{9} + 13$ and $10^{9} + 16$ (sample variance 30), the one-pass formula $\bigl(\sum x^2 - (\sum x)^2/n\bigr)/(n - 1)$ is off by more than 10%, while Welford's update and the two-pass formula give 30 to a relative error below $10^{-12}$.
+topic: math
+section: floating point
+reference: The exact sample variance 30 (deviations $-6, -3, 3, 6$ from the mean $10^{9} + 10$); Chan, Golub and LeVeque, "Algorithms for computing the sample variance", The American Statistician 37 (1983) 242-247, which uses this example.
+scope: One data set with a large mean and a small spread; the one-pass formula's error grows with the ratio of mean to standard deviation squared.
+lane: ai
+by: claude
+cost: fast
+###
+
+DATA = [1.0e9 + 4.0, 1.0e9 + 7.0, 1.0e9 + 13.0, 1.0e9 + 16.0]
+EXACT_VARIANCE = 30.0
+
+n_data: Int = len(DATA)
+s1 = 0.0
+s2 = 0.0
+for i to n_data {
+    s1 = s1 + DATA[i]
+    s2 = s2 + DATA[i] * DATA[i]
+}
+one_pass = (s2 - s1 * s1 / n_data) / (n_data - 1.0)
+#: Welford: a running mean and a running sum of squared deviations
+w_mean = 0.0
+w_m2 = 0.0
+for i to n_data {
+    d = DATA[i] - w_mean
+    w_mean = w_mean + d / (i + 1.0)
+    w_m2 = w_m2 + d * (DATA[i] - w_mean)
+}
+welford = w_m2 / (n_data - 1.0)
+two_pass_mean = s1 / n_data
+two_pass = 0.0
+for i to n_data {
+    two_pass = two_pass + (DATA[i] - two_pass_mean) * (DATA[i] - two_pass_mean)
+}
+two_pass = two_pass / (n_data - 1.0)
+rel_err_one_pass = abs(one_pass - EXACT_VARIANCE) / EXACT_VARIANCE
+rel_err_welford = abs(welford - EXACT_VARIANCE) / EXACT_VARIANCE
+rel_err_two_pass = abs(two_pass - EXACT_VARIANCE) / EXACT_VARIANCE
+show one_pass
+show welford
+show rel_err_one_pass
+
+#: the figure: the same four spacings shifted by 10^p, p = 0 .. 9: the variance each formula computes
+N_SHIFT: Int = 10
+fg_shift = zeros(N_SHIFT)
+fg_one = zeros(N_SHIFT)
+fg_wel = zeros(N_SHIFT)
+for fg_k to N_SHIFT {
+    fg_off = pow(10.0, fg_k * 1.0)
+    fg_s1 = 0.0
+    fg_s2 = 0.0
+    fg_mean = 0.0
+    fg_m2 = 0.0
+    for fg_i to n_data {
+        fg_x = DATA[fg_i] - 1.0e9 + fg_off
+        fg_s1 = fg_s1 + fg_x
+        fg_s2 = fg_s2 + fg_x * fg_x
+        fg_delta = fg_x - fg_mean
+        fg_mean = fg_mean + fg_delta / (fg_i + 1.0)
+        fg_m2 = fg_m2 + fg_delta * (fg_x - fg_mean)
+    }
+    fg_shift[fg_k] = fg_off
+    fg_one[fg_k] = (fg_s2 - fg_s1 * fg_s1 / n_data) / (n_data - 1.0)
+    fg_wel[fg_k] = fg_m2 / (n_data - 1.0)
+}
+figure("Variance of 4, 7, 13, 16 shifted by an offset", "offset", "computed sample variance (exact: 30)")
+xscale("log")
+plot(fg_shift, fg_one, "one-pass formula")
+style("one-pass formula", "s2 square")
+plot(fg_shift, fg_wel, "Welford")
+style("Welford", "s1 circle")
+
+test "the one-pass formula is off by more than 10%" {
+    assert_gt(rel_err_one_pass, 0.1)
+}
+test "Welford and two-pass give 30 to 1e-12" {
+    assert_lt(rel_err_welford, 1.0e-12)
+    assert_lt(rel_err_two_pass, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

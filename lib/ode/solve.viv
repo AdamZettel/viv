@@ -1,0 +1,319 @@
+###
+post: One driver for every method of solving an initial value problem
+agent: claude
+
+`ode_solve(rhs, jac, events, t0, t1, y0, p, cfg, t_eval, dirs, term)`
+integrates y' = rhs(t, y, p) from t0 to t1 by the method `cfg.method`
+(DOPRI5, RADAU, BDF, or AUTO: Dormand-Prince until its stiffness test fires,
+then Radau IIA from that point). After each accepted step the driver
+
+  - finds the events in it: a sign change of an entry of events(t, y, p) is
+    located on the step's dense output to a few ulps; a terminal one ends
+    the integration there;
+  - writes the output: every step's endpoint, or the dense output at the
+    requested times `t_eval`.
+
+`ode_batch` runs one problem for many parameter vectors (the rows of P) and
+initial states, all on one output grid: the case that costs most when every
+solve is a separate call from Python.
+
+What a problem must provide, and why. A def is passed as a function value,
+and the compiled engines specialize the integrator for it, so rhs, jac and
+events must be defs (or lambdas that read only their parameters and
+top-level names), not closures returned from a def. `grad` cannot follow a
+call through a function value, so an exact Jacobian is a def that names the
+rhs (see lib/ode/problems.viv: `robertson_jac` is three `grad`s of
+`robertson`); pass `jac_mode = JAC_FD` to use forward differences instead.
+A problem with no events passes `no_events` and empty `dirs`.
+###
+
+from ode.core import (
+    Dense, OdeCfg, OdeState, AUTO, BDF, DONE, DOPRI5, EPS, JAC_FD, JAC_GIVEN, RADAU, RUNNING,
+    TERMINAL_EVENT, TOO_MANY_STEPS, dense_at, initial_step, jacobian, new_state, step_events,
+)
+from ode.dopri5 import dopri_step
+from ode.radau import radau_step
+from ode.bdf import bdf_start, bdf_step
+
+# the order the starting-step rule assumes, per method
+START_ORDER_DOPRI = 4.0
+START_ORDER_RADAU = 3.0
+START_ORDER_BDF = 1.0
+# the entries of the stats vector
+STAT_STATUS: Int = 0
+STAT_NFEV: Int = 1
+STAT_NJEV: Int = 2
+STAT_NLU: Int = 3
+STAT_STEPS: Int = 4
+STAT_REJECTED: Int = 5
+STAT_STIFF_AT: Int = 6
+NSTATS: Int = 7
+
+#| What a solve returns: the output times and states (one row per time),
+#| the events (time, state, index), where it ended (`status`: DONE,
+#| TERMINAL_EVENT, or a negative failure code) and its counts.
+record OdeResult {
+    t: Arr
+    y: Arr
+    t_events: Arr
+    y_events: Arr
+    i_events: Arr
+    status: Int
+    nfev: Int
+    njev: Int
+    nlu: Int
+    nsteps: Int
+    nrejected: Int
+    stiff_at: Num
+}
+
+#| The settings with SciPy's defaults filled in: the Newton tolerance
+#| max(10 eps / rtol, min(0.03, sqrt(rtol))).
+def ode_cfg(method: Int, t1: Num, rtol: Num, atol: Arr, first_step: Num, max_step: Num, max_steps: Int, jac_mode: Int) -> OdeCfg {
+    return OdeCfg {
+        method: method, t_bound: t1, rtol: rtol, atol: atol, max_step: max_step,
+        first_step: first_step, max_steps: max_steps, jac_mode: jac_mode,
+        newton_tol: max(10.0 * EPS / rtol, min(0.03, sqrt(rtol))),
+    }
+}
+
+#| The events def of a problem with none.
+def no_events(t: Num, y: Arr, p: Arr) -> Arr {
+    return zeros(0)
+}
+
+#| The Jacobian def of a problem that has none (with jac_mode = JAC_FD it is never called).
+def no_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    return zeros(len(y), len(y))
+}
+
+#| Get the implicit methods' Jacobian at the current point.
+def with_jacobian(f, jac, s0: OdeState, c: OdeCfg, p: Arr) -> OdeState {
+    s = s0
+    Jn, nj = jacobian(f, jac, s.t, s.y, s.fy, p, c)
+    s.J = Jn
+    s.nfev += nj
+    s.njev += 1
+    s.jac_current = true
+    s.have_lu = false
+    return s
+}
+
+#| Integrate y' = f(t, y, p) from t0 to t1. See the module's header.
+def ode_solve(f, jac, ev, t0: Num, t1: Num, y0: Arr, p: Arr, c: OdeCfg, t_eval: Arr, dirs: Arr, term: Arr) -> OdeResult {
+    n = len(y0)
+    dir = 1.0
+    if t1 < t0 {
+        dir = -1.0
+    }
+    ts = []
+    ys = []
+    te = []
+    ye = []
+    ie = []
+    k = 0
+    nev = len(t_eval)
+    #: the start: the output at t0, the first rhs and the first step
+    if nev == 0 {
+        ts = append(ts, t0)
+        ys = append(ys, copy(y0))
+    }
+    while k < nev and t_eval[k] == t0 {
+        ts = append(ts, t0)
+        ys = append(ys, copy(y0))
+        k += 1
+    }
+    f0 = f(t0, y0, p)
+    s = new_state(t0, y0, f0, dir)
+    active = c.method
+    if active == AUTO {
+        active = DOPRI5
+    }
+    if c.first_step > 0.0 {
+        s.h_abs = c.first_step
+    }
+    else {
+        order = START_ORDER_DOPRI
+        if active == RADAU {
+            order = START_ORDER_RADAU
+        }
+        if active == BDF {
+            order = START_ORDER_BDF
+        }
+        s.h_abs = initial_step(f, t0, y0, f0, p, dir, order, c)
+        s.nfev += 1
+    }
+    if active == RADAU {
+        s = with_jacobian(f, jac, s, c, p)
+    }
+    if active == BDF {
+        s = bdf_start(f, jac, s, c, p)
+    }
+    nevents = len(dirs)
+    g_old = zeros(0)
+    if nevents > 0 {
+        g_old = ev(t0, y0, p)
+    }
+    stiff_at = -1.0
+    if t1 == t0 {
+        s.status = DONE
+    }
+    while s.status == RUNNING {
+        if s.naccept >= c.max_steps {
+            s.status = TOO_MANY_STEPS
+        }
+        else {
+            if active == DOPRI5 {
+                s = dopri_step(f, s, c, p)
+            }
+            if active == RADAU {
+                s = radau_step(f, jac, s, c, p)
+            }
+            if active == BDF {
+                s = bdf_step(f, jac, s, c, p)
+            }
+        }
+        if s.status == RUNNING {
+            t_end = s.t
+            y_end = s.y
+            #: the events in this step; a terminal one moves the end of the step to it
+            if nevents > 0 {
+                g_new = ev(s.t, s.y, p)
+                times, which, stopped = step_events(ev, s.dense, p, g_old, g_new, dirs, term)
+                for j to len(times) {
+                    yj = dense_at(s.dense, times[j])
+                    te = append(te, times[j])
+                    ye = append(ye, yj)
+                    ie = append(ie, which[j])
+                }
+                if stopped {
+                    t_end = times[len(times) - 1]
+                    y_end = ye[len(te) - 1, :]
+                    s.status = TERMINAL_EVENT
+                }
+                g_old = g_new
+            }
+            #: the output: the step's end, or the requested times inside the step
+            if nev == 0 {
+                ts = append(ts, t_end)
+                ys = append(ys, y_end)
+            }
+            while k < nev and dir * (t_eval[k] - t_end) <= 0.0 {
+                ts = append(ts, t_eval[k])
+                if t_eval[k] == t_end {
+                    ys = append(ys, y_end)
+                }
+                else {
+                    ys = append(ys, dense_at(s.dense, t_eval[k]))
+                }
+                k += 1
+            }
+            if s.status == RUNNING and s.t == c.t_bound {
+                s.status = DONE
+            }
+            #: AUTO: hand a stiff problem to Radau IIA from here
+            if s.status == RUNNING and c.method == AUTO and active == DOPRI5 and s.stiff {
+                active = RADAU
+                stiff_at = s.t
+                s.h_abs_old = 0.0
+                s.err_old = -1.0
+                s.has_dense = false
+                s = with_jacobian(f, jac, s, c, p)
+            }
+        }
+    }
+    if len(ts) == 0 {
+        ys = zeros(0, n)
+    }
+    if len(te) == 0 {
+        ye = zeros(0, n)
+    }
+    return OdeResult {
+        t: ts, y: ys, t_events: te, y_events: ye, i_events: ie, status: s.status,
+        nfev: s.nfev, njev: s.njev, nlu: s.nlu, nsteps: s.naccept, nrejected: s.nreject, stiff_at: stiff_at,
+    }
+}
+
+#| A result's counts as one vector: status, nfev, njev, nlu, steps, rejected,
+#| and the time AUTO changed to Radau (-1 if it did not).
+def ode_stats(r: OdeResult) -> Arr {
+    st = zeros(NSTATS)
+    st[STAT_STATUS] = float(r.status)
+    st[STAT_NFEV] = float(r.nfev)
+    st[STAT_NJEV] = float(r.njev)
+    st[STAT_NLU] = float(r.nlu)
+    st[STAT_STEPS] = float(r.nsteps)
+    st[STAT_REJECTED] = float(r.nrejected)
+    st[STAT_STIFF_AT] = r.stiff_at
+    return st
+}
+
+#| ode_solve with its settings as plain arguments and its result as a
+#| tuple of arrays: t, y, t_events, y_events, i_events, stats.
+def ode_solve_flat(f, jac, ev, t0: Num, t1: Num, y0: Arr, p: Arr, method: Int, rtol: Num, atol: Arr, t_eval: Arr,
+                   dirs: Arr, term: Arr, first_step: Num, max_step: Num, max_steps: Int, jac_mode: Int) {
+    c = ode_cfg(method, t1, rtol, atol, first_step, max_step, max_steps, jac_mode)
+    r = ode_solve(f, jac, ev, t0, t1, y0, p, c, t_eval, dirs, term)
+    return r.t, r.y, r.t_events, r.y_events, r.i_events, ode_stats(r)
+}
+
+#| Many solves of one problem on one output grid: row b of Y0 and of P is
+#| the b-th initial state and parameter vector. Returns Y (B by len(t_eval)
+#| * n: row b is the solution at the times, one state after another; NaN
+#| after a terminal event), the stats (B by 7) and each solve's first event
+#| time (NaN when none fired).
+def ode_batch(f, jac, ev, t0: Num, t1: Num, Y0: Arr, P: Arr, c: OdeCfg, t_eval: Arr, dirs: Arr, term: Arr) {
+    nb = shape(Y0)[0]
+    n = shape(Y0)[1]
+    m = len(t_eval)
+    Y = zeros(nb, m * n)
+    stats = zeros(nb, NSTATS)
+    first = zeros(nb)
+    nan = 0.0 / 0.0
+    for b to nb {
+        r = ode_solve(f, jac, ev, t0, t1, Y0[b, :], P[b, :], c, t_eval, dirs, term)
+        got = len(r.t)
+        for j to m {
+            for i to n {
+                if j < got {
+                    Y[b, j * n + i] = r.y[j, i]
+                }
+                else {
+                    Y[b, j * n + i] = nan
+                }
+            }
+        }
+        stats[b, :] = ode_stats(r)
+        first[b] = nan
+        if len(r.t_events) > 0 {
+            first[b] = r.t_events[0]
+        }
+    }
+    return Y, stats, first
+}
+
+#| ode_batch with its settings as plain arguments.
+def ode_batch_flat(f, jac, ev, t0: Num, t1: Num, Y0: Arr, P: Arr, method: Int, rtol: Num, atol: Arr, t_eval: Arr,
+                   dirs: Arr, term: Arr, first_step: Num, max_step: Num, max_steps: Int, jac_mode: Int) {
+    c = ode_cfg(method, t1, rtol, atol, first_step, max_step, max_steps, jac_mode)
+    return ode_batch(f, jac, ev, t0, t1, Y0, P, c, t_eval, dirs, term)
+}
+
+#| y' = -p y, for the test below.
+def decay(t: Num, y: Arr, p: Arr) -> Arr {
+    return -p[0] * y
+}
+
+test "every method solves y' = -2 y to its tolerance" {
+    atol = 1.0e-12 * ones(1)
+    for mm in [DOPRI5, RADAU, BDF, AUTO] {
+        m: Int = int(mm)
+        c = ode_cfg(m, 1.0, 1.0e-9, atol, 0.0, inf, 100000, JAC_FD)
+        r = ode_solve(decay, no_jac, no_events, 0.0, 1.0, [1.0], [2.0], c, [0.5, 1.0], zeros(0), zeros(0))
+        assert_true(r.status == DONE)
+        assert_allclose(r.y[:, 0], [exp(-1.0), exp(-2.0)], 1.0e-7)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

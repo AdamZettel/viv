@@ -1,0 +1,97 @@
+###
+title: Householder and Givens keep Q orthogonal at any condition number
+line: $\lVert Q^\top Q - I \rVert$ stays below $10\,nu$ from $\kappa = 10$ to $10^{12}$, while Gram-Schmidt grows like $u\kappa$ or $u\kappa^2$.
+claim: For $40 \times 40$ matrices with condition number $\kappa$ from $10^{1}$ to $10^{12}$, the loss of orthogonality $\lVert Q^\top Q - I \rVert$ of the computed $Q$ stays below $10\,n u$ for Householder QR and for Givens QR whatever $\kappa$ is (fitted log-log slope against $\kappa$ below 0.1). It grows like $u\kappa$ for modified Gram-Schmidt (slope between 0.8 and 1.2) and like $u\kappa^2$ for classical Gram-Schmidt (slope between 1.6 and 2.4 up to $\kappa = 10^{6}$) until $Q$ has no orthogonality left (a loss above 1 from $\kappa = 10^{8}$ on).
+topic: math
+section: linalg
+reference: Golub and Van Loan, Matrix Computations (4th ed., 2013), sections 5.2.1, 5.2.8 and 5.2.9; Björck, Numerical Methods for Least Squares Problems (1996), section 2.4 (MGS, $u\kappa$); Giraud, Langou, Rozložník and van den Eshof, Numer. Math. 101 (2005) 87-100 (CGS, $u\kappa^2$). The vipyr twin checks the Householder bound with LAPACK's QR (numpy.linalg.qr) on the same kind of matrix.
+scope: One size, one random matrix per $\kappa$ (seeded), singular values geometrically spaced; the norm is Frobenius. The slopes are fitted from $\kappa = 10^{1}$ to $10^{12}$ (MGS, Householder, Givens) and to $10^{6}$ (CGS, before it saturates). Reorthogonalization (CGS2), which restores u-level orthogonality, is not measured.
+lane: ai
+by: claude
+cost: fast
+agree: 1e-12
+###
+
+from qrlib import loglog_slope, orthogonality_losses
+
+N_SIZE: Int = 40
+SEED: Int = 7
+N_KAPPA: Int = 12
+#: CGS's slope is fitted over the first CGS_FIT kappas (1e1 to 1e6), before it saturates
+CGS_FIT: Int = 6
+UNIT_ROUNDOFF = 1.1102230246251565e-16
+
+kappas, loss_householder, loss_givens, loss_mgs, loss_cgs = orthogonality_losses(N_SIZE, N_KAPPA, SEED)
+show loss_householder
+show loss_givens
+show loss_mgs
+show loss_cgs
+nu = N_SIZE * UNIT_ROUNDOFF
+worst_householder_in_nu = max(loss_householder) / nu
+worst_givens_in_nu = max(loss_givens) / nu
+slope_householder = loglog_slope(kappas, loss_householder)
+slope_givens = loglog_slope(kappas, loss_givens)
+slope_mgs = loglog_slope(kappas, loss_mgs)
+slope_cgs = loglog_slope(kappas[0:CGS_FIT], loss_cgs[0:CGS_FIT])
+#: index 9 is kappa = 1e10
+kappa_min = min(kappas)
+kappa_max = max(kappas)
+cgs_fit_to = kappas[CGS_FIT - 1]
+show kappa_min
+show kappa_max
+show cgs_fit_to
+#: the smallest kappa at which classical Gram-Schmidt's loss is above 1
+cgs_gone_at = 0.0
+for k to N_KAPPA {
+    if cgs_gone_at == 0.0 and loss_cgs[k] > 1.0 {
+        cgs_gone_at = kappas[k]
+    }
+}
+show cgs_gone_at
+show worst_householder_in_nu
+show worst_givens_in_nu
+show slope_householder
+show slope_givens
+show slope_mgs
+show slope_cgs
+
+#: the figure: loss of orthogonality against kappa for the four methods
+figure("Loss of orthogonality of Q, 40 x 40", "condition number kappa", "||Q^T Q - I||")
+xscale("log")
+yscale("log")
+plot(kappas, loss_cgs, "classical Gram-Schmidt")
+style("classical Gram-Schmidt", "s6 ring")
+plot(kappas, loss_mgs, "modified Gram-Schmidt")
+style("modified Gram-Schmidt", "s2 square")
+plot(kappas, loss_givens, "Givens")
+style("Givens", "s4 cross")
+plot(kappas, loss_householder, "Householder")
+style("Householder", "s1 circle")
+
+test "Householder and Givens QR stay below 10 n u for every kappa" {
+    assert_lt(worst_householder_in_nu, 10.0)
+    assert_lt(worst_givens_in_nu, 10.0)
+}
+test "their loss does not grow with kappa: slope below 0.1" {
+    assert_lt(abs(slope_householder), 0.1)
+    assert_lt(abs(slope_givens), 0.1)
+}
+test "modified Gram-Schmidt grows like u kappa: slope between 0.8 and 1.2" {
+    assert_gt(slope_mgs, 0.8)
+    assert_lt(slope_mgs, 1.2)
+}
+test "classical Gram-Schmidt grows like u kappa^2: slope between 1.6 and 2.4 up to kappa = 1e6" {
+    assert_gt(slope_cgs, 1.6)
+    assert_lt(slope_cgs, 2.4)
+}
+test "classical Gram-Schmidt has no orthogonality left from kappa = 1e8 on: loss above 1" {
+    assert_near(cgs_gone_at, 1.0e8, 0.0)
+    for k to N_KAPPA {
+        if kappas[k] >= cgs_gone_at {
+            assert_gt(loss_cgs[k], 1.0)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

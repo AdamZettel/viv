@@ -1,0 +1,512 @@
+###
+post: PPO on CartPole, after CleanRL's ppo.py
+agent: claude
+
+Proximal policy optimization as CleanRL writes it in one file
+(github.com/vwxyzjn/cleanrl, cleanrl/ppo.py): four cart-poles run side by side,
+an actor and a critic (two tanh layers each) choose moves and score states, the
+rollout is scored by generalized advantage estimation, and the clipped
+objective is minimized for a few epochs of shuffled minibatches with Adam.
+
+The cart-pole is CartPole-v1: `lib/cartpole`'s equations of motion with
+gravity 9.8, one explicit Euler step of 0.02 s per move, a push of 10 N left or
+right, and the episode over when the cart leaves |x| < 2.4 or the pole leans
+past 12 degrees, or after 500 steps.
+
+The network and the training loop are CleanRL's at a smaller size (32 steps a
+rollout instead of 128, 40 rollouts, a learning rate of 2.5e-3 instead of
+2.5e-4 so it learns in that time). Every random draw is Viv's generator, and
+`reference.py` in this folder runs CleanRL's own `Agent`, gymnasium's own
+cart-pole and torch's autograd and Adam on the same draws; the tests hold this
+program to its numbers.
+
+This copy takes the loss's gradient from `value_and_grad`; `ppo.viv` writes
+the backward pass by hand, torch's tie and clamp rules included.
+###
+
+from cartpole import cartpole_accel
+from params import (
+    param_cols, param_declare, param_get, param_rows, param_set, param_table, param_zeros,
+)
+from optim import adam, OPT_EPS, OPT_LR, optim_state, optim_step
+from nn import softmax_rows
+from random import arange, choice, randn_matrix, shuffle
+from hand.backward import hand_minibatch_grad
+
+# ---- CartPole-v1 ----
+GRAVITY = 9.8
+FORCE_MAG = 10.0
+DT = 0.02
+X_THRESHOLD = 2.4
+THETA_THRESHOLD = 12.0 * 2.0 * 3.141592653589793 / 360.0
+MAX_EPISODE_STEPS = 500
+
+# ---- CleanRL's arguments, at a smaller size ----
+SEED = 1
+NUM_ENVS = 4
+NUM_STEPS = 32
+NUM_ITERATIONS = 40
+LEARNING_RATE = 2.5e-3
+GAMMA = 0.99
+GAE_LAMBDA = 0.95
+NUM_MINIBATCHES = 4
+UPDATE_EPOCHS = 4
+CLIP_COEF = 0.2
+ENT_COEF = 0.01
+VF_COEF = 0.5
+MAX_GRAD_NORM = 0.5
+BATCH_SIZE = NUM_ENVS * NUM_STEPS
+MINIBATCH_SIZE = BATCH_SIZE / NUM_MINIBATCHES
+OBS = 4
+ACTIONS = 2
+HIDDEN = 64
+
+#| One move of CartPole-v1: push left (action 0) or right (1) for one Euler step.
+def cartpole_v1_step(s: Arr, action) {
+    force = FORCE_MAG
+    if action == 0 {
+        force = -FORCE_MAG
+    }
+    a = cartpole_accel(s, force, gravity=GRAVITY)
+    return [s[0] + DT * s[1], s[1] + DT * a[0], s[2] + DT * s[3], s[3] + DT * a[1]]
+}
+
+def fell(s: Arr) -> Bool {
+    return abs(s[0]) > X_THRESHOLD or abs(s[2]) > THETA_THRESHOLD
+}
+
+#| A fresh episode: every entry of the state uniform on [-0.05, 0.05).
+def reset_state() {
+    s = zeros(OBS)
+    for k to OBS {
+        s[k] = -0.05 + 0.1 * rand()
+    }
+    return s
+}
+
+# ---- randomness: lib/random's randn (Box-Muller, u1 first), shuffle (Fisher-Yates
+# from the top index down) and choice (the inverse CDF at one draw) ----
+
+#| torch.nn.init.orthogonal_: the Q of a Gaussian matrix, taken from its taller
+#| orientation, with the signs that make R's diagonal positive. Gram-Schmidt
+#| gives exactly that Q.
+def orthogonal(rows, cols, gain) {
+    G = randn_matrix(rows, cols)
+    if rows < cols {
+        G = transpose(G)
+    }
+    n = len(G)
+    m = len(transpose(G))
+    for j to m {
+        for k to j {
+            dot = 0.0
+            for i to n {
+                dot = dot + G[i, k] * G[i, j]
+            }
+            for i to n {
+                G[i, j] -= dot * G[i, k]
+            }
+        }
+        norm = 0.0
+        for i to n {
+            norm = norm + G[i, j] * G[i, j]
+        }
+        for i to n {
+            G[i, j] /= sqrt(norm)
+        }
+    }
+    if rows < cols {
+        G = transpose(G)
+    }
+    return gain * G
+}
+
+# ---- the agent: a critic and an actor, each Linear-tanh-Linear-tanh-Linear ----
+# A weight is stored input-by-output, so a layer is `X @ W + b`; torch stores
+# the transpose and computes `x W^T + b`.
+model = param_table(12)
+CRITIC = param_declare(model, OBS, HIDDEN)
+param_declare(model, 1, HIDDEN)
+param_declare(model, HIDDEN, HIDDEN)
+param_declare(model, 1, HIDDEN)
+param_declare(model, HIDDEN, 1)
+param_declare(model, 1, 1)
+ACTOR = param_declare(model, OBS, HIDDEN)
+param_declare(model, 1, HIDDEN)
+param_declare(model, HIDDEN, HIDDEN)
+param_declare(model, 1, HIDDEN)
+param_declare(model, HIDDEN, ACTIONS)
+param_declare(model, 1, ACTIONS)
+
+#| layer_init: an orthogonal weight with this gain and a zero bias (already zero).
+def layer_init(theta: Arr, k, gain) {
+    param_set(theta, model, k, transpose(orthogonal(param_cols(model, k), param_rows(model, k), gain)))
+}
+
+def ones_column(n) {
+    return zeros(n, 1) + 1.0
+}
+
+#| `X @ W + b` with the bias row added to every row.
+def affine(theta: Arr, k, X: Arr) {
+    return X @ param_get(theta, model, k) + ones_column(len(X)) @ param_get(theta, model, k + 1)
+}
+
+#| The network starting at tensor `net`, on the rows of `X`.
+def mlp(theta: Arr, net, X: Arr) {
+    H1 = tanh(affine(theta, net, X))
+    H2 = tanh(affine(theta, net + 2, H1))
+    return affine(theta, net + 4, H2)
+}
+
+#| Categorical(logits=...).logits: each row minus its log-sum-exp.
+def log_softmax(L: Arr) {
+    out = zeros(len(L), ACTIONS)
+    for i to len(L) {
+        top = max(L[i, 0], L[i, 1])
+        lse = top + log(exp(L[i, 0] - top) + exp(L[i, 1] - top))
+        for j to ACTIONS {
+            out[i, j] = L[i, j] - lse
+        }
+    }
+    return out
+}
+
+#| The rows of `A` (n by OBS) picked out by `idx`, in that order.
+def rows(A: Arr, idx: Arr) {
+    flat = zeros(len(idx), OBS)
+    for i to len(idx) {
+        for k to OBS {
+            flat[i, k] = idx[i] * OBS + k
+        }
+    }
+    return take(A, flat)
+}
+
+#| The column vector a critic returns, as a plain vector.
+def column(V: Arr) {
+    return V[:, 0]
+}
+
+#| What ppo_loss reports in `stats`: policy, value, entropy, old_approx_kl,
+#| approx_kl, clipped count.
+N_STATS = 6
+
+#| torch.clamp: `lo` below it, `hi` above, and `x` itself on the closed
+#| interval, where the gradient passes (at the ends too, as torch's does).
+def clamp(x, lo, hi) {
+    y = x
+    if x < lo {
+        y = lo
+    }
+    if x > hi {
+        y = hi
+    }
+    return y
+}
+
+#| CleanRL's minibatch loss (ppo.py lines 250-281): the clipped policy loss,
+#| the clipped value loss and the entropy bonus, from the actor's and the
+#| critic's outputs on the observations `X`. `torch.max` of two numbers
+#| splits its gradient on a tie, as Viv's `max` does under `grad`. The
+#| losses and the diagnostics go in `stats` (policy, value, entropy,
+#| old_approx_kl, approx_kl, clipped count).
+def ppo_loss(theta: Arr, X: Arr, mb_actions: Arr, mb_logprobs: Arr, mb_advantages: Arr, mb_returns: Arr, mb_values: Arr, stats: Arr) {
+    M = len(X)
+    logits = mlp(theta, ACTOR, X)
+    newlogp = log_softmax(logits)
+    P = softmax_rows(logits)
+    newvalue = column(mlp(theta, CRITIC, X))
+    policy_loss = 0.0
+    value_loss = 0.0
+    entropy = 0.0
+    old_approx_kl = 0.0
+    approx_kl = 0.0
+    clipped = 0.0
+    for i to M {
+        a = mb_actions[i]
+        logratio = newlogp[i, a] - mb_logprobs[i]
+        ratio = exp(logratio)
+        old_approx_kl = old_approx_kl - logratio / M
+        approx_kl = approx_kl + ((ratio - 1.0) - logratio) / M
+        if abs(ratio - 1.0) > CLIP_COEF {
+            clipped = clipped + 1.0
+        }
+        A = mb_advantages[i]
+        pg1 = -A * ratio
+        pg2 = -A * clamp(ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF)
+        policy_loss = policy_loss + max(pg1, pg2) / M
+        H = 0.0
+        for j to ACTIONS {
+            H = H - P[i, j] * newlogp[i, j]
+        }
+        entropy = entropy + H / M
+        v = newvalue[i]
+        R = mb_returns[i]
+        vb = mb_values[i]
+        v_clipped = vb + clamp(v - vb, -CLIP_COEF, CLIP_COEF)
+        lu = (v - R) * (v - R)
+        lc = (v_clipped - R) * (v_clipped - R)
+        value_loss = value_loss + 0.5 * max(lu, lc) / M
+    }
+    stats[0] = policy_loss
+    stats[1] = value_loss
+    stats[2] = entropy
+    stats[3] = old_approx_kl
+    stats[4] = approx_kl
+    stats[5] = clipped
+    return policy_loss - ENT_COEF * entropy + VF_COEF * value_loss
+}
+
+# ---- generalized advantage estimation, ppo.py lines 219-231 ----
+#| `rewards`, `values` and `dones` are NUM_STEPS by NUM_ENVS, one row per step.
+def gae(rewards: Arr, values: Arr, dones: Arr, next_value: Arr, next_done: Arr) {
+    T = len(rewards)
+    advantages = zeros(T, len(transpose(rewards)))
+    lastgaelam = 0.0 * next_value
+    for t to T reversed {
+        nextnonterminal = 1.0 - next_done
+        nextvalues = next_value
+        if t < T - 1 {
+            nextnonterminal = 1.0 - slab(dones, t + 1)
+            nextvalues = slab(values, t + 1)
+        }
+        delta = slab(rewards, t) + GAMMA * nextvalues * nextnonterminal - slab(values, t)
+        lastgaelam = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+        setslab(advantages, t, lastgaelam)
+    }
+    return advantages
+}
+
+def variance(a: Arr) {
+    mu = sum(a) / len(a)
+    return sum((a - mu) * (a - mu)) / len(a)
+}
+
+# ---- GAE on a fixed trajectory: three envs, six steps, two episodes ending ----
+srand(7)
+fixed_rewards = zeros(6, 3) + 1.0
+fixed_values = zeros(6, 3)
+for t to 6 {
+    for e to 3 {
+        fixed_values[t, e] = 10.0 * rand()
+    }
+}
+fixed_dones = zeros(6, 3)
+fixed_dones[2, 0] = 1.0
+fixed_dones[4, 1] = 1.0
+fixed_dones[5, 1] = 1.0
+fixed_next_value = [10.0 * rand(), 10.0 * rand(), 10.0 * rand()]
+fixed_adv = gae(fixed_rewards, fixed_values, fixed_dones, fixed_next_value, [0.0, 1.0, 0.0])
+narrate "GAE on a fixed trajectory"
+for t to 6 {
+    adv = slab(fixed_adv, t)
+    show adv
+}
+
+# ---- setup ----
+srand(SEED)
+theta = param_zeros(model)
+layer_init(theta, CRITIC, sqrt(2.0))
+layer_init(theta, CRITIC + 2, sqrt(2.0))
+layer_init(theta, CRITIC + 4, 1.0)
+layer_init(theta, ACTOR, sqrt(2.0))
+layer_init(theta, ACTOR + 2, sqrt(2.0))
+layer_init(theta, ACTOR + 4, 0.01)
+opt = adam(LEARNING_RATE, 0.9, 0.999)
+opt[OPT_EPS] = 1.0e-5
+adam_state = optim_state(model)
+
+# rollout storage; a row of obs is step * NUM_ENVS + env, which is the order
+# torch's reshape flattens (NUM_STEPS, NUM_ENVS, 4) into
+obs = zeros(BATCH_SIZE, OBS)
+actions = zeros(NUM_STEPS, NUM_ENVS)
+logprobs = zeros(NUM_STEPS, NUM_ENVS)
+rewards = zeros(NUM_STEPS, NUM_ENVS)
+dones = zeros(NUM_STEPS, NUM_ENVS)
+values = zeros(NUM_STEPS, NUM_ENVS)
+
+global_step = 0
+next_obs = zeros(NUM_ENVS, OBS)
+for e to NUM_ENVS {
+    setslab(next_obs, e, reset_state())
+}
+next_done = zeros(NUM_ENVS)
+elapsed = zeros(NUM_ENVS)
+ep_return = zeros(NUM_ENVS)
+# per iteration: value loss, policy loss, entropy, approx_kl, explained variance
+history = zeros(NUM_ITERATIONS, 5)
+
+for it to NUM_ITERATIONS {
+    iteration = it + 1
+    frac = 1.0 - (iteration - 1.0) / NUM_ITERATIONS
+    opt[OPT_LR] = frac * LEARNING_RATE
+    episodes = 0
+    return_sum = 0.0
+
+    for step to NUM_STEPS {
+        global_step = global_step + NUM_ENVS
+        for e to NUM_ENVS {
+            setslab(obs, step * NUM_ENVS + e, slab(next_obs, e))
+        }
+        setslab(dones, step, next_done)
+        logits = mlp(theta, ACTOR, next_obs)
+        probs = softmax_rows(logits)
+        logp = log_softmax(logits)
+        setslab(values, step, column(mlp(theta, CRITIC, next_obs)))
+        for e to NUM_ENVS {
+            # action 0 when the draw is below its probability, as reference.py draws it
+            a = choice(slab(probs, e))
+            actions[step, e] = a
+            logprobs[step, e] = logp[e, a]
+        }
+        # the vector env: step each cart-pole, and reset it in the same step
+        # when its episode ends
+        for e to NUM_ENVS {
+            s = cartpole_v1_step(slab(next_obs, e), actions[step, e])
+            rewards[step, e] = 1.0
+            elapsed[e] += 1.0
+            ep_return[e] += 1.0
+            next_done[e] = 0.0
+            if fell(s) or elapsed[e] >= MAX_EPISODE_STEPS {
+                episodes = episodes + 1
+                return_sum = return_sum + ep_return[e]
+                s = reset_state()
+                elapsed[e] = 0.0
+                ep_return[e] = 0.0
+                next_done[e] = 1.0
+            }
+            setslab(next_obs, e, s)
+        }
+    }
+
+    next_value = column(mlp(theta, CRITIC, next_obs))
+    advantages = gae(rewards, values, dones, next_value, next_done)
+    returns = advantages + values
+
+    flat = arange(BATCH_SIZE)
+    b_logprobs = take(logprobs, flat)
+    b_actions = take(actions, flat)
+    b_advantages = take(advantages, flat)
+    b_returns = take(returns, flat)
+    b_values = take(values, flat)
+
+    b_inds = arange(BATCH_SIZE)
+    clipfrac_sum = 0.0
+    stats = zeros(N_STATS)
+    for epoch to UPDATE_EPOCHS {
+        shuffle(b_inds)
+        for mb to NUM_MINIBATCHES {
+            mb_inds = b_inds[mb * MINIBATCH_SIZE:(mb + 1) * MINIBATCH_SIZE]
+            X = rows(obs, mb_inds)
+            mb_actions = take(b_actions, mb_inds)
+            mb_logprobs = take(b_logprobs, mb_inds)
+            mb_returns = take(b_returns, mb_inds)
+            mb_values = take(b_values, mb_inds)
+            mb_advantages = take(b_advantages, mb_inds)
+            mu = sum(mb_advantages) / MINIBATCH_SIZE
+            std = sqrt(sum((mb_advantages - mu) * (mb_advantages - mu)) / (MINIBATCH_SIZE - 1))
+            mb_advantages = (mb_advantages - mu) / (std + 1.0e-8)
+
+            loss, grad = value_and_grad(ppo_loss, theta, X, mb_actions, mb_logprobs, mb_advantages, mb_returns, mb_values, stats)
+            policy_loss = stats[0]
+            value_loss = stats[1]
+            entropy = stats[2]
+            old_approx_kl = stats[3]
+            approx_kl = stats[4]
+            clipfrac_sum = clipfrac_sum + stats[5] / MINIBATCH_SIZE
+            grad = grad * min(1.0, MAX_GRAD_NORM / (sqrt(sum(grad * grad)) + 1.0e-6))
+            optim_step(opt, theta, grad, adam_state, model)
+        }
+    }
+
+    var_y = variance(b_returns)
+    explained_variance = 1.0 - variance(b_returns - b_values) / var_y
+    mean_return = 0.0
+    if episodes > 0 {
+        mean_return = return_sum / episodes
+    }
+    clipfrac = clipfrac_sum / (UPDATE_EPOCHS * NUM_MINIBATCHES)
+    show iteration
+    show global_step
+    show episodes
+    show mean_return
+    show value_loss
+    show policy_loss
+    show entropy
+    show old_approx_kl
+    show approx_kl
+    show clipfrac
+    show explained_variance
+    setslab(history, it, [value_loss, policy_loss, entropy, approx_kl, explained_variance])
+}
+
+# ---- the reference's numbers (python3 reference.py --digits) ----
+test "GAE on the fixed trajectory is CleanRL's to the last bit" {
+    want = [2.2711284128761049, 3.4940791398375834, 8.0451583835996239, -5.6920105538759431, 0.44863050318668796, 0.055307391831501906, 1.0898282071518137, -2.3350091226056726, 2.415488522933595, -0.92959048825395385, 0.31983380081124313, 4.4884894439984766, -3.7922532962116886, -1.7657688421969158, 0.85873228485746367, -0.70949592702532893, -2.6919507261793831, 3.7490342801665113]
+    assert_allclose(take(fixed_adv, arange(18)), want, 0.0)
+}
+
+def assert_iteration(it, want: Arr, tol) {
+    for k to 5 {
+        assert_near(history[it, k], want[k], tol * max(abs(want[k]), 1.0))
+    }
+}
+
+test "the first two rollouts match torch to rounding: losses, entropy, KL, explained variance within 1e-13" {
+    assert_iteration(0, [42.229523907761617, -0.011091093564004798, 0.68857279443074215, 0.0047985100956517215, -0.0024564551731178774], 1.0e-13)
+    assert_iteration(1, [33.230135431067595, 0.045003416525993933, 0.63979018038425961, 0.025080606064226321, -0.014039869044250475], 1.0e-13)
+}
+
+test "after 40 rollouts and 640 Adam steps the run is still torch's to 1e-8, and the actor's last layer to 1e-9" {
+    assert_iteration(39, [33.144003366249756, 5.7449970728436217e-05, 0.61594172910133016, 4.0429237044108113e-06, 0.17307312383517359], 1.0e-8)
+    W = param_get(theta, model, ACTOR + 4)
+    got = [W[0, 0], W[1, 0], W[2, 0], W[0, 1], W[1, 1], W[2, 1]]
+    want = [-0.019551124388212712, 0.044304301182853313, -0.019012135768089009, 0.018292940048403011, -0.044039689944018252, 0.017977365548286588]
+    assert_allclose(got, want, 1.0e-9)
+}
+
+# ---- the generated gradient against the hand-written one ----
+
+#| The first minibatch of the first update, at the initial parameters, both
+#| ways. Some sums run in another order, so the check is 1e-12 of the
+#| gradient's largest entry.
+test "value_and_grad matches the hand-written backward pass to 1e-12" {
+    srand(SEED)
+    theta0 = param_zeros(model)
+    layer_init(theta0, CRITIC, sqrt(2.0))
+    layer_init(theta0, CRITIC + 2, sqrt(2.0))
+    layer_init(theta0, CRITIC + 4, 1.0)
+    layer_init(theta0, ACTOR, sqrt(2.0))
+    layer_init(theta0, ACTOR + 2, sqrt(2.0))
+    layer_init(theta0, ACTOR + 4, 0.01)
+    # a minibatch from the fixed trajectory's states, with made-up rollout data
+    M = MINIBATCH_SIZE
+    Xc = zeros(M, OBS)
+    acts = zeros(M)
+    oldlogp = zeros(M)
+    advs = zeros(M)
+    rets = zeros(M)
+    vals = zeros(M)
+    for i to M {
+        setslab(Xc, i, reset_state() * 20.0)
+        acts[i] = floor(2.0 * rand())
+        oldlogp[i] = -0.6 - 0.2 * rand()
+        advs[i] = rand() - 0.5
+        rets[i] = 2.0 * rand()
+        vals[i] = rets[i] + 0.4 * (rand() - 0.5)
+    }
+    hand_logits = mlp(theta0, ACTOR, Xc)
+    hand_stats = zeros(N_STATS)
+    hand_grad = hand_minibatch_grad(theta0, Xc, log_softmax(hand_logits), softmax_rows(hand_logits), column(mlp(theta0, CRITIC, Xc)), acts, oldlogp, advs, rets, vals, hand_stats)
+    ad_stats = zeros(N_STATS)
+    ad_loss, ad_grad = value_and_grad(ppo_loss, theta0, Xc, acts, oldlogp, advs, rets, vals, ad_stats)
+    assert_allclose(ad_stats, hand_stats, 0.0)
+    ppo_miss = max(abs(ad_grad - hand_grad)) / max(abs(hand_grad))
+    show ppo_miss
+    assert_lt(ppo_miss, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2019 CleanRL developers (vwxyzjn/cleanrl)
+# SPDX-FileCopyrightText: 2026 The Viv authors

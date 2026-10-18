@@ -1,0 +1,144 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// The link to a vipyr function's code map (/vipyr/map/<function>), with the
+// counts from src/data/codemap.json. Renders nothing for a function with no
+// map. `fns` lists several (a gallery entry's).
+import index from '../data/codemap.json';
+
+export interface Props {
+  fns: string[];
+}
+const { fns } = Astro.props;
+const items = fns
+  .filter((q) => (index.functions as Record<string, any>)[q])
+  .map((q) => {
+    const m = (index.maps as Record<string, any>)[(index.functions as Record<string, any>)[q].map];
+    return { q, m, from: m.entry === '<main>' ? m.file : `${m.entry} in ${m.file}` };
+  });
+---
+
+{
+  items.length === 1 && (
+    <nav class="vp-maplinks" aria-label="Map of the Viv code">
+      <a class="vp-maplink" href={`/vipyr/map/${items[0].q}`}>
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <rect x="2.5" y="4" width="7" height="5" rx="1" />
+          <rect x="14.5" y="3" width="7" height="5" rx="1" />
+          <rect x="14.5" y="15" width="7" height="5" rx="1" />
+          <path d="M9.5 6.5h5M9.5 7.5c3 0 2 10 5 10" />
+        </svg>
+        <span>
+          <b>Map of the code</b>
+          <small>{`${items[0].m.defs} defs in ${items[0].m.modules} ${items[0].m.modules === 1 ? 'module' : 'modules'}, reached from ${items[0].from}`}</small>
+        </span>
+      </a>
+    </nav>
+  )
+}
+{
+  items.length > 1 && (
+    <nav class="vp-maplinks vp-maplinks-n" aria-label="Maps of the Viv code">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+        <rect x="2.5" y="4" width="7" height="5" rx="1" />
+        <rect x="14.5" y="3" width="7" height="5" rx="1" />
+        <rect x="14.5" y="15" width="7" height="5" rx="1" />
+        <path d="M9.5 6.5h5M9.5 7.5c3 0 2 10 5 10" />
+      </svg>
+      <span>
+        <b>Maps of the code</b>
+        <span class="vp-maplist">
+          {items.map(({ q, m }) => (
+            <a href={`/vipyr/map/${q}`} title={`${m.defs} defs in ${m.modules} ${m.modules === 1 ? 'module' : 'modules'}`}>
+              <code>vp.{q}</code>
+              <small>{`${m.defs} defs`}</small>
+            </a>
+          ))}
+        </span>
+      </span>
+    </nav>
+  )
+}
+
+<style>
+  .vp-maplinks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 14px 0 20px;
+  }
+  .vp-maplink {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px 10px 12px;
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--accent-fill);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    color: var(--text);
+    text-decoration: none;
+    max-width: 100%;
+  }
+  .vp-maplink:hover {
+    border-color: var(--accent);
+    border-left-color: var(--accent-fill);
+    background: var(--accent-wash);
+  }
+  .vp-maplink svg {
+    flex: none;
+    color: var(--accent);
+  }
+  .vp-maplinks-n {
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 16px 10px 12px;
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--accent-fill);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    flex-wrap: nowrap;
+  }
+  .vp-maplinks-n > svg {
+    flex: none;
+    color: var(--accent);
+    margin-top: 2px;
+  }
+  .vp-maplinks-n b {
+    font-weight: 600;
+    color: var(--heading);
+  }
+  .vp-maplist {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 2px;
+  }
+  .vp-maplist a {
+    color: var(--accent);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .vp-maplist a:hover code {
+    text-decoration: underline;
+  }
+  .vp-maplist small {
+    margin-left: 5px;
+    color: var(--text-faint);
+    font-size: 12.5px;
+  }
+  .vp-maplink span {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .vp-maplink b {
+    font-weight: 600;
+    color: var(--heading);
+  }
+  .vp-maplink small {
+    color: var(--text-muted);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+</style>

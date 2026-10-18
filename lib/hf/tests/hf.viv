@@ -1,0 +1,77 @@
+# The tests of lib/hf/hf that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/hf does not load the references.
+from hf.hf import hf_energy, hf_scf, hf_setup, hf_setup_of, hf_step
+from hf.molecule import mol_enuc, mol_nalpha, mol_nbeta, mol_nelectron, Molecule, molecule_packs
+from hf.basis import AT_LEN, AT_X
+from hf.opts import scf_checked, scf_defaults, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.guess import GS_CORE
+from hf.jk_direct import INT_JK_DIRECT
+from hfref.water_631gs_sph import (
+    water631gs_sph_atoms, WATER631GS_SPH_E_RHF, water631gs_sph_prims, water631gs_sph_shells,
+)
+from hfref.water_sto3g import (
+    watersto3g_atoms, WATERSTO3G_E_NUC, WATERSTO3G_E_RHF, WATERSTO3G_E_UHF, WATERSTO3G_NAO_CART,
+    watersto3g_prims, watersto3g_shells,
+)
+
+#| Water STO-3G from PySCF's packs.
+#~ test
+#@ 55823b96
+def hf_t_water() -> Molecule {
+    return molecule_packs(watersto3g_atoms(), watersto3g_shells(), watersto3g_prims())
+}
+
+test "the nuclear repulsion and electron counts are PySCF's" {
+    hf_m = hf_t_water()
+    assert_near(mol_enuc(hf_m), WATERSTO3G_E_NUC, 1.0e-13)
+    hf_c = Molecule { charge: 1, spin: 1, ..hf_m }
+    assert_near(mol_nalpha(hf_c), 5, 0.0)
+    assert_near(mol_nbeta(hf_c), 4, 0.0)
+    # automatic is RHF for the closed shell and UHF for the cation
+    hf_o = scf_defaults()
+    hf_n = WATERSTO3G_NAO_CART
+    hf_z = zeros(hf_n, hf_n)
+    assert_near(hf_setup_of(hf_m, hf_z, hf_z, hf_z, hf_o).method, SCF_RHF, 0.0)
+    assert_near(hf_setup_of(hf_c, hf_z, hf_z, hf_z, hf_o).method, SCF_UHF, 0.0)
+    assert_near(hf_setup_of(hf_c, hf_z, hf_z, hf_z, ScfOptions { method: SCF_ROHF, ..hf_o }).method, SCF_ROHF, 0.0)
+    # a ghost atom adds no charge and no repulsion
+    hf_ghost = zeros(AT_LEN)
+    hf_ghost[AT_X] = 3.0
+    hf_gm = Molecule { atoms: vcat(watersto3g_atoms(), hf_ghost), ..hf_m }
+    assert_near(mol_enuc(hf_gm), WATERSTO3G_E_NUC, 1.0e-13)
+    assert_near(mol_nelectron(hf_gm), 10, 0.0)
+}
+
+test "water STO-3G from the packs: RHF, and UHF on the closed shell, give PySCF's energy" {
+    hf_m = hf_t_water()
+    hf_r = hf_energy(hf_m, scf_checked())
+    assert_lt(abs(hf_r.energy - WATERSTO3G_E_RHF), 1.0e-9)
+    assert_near(hf_r.converged, 1.0, 0.0)
+    hf_u = hf_energy(hf_m, ScfOptions { method: SCF_UHF, ..scf_checked() })
+    assert_lt(abs(hf_u.energy - WATERSTO3G_E_UHF), 1.0e-9)
+    assert_lt(abs(hf_u.energy - hf_r.energy), 1.0e-10)
+}
+
+test "direct and in-core J/K give the same energy (PySCF's T1 rows 2 and 3)" {
+    hf_m = hf_t_water()
+    hf_o = ScfOptions { guess: GS_CORE, ..scf_checked() }
+    hf_r = hf_energy(hf_m, hf_o)
+    hf_d = hf_energy(hf_m, ScfOptions { jk: INT_JK_DIRECT, ..hf_o })
+    assert_lt(abs(hf_d.energy - hf_r.energy), 1.0e-10)
+    assert_lt(abs(hf_d.energy - WATERSTO3G_E_RHF), 1.0e-9)
+}
+
+test "water 6-31G* in 5D from the packs gives PySCF's spherical energy" {
+    hf_m = molecule_packs(water631gs_sph_atoms(), water631gs_sph_shells(), water631gs_sph_prims())
+    hf_p = hf_setup(hf_m, scf_checked())
+    hf_r = hf_scf(hf_p)
+    assert_lt(abs(hf_r.energy - WATER631GS_SPH_E_RHF), 1.0e-9)
+    # the import step from the converged density gives it back
+    hf_s = hf_step(hf_p, hf_r.alpha.density, hf_r.beta.density)
+    assert_lt(abs(hf_s.energy - hf_r.energy), 1.0e-10)
+    assert_lt(max(abs(hf_s.density - hf_r.density)), 1.0e-8)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

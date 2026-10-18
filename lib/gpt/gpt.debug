@@ -1,0 +1,20 @@
+# What to check while the small GPT trains and writes. Nothing here prints: the watches and holds go into the story
+# (`viv story lib/gpt/story_gpt.viv`), and a failed hold fails the run.
+#
+# Per training step: the mean loss of the step's batch, the length of the
+# gradient over all parameters, and the fraction of the starting step sizes
+# the schedule uses; per update, the step count Adam's correction reads. Per
+# sampled character: the token drawn (the last of `out`) and the probability
+# the model gave it.
+train  @9ee69166
+  watch per iteration     loss, gnorm, lr_scale
+  hold per iteration      loss > 0.0 and gnorm >= 0.0                                   "the loss is positive and the gradient has a length"
+self_attention  @2d2dd5ee
+  hold at head            max(abs((N * N) @ (zeros(len(transpose(N))) + 1.0) / len(transpose(N)) - 1.0)) <= 1.0e-6   "each row entering attention has root mean square 1"
+optimizer_step  @a4d42823
+  watch at adam           taken, lr_scale
+sequence_loss  @e4a4b838
+  watch at loss           loss
+sample  @f720937f
+  watch per iteration     next = out[len(out) - 1], p_next = p[out[len(out) - 1]]
+  hold at probs           abs(sum(p) - 1.0) <= 1.0e-12                                  "the next-character probabilities sum to 1"

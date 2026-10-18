@@ -1,0 +1,599 @@
+###
+post: Reading a PSS/E RAW case
+agent: claude
+
+PSS/E's RAW file (Siemens PTI, "PSS/E Program Operation Manual", chapter
+"Power Flow Raw Data File Contents", revisions 32 to 34) holds a network as
+a sequence of sections, one record per line, each section ended by a line
+that starts with `0`. `read_raw(path)` reads the sections a power flow
+needs and returns the network in MATPOWER's form (power.case), so every
+solver in lib/power takes it:
+
+  - buses: number, base kV, type (1 PQ, 2 PV, 3 swing, 4 isolated), area,
+    zone, voltage and, from revision 33, the normal voltage limits;
+  - loads: the constant-power part PL + jQL is added to the bus's Pd, Qd;
+    the constant-admittance part YP + jYQ (MW and MVAr at 1 pu) becomes a
+    bus shunt; the constant-current part IP + jIQ is taken at the case's
+    voltage, P = IP Vm, Q = IQ Vm (MATPOWER has constant-power loads only);
+  - fixed shunts: GL + jBL added to the bus shunt;
+  - switched shunts: held at their initial susceptance BINIT;
+  - generators: P, Q, Q limits, voltage set point, MVA base, status, P
+    limits, and the source impedance ZR + jZX on the machine base (kept
+    for the short circuit, power.shortcircuit);
+  - branches: r, x, total charging b, ratings A, B, C (the first three of
+    revision 34's twelve), status; the line-end shunts GI + jBI, GJ + jBJ
+    are added to the shunts of the two buses;
+  - two-winding transformers (four records each): the impedance R1-2 +
+    jX1-2 on the system base (CZ = 1), the winding base (CZ = 2) or as
+    load loss in watts and |Z| (CZ = 3); the off-nominal ratio
+    t = (WINDV1 / WINDV2) in per unit of the bus base voltages (CW = 1),
+    from winding voltages in kV (CW = 2) or in per unit of the windings'
+    nominal voltages NOMV (CW = 3); the phase shift ANG1; the magnetizing
+    admittance MAG1 + jMAG2 at the winding 1 bus, on the system base
+    (CM = 1) or as no-load loss in watts and exciting current in per unit
+    of the winding base (CM = 2);
+  - areas (number, swing bus, desired interchange) and zones.
+
+A transformer's impedance on its winding base is moved to the system base
+by the ratio of the MVA bases alone, as ANDES's reader does. Revision 34
+adds a switching-device section after the branches; a closed device is
+read as a branch of its reactance. Three-winding transformers, DC lines
+and FACTS devices are not read: a file that has any stops with a message.
+###
+
+from power.case import Case, VA, VM, read_case
+from power.pf import NR, internal, runpf
+from power.ybus import DEG, full_network, make_ybus, ybus_mul
+
+#: bus types
+PQ_BUS: Num = 1.0
+PV_BUS: Num = 2.0
+REF_BUS: Num = 3.0
+ISOLATED: Num = 4.0
+
+#: MATPOWER's matrix widths and the columns written here (power.case's are the solver's)
+BUS_W: Int = 13
+GEN_W: Int = 21
+BRANCH_W: Int = 13
+C_BUS_I: Int = 0
+C_TYPE: Int = 1
+C_PD: Int = 2
+C_QD: Int = 3
+C_GS: Int = 4
+C_BS: Int = 5
+C_AREA: Int = 6
+C_VM: Int = 7
+C_VA: Int = 8
+C_BASE_KV: Int = 9
+C_ZONE: Int = 10
+C_VMAX: Int = 11
+C_VMIN: Int = 12
+G_BUS: Int = 0
+G_PG: Int = 1
+G_QG: Int = 2
+G_QMAX: Int = 3
+G_QMIN: Int = 4
+G_VG: Int = 5
+G_MBASE: Int = 6
+G_STATUS: Int = 7
+G_PMAX: Int = 8
+G_PMIN: Int = 9
+B_F: Int = 0
+B_T: Int = 1
+B_R: Int = 2
+B_X: Int = 3
+B_B: Int = 4
+B_RATE_A: Int = 5
+B_RATE_B: Int = 6
+B_RATE_C: Int = 7
+B_TAP: Int = 8
+B_SHIFT: Int = 9
+B_STATUS: Int = 10
+B_ANGMIN: Int = 11
+B_ANGMAX: Int = 12
+ANGLE_LIMIT: Num = 360.0
+#: a closed switching device of zero reactance is read with this reactance, per unit
+SWITCH_X: Num = 0.0001
+#: watts per megawatt
+W_PER_MW: Num = 1e6
+#: voltage limits when the file has none (revision 32)
+VMAX_DEFAULT: Num = 1.1
+VMIN_DEFAULT: Num = 0.9
+
+#: the load fields kept in Raw.loads: I, STATUS, PL, QL, IP, IQ, YP, YQ
+LOAD_FIELDS: [Int] = [0, 2, 5, 6, 7, 8, 9, 10]
+#: Raw.machine's columns: MBASE, ZR, ZX
+M_MBASE: Int = 0
+M_ZR: Int = 1
+M_ZX: Int = 2
+#: Raw.areas' columns: number, swing bus, desired interchange
+A_NUM: Int = 0
+A_SWING: Int = 1
+A_PDES: Int = 2
+
+#: the sections of revisions 32 and 33 in file order; revision 34 adds one
+SECTIONS_33: [Str] = ["bus", "load", "fshunt", "gen", "branch", "transf", "area", "twotermdc", "vscdc",
+                      "impedcorr", "mtdc", "msline", "zone", "interarea", "owner", "facts", "swshunt", "gne",
+                      "indmach"]
+SECTIONS_34: [Str] = ["bus", "load", "fshunt", "gen", "branch", "swdev", "transf", "area", "twotermdc",
+                      "vscdc", "impedcorr", "mtdc", "msline", "zone", "interarea", "owner", "facts", "swshunt",
+                      "gne", "indmach", "substation"]
+#: sections whose records change the power flow but are not read
+UNREAD: [Str] = ["twotermdc", "vscdc", "mtdc", "facts", "gne", "indmach"]
+
+record Raw {
+    case: Case
+    rev: Int
+    #: per generator: MBASE, ZR, ZX (the source impedance on the machine base)
+    machine: Arr
+    #: per area: number, swing bus, desired interchange (MW)
+    areas: Arr
+    zones: [Int]
+    #: per load record: bus, status, PL, QL, IP, IQ, YP, YQ
+    loads: Arr
+}
+
+#| The fields of one record: separated by commas (or blanks when the line
+#| has no comma), quoted names kept whole, the comment after `/` dropped.
+def fields(line: Str) -> [Str] {
+    out: [Str] = []
+    cur = ""
+    quoted = false
+    commas = contains(line, ",")
+    for ch in line {
+        if ch == "'" or ch == "\"" {
+            quoted = not quoted
+            cur = cur + ch
+        }
+        else if not quoted and ch == "/" {
+            break
+        }
+        else if not quoted and (ch == "," or (not commas and (ch == " " or ch == "\t"))) {
+            if commas or len(strip(cur)) > 0 {
+                out = append(out, strip(cur))
+            }
+            cur = ""
+        }
+        else {
+            cur = cur + ch
+        }
+    }
+    if len(strip(cur)) > 0 {
+        out = append(out, strip(cur))
+    }
+    return out
+}
+
+#| Field k as a number, or `default` when the record is shorter or the field empty.
+def num(f: [Str], k: Int, default: Num) -> Num {
+    if k < len(f) and len(f[k]) > 0 {
+        return float(f[k])
+    }
+    return default
+}
+
+def _ends_section(line: Str) -> Bool {
+    s = strip(line)
+    if startswith(s, "Q") {
+        return true
+    }
+    if not startswith(s, "0") {
+        return false
+    }
+    rest = strip(s[1:])
+    return len(rest) == 0 or startswith(rest, "/") or startswith(rest, ",")
+}
+
+#| The records of each section, in file order: sec[name] is the index of
+#| the section's first line in `lines` and cnt[name] its number of lines.
+def _sections(lines: [Str], names: [Str], first: Int) {
+    start = map()
+    stop_at = map()
+    k: Int = first
+    for name in names {
+        start[name] = k
+        while k < len(lines) and not _ends_section(lines[k]) {
+            k += 1
+        }
+        stop_at[name] = k
+        k += 1
+        if k >= len(lines) {
+            break
+        }
+    }
+    return start, stop_at
+}
+
+def _span(start: Map, stop_at: Map, name: Str) -> [Int] {
+    if not has(start, name) {
+        return [0, 0]
+    }
+    return [int(start[name]), int(stop_at[name])]
+}
+
+#| The network in the RAW text `text`: MATPOWER's case plus what the
+#| short circuit and the study read beside it.
+def parse_raw(text: Str, label: Str) -> Raw {
+    lines = split(replace(text, "\r", ""), "\n")
+    head = fields(lines[0])
+    base = num(head, 1, 100.0)
+    rev: Int = int(num(head, 2, 33.0))
+    if rev < 32 or rev > 34 {
+        stop(f"read_raw: {label} is revision {rev}; revisions 32, 33 and 34 are read")
+    }
+    #: three lines of case identification; revision 34 then has system-wide data up to a 0 line
+    first: Int = 3
+    names = SECTIONS_33
+    if rev == 34 {
+        names = SECTIONS_34
+        while first < len(lines) and not _ends_section(lines[first]) {
+            first += 1
+        }
+        first += 1
+    }
+    start, stop_at = _sections(lines, names, first)
+    for name in UNREAD {
+        s = _span(start, stop_at, name)
+        if s[1] > s[0] {
+            stop(f"read_raw: {label} has {name} records, which are not read")
+        }
+    }
+
+    #: buses
+    sb = _span(start, stop_at, "bus")
+    nb: Int = s_count(sb)
+    bus = zeros(nb, BUS_W)
+    row = map()
+    for i to nb {
+        f = fields(lines[sb[0] + i])
+        bus[i, C_BUS_I] = num(f, 0, 0.0)
+        bus[i, C_BASE_KV] = num(f, 2, 0.0)
+        bus[i, C_TYPE] = num(f, 3, PQ_BUS)
+        bus[i, C_AREA] = num(f, 4, 1.0)
+        bus[i, C_ZONE] = num(f, 5, 1.0)
+        bus[i, C_VM] = num(f, 7, 1.0)
+        bus[i, C_VA] = num(f, 8, 0.0)
+        bus[i, C_VMAX] = num(f, 9, VMAX_DEFAULT)
+        bus[i, C_VMIN] = num(f, 10, VMIN_DEFAULT)
+        row[bus[i, C_BUS_I]] = i
+    }
+
+    #: loads: constant power to Pd + jQd, constant current at the case voltage, constant admittance to the shunt
+    sl = _span(start, stop_at, "load")
+    nload: Int = s_count(sl)
+    loads = zeros(nload, len(LOAD_FIELDS))
+    for k to nload {
+        f = fields(lines[sl[0] + k])
+        i: Int = int(row[num(f, 0, 0.0)])
+        for c to len(LOAD_FIELDS) {
+            loads[k, c] = num(f, LOAD_FIELDS[c], 0.0)
+        }
+        if num(f, 2, 1.0) > 0.0 {
+            vm = bus[i, C_VM]
+            bus[i, C_PD] += num(f, 5, 0.0) + num(f, 7, 0.0) * vm
+            bus[i, C_QD] += num(f, 6, 0.0) + num(f, 8, 0.0) * vm
+            bus[i, C_GS] += num(f, 9, 0.0)
+            bus[i, C_BS] -= num(f, 10, 0.0)
+        }
+    }
+
+    #: fixed shunts: I, ID, STATUS, GL, BL
+    ss = _span(start, stop_at, "fshunt")
+    for k from ss[0] to ss[1] {
+        f = fields(lines[k])
+        if num(f, 2, 1.0) > 0.0 {
+            i: Int = int(row[num(f, 0, 0.0)])
+            bus[i, C_GS] += num(f, 3, 0.0)
+            bus[i, C_BS] += num(f, 4, 0.0)
+        }
+    }
+
+    #: switched shunts at their initial susceptance BINIT: I, MODSW, ADJM, STAT, VSWHI, VSWLO, SWREM,
+    #: RMPCT, RMIDNT, BINIT; revision 34 adds NREG after SWREM
+    sw = _span(start, stop_at, "swshunt")
+    binit: Int = 10 if rev == 34 else 9
+    for k from sw[0] to sw[1] {
+        f = fields(lines[k])
+        if num(f, 3, 1.0) > 0.0 {
+            i: Int = int(row[num(f, 0, 0.0)])
+            bus[i, C_BS] += num(f, binit, 0.0)
+        }
+    }
+
+    #: generators; revision 34 adds NREG after IREG, so the later fields move by one
+    sg = _span(start, stop_at, "gen")
+    ng: Int = s_count(sg)
+    gen = zeros(ng, GEN_W)
+    machine = zeros(ng, M_ZX + 1)
+    d: Int = 1 if rev == 34 else 0
+    for g to ng {
+        f = fields(lines[sg[0] + g])
+        gen[g, G_BUS] = num(f, 0, 0.0)
+        gen[g, G_PG] = num(f, 2, 0.0)
+        gen[g, G_QG] = num(f, 3, 0.0)
+        gen[g, G_QMAX] = num(f, 4, 9999.0)
+        gen[g, G_QMIN] = num(f, 5, -9999.0)
+        gen[g, G_VG] = num(f, 6, 1.0)
+        gen[g, G_MBASE] = num(f, 8 + d, base)
+        gen[g, G_STATUS] = num(f, 14 + d, 1.0)
+        gen[g, G_PMAX] = num(f, 16 + d, 9999.0)
+        gen[g, G_PMIN] = num(f, 17 + d, -9999.0)
+        machine[g, M_MBASE] = gen[g, G_MBASE]
+        machine[g, M_ZR] = num(f, 9 + d, 0.0)
+        machine[g, M_ZX] = num(f, 10 + d, 1.0)
+    }
+
+    #: non-transformer branches; revision 34 has a name and twelve ratings
+    sbr = _span(start, stop_at, "branch")
+    rate0: Int = 7 if rev == 34 else 6
+    gi: Int = 19 if rev == 34 else 9
+    st: Int = 23 if rev == 34 else 13
+    branch = []
+    for k from sbr[0] to sbr[1] {
+        f = fields(lines[k])
+        r = zeros(BRANCH_W)
+        r[B_F] = num(f, 0, 0.0)
+        r[B_T] = abs(num(f, 1, 0.0))
+        r[B_R] = num(f, 3, 0.0)
+        r[B_X] = num(f, 4, 0.0)
+        r[B_B] = num(f, 5, 0.0)
+        r[B_RATE_A] = num(f, rate0, 0.0)
+        r[B_RATE_B] = num(f, rate0 + 1, 0.0)
+        r[B_RATE_C] = num(f, rate0 + 2, 0.0)
+        r[B_STATUS] = num(f, st, 1.0)
+        r[B_ANGMIN] = -ANGLE_LIMIT
+        r[B_ANGMAX] = ANGLE_LIMIT
+        branch = append(branch, r)
+        if r[B_STATUS] > 0.0 {
+            i: Int = int(row[r[B_F]])
+            j: Int = int(row[r[B_T]])
+            bus[i, C_GS] += num(f, gi, 0.0) * base
+            bus[i, C_BS] += num(f, gi + 1, 0.0) * base
+            bus[j, C_GS] += num(f, gi + 2, 0.0) * base
+            bus[j, C_BS] += num(f, gi + 3, 0.0) * base
+        }
+    }
+
+    #: revision 34's switching devices: I, J, CKT, X, RATE1..RATE12, STAT
+    sd = _span(start, stop_at, "swdev")
+    for k from sd[0] to sd[1] {
+        f = fields(lines[k])
+        r = zeros(BRANCH_W)
+        r[B_F] = num(f, 0, 0.0)
+        r[B_T] = abs(num(f, 1, 0.0))
+        x = num(f, 3, 0.0)
+        r[B_X] = x if x != 0.0 else SWITCH_X
+        r[B_RATE_A] = num(f, 4, 0.0)
+        r[B_RATE_B] = num(f, 5, 0.0)
+        r[B_RATE_C] = num(f, 6, 0.0)
+        r[B_STATUS] = num(f, 16, 1.0)
+        r[B_ANGMIN] = -ANGLE_LIMIT
+        r[B_ANGMAX] = ANGLE_LIMIT
+        branch = append(branch, r)
+    }
+
+    #: two-winding transformers, four records each
+    stf = _span(start, stop_at, "transf")
+    k: Int = stf[0]
+    while k < stf[1] {
+        f1 = fields(lines[k])
+        if num(f1, 2, 0.0) != 0.0 {
+            stop(f"read_raw: {label} has a three-winding transformer (line {k + 1}), which is not read")
+        }
+        f2 = fields(lines[k + 1])
+        f3 = fields(lines[k + 2])
+        f4 = fields(lines[k + 3])
+        k += 4
+        branch = append(branch, _transformer(f1, f2, f3, f4, bus, row, base))
+    }
+
+    #: areas: I, ISW, PDES, PTOL, ARNAME
+    sa = _span(start, stop_at, "area")
+    areas = zeros(s_count(sa), A_PDES + 1)
+    for a to s_count(sa) {
+        f = fields(lines[sa[0] + a])
+        areas[a, A_NUM] = num(f, 0, 0.0)
+        areas[a, A_SWING] = num(f, 1, 0.0)
+        areas[a, A_PDES] = num(f, 2, 0.0)
+    }
+    sz = _span(start, stop_at, "zone")
+    zones: [Int] = [int(num(fields(lines[sz[0] + z]), 0, 0.0)) for z to s_count(sz)]
+
+    if len(branch) == 0 {
+        stop(f"read_raw: {label} has no branches")
+    }
+    net = Case { base_mva: base, bus: bus, gen: gen, branch: branch }
+    return Raw { case: net, rev: rev, machine: machine, areas: areas, zones: zones, loads: loads }
+}
+
+def s_count(s: [Int]) -> Int {
+    return s[1] - s[0]
+}
+
+#| One two-winding transformer as a MATPOWER branch. Its magnetizing
+#| admittance is added to the shunt at the winding 1 bus.
+def _transformer(f1: [Str], f2: [Str], f3: [Str], f4: [Str], bus: Arr, row: Map, base: Num) -> Arr {
+    r = zeros(BRANCH_W)
+    r[B_F] = num(f1, 0, 0.0)
+    r[B_T] = abs(num(f1, 1, 0.0))
+    i: Int = int(row[r[B_F]])
+    j: Int = int(row[r[B_T]])
+    cw: Int = int(num(f1, 4, 1.0))
+    cz: Int = int(num(f1, 5, 1.0))
+    cm: Int = int(num(f1, 6, 1.0))
+    mag1 = num(f1, 7, 0.0)
+    mag2 = num(f1, 8, 0.0)
+    r[B_STATUS] = 1.0 if num(f1, 11, 1.0) > 0.0 else 0.0
+
+    #: the series impedance, moved to the system base
+    rs = num(f2, 0, 0.0)
+    xs = num(f2, 1, 0.0)
+    sbase12 = num(f2, 2, base)
+    if cz == 3 {
+        #: R from the load loss in watts, then X from |Z|, both on the winding base
+        zmag = xs
+        rs = rs / (W_PER_MW * sbase12)
+        xs = sqrt(max(zmag * zmag - rs * rs, 0.0))
+    }
+    if cz == 2 or cz == 3 {
+        rs = rs * base / sbase12
+        xs = xs * base / sbase12
+    }
+    r[B_R] = rs
+    r[B_X] = xs
+
+    #: the off-nominal ratio in per unit of the bus base voltages
+    windv1 = num(f3, 0, 1.0)
+    nomv1 = num(f3, 1, 0.0)
+    windv2 = num(f4, 0, 1.0)
+    nomv2 = num(f4, 1, 0.0)
+    kv1 = bus[i, C_BASE_KV]
+    kv2 = bus[j, C_BASE_KV]
+    if nomv1 == 0.0 {
+        nomv1 = kv1
+    }
+    if nomv2 == 0.0 {
+        nomv2 = kv2
+    }
+    t1 = windv1
+    t2 = windv2
+    if cw == 2 {
+        t1 = windv1 / kv1
+        t2 = windv2 / kv2
+    }
+    else if cw == 3 {
+        t1 = windv1 * nomv1 / kv1
+        t2 = windv2 * nomv2 / kv2
+    }
+    if t1 == 0.0 {
+        t1 = 1.0
+    }
+    if t2 == 0.0 {
+        t2 = 1.0
+    }
+    r[B_TAP] = t1 / t2
+    #: the impedance is on the winding 2 side of the ratio t2: referred to the bus base it scales by t2^2
+    r[B_R] = r[B_R] * t2 * t2
+    r[B_X] = r[B_X] * t2 * t2
+    r[B_SHIFT] = num(f3, 2, 0.0)
+    r[B_RATE_A] = num(f3, 3, 0.0)
+    r[B_RATE_B] = num(f3, 4, 0.0)
+    r[B_RATE_C] = num(f3, 5, 0.0)
+    r[B_ANGMIN] = -ANGLE_LIMIT
+    r[B_ANGMAX] = ANGLE_LIMIT
+
+    #: the magnetizing admittance, per unit on the system base, at the winding 1 bus
+    gm = mag1
+    bm = mag2
+    if cm == 2 {
+        gm = mag1 / (W_PER_MW * base)
+        ymag = abs(mag2) * sbase12 / base
+        bm = -sqrt(max(ymag * ymag - gm * gm, 0.0))
+    }
+    if r[B_STATUS] > 0.0 {
+        bus[i, C_GS] += gm * base
+        bus[i, C_BS] += bm * base
+    }
+    return r
+}
+
+#| The RAW file at `path`.
+def read_raw(path: Str) -> Raw {
+    return parse_raw(read_text(path), path)
+}
+
+#| The case as a MATPOWER case file (format version 2), readable by
+#| power.case's read_case and by MATPOWER itself.
+def write_case(c: Case, path: Str, name: Str) {
+    out = f"function mpc = {name}\n%% converted from PSS/E RAW by lib/power/raw.viv\nmpc.version = '2';\n"
+    out = out + f"mpc.baseMVA = {c.base_mva};\n"
+    out = out + _mat("bus", c.bus) + _mat("gen", c.gen) + _mat("branch", c.branch)
+    write_text(path, out)
+}
+
+def _mat(name: Str, m: Arr) -> Str {
+    rows: [Str] = []
+    nr: Int = int(shape(m)[0])
+    nc: Int = int(shape(m)[1])
+    for i to nr {
+        rows = append(rows, "\t" + join("\t", [repr(m[i, c]) for c to nc]) + ";")
+    }
+    return f"mpc.{name} = [\n" + join("\n", rows) + "\n];\n"
+}
+
+test "a record splits on commas, keeps a quoted name whole and drops the comment" {
+    f = fields("     1,'BUS 1, A    ',  69.0000,3,   1 / a comment, here")
+    assert_true(len(f) == 5)
+    assert_true(f[1] == "'BUS 1, A    '")
+    assert_near(num(f, 2, 0.0), 69.0, 0.0)
+    assert_near(num(f, 7, -1.0), -1.0, 0.0)
+}
+
+#| The largest difference between the admittance matrices of two cases
+#| with the same buses in the same order, and between their Newton power
+#| flows' voltages (per unit) and branch flows (MW, MVAr).
+def same_network(a: Case, b: Case) {
+    na = internal(a)
+    nb = internal(b)
+    ya = make_ybus(na.nb, na.fbus, na.tbus, na.bus, na.branch, na.base, full_network())
+    yb = make_ybus(nb.nb, nb.fbus, nb.tbus, nb.bus, nb.branch, nb.base, full_network())
+    dy = 0.0
+    for j to na.nb {
+        ca = ybus_mul(ya, _unit(na.nb, j))
+        cb = ybus_mul(yb, _unit(nb.nb, j))
+        for i to na.nb {
+            dy = max(dy, abs(ca[i] - cb[i]))
+        }
+    }
+    ra = runpf(a, NR, false, 1e-10, 10)
+    rb = runpf(b, NR, false, 1e-10, 10)
+    va = ra.bus[:, VM] * exp_i(ra.bus[:, VA] * DEG)
+    vb = rb.bus[:, VM] * exp_i(rb.bus[:, VA] * DEG)
+    dv = 0.0
+    for i to na.nb {
+        dv = max(dv, abs(va[i] - vb[i]))
+    }
+    return dy, dv
+}
+
+def _unit(n: Int, j: Int) -> CArr {
+    e = czeros(n)
+    e[j] = 1.0 + 0.0i
+    return e
+}
+
+def exp_i(a: Arr) -> CArr {
+    out = czeros(len(a))
+    for k to len(a) {
+        out[k] = cos(a[k]) + sin(a[k]) * 1.0i
+    }
+    return out
+}
+
+test "MATPOWER's case14 written as RAW revision 33 and 34 reads back as the same network" {
+    m = read_case("lib/power/cases/case14.m")
+    for rev in ["33", "34"] {
+        r = read_raw(f"lib/power/cases/raw/case14_v{rev}.raw")
+        assert_true(r.rev == int(rev))
+        assert_allclose(shape(r.case.bus), [14.0, 13.0], 0.0)
+        assert_near(sum(r.case.bus[:, C_PD]), sum(m.bus[:, C_PD]), 1e-9)
+        dy, dv = same_network(m, r.case)
+        assert_near(dy, 0.0, 1e-12)
+        assert_near(dv, 0.0, 1e-12)
+    }
+}
+
+test "case118 and case300 (every transformer code CW, CZ; WINDV2 != 1; charging as magnetizing) read back the same" {
+    for name in ["case118", "case300"] {
+        m = read_case(f"lib/power/cases/{name}.m")
+        for rev in ["33", "34"] {
+            r = read_raw(f"lib/power/cases/raw/{name}_v{rev}.raw")
+            dy, dv = same_network(m, r.case)
+            assert_near(dy, 0.0, 1e-9)
+            assert_near(dv, 0.0, 1e-9)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

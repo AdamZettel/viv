@@ -1,0 +1,320 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Code from '../components/Code.astro';
+import Base from '../layouts/Base.astro';
+import Toc from '../components/Toc.astro';
+import trace from '../data/trace.json';
+import facts from '../data/facts.json';
+
+// The token dump is one token per line. Regroup it onto the source lines it
+// came from, which is how you actually want to read it.
+const tokenRows: string[][] = [[]];
+for (const t of trace.tokens.split('\n')) {
+  tokenRows.at(-1)!.push(t);
+  if (t === 'Newline' || t === 'Eof') tokenRows.push([]);
+}
+const tokenText = tokenRows
+  .filter((r) => r.length)
+  .map((r) => r.join(' '))
+  .join('\n');
+
+// The IR dump prints each node's hash; the store holds one entry per DISTINCT
+// hash, so the count of unique hashes is the real node count.
+const irHashes = (trace.ir.match(/^\s*([0-9a-f]{8})/gm) ?? []).map((s) => s.trim());
+const irPositions = irHashes.length;
+const irUnique = new Set(irHashes).size;
+
+const kit = facts.inventory.filter((r) => r.path.startsWith('crates/'));
+const lang = facts.inventory.filter((r) => r.path.startsWith('lang/'));
+
+// Keys are QUOTED deliberately: Astro hoists import/export statements out of
+// the frontmatter, and a bare `import:` or `export:` object key trips that
+// scan — the build fails with a bare `Unexpected ":"`.
+const debugEntries = trace.cNote.match(/(\d+) debug entries/)?.[1] ?? '';
+const sectionNote: Record<string, string> = {
+  header: 'the wasm magic and version',
+  type: 'the distinct function signatures',
+  'import': 'the runtime functions it calls, the host\'s flush, and the runtime\'s memory',
+  function: 'which signature each function uses',
+  table: 'function values, for `apply`',
+  global: 'the top-level bindings, then the addresses of the string table and a scratch pair',
+  'export': 'the entry point the host calls',
+  element: 'the table\'s contents',
+  'data count': 'how many data segments there are, which memory.init needs to know first',
+  code: 'the function bodies',
+  data: 'the strings the program prints, and its constant tables',
+};
+const TOC: [string, string][] = [
+  ['program', 'The program'],
+  ['lexer', 'Lexer'],
+  ['parser', 'Parser'],
+  ['ir', 'Content-addressed IR'],
+  ['c-backend', 'C99 backend'],
+  ['wasm-backend', 'Direct wasm'],
+  ['interpreter', 'Interpreter'],
+  ['where', 'Where it lives'],
+];
+---
+
+<Base
+  title="Compiler internals · Viv"
+  description="One nine-line Viv program traced through every representation the compiler has: tokens, AST, content-addressed IR, C99, a native run, and a wasm module — all printed by the compiler itself."
+  eyebrow="Compiler internals"
+  heading="One program, every representation">
+  <div class="withtoc">
+    <div>
+  <p class="lede">
+    This page follows one nine-line program through every form the compiler gives it, using
+    <strong>the compiler's own dumps</strong> — <code>viv --emit tokens|ast|ir</code>, the C
+    backend, the wasm emitter. A script regenerates all of it
+    (last run {trace.generated}).
+  </p>
+
+  <h2 id="program">The program</h2>
+  <p>
+    Sum of squares, 0 through 9. It is short enough to follow by hand and uses a
+    definition, a call, a counted loop, mutation of a global, and output:
+  </p>
+  <Code lang="viv" code={trace.program} />
+  <p>
+    Expected answer: <code>0² + 1² + … + 9² = 285</code>. All three executors must
+    produce it.
+  </p>
+
+  <ol class="stages">
+    <li>
+      <b>lexer.rs</b><span
+        >characters → {trace.tokenCount} tokens, every number literal an f64</span
+      >
+    </li>
+    <li><b>parser.rs</b><span>tokens → an AST with a byte span on every node</span></li>
+    <li><b>lower.rs</b><span>AST → typed, content-addressed IR in knotkit's store</span></li>
+    <li>
+      <b>backend.rs / wasm_backend.rs / interp.rs</b><span
+        >the C backend, the wasm backend and the interpreter</span
+      >
+    </li>
+  </ol>
+
+  <h2 id="lexer">The lexer turns characters into tokens</h2>
+  <p>
+    Every numeric literal lexes as an <code>f64</code>: <code>10</code> lexes as
+    <code>Num(10.0)</code>. The compiler makes a literal an <code>Int</code> later, when it
+    stands where the program expects one (an annotation, a parameter, a field). Newlines are real tokens, because
+    a newline is the statement terminator; inside parentheses or brackets the lexer suppresses
+    them so long expressions can wrap.
+  </p>
+  <pre class="dump dump-wide">{tokenText}</pre>
+  <p class="note">
+    {trace.tokenCount} tokens, regrouped one source line per row for reading. The dump itself is
+    one token per line.
+  </p>
+
+  <h2 id="parser">The parser turns tokens into an AST</h2>
+  <p>
+    Recursive descent, no backtracking; the first error stops the parse. The AST records
+    everything the source said, including a <code>Span</code> (a byte range) on every node,
+    which is what diagnostics and the workbench's red squiggles point at. The full dump is
+    {trace.astLines} lines. Here is <code>def sq</code>:
+  </p>
+  <pre class="dump dump-tall">{trace.ast.split('\n').slice(0, 42).join('\n')}</pre>
+  <p class="note">
+    Excerpt. The AST has <em>two</em> separate <code>Var("x")</code> nodes for <code>x * x</code>;
+    the next stage merges them.
+  </p>
+
+  <h2 id="ir">From the AST to content-addressed IR</h2>
+  <p>
+    <!-- aispeak-ok: the stage is named in the heading above and defined here -->
+    Lowering type-checks the AST and builds
+    knotkit's IR store, and every node's identity is a <strong>BLAKE3 hash</strong> of its kind,
+    its payload, and its children's hashes — not a pointer, not an index. The dump prints that
+    hash next to each node:
+  </p>
+  <pre class="dump dump-tall">{trace.ir}</pre>
+  <p>
+    Read the hashes. The two <code>Var&#123;x&#125;</code> operands of <code>x * x</code> are both
+    <code>69a8093d</code> — the AST had two nodes, the IR has <em>one</em>, referenced twice,
+    because they are structurally identical. Same for <code>Var&#123;total&#125;</code>
+    (<code>cc211d98</code>), shared between the loop body and the <code>show</code>. The tree
+    above has {irPositions} positions and the store holds {irUnique} distinct nodes.
+  </p>
+  <p>
+    The store keeps one entry per distinct hash, so identical subexpressions are shared without
+    a separate optimization pass, and results can be cached by hash. It is also how
+    <code>viv hash</code> and <code>viv diff</code> work: identical code has the same address.
+  </p>
+  <p>
+    <!-- aispeak-ok: the stage defined above -->
+    Lowering is also where types are assigned (everything here is <code>Num</code>), where
+    assignments are hoisted into function-scoped locals, and where the typed vocabulary —
+    <code>Func</code>, <code>Main</code>, <code>For</code>, <code>Bin</code>, <code>Show</code> —
+    replaces the parser's untyped one. Past this point the AST is gone; no later phase sees it.
+  </p>
+
+  <h2 id="c-backend">The C99 backend</h2>
+  <p>
+    knotkit's C backend walks the IR and emits portable C99. It is generic over the source
+    language: any language that implements the kit's code-generation interface gets a C99
+    backend. For this program the entire output is {trace.cLines} lines, because the C runtime
+    functions a program uses are added only when it uses them, and this program uses one (<code>viv_show_num</code>):
+  </p>
+  <Code lang="c" code={trace.c} tall />
+  <p>
+    The C needs no library but libm and builds with <code>cc sumsq.c -O2 -lm</code>. Going through
+    C means clang applies the LLVM optimizer, and the Viv compiler contains no LLVM code.
+  </p>
+  <Code lang="console" code={`$ viv sumsq.viv -o sumsq.c
+${trace.cNote}
+$ cc sumsq.c -O2 -lm -o sumsq && ./sumsq
+${trace.native}`} />
+  <p class="note">
+    The program prints 285, and the compiler reports the {irUnique} IR nodes from stage 3. The
+    {debugEntries} debug entries map IR nodes to C lines; the workbench uses them to map a compiler
+    diagnostic back onto your source.
+  </p>
+
+  <h2 id="wasm-backend">The direct wasm backend</h2>
+  <p>
+    The second backend skips C entirely and emits WebAssembly bytecode by hand — no external
+    crate, sections written byte by byte. It compiles from the same typed IR as the C backend,
+    so it takes the whole language. The module does its own arithmetic, loops, calls and
+    element access, and calls every other builtin in a runtime that lives inside the browser
+    compiler and runs the interpreter's own code for it; that is how its output matches the
+    interpreter's byte for byte. The program compiles to a
+    module of <strong>{trace.wasmSize} bytes</strong>:
+  </p>
+  <Code lang="console" code={`$ viv sumsq.viv -o sumsq.wasm
+${trace.wasmNote}`} />
+  <p>Those {trace.wasmSize} bytes, section by section — parsed out of the module itself:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Section</th><th class="num">Bytes</th><th class="num">Entries</th><th>Holds</th></tr></thead>
+      <tbody>
+        {
+          trace.sections.map((s) => (
+            <tr>
+              <td><code>{s.name}</code></td>
+              <td class="num">{s.bytes}</td>
+              <td class="num">{s.name === 'header' ? '—' : s.count}</td>
+              <td>{sectionNote[s.name] ?? ''}</td>
+            </tr>
+          ))
+        }
+        <tr>
+          <td><b>total</b></td>
+          <td class="num"><b>{trace.sections.reduce((a, s) => a + s.bytes, 0)}</b></td>
+          <td class="num" />
+          <td>the whole module</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The compiled body of <code>sq</code> is six bytes,
+    <code>20 00 20 00 a2 0f</code>:
+  </p>
+  <Code lang="wat" code={`local.get 0    ; push x
+local.get 0    ; push x again
+f64.mul        ; x * x
+return`} />
+  <p>
+    To run the module, the host supplies its imports, the transcendentals and the output
+    hooks:
+  </p>
+  <Code lang="console" code={`$ node -e 'WebAssembly.instantiate(fs.readFileSync("sumsq.wasm"),
+    { env: { exp: Math.exp, ..., show: x => console.log(x) } })
+    .then(m => m.instance.exports.run())'
+${trace.wasmRun}`} />
+
+  <h2 id="interpreter">The interpreter</h2>
+  <p>
+    The third path is a tree-walking interpreter over the same parse. It lets a browser run Viv
+    with no compile step, and a step budget stops a runaway loop before it hangs the tab. Every cell on this site runs on it. The interpreter runs the same program:
+  </p>
+  <Code lang="console" code={`$ viv run sumsq.viv
+${trace.interp}`} />
+
+  <div class="agree">
+    <div class="agree-cell">
+      <span class="agree-k">interpreter</span><b class="agree-v hot">285</b>
+    </div>
+    <div class="agree-cell">
+      <span class="agree-k">compiled C, run native</span><b class="agree-v hot">285</b>
+    </div>
+    <div class="agree-cell">
+      <span class="agree-k">wasm module, run in node</span><b class="agree-v hot">285</b>
+    </div>
+  </div>
+  <p>
+    All three numbers above came from the same script run. The agreement is enforced: every feature
+    goes into the interpreter and the C backend together, and the example suite checks that both
+    print the same output. Agreement does not catch everything. An eigensolver doing single Jacobi
+    rotations instead of full sweeps was wrong in both backends at once, and a physics program
+    found it; an LU solve that interleaved row swaps with substitution was caught by its own
+    residual check.
+  </p>
+
+  <h2 id="where">Where each stage lives</h2>
+  <p>The language:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Stage</th><th>File</th><th class="num">Lines</th></tr></thead>
+      <tbody>
+        {
+          lang.map((r) => (
+            <tr>
+              <td>{r.what}</td>
+              <td><code>{r.path}</code></td>
+              <td class="num">{r.lines.toLocaleString()}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+  <p>And <a href="/knotkit">the kit</a>, shared with the sibling languages:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Piece</th><th>File</th><th class="num">Lines</th></tr></thead>
+      <tbody>
+        {
+          kit.map((r) => (
+            <tr>
+              <td>{r.what.replace(/^Kit: /, '')}</td>
+              <td><code>{r.path}</code></td>
+              <td class="num">{r.lines.toLocaleString()}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+  <p class="note">
+    {facts.totalRustLines.toLocaleString()} lines in the files above, counted from the repository
+    at build time.
+  </p>
+
+  <div class="nextprev">
+    <span><a href="/knotkit">← The kit underneath</a></span>
+    <span><a href="/reference">Language reference →</a></span>
+  </div>
+</div>
+    <Toc items={TOC} />
+  </div>
+
+  <style>
+    h2 {
+      scroll-margin-top: 72px;
+    }
+    td.num {
+      text-align: right;
+      padding-right: 1.4rem;
+    }
+    th.num {
+      text-align: right;
+      padding-right: 1.4rem;
+    }
+  </style>
+</Base>

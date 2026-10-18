@@ -1,0 +1,466 @@
+###
+post: Skyrme Hartree-Fock of oxygen-16 on a radial mesh
+agent: claude
+
+The solver of posts/2026-09-25-skyrme-hartree-fock-of-oxygen-16.viv as a
+module, with its self-consistent loop cut into steps and its fields and
+single-particle Hamiltonian in defs of their own, so the explorer can walk
+through it. The arithmetic is the post's, operation for operation: the story
+beside this file (lib/skyrme/story_o16.viv) gets the post's numbers on its
+0.1 fm mesh.
+
+    from skyrme.skyrme import skyrme_o16
+
+    res = skyrme_o16(0.1, 150)
+    show res.e_per_a       # E/A, MeV
+
+skyrme_o16 solves with SLy5 and the iteration settings below;
+`skyrme_hf(h, nr, force, mix, e_tol, max_iter)` takes them as arguments,
+the force as a SkyrmeForce record (SLY5 is one).
+lib/skyrme/spherical.viv generalizes it to any spherical closed-shell
+nucleus and four forces, with the same bits for oxygen-16 and SLy5; its
+program lib/skyrme/skyrmehf.viv is what lib/skyrme/skyrmehf.export.toml
+exports as one C file and a Python wrapper (`viv export`).
+
+The force is SLy5 (Chabanat et al., Nucl. Phys. A 643, 441 (1998)) with
+the parameters and constants of skyrme_rpa (Colò, Cao, Van Giai and
+Capelli, Computer Physics Communications 184, 142 (2013)). The nucleus is
+oxygen-16: 8 protons and 8 neutrons filling the $1s_{1/2}$, $1p_{3/2}$ and
+$1p_{1/2}$ shells of each, so it is spherical and each orbital is the
+lowest of its $(l, j)$ block. Each block's radial equation for $u(r) = r R(r)$ is a symmetric
+tridiagonal matrix on the mesh $r_i = (i + 1) h$; its lowest eigenvector
+comes from inverse iteration.
+
+Used with `import skyrme.skyrme`.
+###
+
+# ---- SLy5, as skyrme_rpa's skyrme.in lists it (MeV and fm)
+T0 = -2484.88
+T1 = 483.13
+T2 = -549.40
+T3 = 13763.0
+X0 = 0.778
+X1 = -0.328
+X2 = -1.0
+X3 = 1.267
+W0 = 126.0
+ALPHA = 1.0 / 6.0
+
+#| A Skyrme force: the ten parameters of the functional. t0 is in MeV fm^3,
+#| t1, t2 and w0 in MeV fm^5, t3 in MeV fm^(3 + 3 alpha); the x's and alpha
+#| have no unit. The J^2 terms are always included, as in SLy5.
+record SkyrmeForce {
+    t0: Num
+    t1: Num
+    t2: Num
+    t3: Num
+    x0: Num
+    x1: Num
+    x2: Num
+    x3: Num
+    w0: Num
+    alpha: Num
+}
+SLY5 = SkyrmeForce { t0: T0, t1: T1, t2: T2, t3: T3, x0: X0, x1: X1, x2: X2, x3: X3, w0: W0, alpha: ALPHA }
+
+# ---- skyrme_rpa's constants: hbar c, the nucleon mass (the p-n average), e^2
+HBARC = 197.327053
+M_NUC = 0.5 * (938.27231 + 939.56563)
+E2 = 1.43986
+PI = 3.141592653589793
+
+# ---- oxygen-16
+Z_P = 8
+N_N = 8
+A_NUC = Z_P + N_N
+# the two kinds of nucleon, as the first index of the density arrays
+NEUTRON = 0
+PROTON = 1
+NKIND = 2
+# the center-of-mass correction: hbar^2/2m times (1 - 1/A)
+HB = HBARC * HBARC / (2.0 * M_NUC) * (1.0 - 1.0 / A_NUC)
+# the occupied shells of each kind: l, j and the number of nucleons 2j + 1
+SHELL_L = [0, 1, 1]
+SHELL_J = [0.5, 1.5, 0.5]
+# where 1p3/2 and 1p1/2 sit in that list
+SHELL_P32 = 1
+SHELL_P12 = 2
+# the Gaussian range of the proton charge in skyrme_rpa's charge density (fm)
+FOLD = 0.65
+# the starting Woods-Saxon profile: radius R0 A^(1/3) and diffuseness (fm)
+WS_R0 = 1.2
+WS_DIFFUSE = 0.6
+
+# ---- the iteration
+MIX = 0.5
+E_TOL = 1.0e-9
+MAX_ITER = 300
+# the energy must be settled after at least this many iterations
+MIN_ITER = 3
+# in the first iteration bisection brackets each orbital energy to EIG_TOL (MeV); after it the
+# inverse-iteration shift is NEAR below the orbital's last energy. INV_SWEEPS solves per iteration.
+EIG_TOL = 1.0e-11
+NEAR = 0.1
+INV_SWEEPS = 3
+
+def grad1(f: Arr, h) {
+    n = len(f)
+    out = zeros(n)
+    out[0] = (-1.5 * f[0] + 2.0 * f[1] - 0.5 * f[2]) / h
+    out[1:n - 1] = (f[2:n] - f[0:n - 2]) / (2.0 * h)
+    out[n - 1] = (1.5 * f[n - 1] - 2.0 * f[n - 2] + 0.5 * f[n - 3]) / h
+    return out
+}
+
+def lap_r(f: Arr, r: Arr, h) {
+    d1 = grad1(f, h)
+    return grad1(d1, h) + 2.0 * d1 / r
+}
+
+def integrate_r2(f: Arr, r: Arr, h) {
+    n = len(f)
+    s = sum(f * r * r)
+    s -= 0.5 * (f[0] * r[0] * r[0] + f[n - 1] * r[n - 1] * r[n - 1])
+    return 4.0 * PI * h * s
+}
+
+def particle_number(rho: Arr, q, r: Arr, h) {
+    return 4.0 * PI * h * sum(rho[q, :] * r * r)
+}
+
+def coulomb(rp: Arr, r: Arr, h) {
+    n = len(rp)
+    out = zeros(n)
+    #: charge inside r, over r
+    inner = 0.0
+    for i to n {
+        inner += rp[i] * r[i] * r[i]
+        out[i] = inner / r[i]
+    }
+    #: plus each outer shell's charge over its own radius
+    outer = 0.0
+    for k from 0 to n by 1 reversed {
+        out[k] = E2 * 4.0 * PI * h * (out[k] + outer)
+        outer += rp[k] * r[k]
+    }
+    return out
+}
+
+def proton_coulomb(rp: Arr, r: Arr, h) {
+    return coulomb(rp, r, h) - E2 * pow(3.0 / PI, 1.0 / 3.0) * pow(rp, 1.0 / 3.0)
+}
+
+def count_below(diag: Arr, off: Arr, x) {
+    n = len(diag)
+    cnt = 0
+    #: Sturm count: the negative pivots in the factorization of T - x I
+    p = diag[0] - x
+    if p < 0.0 {
+        cnt += 1
+    }
+    for i from 1 to n {
+        if p == 0.0 {
+            p = 1.0e-300
+        }
+        p = diag[i] - x - off[i - 1] * off[i - 1] / p
+        if p < 0.0 {
+            cnt += 1
+        }
+    }
+    return cnt
+}
+
+def lowest_eigenvalue(diag: Arr, off: Arr, lo, hi) {
+    a = lo
+    b = hi
+    while b - a > EIG_TOL {
+        mid = 0.5 * (a + b)
+        if count_below(diag, off, mid) > 0 {
+            b = mid
+        }
+        else {
+            a = mid
+        }
+    }
+    return a
+}
+
+def inverse_iteration(diag: Arr, off: Arr, sigma, u: Arr) {
+    n = len(diag)
+    c = zeros(n)
+    d = zeros(n)
+    w = zeros(n)
+    #: Thomas-algorithm solve, normalized along u
+    for sweep to INV_SWEEPS {
+        c[0] = off[0] / (diag[0] - sigma)
+        d[0] = u[0] / (diag[0] - sigma)
+        for i from 1 to n {
+            m = diag[i] - sigma - off[i - 1] * c[i - 1]
+            if i < n - 1 {
+                c[i] = off[i] / m
+            }
+            d[i] = (u[i] - off[i - 1] * d[i - 1]) / m
+        }
+        w[n - 1] = d[n - 1]
+        for k from 0 to n - 1 by 1 reversed {
+            w[k] = d[k] - c[k] * w[k + 1]
+        }
+        nrm = sqrt(sum(w * w))
+        if sum(w * u) < 0.0 {
+            nrm = -nrm
+        }
+        u[:] = w / nrm
+    }
+    #: Rayleigh quotient
+    lam = 0.0
+    for i to n {
+        lam += diag[i] * u[i] * u[i]
+        if i < n - 1 {
+            lam += 2.0 * off[i] * u[i] * u[i + 1]
+        }
+    }
+    return lam
+}
+
+def skyrme_fields(f: SkyrmeForce, q, rho: Arr, tau: Arr, jso: Arr, r: Arr, h) {
+    step densities {
+        rt = rho[NEUTRON, :] + rho[PROTON, :]
+        tt = tau[NEUTRON, :] + tau[PROTON, :]
+        jt = jso[NEUTRON, :] + jso[PROTON, :]
+        rq = rho[q, :]
+        sj = jt + jso[q, :]
+        lap_t = lap_r(rt, r, h)
+        drt = grad1(rt, h)
+        lap_q = lap_r(rq, r, h)
+        drq = grad1(rq, h)
+        dsj = grad1(sj, h)
+    }
+    step effective_mass {
+        B = HB + 0.125 * (f.t1 * (2.0 + f.x1) + f.t2 * (2.0 + f.x2)) * rt + 0.125 * (f.t2 * (1.0 + 2.0 * f.x2) - f.t1 * (1.0 + 2.0 * f.x1)) * rq
+    }
+    step central {
+        ra = pow(rt, f.alpha)
+        U = f.t0 * ((1.0 + f.x0 / 2.0) * rt - (f.x0 + 0.5) * rq)
+        U += 0.25 * f.t1 * ((1.0 + f.x1 / 2.0) * (tt - 1.5 * lap_t) - (f.x1 + 0.5) * (tau[q, :] - 1.5 * lap_q))
+        U += 0.25 * f.t2 * ((1.0 + f.x2 / 2.0) * (tt + 0.5 * lap_t) + (f.x2 + 0.5) * (tau[q, :] + 0.5 * lap_q))
+        rsq = rho[NEUTRON, :] * rho[NEUTRON, :] + rho[PROTON, :] * rho[PROTON, :]
+        U += f.t3 / 12.0 * ((1.0 + f.x3 / 2.0) * (2.0 + f.alpha) * ra * rt - (f.x3 + 0.5) * (2.0 * ra * rq + f.alpha * ra / rt * rsq))
+        U -= f.w0 * (sj / r + 0.5 * dsj)
+    }
+    step spin_orbit {
+        W = 0.5 * f.w0 * (drt + drq) + 0.125 * (f.t1 - f.t2) * jso[q, :] - 0.125 * (f.t1 * f.x1 + f.t2 * f.x2) * jt
+    }
+    return B, U, W
+}
+
+def skyrme_hamiltonian(B: Arr, dB: Arr, U: Arr, W: Arr, V: Arr, q, l, sdl, r: Arr, h) {
+    nr = len(r)
+    # B halfway between neighboring points; past the last point it meets HB
+    bm = copy(B)
+    bm[1:nr] = 0.5 * (B[0:nr - 1] + B[1:nr])
+    bp = zeros(nr) + 0.5 * (B[nr - 1] + HB)
+    bp[0:nr - 1] = 0.5 * (B[0:nr - 1] + B[1:nr])
+    off = -bp[0:nr - 1] / (h * h)
+    diag = (bm + bp) / (h * h) + B * l * (l + 1.0) / (r * r) + dB / r + U + sdl * W / r
+    if q == PROTON {
+        diag = diag + V
+    }
+    return diag, off
+}
+
+#| What skyrme_o16 finds: the energy per nucleon and the total energy
+#| (MeV), the proton, neutron and charge radii (fm), the six orbital
+#| energies (MeV: neutron 1s1/2, 1p3/2, 1p1/2, then the proton ones), the
+#| number of passes and whether the energy settled in them, the mesh
+#| points (fm), and the converged number, kinetic-energy and spin-orbit
+#| densities, each `[2, nr]` (neutrons, then protons).
+record SkyrmeO16 {
+    e_per_a: Num
+    energy: Num
+    r_p: Num
+    r_n: Num
+    r_ch: Num
+    levels: Arr
+    iterations: Num
+    converged: Bool
+    r: Arr
+    rho: Arr
+    tau: Arr
+    jso: Arr
+}
+
+def skyrme_o16(h, nr) -> SkyrmeO16 {
+    return skyrme_hf(h, nr, SLY5, MIX, E_TOL, MAX_ITER)
+}
+
+def skyrme_hf(h, nr, force: SkyrmeForce, mix, e_tol, max_iter) -> SkyrmeO16 {
+    nsh = len(SHELL_L)
+    step mesh {
+        r = zeros(nr)
+        for i to nr {
+            r[i] = (i + 1) * h
+        }
+    }
+    step start {
+        rho = zeros(NKIND, nr)
+        tau = zeros(NKIND, nr)
+        jso = zeros(NKIND, nr)
+        prof = 1.0 / (1.0 + exp((r - WS_R0 * pow(A_NUC, 1.0 / 3.0)) / WS_DIFFUSE))
+        pn = integrate_r2(prof, r, h)
+        rho[NEUTRON, :] = prof * N_N / pn
+        rho[PROTON, :] = prof * Z_P / pn
+        # orbitals: warm-start vectors and last energies, block k = q * nsh + s
+        uvec = zeros(NKIND * nsh, nr) + 1.0
+        lam = zeros(NKIND * nsh)
+        # the Coulomb field, which only protons feel
+        V = zeros(nr)
+        nrho = zeros(NKIND, nr)
+        ntau = zeros(NKIND, nr)
+        njso = zeros(NKIND, nr)
+        e_old = 0.0
+        E = 0.0
+        it = 0
+        done = 0
+        # read by the debug lens only (skyrme_hf in skyrme.debug)
+        de = 0.0
+        n_neutrons = 0.0
+        n_protons = 0.0
+        split_n = 0.0
+        split_p = 0.0
+    }
+    while done < 1 and it < max_iter {
+        it += 1
+        fill(nrho, 0.0)
+        fill(ntau, 0.0)
+        fill(njso, 0.0)
+        for q to NKIND {
+            step fields {
+                B, U, W = skyrme_fields(force, q, rho, tau, jso, r, h)
+                dB = grad1(B, h)
+                if q == PROTON {
+                    V = proton_coulomb(rho[PROTON, :], r, h)
+                }
+            }
+            for s to nsh {
+                step hamiltonian {
+                    l = SHELL_L[s]
+                    j = SHELL_J[s]
+                    sdl = j * (j + 1.0) - l * (l + 1.0) - 0.75
+                    diag, off = skyrme_hamiltonian(B, dB, U, W, V, q, l, sdl, r, h)
+                }
+                step diagonalize {
+                    k = q * nsh + s
+                    u = uvec[k, :]
+                    sigma = lam[k] - NEAR
+                    if it == 1 {
+                        # Gershgorin: every eigenvalue lies within diag[i] +- (|off[i-1]| + |off[i]|)
+                        big = max(abs(off))
+                        sigma = lowest_eigenvalue(diag, off, min(diag) - 2.0 * big, max(diag) + 2.0 * big) - EIG_TOL
+                    }
+                    lam[k] = inverse_iteration(diag, off, sigma, u)
+                }
+                step occupy {
+                    uvec[k, :] = u
+                    R = u / (sqrt(h) * r)
+                    dR = grad1(R, h)
+                    wt = (2.0 * j + 1.0) / (4.0 * PI)
+                    nrho[q, :] = nrho[q, :] + wt * R * R
+                    ntau[q, :] = ntau[q, :] + wt * (dR * dR + l * (l + 1.0) / (r * r) * R * R)
+                    njso[q, :] = njso[q, :] + wt * sdl / r * R * R
+                }
+            }
+        }
+        step mix {
+            n_neutrons = particle_number(nrho, NEUTRON, r, h)
+            n_protons = particle_number(nrho, PROTON, r, h)
+            rho = (1.0 - mix) * rho + mix * nrho
+            tau = (1.0 - mix) * tau + mix * ntau
+            jso = (1.0 - mix) * jso + mix * njso
+        }
+        step energy {
+            E = skyrme_energy(force, rho, tau, jso, r, h)
+            de = E - e_old
+            split_n = lam[NEUTRON * nsh + SHELL_P12] - lam[NEUTRON * nsh + SHELL_P32]
+            split_p = lam[PROTON * nsh + SHELL_P12] - lam[PROTON * nsh + SHELL_P32]
+        }
+        step convergence {
+            if abs(E - e_old) < e_tol and it > MIN_ITER {
+                done = 1
+            }
+            e_old = E
+        }
+    }
+    step observables {
+        r2p = integrate_r2(rho[PROTON, :] * r * r, r, h) / Z_P
+        r2n = integrate_r2(rho[NEUTRON, :] * r * r, r, h) / N_N
+    }
+    return SkyrmeO16 { e_per_a: E / A_NUC, energy: E, r_p: sqrt(r2p), r_n: sqrt(r2n), r_ch: sqrt(r2p + 1.5 * FOLD * FOLD), levels: lam, iterations: it, converged: done > 0, r: r, rho: rho, tau: tau, jso: jso }
+}
+
+def skyrme_energy(f: SkyrmeForce, rho: Arr, tau: Arr, jso: Arr, r: Arr, h) {
+    rn = rho[NEUTRON, :]
+    rp = rho[PROTON, :]
+    rt = rn + rp
+    drt = grad1(rt, h)
+    drn = grad1(rn, h)
+    drp = grad1(rp, h)
+    tn = tau[NEUTRON, :]
+    tp = tau[PROTON, :]
+    tt = tn + tp
+    jn = jso[NEUTRON, :]
+    jp = jso[PROTON, :]
+    jt = jn + jp
+    rsq = rn * rn + rp * rp
+    H = HB * tt + 0.5 * f.t0 * ((1.0 + f.x0 / 2.0) * rt * rt - (f.x0 + 0.5) * rsq)
+    H += 0.25 * f.t1 * ((1.0 + f.x1 / 2.0) * (rt * tt + 0.75 * drt * drt) - (f.x1 + 0.5) * (rn * tn + 0.75 * drn * drn + rp * tp + 0.75 * drp * drp))
+    H += 0.25 * f.t2 * ((1.0 + f.x2 / 2.0) * (rt * tt - 0.25 * drt * drt) + (f.x2 + 0.5) * (rn * tn - 0.25 * drn * drn + rp * tp - 0.25 * drp * drp))
+    H += f.t3 / 12.0 * pow(rt, f.alpha) * ((1.0 + f.x3 / 2.0) * rt * rt - (f.x3 + 0.5) * rsq)
+    H += (f.t1 - f.t2) / 16.0 * (jn * jn + jp * jp) - (f.t1 * f.x1 + f.t2 * f.x2) / 16.0 * jt * jt
+    H += 0.5 * f.w0 * (jt * drt + jn * drn + jp * drp)
+    #: Coulomb exchange in the Slater approximation
+    ec = 0.5 * coulomb(rp, r, h) * rp - 0.75 * E2 * pow(3.0 / PI, 1.0 / 3.0) * pow(rp, 4.0 / 3.0)
+    return integrate_r2(H, r, h) + integrate_r2(ec, r, h)
+}
+
+# ---- tests: the mesh tools on problems with known answers, and the whole
+# solver against the post's numpy twin on its 0.1 fm mesh
+SK_TEST_N = 40
+SK_TEST_H = 0.1
+SK_TWIN_H = 0.1
+SK_TWIN_BOX = 15.0
+# the numpy twin (posts/refs/skyrme-hartree-fock-of-oxygen-16.py) on the 0.1 fm
+# mesh: E/A, the proton, neutron and charge radii, the neutron 1s1/2 1p3/2
+# 1p1/2 energies and the proton ones
+SK_TWIN = [-8.0465386180, 2.6809867361, 2.6558537301, 2.7966837288, -36.18659979, -20.63141616, -14.42364526, -32.38991872, -17.15296823, -11.07440402]
+
+test "grad1 differentiates a quadratic exactly, at the two ends as well" {
+    sk_x = zeros(SK_TEST_N)
+    sk_f = zeros(SK_TEST_N)
+    for i to SK_TEST_N {
+        sk_x[i] = (i + 1) * SK_TEST_H
+        sk_f[i] = 3.0 * sk_x[i] * sk_x[i] - sk_x[i]
+    }
+    assert_lt(max(abs(grad1(sk_f, SK_TEST_H) - (6.0 * sk_x - 1.0))), 1.0e-10)
+}
+
+test "bisection and inverse iteration find the lowest eigenvalue of the matrix with 2 on the diagonal and -1 beside it, 2 - 2 cos(pi / (n + 1))" {
+    sk_diag = zeros(SK_TEST_N) + 2.0
+    sk_off = zeros(SK_TEST_N - 1) - 1.0
+    sk_exact = 2.0 - 2.0 * cos(PI / (SK_TEST_N + 1))
+    sk_low = lowest_eigenvalue(sk_diag, sk_off, -1.0, 5.0)
+    assert_near(sk_low, sk_exact, 1.0e-10)
+    assert_near(count_below(sk_diag, sk_off, sk_exact + 1.0e-9), 1, 0.0)
+    sk_u = zeros(SK_TEST_N) + 1.0
+    assert_near(inverse_iteration(sk_diag, sk_off, sk_low - EIG_TOL, sk_u), sk_exact, 1.0e-12)
+    assert_near(sum(sk_u * sk_u), 1.0, 1.0e-14)
+}
+
+test "on 150 points of 0.1 fm skyrme_o16 gives the post's numpy twin to 1e-7, in 38 iterations" {
+    sk_res = skyrme_o16(SK_TWIN_H, round(SK_TWIN_BOX / SK_TWIN_H))
+    sk_got = concat([sk_res.e_per_a, sk_res.r_p, sk_res.r_n, sk_res.r_ch], sk_res.levels)
+    assert_lt(max(abs(sk_got - SK_TWIN)), 1.0e-7)
+    assert_near(sk_res.iterations, 38, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

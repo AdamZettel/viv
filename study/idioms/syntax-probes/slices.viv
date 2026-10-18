@@ -1,0 +1,143 @@
+###
+Slices, `copy`, `concat`, `vcat` and `hcat` (gap R3). A slice is a
+copy: `b = a[1:3]` is a new array, and `a[1:3] = b` copies b into a. `lo:hi`
+runs lo, lo + 1, ..., hi - 1; any part can be left out (`a[:hi]`, `a[lo:]`,
+`a[:]`), and `lo:hi:s` steps by s. A plain index drops its axis, so
+`A[i, :]` is row i as a vector and `A[:, j]` is column j. Axes left out at
+the end are taken whole. No negative indices: `a[len(a) - 2:]` is Python's
+`a[-2:]`.
+###
+
+a = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+show a[1:4]
+show a[:2]
+show a[4:]
+show a[:]
+show a[0:6:2]
+show a[1::3]
+show a[3:3]
+
+M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+show M[1, :]
+show M[:, 2]
+show shape(M[0:2, 1:3])
+show M[0:2, 1:3]
+show shape(M[1:])
+show M[::2, ::2]
+
+# a copy, not a view: writing the slice leaves the source alone
+r = M[0, :]
+r[0] = 100.0
+show M[0, 0]
+
+# writes
+b = zeros(6)
+b[1:4] = [1.0, 2.0, 3.0]
+show b
+b[4:] = 9.0
+show b
+b[::2] += 0.5
+show b
+G = zeros(3, 3)
+G[:, 1] = [1.0, 2.0, 3.0]
+G[2, :] = 7.0
+G[0:2, 0:2] += [[10.0, 20.0], [30.0, 40.0]]
+show G
+
+# the value is read before the write, so a shift does not smear
+s = [1.0, 2.0, 3.0, 4.0, 5.0]
+s[1:5] = s[0:4]
+show s
+
+# copy and the joins
+c = copy(a)
+c[0] = -1.0
+show a[0]
+show concat([1.0, 2.0], [3.0], [4.0, 5.0])
+show vcat([1.0, 2.0], [3.0, 4.0])
+show hcat([1.0, 2.0], [3.0, 4.0])
+show shape(hcat([1.0, 2.0, 3.0]))
+show vcat(M[0:1, :], [0.0, 0.0, 0.0])
+show hcat(M, M[:, 0])
+
+# complex arrays slice too
+z = czeros(4)
+z[1:3] = complex([1.0, 2.0], [3.0, 4.0])
+z[3:] = 5.0 + 6.0i
+show z[1:]
+
+# a slice inside a def
+def middle(v: Arr) -> Arr {
+    return v[1:len(v) - 1]
+}
+show middle([4.0, 5.0, 6.0, 7.0])
+
+test "a slice has the elements Python's has" {
+    assert_true(all(a[1:4] == [11.0, 12.0, 13.0]))
+    assert_true(all(a[1::3] == [11.0, 14.0]))
+    assert_near(len(a[3:3]), 0, 0)
+    assert_near(len(a[0:5:2]), 3, 0)
+    assert_true(all(M[:, 1] == [2.0, 5.0, 8.0]))
+    assert_true(all(shape(M[1, 1:]) == [2.0]))
+}
+
+test "writes, with the index list evaluated once in +=" {
+    v = zeros(5)
+    srand(3)
+    first = rand()
+    srand(3)
+    v[0:floor(1.0 + 3.0 * rand())] += 1.0
+    assert_near(sum(v), floor(1.0 + 3.0 * first), 0)
+}
+
+test "the joins agree with the slices" {
+    J = hcat(M[:, 0:1], M[:, 1:])
+    assert_true(all(J == M))
+    K = vcat(M[0, :], M[1:, :])
+    assert_true(all(K == M))
+    assert_true(all(concat(a[:3], a[3:]) == a))
+}
+
+# gradients through slices, a slice write and the joins, against central
+# differences
+def loss(x: Arr) {
+    y = zeros(6)
+    y[0:3] = x[1:4] * x[0:3]
+    y[3:] = 2.0 * x[::2]
+    w = concat(y[0:2], x, y[4:])
+    P = vcat(w[0:4], w[4:8])
+    Q = hcat(P, P[:, 1])
+    return sum(Q * Q) + sum(w[1:7:3])
+}
+
+x0 = [0.3, -1.2, 0.7, 2.0, 0.5, -0.4]
+g = grad(loss, x0)
+show g
+
+test "grad through slices matches central differences" {
+    h = 1.0e-6
+    for i to len(x0) {
+        xp = copy(x0)
+        xm = copy(x0)
+        xp[i] = xp[i] + h
+        xm[i] = xm[i] - h
+        assert_near(g[i], (loss(xp) - loss(xm)) / (2.0 * h), 1.0e-6)
+    }
+}
+
+# a number written into a slice takes the sum of that slice's adjoint
+def fill_loss(x: Arr) {
+    y = zeros(4)
+    y[1:3] = x[0]
+    return sum(y * y) + x[1]
+}
+show grad(fill_loss, [1.5, 2.0])
+
+test "a filled slice's gradient" {
+    gf = grad(fill_loss, [1.5, 2.0])
+    assert_near(gf[0], 6.0, 1.0e-12)
+    assert_near(gf[1], 1.0, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,551 @@
+# The C corpus of tests/cc compiled by lib/cc and run on lib/rv32's
+# simulator, against clang -O0 on the host: written by
+# tools/cc/corpus.py, which ran each program natively for the expected
+# output and exit status. Generated: do not edit.
+
+from cc.driver import run_c
+
+EXIT_MOD: Int = 256       # a host process reports the low 8 bits of main's value
+
+SRC_ACKERMANN = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* The Ackermann function: deep recursion through two parameters. */
+int ack(int m, int n) {
+    if (m == 0) return n + 1;
+    if (n == 0) return ack(m - 1, 1);
+    return ack(m - 1, ack(m, n - 1));
+}
+int main() {
+    int m;
+    int n;
+    for (m = 0; m <= 2; m = m + 1)
+        for (n = 0; n <= 3; n = n + 1)
+            print_int(ack(m, n));
+    return ack(2, 3);
+}
+"""
+
+test "ackermann.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_ACKERMANN)
+    assert_true(m.halted)
+    assert_true(m.output == "1\n2\n3\n4\n2\n3\n4\n5\n3\n5\n7\n9\n")
+    assert_true(m.exit_code % EXIT_MOD == 9)
+}
+
+SRC_ARITH = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Arithmetic, precedence and comparisons: expressions from chibicc's
+ * test.sh and tests/arith.c (github.com/rui314/chibicc). */
+int main() {
+    print_int(5 + 20 - 4);
+    print_int(5 + 6 * 7);
+    print_int(5 * (9 - 6));
+    print_int((3 + 5) / 2);
+    print_int(-10 + 20);
+    print_int(- -10);
+    print_int(17 % 6);
+    print_int(-17 % 6);
+    print_int(-17 / 6);
+    print_int(0 == 1);
+    print_int(42 != 42);
+    print_int(1 >= 1);
+    print_int(!0 + !5);
+    print_int(0 || (2 - 2) || 5);
+    print_int((2 - 2) && 5);
+    return 21;
+}
+"""
+
+test "arith.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_ARITH)
+    assert_true(m.halted)
+    assert_true(m.output == "21\n47\n15\n4\n10\n10\n5\n-5\n-2\n0\n0\n1\n1\n1\n0\n")
+    assert_true(m.exit_code % EXIT_MOD == 21)
+}
+
+SRC_CALLS = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Calls with up to eight arguments, nested in each other's arguments
+ * (chibicc test.sh, with six-argument add6 widened to eight). */
+int add2(int x, int y) { return x + y; }
+int sub2(int x, int y) { return x - y; }
+int add6(int a, int b, int c, int d, int e, int f) {
+    return a + b + c + d + e + f;
+}
+int add8(int a, int b, int c, int d, int e, int f, int g, int h) {
+    return a + b + c + d + e + f + g + h;
+}
+int weigh8(int a, int b, int c, int d, int e, int f, int g, int h) {
+    return a - 2 * b + 3 * c - 4 * d + 5 * e - 6 * f + 7 * g - 8 * h;
+}
+int main() {
+    print_int(add2(3, 4));
+    print_int(sub2(4, 3));
+    print_int(add6(1, 2, add6(3, 4, 5, 6, 7, 8), 9, 10, 11));
+    print_int(add6(1, 2, add6(3, add6(4, 5, 6, 7, 8, 9), 10, 11, 12, 13), 14, 15, 16));
+    print_int(add8(1, 2, 3, 4, 5, 6, 7, 8));
+    print_int(weigh8(8, 7, 6, 5, 4, 3, 2, 1));
+    print_int(weigh8(add2(1, 1), 0, 0, 0, 0, 0, 0, sub2(0, 1)));
+    return add2(40, 2);
+}
+"""
+
+test "calls.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_CALLS)
+    assert_true(m.halted)
+    assert_true(m.output == "7\n1\n66\n136\n36\n0\n10\n")
+    assert_true(m.exit_code % EXIT_MOD == 42)
+}
+
+SRC_COLLATZ = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Collatz steps: the longest chain below 200 and where it starts. */
+int steps(int n) {
+    int k = 0;
+    while (n != 1) {
+        if (n % 2 == 0) n = n / 2;
+        else n = 3 * n + 1;
+        k = k + 1;
+    }
+    return k;
+}
+int main() {
+    int best = 0;
+    int arg = 0;
+    int n;
+    for (n = 1; n < 200; n = n + 1) {
+        int s = steps(n);
+        if (s > best) {
+            best = s;
+            arg = n;
+        }
+    }
+    print_int(steps(27));
+    print_int(arg);
+    print_int(best);
+    return best % 256;
+}
+"""
+
+test "collatz.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_COLLATZ)
+    assert_true(m.halted)
+    assert_true(m.output == "111\n171\n124\n")
+    assert_true(m.exit_code % EXIT_MOD == 124)
+}
+
+SRC_CONTROL = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* if, else, for and while (chibicc test.sh), with the sums printed. */
+int main() {
+    int i = 0;
+    int j = 0;
+    for (i = 0; i <= 10; i = i + 1)
+        j = i + j;
+    print_int(j);
+    i = 0;
+    while (i < 10)
+        i = i + 1;
+    print_int(i);
+    if (i == 10) print_int(1); else print_int(2);
+    if (i != 10) print_int(3); else if (j == 55) print_int(4); else print_int(5);
+    for (;;) {
+        if (i > 15) return i;
+        i = i + 2;
+    }
+    return 0;
+}
+"""
+
+test "control.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_CONTROL)
+    assert_true(m.halted)
+    assert_true(m.output == "55\n10\n1\n4\n")
+    assert_true(m.exit_code % EXIT_MOD == 16)
+}
+
+SRC_DIGITS = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Digit sums, digit reversal and palindromes: / and % on negatives too. */
+int digit_sum(int n) {
+    int s = 0;
+    if (n < 0) n = -n;
+    while (n > 0) {
+        s = s + n % 10;
+        n = n / 10;
+    }
+    return s;
+}
+int reverse(int n) {
+    int r = 0;
+    while (n != 0) {
+        r = r * 10 + n % 10;
+        n = n / 10;
+    }
+    return r;
+}
+int main() {
+    int n;
+    int pal = 0;
+    print_int(digit_sum(987654321));
+    print_int(digit_sum(-4096));
+    print_int(reverse(12345));
+    print_int(reverse(-120));
+    for (n = 100; n < 200; n = n + 1)
+        if (reverse(n) == n) pal = pal + 1;
+    print_int(pal);
+    return digit_sum(99999);
+}
+"""
+
+test "digits.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_DIGITS)
+    assert_true(m.halted)
+    assert_true(m.output == "45\n19\n54321\n-21\n10\n")
+    assert_true(m.exit_code % EXIT_MOD == 45)
+}
+
+SRC_FIB = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Recursive Fibonacci (chibicc test.sh's fib), printed for n = 0..12. */
+int fib(int x) {
+    if (x <= 1) return x;
+    return fib(x - 1) + fib(x - 2);
+}
+int main() {
+    int n;
+    for (n = 0; n <= 12; n = n + 1)
+        print_int(fib(n));
+    return fib(11);
+}
+"""
+
+test "fib.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_FIB)
+    assert_true(m.halted)
+    assert_true(m.output == "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\n89\n144\n")
+    assert_true(m.exit_code % EXIT_MOD == 89)
+}
+
+SRC_GCD = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Euclid's algorithm, recursive and iterative. */
+int gcd(int a, int b) {
+    if (b == 0) return a;
+    return gcd(b, a % b);
+}
+int gcd_loop(int a, int b) {
+    while (b != 0) {
+        int t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+int main() {
+    print_int(gcd(1071, 462));
+    print_int(gcd_loop(1071, 462));
+    print_int(gcd(17, 5));
+    print_int(gcd_loop(270, 192));
+    return gcd(84, 36);
+}
+"""
+
+test "gcd.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_GCD)
+    assert_true(m.halted)
+    assert_true(m.output == "21\n21\n1\n6\n")
+    assert_true(m.exit_code % EXIT_MOD == 12)
+}
+
+SRC_HANOI = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Towers of Hanoi: the number of moves, counted by recursion. */
+int moves(int n, int from, int to, int via) {
+    if (n == 0) return 0;
+    return moves(n - 1, from, via, to) + 1 + moves(n - 1, via, to, from);
+}
+int main() {
+    int n;
+    for (n = 1; n <= 8; n = n + 1)
+        print_int(moves(n, 1, 3, 2));
+    return moves(7, 1, 3, 2);
+}
+"""
+
+test "hanoi.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_HANOI)
+    assert_true(m.halted)
+    assert_true(m.output == "1\n3\n7\n15\n31\n63\n127\n255\n")
+    assert_true(m.exit_code % EXIT_MOD == 127)
+}
+
+SRC_ISQRT = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Integer square root by bisection, and the perfect squares it finds. */
+int isqrt(int n) {
+    int lo = 0;
+    int hi = n + 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) / 2;
+        if (mid * mid <= n) lo = mid;
+        else hi = mid;
+    }
+    return lo;
+}
+int main() {
+    int n;
+    print_int(isqrt(0));
+    print_int(isqrt(99));
+    print_int(isqrt(100));
+    print_int(isqrt(2000000));
+    for (n = 1; n < 50; n = n + 1)
+        if (isqrt(n) * isqrt(n) == n) print_int(n);
+    return isqrt(65535);
+}
+"""
+
+test "isqrt.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_ISQRT)
+    assert_true(m.halted)
+    assert_true(m.output == "0\n9\n10\n1684925\n1\n4\n9\n16\n25\n36\n49\n")
+    assert_true(m.exit_code % EXIT_MOD == 255)
+}
+
+SRC_OVERFLOW = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* int arithmetic that does not overflow but comes close: products near
+ * 2^31 and the M extension's 32-bit mul, div and rem on large values. */
+int main() {
+    int big = 46340;
+    print_int(big * big);
+    print_int(2147483647 / 7);
+    print_int(2147483647 % 1000);
+    print_int(-2147483647 / 3);
+    print_int(-2147483647 % 3);
+    print_int(65535 * 32767);
+    return (big * big) % 256;
+}
+"""
+
+test "overflow.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_OVERFLOW)
+    assert_true(m.halted)
+    assert_true(m.output == "2147395600\n306783378\n647\n-715827882\n-1\n2147385345\n")
+    assert_true(m.exit_code % EXIT_MOD == 16)
+}
+
+SRC_POWMOD = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Modular exponentiation by squaring; Fermat's little theorem checked. */
+int powmod(int b, int e, int m) {
+    int r = 1;
+    b = b % m;
+    while (e > 0) {
+        if (e % 2 == 1) r = r * b % m;
+        b = b * b % m;
+        e = e / 2;
+    }
+    return r;
+}
+int main() {
+    print_int(powmod(2, 10, 1000));
+    print_int(powmod(3, 200, 1009));
+    print_int(powmod(7, 1008, 1009));
+    print_int(powmod(12345, 6789, 9973));
+    return powmod(5, 3, 13);
+}
+"""
+
+test "powmod.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_POWMOD)
+    assert_true(m.halted)
+    assert_true(m.output == "24\n985\n1\n6220\n")
+    assert_true(m.exit_code % EXIT_MOD == 8)
+}
+
+SRC_PRIMES = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Primes below 200 by trial division; prints each, returns the count. */
+int is_prime(int n) {
+    int d;
+    if (n < 2) return 0;
+    for (d = 2; d * d <= n; d = d + 1)
+        if (n % d == 0) return 0;
+    return 1;
+}
+int main() {
+    int n;
+    int count = 0;
+    for (n = 0; n < 200; n = n + 1) {
+        if (is_prime(n)) {
+            print_int(n);
+            count = count + 1;
+        }
+    }
+    return count;
+}
+"""
+
+test "primes.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_PRIMES)
+    assert_true(m.halted)
+    assert_true(m.output == "2\n3\n5\n7\n11\n13\n17\n19\n23\n29\n31\n37\n41\n43\n47\n53\n59\n61\n67\n71\n73\n79\n83\n89\n97\n101\n103\n107\n109\n113\n127\n131\n137\n139\n149\n151\n157\n163\n167\n173\n179\n181\n191\n193\n197\n199\n")
+    assert_true(m.exit_code % EXIT_MOD == 46)
+}
+
+SRC_SCOPES = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Blocks, null statements, early returns, and a deep expression stack. */
+int deep(int a) {
+    return a + (a + (a + (a + (a + (a + (a + (a + (a + (a + 1)))))))));
+}
+int main() {
+    int a = 3;
+    ;;
+    {
+        int b = 4;
+        {
+            int c = a * b;
+            print_int(c);
+        }
+        ;
+    }
+    print_int(deep(2));
+    print_int(((((1 + 2) * (3 + 4)) - ((5 - 6) * (7 - 8))) / 2) % 7);
+    return deep(a);
+}
+"""
+
+test "scopes.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_SCOPES)
+    assert_true(m.halted)
+    assert_true(m.output == "12\n21\n3\n")
+    assert_true(m.exit_code % EXIT_MOD == 31)
+}
+
+SRC_SHORTCIRCUIT = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* && and || evaluate their right operand only when it decides the result;
+ * the assignments inside them show which ones ran. */
+int main() {
+    int x = 0;
+    int y = 0;
+    int r;
+    r = 0 && (x = 1);
+    print_int(r);
+    print_int(x);
+    r = 1 || (y = 1);
+    print_int(r);
+    print_int(y);
+    r = 1 && (x = 5);
+    print_int(r);
+    print_int(x);
+    r = 0 || (y = 0);
+    print_int(r);
+    print_int(y);
+    return !(x == 5) + 2 * (y == 0);
+}
+"""
+
+test "shortcircuit.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_SHORTCIRCUIT)
+    assert_true(m.halted)
+    assert_true(m.output == "0\n0\n1\n0\n1\n5\n0\n0\n")
+    assert_true(m.exit_code % EXIT_MOD == 2)
+}
+
+SRC_SUMSQ = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Nested loops: sums of squares, a multiplication table checksum and
+ * triangular numbers. */
+int main() {
+    int i;
+    int j;
+    int s = 0;
+    int t = 0;
+    for (i = 1; i <= 100; i = i + 1) s = s + i * i;
+    print_int(s);
+    for (i = 1; i <= 12; i = i + 1)
+        for (j = 1; j <= 12; j = j + 1)
+            t = t + i * j * (i + j) % 7;
+    print_int(t);
+    s = 0;
+    i = 0;
+    while (s < 1000) {
+        i = i + 1;
+        s = s + i;
+    }
+    print_int(i);
+    print_int(s);
+    return t % 100;
+}
+"""
+
+test "sumsq.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_SUMSQ)
+    assert_true(m.halted)
+    assert_true(m.output == "338350\n369\n45\n1035\n")
+    assert_true(m.exit_code % EXIT_MOD == 69)
+}
+
+SRC_TAK = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Takeuchi's function, a classic benchmark of calls and comparisons. */
+int tak(int x, int y, int z) {
+    if (y < x)
+        return tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y));
+    return z;
+}
+int main() {
+    print_int(tak(6, 4, 2));
+    print_int(tak(9, 6, 3));
+    return tak(8, 4, 0);
+}
+"""
+
+test "tak.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_TAK)
+    assert_true(m.halted)
+    assert_true(m.output == "3\n6\n")
+    assert_true(m.exit_code % EXIT_MOD == 1)
+}
+
+SRC_VARS = """/* SPDX-License-Identifier: MIT */
+/* SPDX-FileCopyrightText: 2019 Rui Ueyama */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* Local variables and chained assignment (chibicc test.sh). */
+int main() {
+    int a;
+    int b;
+    a = b = 3;
+    int foo123 = 3, bar = 5;
+    print_int(a + b);
+    print_int(foo123 + bar);
+    return a * b + bar;
+}
+"""
+
+test "vars.c: the output and exit status clang -O0 gives" {
+    m = run_c(SRC_VARS)
+    assert_true(m.halted)
+    assert_true(m.output == "6\n8\n")
+    assert_true(m.exit_code % EXIT_MOD == 14)
+}

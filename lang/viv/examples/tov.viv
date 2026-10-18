@@ -1,0 +1,108 @@
+# Neutron-star structure from the Tolman-Oppenheimer-Volkoff equations,
+# with the relativistic free neutron-gas equation of state.
+#
+#   dm/dr = 4 pi r^2 rho
+#   dP/dr = - G (rho + P/c^2)(m + 4 pi r^3 P/c^2) / [ r (r - 2 G m / c^2) ]
+#
+# Integrate outward from the center to the surface (P -> 0) for a range of
+# central densities, and read off the mass-radius curve. Reproduces
+# Oppenheimer & Volkoff, Phys. Rev. 55, 374 (1939): M_max ~ 0.71 solar masses.
+# Pure ODE integration + a bisection EOS inversion -- no eigensolver.
+
+PI   = 3.141592653589793
+G    = 6.6743e-8              # cgs gravitational constant
+c2   = 8.98755178737e20       # c^2, cm^2/s^2
+Msun = 1.98847e33             # grams
+eps0 = 2.05811363743671e36    # m_n^4 c^5 / (8 pi^2 hbar^3), erg/cm^3
+
+def asinh_(x) {
+    return log(x + sqrt(x * x + 1.0))
+}
+
+# relativistic degenerate Fermi gas, parametrized by x = p_F / (m_n c)
+def eps_of_x(x) {
+    return eps0 * ((2.0 * x * x * x + x) * sqrt(1.0 + x * x) - asinh_(x))
+}
+def P_of_x(x) {
+    return (eps0 / 3.0) * ((2.0 * x * x * x - 3.0 * x) * sqrt(1.0 + x * x) + 3.0 * asinh_(x))
+}
+
+# invert P(x) by bisection to get x (hence energy density) at a given pressure
+def x_of_P(P) {
+    if P <= 0.0 { return 0.0 }
+    lo = 0.0
+    hi = 10000.0
+    for j to 60 {
+        mid = 0.5 * (lo + hi)
+        pv = P_of_x(mid)
+        if pv < P  { lo = mid }
+        if pv >= P { hi = mid }
+    }
+    return 0.5 * (lo + hi)
+}
+
+# TOV right-hand sides, returned through a by-reference scratch array
+#   out[0] = dm/dr,  out[1] = dP/dr
+def derivs(r, m, P, out) {
+    if P <= 0.0 {
+        out[0] = 0.0
+        out[1] = 0.0
+        return 0.0
+    }
+    xx  = x_of_P(P)
+    rho = eps_of_x(xx) / c2
+    out[0] = 4.0 * PI * r * r * rho
+    den = r * (r - 2.0 * G * m / c2)
+    if den <= 0.0 { out[1] = 0.0 }
+    if den > 0.0 {
+        out[1] = 0.0 - G * (rho + P / c2) * (m + 4.0 * PI * r * r * r * P / c2) / den
+    }
+    return 0.0
+}
+
+# sweep central Fermi momentum (log spaced) -> mass-radius curve
+nx = 25
+dr = 500.0
+maxstep = 4000
+xlo = 0.3
+xhi = 8.0
+dlog = log(xhi / xlo) / (nx - 1.0)
+
+xR = zeros(nx)   # radius, km
+xM = zeros(nx)   # gravitational mass, solar masses
+kk = zeros(2)    # scratch for the derivatives
+
+for i to nx {
+    xc  = xlo * exp(i * dlog)
+    Pc  = P_of_x(xc)
+    rho0 = eps_of_x(xc) / c2
+    r = 1.0
+    m = (4.0 / 3.0) * PI * r * r * r * rho0
+    P = Pc
+    for s to maxstep {
+        if P > 1.0e-9 * Pc {
+            derivs(r, m, P, kk)
+            k1m = kk[0]
+            k1P = kk[1]
+            derivs(r + 0.5 * dr, m + 0.5 * dr * k1m, P + 0.5 * dr * k1P, kk)
+            k2m = kk[0]
+            k2P = kk[1]
+            derivs(r + 0.5 * dr, m + 0.5 * dr * k2m, P + 0.5 * dr * k2P, kk)
+            k3m = kk[0]
+            k3P = kk[1]
+            derivs(r + dr, m + dr * k3m, P + dr * k3P, kk)
+            k4m = kk[0]
+            k4P = kk[1]
+            m = m + dr / 6.0 * (k1m + 2.0 * k2m + 2.0 * k3m + k4m)
+            P = P + dr / 6.0 * (k1P + 2.0 * k2P + 2.0 * k3P + k4P)
+            r = r + dr
+        }
+    }
+    xR[i] = r / 1.0e5
+    xM[i] = m / Msun
+}
+show xR
+show xM
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

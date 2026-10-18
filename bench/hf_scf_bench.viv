@@ -1,0 +1,25 @@
+# Water cc-pVDZ, spherical, from the molecule to the RHF energy: every
+# integral computed (MD for the ERIs), transformed to 24 spherical AOs, then
+# RHF with CDIIS. Production members only (`rhf` with the default options), as a release
+# build would run it. The gate is 1.0 s best of 3, native:
+#
+#     tools/race.sh bench/hf_scf_bench.viv
+#
+# It prints the energy to six figures; the test holds it to PySCF's
+# -76.026765673119627 within 1e-9.
+from hf.scf import rhf
+from hf.molecule import molecule_from
+from basis.ccpvdz import basis_ccpvdz
+
+hfbench_mol = molecule_from([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]], basis_ccpvdz())
+hfbench_r = rhf(hfbench_mol)
+hfbench_e = hfbench_r.energy
+show hfbench_e
+
+test "the benchmark energy is PySCF's spherical cc-pVDZ energy within 1e-9" {
+    assert_lt(abs(hfbench_e - -76.026765673119627), 1.0e-9)
+    assert_near(hfbench_r.converged, 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

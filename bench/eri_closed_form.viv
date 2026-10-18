@@ -1,0 +1,22 @@
+# The two-electron integrals from the closed form for s-type Gaussians.
+# One half of the race; bench/eri_hermite.viv is the other.
+from qcfuzz import fuzz_geometry, fuzz_shell_atom
+from gto import gto_contraction, gto_eri
+from qcref import NPRIM, sto3g_h_coef, sto3g_h_expo
+
+NATM = 6
+REPS = 6
+acc = 0.0
+for r to REPS {
+    R = fuzz_geometry(NATM, 11.0 + 7.0 * r)
+    bfa = fuzz_shell_atom(NATM)
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    G = gto_eri(R, bfa, sto3g_h_expo(), cn, NATM, NPRIM)
+    for u to NATM {
+        acc = acc + G[u, u, u, u]
+    }
+}
+show acc
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

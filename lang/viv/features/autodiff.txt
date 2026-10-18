@@ -1,0 +1,98 @@
+# Autodiff: forward mode (`deriv`) and reverse mode over defs (`grad`,
+# `value_and_grad`), lang/viv/src/grad.rs.
+
+== deriv
+title: Forward-mode derivative of one expression
+what: `deriv(fn(x) -> expr, x0)` is the exact derivative of a scalar expression at `x0`. The
+  compiler emits the chain rule inline (a value and a derivative per node), so there is no
+  runtime dual type. The body is one expression of builtins it has rules for; a call of a
+  program's own def inside it is refused.
+when: Instead of a finite difference `(f(x + h) - f(x - h)) / (2 h)` for the derivative of a
+  formula, for example the slope in a Newton step. For a whole def with loops and arrays,
+  use `grad`.
+example: deriv
+see: grad, value-and-grad, phrases, deriv
+keywords: derivative forward mode dual numbers differentiate slope newton autodiff ad
+usage: call:deriv
+
+== grad
+title: Reverse-mode gradient of a def
+what: `g = grad(f, x, a, b)` is the gradient of the number `f(x, a, b)` with respect to its
+  first argument, with `x`'s shape; the other arguments are constants. Loops, branches,
+  calls, slices and the array vocabulary are differentiated. The compiler rewrites the
+  program before any engine sees it, so the interpreter, C and wasm run the same generated
+  def and print the same bytes.
+when: Instead of a hand-written backward pass or a finite-difference gradient. The six
+  study/idioms models that wrote their backward passes by hand match the generated ones to
+  1.1e-15 of the largest entry.
+example: grad
+see: value-and-grad, reduction-adjoints, autodiff-limits, grad
+keywords: gradient reverse mode backprop backpropagation adjoint autodiff ad tape jacobian
+usage: call:grad
+
+== value-and-grad
+title: The value and the gradient in one pass
+what: `l, g = value_and_grad(f, x, a, b)` gives `f(x, a, b)` and its gradient with respect to
+  `x` from one forward and one backward pass. It is an unpacking, written on a line of its
+  own.
+when: In a training or optimization loop, which needs the loss and the gradient each step:
+  calling `f` and then `grad` runs the forward pass twice.
+example: value-and-grad
+see: grad, value-and-grad-over-records, unpacking, lib-optim, value_and_grad
+keywords: value_and_grad loss gradient training optimizer step backprop jax
+usage: call:value_and_grad
+
+== value-and-grad-over-records
+title: Gradients of a record of arrays
+what: When the differentiated argument is a record whose every field is an array, a record
+  of arrays or an array of them (`Gpt { tok, pos, blocks: [Block], unembed }`), the gradient
+  is a record of the same type: each array of `g` is the derivative with respect to the
+  array at the same place. The first parameter's annotation (`m: Model`) marks it. A number,
+  boolean or string field is refused with its name: keep sizes in a record of their own.
+when: Instead of packing a model's weights into one flat parameter vector with an offset
+  table (lib/params) to fit `grad`'s one-array argument.
+example: value-and-grad-over-records
+see: value-and-grad, for-leaves, record-arithmetic, records, arrays-of-records, lib-gpt
+keywords: record model parameters pytree weights gradient record of arrays struct flat vector
+
+== reduction-adjoints
+title: Adjoints for reductions, reshapes, gathers and broadcasts
+what: `grad` differentiates `sum`, `mean`, `var`, `std`, `prod`, `amax` and `amin`, whole or
+  along an axis with or without keepdims; `reshape`, `ravel`, `flatten`, `transpose` with
+  axes, `swapaxes`; `take` along an axis; `dot`, `norm`; `where`; and `@` on stacks of
+  matrices. A broadcast operand's gradient is summed back to its shape, and `amax`/`amin`
+  share it among tied entries as torch.amax does.
+when: Write normalizations, softmax and cross-entropy as whole-array expressions with axis
+  reductions; the gradient comes with them, with no per-row loop.
+example: reduction-adjoints
+doc: study/idioms/autodiff-probes/axes.viv
+see: axis-reductions, broadcasting, batched-matmul, grad, lib-nn
+keywords: adjoint reduction softmax rmsnorm layernorm keepdims mean var amax gradient broadcast
+
+== for-leaves
+title: `for_leaves` and `zeros_like` over records of arrays
+what: `for_leaves(f, r1, r2, ..., x)` calls the def `f` once per array of the records,
+  passing the arrays at the same place in each record, then any extra arguments; `f` may
+  write the first in place. `zeros_like(r)` is a record of the same shape filled with zeros,
+  and `sum(r)` adds the sums of its arrays.
+when: Instead of one statement per field to update, copy or zero a model's weights, as in an
+  optimizer step over every parameter array.
+example: for-leaves
+doc: www/src/pages/reference.astro section Statements
+see: value-and-grad-over-records, record-arithmetic, lib-optim, for_leaves
+keywords: for_leaves tree_map pytree leaves map over fields zeros_like optimizer update parameters
+usage: call:for_leaves, call:zeros_like
+
+== autodiff-limits
+title: What `grad` refuses, and why
+what: Anything `grad` cannot differentiate is a compile error at its line, never a silent
+  zero: a builtin with no adjoint given a differentiated value (`eig_sym`, `lin_solve`,
+  `gamma`, `fft`, `sort`, complex numbers), `break` and `continue`, `return` inside a loop,
+  `parallel for`, recursion, a write into a parameter or global array the def also reads,
+  and `grad` inside a differentiated def. The tape keeps every overwritten value, with no
+  checkpointing. The error's note lists the differentiable builtins.
+when: Read before differentiating a solver or a long time integration. Eigen-solve and
+  linear-solve adjoints, Hessians and checkpointing are not built.
+example: none: a refused program does not run; `viv check` on one prints the located error and the list of differentiable builtins
+see: grad, value-and-grad, check
+keywords: refused unsupported adjoint eig lin_solve hessian checkpointing tape limits error

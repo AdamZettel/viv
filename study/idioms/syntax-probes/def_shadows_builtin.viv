@@ -1,0 +1,82 @@
+###
+A program's own def wins over a builtin of the same name, in every engine.
+The interpreter always tried a program's defs first; the compiled engines
+used to take the builtin for some names: `def band(a, b)` ran in the
+interpreter, while the C and wasm builds called the bitwise builtin and
+printed other numbers, with no error. For a name like `pow` or `atan2` the C
+did not build at all, and for `sin` or `sqrt` every engine refused the call
+for having the builtin's argument count. Now the def is called everywhere,
+and the builtin stays in reach under any name the program did not take.
+###
+
+def band(lo, hi) {
+    return hi - lo
+}
+
+def mod(a, b) {
+    return a * 10 + b
+}
+
+# three arguments where the builtin takes one
+def sin(a, b, c) {
+    return a + b + c
+}
+
+# a def of the name `log`; the builtin `ln` is still libm's log
+def log(x) {
+    return x + 1000
+}
+
+def pow(x, y) {
+    return x * y
+}
+
+def zeros(n) {
+    return n * 2
+}
+
+def sum(a) {
+    s = 0
+    for i to len(a) {
+        s += 2 * a[i]
+    }
+    return s
+}
+
+def twice(f, x) -> Num {
+    return apply(f, x, 3)
+}
+
+show band(3, 10)
+show mod(3, 4)
+show sin(1, 2, 3)
+show log(1)
+show ln(1)
+show pow(2, 10)
+show zeros(4)
+show sum([1, 2, 3])
+show twice(pow, 5)
+
+test "a program's own def is the one called" {
+    assert_near(band(3, 10), 7, 0)
+    assert_near(mod(3, 4), 34, 0)
+    assert_near(sin(1, 2, 3), 6, 0)
+    assert_near(pow(2, 10), 20, 0)
+    assert_near(zeros(4), 8, 0)
+    assert_near(sum([1, 2, 3]), 12, 0)
+}
+
+test "the builtins the program did not redefine still work" {
+    assert_near(bor(4, 1), 5, 0)
+    assert_near(ln(1), 0, 0)
+    assert_near(cos(0), 1, 0)
+    assert_near(sqrt(16), 4, 0)
+}
+
+test "a def named like a builtin is also a function value" {
+    assert_near(twice(pow, 5), 15, 0)
+    assert_near(log(1), 1001, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,73 @@
+###
+title: Each digit of Monte Carlo accuracy costs 100× the paths
+line: The error falls like $N^{-1/2}$, with a log-log slope between $-0.6$ and $-0.4$ from 1,000 to 1,000,000 paths.
+claim: Pricing a European call ($S = K = 100$, $r = 5\%$, $\sigma = 20\%$, one year) by Monte Carlo, the root-mean-square error over 16 independent runs against the Black-Scholes price 10.4506 falls like $N^{-1/2}$. The log-log slope from 1,000 to 1,000,000 paths is between $-0.6$ and $-0.4$, so each extra digit of accuracy costs 100 times the paths.
+topic: finance
+section: option pricing
+reference: The Black-Scholes price 10.450583572185565 (closed form, the vipyr twin's vp.finance.bs_price); the central limit theorem's $N^{-1/2}$ for the standard error of a sample mean (Glasserman, Monte Carlo Methods in Financial Engineering (2003), section 1.1).
+scope: Plain Monte Carlo of the terminal price (exact lognormal step), no variance reduction; 16 runs per path count with fixed seeds, so the fitted slope carries sampling noise of a few hundredths.
+lane: ai
+by: claude
+cost: fast
+agree: 1e-12
+###
+
+S0 = 100.0
+STRIKE = 100.0
+RATE = 0.05
+SIGMA = 0.2
+T = 1.0
+BS_PRICE = 10.450583572185565
+N_RUNS: Int = 16
+PATHS = [1000, 10000, 100000, 1000000]
+SEED: Int = 99
+
+#| One Monte Carlo estimate with n paths.
+def mc_price(n: Int) -> Num {
+    drift = (RATE - 0.5 * SIGMA * SIGMA) * T
+    vol = SIGMA * sqrt(T)
+    s = 0.0
+    for i to n {
+        st = S0 * exp(drift + vol * randn())
+        s = s + max(st - STRIKE, 0.0)
+    }
+    return exp(-RATE * T) * s / n
+}
+
+srand(SEED)
+n_counts: Int = len(PATHS)
+rms_error = zeros(n_counts)
+for k to n_counts {
+    acc = 0.0
+    for run to N_RUNS {
+        e = mc_price(int(PATHS[k])) - BS_PRICE
+        acc = acc + e * e
+    }
+    rms_error[k] = sqrt(acc / N_RUNS)
+}
+lx = log(PATHS * 1.0)
+ly = log(rms_error)
+mc_slope = sum((lx - mean(lx)) * (ly - mean(ly))) / sum((lx - mean(lx)) * (lx - mean(lx)))
+bs_price = BS_PRICE
+show bs_price
+show rms_error
+show mc_slope
+
+#: the figure: the error against the path count, with the slope -1/2 through the first point
+fg_paths = PATHS * 1.0
+fg_ref = rms_error[0] * sqrt(fg_paths[0]) / sqrt(fg_paths)
+figure("Monte Carlo pricing error against the number of paths", "paths N", "RMS error of the price")
+xscale("log")
+yscale("log")
+plot(fg_paths, fg_ref, "slope -1/2")
+style("slope -1/2", "dash s6 nomarker thin")
+plot(fg_paths, rms_error, "RMS error over 16 runs")
+style("RMS error over 16 runs", "s1 circle")
+
+test "the RMS error falls with a log-log slope between -0.6 and -0.4" {
+    assert_gt(mc_slope, -0.6)
+    assert_lt(mc_slope, -0.4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,101 @@
+# A four-bit ripple-carry adder out of NAND gates, and the gate outlines of
+# lib/gates.viv for drawing a full adder, for
+# gallery/hardware/plot_four_bit_adder.py.
+
+import gates
+
+ADDER_BITS: Int = 4     # the width of the adder
+GATE_AND: Int = 0
+GATE_OR: Int = 1
+GATE_XOR: Int = 2
+
+#| NAND of two bits held as 0.0 or 1.0.
+def nand(a, b) {
+    return 1.0 - a * b
+}
+
+#| One full adder from nine NAND gates: the sum bit and the carry out of a + b + c.
+def full_adder(a: Num, b: Num, c: Num) {
+    n1 = nand(a, b)
+    x1 = nand(nand(a, n1), nand(b, n1))     # a xor b
+    n4 = nand(x1, c)
+    s = nand(nand(x1, n4), nand(c, n4))     # a xor b xor c
+    co = nand(n4, n1)                       # ab or c (a xor b)
+    return s, co
+}
+
+#| Bit i of the whole number x.
+def bit(x, i) {
+    p = pow(2.0, i)
+    return floor(x / p) - 2.0 * floor(x / (2.0 * p))
+}
+
+#| a[k] + b[k] + cin for every k, through four full adders: the five-bit
+#| result (the sum and the carry out) as a number.
+def add4(a: Arr, b: Arr, cin: Num) -> Arr {
+    out = zeros(len(a))
+    for k to len(a) {
+        c = cin
+        total = 0.0
+        for i to ADDER_BITS {
+            s, c = full_adder(bit(a[k], i), bit(b[k], i), c)
+            total = total + s * pow(2.0, i)
+        }
+        out[k] = total + c * pow(2.0, ADDER_BITS)
+    }
+    return out
+}
+
+#| Gate delays to each output of a full adder whose inputs settle at ta, tb
+#| and tc: each NAND's output settles one delay after its later input.
+def full_adder_delay(ta, tb, tc) {
+    n1 = max(ta, tb) + 1.0
+    x1 = max(max(ta, n1) + 1.0, max(tb, n1) + 1.0) + 1.0
+    n4 = max(x1, tc) + 1.0
+    s = max(max(x1, n4) + 1.0, max(tc, n4) + 1.0) + 1.0
+    co = max(n4, n1) + 1.0
+    return s, co
+}
+
+#| The gate delays at which s0, s1, s2, s3 and the carry out settle, all
+#| inputs arriving at time 0.
+def settle_times() -> Arr {
+    out = zeros(ADDER_BITS + 1)
+    c = 0.0
+    for i to ADDER_BITS {
+        s, c = full_adder_delay(0.0, 0.0, c)
+        out[i] = s
+    }
+    out[ADDER_BITS] = c
+    return out
+}
+
+#| The outline of an AND (kind 0), OR (1) or XOR (2) gate with its back at x,
+#| width w and height h, centered on y: its x coordinates.
+def gate_x(kind: Int, x: Num, y: Num, w: Num, h: Num) -> Arr {
+    if kind == GATE_AND {
+        return gates.and_x(x, y, w, h)
+    }
+    if kind == GATE_OR {
+        return gates.or_x(x, y, w, h)
+    }
+    return gates.joined(gates.or_x(x, y, w, h), gates.xor_arc_x(x, y, w, h, 0.3 * w))
+}
+
+#| The y coordinates of that outline.
+def gate_y(kind: Int, x: Num, y: Num, w: Num, h: Num) -> Arr {
+    if kind == GATE_AND {
+        return gates.and_y(x, y, w, h)
+    }
+    if kind == GATE_OR {
+        return gates.or_y(x, y, w, h)
+    }
+    return gates.joined(gates.or_y(x, y, w, h), gates.xor_arc_y(x, y, w, h, 0.3 * w))
+}
+
+test "7 + 9 + 1 = 17" {
+    assert_near(add4([7.0], [9.0], 1.0)[0], 17.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

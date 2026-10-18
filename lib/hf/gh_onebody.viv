@@ -1,0 +1,366 @@
+###
+post: Overlap and kinetic energy by Gauss-Hermite quadrature
+agent: claude
+
+The overlap and kinetic integrals of two Cartesian Gaussians factor into one
+integral per axis, and each of those is a polynomial times one Gaussian. The
+product of `exp(-a (x-A)^2)` and `exp(-b (x-B)^2)` is
+
+    exp(-mu (A-B)^2) exp(-p (x-P)^2),    p = a + b,  P = (aA + bB)/p,
+                                         mu = ab/p,
+
+so with `x = P + t/sqrt(p)`
+
+    int (x-A)^i (x-B)^j exp(...) dx
+        = exp(-mu (A-B)^2)/sqrt(p) * int poly(t) exp(-t^2) dt.
+
+An `n`-point Gauss-Hermite rule integrates `poly(t) exp(-t^2)` exactly when
+the polynomial has degree at most `2n - 1`. So a quadrature, which is usually
+an approximation, gives these integrals exactly up to rounding. The module
+uses no recurrence at all: it evaluates the two Cartesian factors at the
+nodes and sums. That makes it independent of both McMurchie-Davidson
+(`hermite.viv`, `md_*`) and Obara-Saika (`os_onebody.viv`), which is its
+purpose: a third opinion on `S` and `T` that shares no algebra with the
+other two.
+
+**Kinetic energy.** Integrating `-1/2 d^2/dx^2` by parts once gives the
+symmetric form
+
+    T_x(i, j) = 1/2 int d/dx[(x-A)^i e^(-a(x-A)^2)] d/dx[(x-B)^j e^(-b(x-B)^2)] dx,
+    d/dx[u^i e^(-a u^2)] = (i u^(i-1) - 2a u^(i+1)) e^(-a u^2),
+
+and `T = Tx Sy Sz + Sx Ty Sz + Sx Sy Tz`. The second-derivative form,
+`j(j-1) u^(j-2) - 2b(2j+1) u^j + 4b^2 u^(j+2)`, subtracts terms of size `b`
+to get a result of size `ab/p`. For the oxygen 1s exponent 5484.67 against a
+valence exponent near 0.27 that is a factor of about 2e4 of cancellation, and
+the symmetric form avoids it. The polynomial degree is then `i + j + 2`, so
+`n = lmax + 2` nodes are exact for every pair in the basis.
+
+**Nodes and weights.** The nodes are the eigenvalues of the Jacobi matrix
+of the Hermite weight, the symmetric tridiagonal matrix with zero diagonal
+and off-diagonal `sqrt(k/2)` (Golub and Welsch 1969). Each one is bracketed
+by bisection on the Sturm count of that matrix and then polished by Newton's
+method on the orthonormal recurrence; its weight is the Christoffel number
+`1 / sum_k p_k(t)^2` over the orthonormal polynomials below degree `n`
+(W. Gautschi, *Orthogonal Polynomials: Computation and Approximation*,
+Oxford 2004; G. H. Golub and J. H. Welsch, Math. Comp. 23, 221
+(1969)). The tests check the rule against the moments `int t^(2k) e^(-t^2) dt =
+(2k-1)!!/2^k sqrt(pi)`.
+
+Normalization is the library's unit-Cartesian convention (`bas_contract`
+and `bas_nc` from `lib/hf/basis.viv`). The stage members `gh_overlap` and
+`gh_kinetic` take `(atoms, shells, prims)` and return `[nao_cart, nao_cart]`.
+
+Used with `import hf.gh_onebody`.
+###
+
+from hf.basis import (
+    AT_X, AT_Y, AT_Z, bas_contract, bas_nao_cart, bas_nc, bas_ncart, bas_powers, PR_EXP,
+    SH_ATOM, SH_CART0, SH_L, SH_NPRIM, SH_P0,
+)
+
+GH_PI = 3.141592653589793
+# bisection halvings per node in gh_rule: 64 shrink the starting interval
+# [0, sqrt(2n) + 1] below the spacing of doubles near any node
+GH_BISECT_IT = 64
+# Newton steps per node after the bisection; each one roughly doubles the
+# correct digits, so a few reach rounding, and a step stops early once the
+# correction is zero
+GH_NEWTON_IT = 4
+# the pivot that stands in for an exact zero in the Sturm count
+GH_PIVOT_FLOOR = 1.0e-300
+# lib/hfref/prims: rows per case in its shell table (shells a, b, c, d), and
+# the largest l of its shells
+GH_T_PRIMS_ROWS = 4
+GH_T_PRIMS_LMAX = 3
+
+#| How many nodes of the `n`-point rule lie below `t`: the number of negative
+#| pivots of the LDL^T factorization of `J - t I`, where `J` is the Jacobi
+#| matrix (zero diagonal, off-diagonal `sqrt(k/2)` between rows `k - 1` and
+#| `k`). Sylvester's law of inertia makes it the count of eigenvalues below `t`.
+def gh_count_below(n, t) {
+    count = 0
+    piv = -t
+    if abs(piv) < GH_PIVOT_FLOOR {
+        piv = -GH_PIVOT_FLOOR
+    }
+    if piv < 0.0 {
+        count = count + 1
+    }
+    for k from 1 to n {
+        #: row k couples to row k - 1 through sqrt(k / 2)
+        piv = -t - (k / 2.0) / piv
+        if abs(piv) < GH_PIVOT_FLOOR {
+            piv = -GH_PIVOT_FLOOR
+        }
+        if piv < 0.0 {
+            count = count + 1
+        }
+    }
+    return count
+}
+
+#| The orthonormal Hermite polynomial `p_n(t)` for weight `exp(-t^2)` and its
+#| derivative, by the three-term recurrence
+#| `sqrt(k + 1) p_(k+1) = sqrt(2) t p_k - sqrt(k) p_(k-1)`, `p_0 = pi^(-1/4)`,
+#| differentiated term by term, and the sum of `p_k(t)^2` for `k < n`.
+def gh_orthonormal(n, t) {
+    prev = 0.0
+    cur = 1.0 / sqrt(sqrt(GH_PI))
+    dprev = 0.0
+    dcur = 0.0
+    sumsq = 0.0
+    for k to n {
+        sumsq = sumsq + cur * cur
+        nxt = (sqrt(2.0) * t * cur - sqrt(k) * prev) / sqrt(k + 1.0)
+        dnxt = (sqrt(2.0) * (cur + t * dcur) - sqrt(k) * dprev) / sqrt(k + 1.0)
+        prev = cur
+        cur = nxt
+        dprev = dcur
+        dcur = dnxt
+    }
+    return cur, dcur, sumsq
+}
+
+#| The `n`-point Gauss-Hermite rule for weight `exp(-t^2)`: `R[0, k]` is a
+#| node, `R[1, k]` its weight, nodes in decreasing order. The nodes are the
+#| eigenvalues of the Jacobi matrix (Golub and Welsch). Node `k`, counting
+#| down from the largest, is where `gh_count_below` steps from `n - 1 - k` to
+#| `n - k`: `GH_BISECT_IT` halvings of the Gershgorin interval
+#| `|t| <= sqrt(2n) + 1` find it, then up to `GH_NEWTON_IT` Newton steps on
+#| `p_n` polish it. Its weight is the Christoffel number
+#| `1 / sum_(j < n) p_j(t)^2` (Gautschi). Only the nonnegative half is
+#| computed; the rule is symmetric.
+def gh_rule(n) {
+    R = zeros(2, n)
+    bound = sqrt(2.0 * n) + 1.0
+    half = floor((n + 1) / 2)
+    for k to half {
+        #: node k has n - 1 - k nodes below it
+        lo = 0.0
+        hi = bound
+        for it to GH_BISECT_IT {
+            mid = 0.5 * (lo + hi)
+            if gh_count_below(n, mid) <= n - 1 - k {
+                lo = mid
+            }
+            else {
+                hi = mid
+            }
+        }
+        t = 0.5 * (lo + hi)
+        for it to GH_NEWTON_IT {
+            pn, dpn, sumsq = gh_orthonormal(n, t)
+            step = pn / dpn
+            t = t - step
+            if step == 0.0 {
+                break
+            }
+        }
+        #: an odd rule's middle node is exactly 0
+        if 2 * k == n - 1 {
+            t = 0.0
+        }
+        pn, dpn, sumsq = gh_orthonormal(n, t)
+        R[0, k] = t
+        R[0, n - 1 - k] = -t
+        R[1, k] = 1.0 / sumsq
+        R[1, n - 1 - k] = R[1, k]
+    }
+    return R
+}
+
+#| The 1-D overlap and kinetic tables for one primitive pair along one axis,
+#| `S[i, j]` and `T[i, j]` for `i <= la`, `j <= lb`, by quadrature with rule
+#| `R`. `U` is scratch, `[2, lmax + 2]` at least.
+def gh_axis(a, b, A, B, la, lb, R: Arr, S: Arr, T: Arr, U: Arr) {
+    p = a + b
+    P = (a * A + b * B) / p
+    sp = sqrt(p)
+    K = exp(-a * b / p * (A - B) * (A - B)) / sp
+    for i to la + 1 {
+        for j to lb + 1 {
+            S[i, j] = 0.0
+            T[i, j] = 0.0
+        }
+    }
+    for k to round(numel(R) / 2) {
+        uA = P - A + R[0, k] / sp
+        uB = P - B + R[0, k] / sp
+        w = K * R[1, k]
+        # U[0, i] = uA^i, U[1, j] = uB^j, one power past each shell for the
+        # derivative
+        U[0, 0] = 1.0
+        U[1, 0] = 1.0
+        for i to la + 1 {
+            U[0, i + 1] = U[0, i] * uA
+        }
+        for j to lb + 1 {
+            U[1, j + 1] = U[1, j] * uB
+        }
+        for i to la + 1 {
+            da = -2.0 * a * U[0, i + 1]
+            if i > 0 {
+                da = da + i * U[0, i - 1]
+            }
+            for j to lb + 1 {
+                db = -2.0 * b * U[1, j + 1]
+                if j > 0 {
+                    db = db + j * U[1, j - 1]
+                }
+                S[i, j] = S[i, j] + w * U[0, i] * U[1, j]
+                T[i, j] = T[i, j] + 0.5 * w * da * db
+            }
+        }
+    }
+    return 0.0
+}
+
+#| Overlap (`kind` 0) or kinetic (`kind` 1) block of shells `sa`, `sb`,
+#| `[ncart(la), ncart(lb)]`, unit-Cartesian, with rule `R`.
+def gh_block(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, R: Arr, sa, sb, kind) {
+    la = round(shells[sa, SH_L])
+    lb = round(shells[sb, SH_L])
+    ia = round(shells[sa, SH_ATOM])
+    ib = round(shells[sb, SH_ATOM])
+    pa0 = round(shells[sa, SH_P0])
+    pb0 = round(shells[sb, SH_P0])
+    Pa = bas_powers(la)
+    Pb = bas_powers(lb)
+    na = len(Pa)
+    nb = len(Pb)
+    out = zeros(na, nb)
+    Sx = zeros(la + 1, lb + 1)
+    Sy = zeros(la + 1, lb + 1)
+    Sz = zeros(la + 1, lb + 1)
+    Tx = zeros(la + 1, lb + 1)
+    Ty = zeros(la + 1, lb + 1)
+    Tz = zeros(la + 1, lb + 1)
+    U = zeros(2, max(la, lb) + 2)
+    for u to round(shells[sa, SH_NPRIM]) {
+        a = prims[pa0 + u, PR_EXP]
+        for v to round(shells[sb, SH_NPRIM]) {
+            b = prims[pb0 + v, PR_EXP]
+            cc = cn[pa0 + u] * cn[pb0 + v]
+            gh_axis(a, b, atoms[ia, AT_X], atoms[ib, AT_X], la, lb, R, Sx, Tx, U)
+            gh_axis(a, b, atoms[ia, AT_Y], atoms[ib, AT_Y], la, lb, R, Sy, Ty, U)
+            gh_axis(a, b, atoms[ia, AT_Z], atoms[ib, AT_Z], la, lb, R, Sz, Tz, U)
+            for r to na {
+                x1 = round(Pa[r, 0])
+                y1 = round(Pa[r, 1])
+                z1 = round(Pa[r, 2])
+                for c to nb {
+                    x2 = round(Pb[c, 0])
+                    y2 = round(Pb[c, 1])
+                    z2 = round(Pb[c, 2])
+                    if kind == 1 {
+                        val = Tx[x1, x2] * Sy[y1, y2] * Sz[z1, z2] + Sx[x1, x2] * Ty[y1, y2] * Sz[z1, z2] + Sx[x1, x2] * Sy[y1, y2] * Tz[z1, z2]
+                    } else {
+                        val = Sx[x1, x2] * Sy[y1, y2] * Sz[z1, z2]
+                    }
+                    out[r, c] = out[r, c] + cc * val
+                }
+            }
+        }
+    }
+    for r to na {
+        for c to nb {
+            out[r, c] = out[r, c] * bas_nc(Pa[r, 0], Pa[r, 1], Pa[r, 2]) * bas_nc(Pb[c, 0], Pb[c, 1], Pb[c, 2])
+        }
+    }
+    return out
+}
+
+#| The rule that is exact for every kinetic integrand of a shell pack:
+#| degree `2 lmax + 2` needs `lmax + 2` nodes.
+def gh_rule_for(shells: Arr) {
+    lmax = 0
+    for s to len(shells) {
+        lmax = max(lmax, round(shells[s, SH_L]))
+    }
+    return gh_rule(lmax + 2)
+}
+
+#| A whole matrix from per-pair blocks, `sa >= sb` computed and mirrored.
+def gh_matrix(atoms: Arr, shells: Arr, prims: Arr, kind) {
+    cn = bas_contract(shells, prims)
+    R = gh_rule_for(shells)
+    n = bas_nao_cart(shells)
+    M = zeros(n, n)
+    for sa to len(shells) {
+        for sb to sa + 1 {
+            blk = gh_block(atoms, shells, prims, cn, R, sa, sb, kind)
+            a0 = round(shells[sa, SH_CART0])
+            b0 = round(shells[sb, SH_CART0])
+            for r to len(blk) {
+                for c to bas_ncart(shells[sb, SH_L]) {
+                    M[a0 + r, b0 + c] = blk[r, c]
+                    M[b0 + c, a0 + r] = blk[r, c]
+                }
+            }
+        }
+    }
+    return M
+}
+
+#| Stage member: the overlap matrix, `[nao_cart, nao_cart]`.
+def gh_overlap(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return gh_matrix(atoms, shells, prims, 0)
+}
+
+#| Stage member: the kinetic energy matrix.
+def gh_kinetic(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return gh_matrix(atoms, shells, prims, 1)
+}
+
+# ---- tests ----------------------------------------------------------------------
+# The reference modules used above exist for these tests. An import cannot sit
+# inside a test block, so a program that uses this module also compiles their
+# literal-returning defs, which nothing calls.
+
+#| Test helper: the largest relative error of the `n`-point rule over the
+#| moments `int t^k exp(-t^2) dt` for `k <= 2n - 1`: 0 for odd `k`, and
+#| `(k-1)!! / 2^(k/2) sqrt(pi)` for even `k`. An odd moment is measured
+#| against `sum w |t|^k`, the size of the terms that cancel in it.
+def gh_t_moment_err(n) {
+    R = gh_rule(n)
+    worst = 0.0
+    for k to 2 * n {
+        s = 0.0
+        sa = 0.0
+        for i to n {
+            s = s + R[1, i] * pow(R[0, i], k)
+            sa = sa + R[1, i] * pow(abs(R[0, i]), k)
+        }
+        if mod(k, 2) == 1 {
+            worst = max(worst, abs(s) / sa)
+        } else {
+            want = sqrt(GH_PI)
+            for j to k / 2 {
+                want = want * (2.0 * j + 1.0) / 2.0
+            }
+            worst = max(worst, abs(s - want) / want)
+        }
+    }
+    return worst
+}
+
+test "the rules integrate every moment they claim, for 1 to 10 nodes" {
+    gh_worst = 0.0
+    gh_nmax = 10
+    for gh_n to gh_nmax {
+        gh_worst = max(gh_worst, gh_t_moment_err(gh_n + 1))
+    }
+    # measured: 3.0e-15 (at 9 nodes)
+    assert_lt(gh_worst, 1.0e-14)
+    # 4 nodes, from Abramowitz and Stegun table 25.10
+    gh_nas = 4
+    gh_r4 = gh_rule(gh_nas)
+
+    assert_near(gh_r4[0, 0], 1.650680123885785, 1.0e-15)
+    assert_near(gh_r4[0, 1], 0.524647623275290, 1.0e-15)
+    assert_near(gh_r4[1, 0], 0.08131283544724518, 1.0e-16)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

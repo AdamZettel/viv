@@ -1,0 +1,81 @@
+#! pde Laplace's equation
+#! equation \nabla^2 u = 0
+#! kind elliptic
+#! method successive over-relaxation, with the optimal relaxation factor for a square
+#! checks a value symmetry fixes exactly; and that over-relaxation beats plain Gauss-Seidel by the factor theory predicts
+#! | A square plate: one edge held at 1, the other three at 0. What is the temperature at the center?
+#! |
+#! | Exactly $\tfrac14$, and no series is needed to see it. Solve the problem four times, heating each
+#! | edge in turn, and add the answers: the sum has every edge at 1, so it is 1 everywhere. By
+#! | symmetry each of the four gives the same value at the center. The discrete equations have the
+#! | same symmetry, so the numerical answer is $\tfrac14$ too -- to the solver's tolerance, not the
+#! | grid's. It is the rare test with no discretization error in it.
+#! |
+#! | **Gauss-Seidel** replaces each point by the average of its neighbors, sweep after sweep, and
+#! | is slow: the error shrinks by a factor of about $1 - \pi^2 h^2$ per sweep. **SOR** moves each
+#! | point a factor $\omega$ past that average. With $\omega = 2/(1 + \sin \pi h)$ the factor becomes
+#! | about $1 - 2\pi h$, and the number of sweeps drops from $O(n^2)$ to $O(n)$.
+
+pi = 3.141592653589793
+SWEEPS = zeros(1)       #: SWEEPS  how many sweeps the last solve took
+
+#| Relax to convergence with relaxation factor omega; returns the grid.
+def relax(n, omega, tol) {
+    u = zeros(n + 2.0, n + 2.0)
+    for j to n + 2.0 {
+        u[0.0, j] = 1.0
+    }
+    change = 1.0
+    sweeps = 0.0
+    while change > tol and sweeps < 20000.0 {
+        change = 0.0
+        for i to n {
+            for j to n {
+                a = i + 1.0
+                b = j + 1.0
+                avg = 0.25 * (u[a - 1.0, b] + u[a + 1.0, b] + u[a, b - 1.0] + u[a, b + 1.0])
+                step = omega * (avg - u[a, b])
+                u[a, b] = u[a, b] + step
+                change = max(change, abs(step))
+            }
+        }
+        sweeps = sweeps + 1.0
+    }
+    SWEEPS[0] = sweeps
+    return u
+}
+
+N = 23
+H = 1.0 / (N + 1.0)
+OMEGA = 2.0 / (1.0 + sin(pi * H))
+u_sor = relax(N, OMEGA, 1.0e-12)
+sor_sweeps = SWEEPS[0]
+u_gs = relax(N, 1.0, 1.0e-12)
+gs_sweeps = SWEEPS[0]
+center = u_sor[(N + 1.0) / 2.0, (N + 1.0) / 2.0]
+speedup = gs_sweeps / sor_sweeps
+show OMEGA
+show center
+show sor_sweeps
+show gs_sweeps
+show speedup
+
+# transposed, the first index of u_sor runs across and the second up, so the hot
+# edge, u[0, j] = 1, is on the left
+figure("A plate with one hot edge", "x", "y")
+origin("lower")
+plot2d(transpose(u_sor), "temperature")
+
+test "the center of the plate is exactly 1/4, by symmetry" {
+    assert_near(center, 0.25, 1.0e-10)
+}
+test "Gauss-Seidel reaches the same answer" {
+    assert_near(u_gs[(N + 1.0) / 2.0, (N + 1.0) / 2.0], 0.25, 1.0e-9)
+}
+test "optimal over-relaxation needs an order of magnitude fewer sweeps" {
+    assert_gt(speedup, 10.0)
+    assert_lt(sor_sweeps, 5.0 * N)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

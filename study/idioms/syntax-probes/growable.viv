@@ -1,0 +1,143 @@
+###
+Growable arrays (gap R17): `[]` is an empty vector, `a = append(a, x)`
+puts a number on the end of a vector or a row under a matrix, and
+`a = extend(a, b)` joins two vectors. An append gives back a new array and is
+written rebinding the name it grows; an alias taken before it (`b = a`) keeps
+the array as it was. Room doubles, so n appends cost O(n) in every engine,
+and nothing here depends on how much room there is.
+###
+
+# collect what a scan finds, without counting first
+kept = []
+for i to 20 {
+    if mod(i * i, 7) == 2 {
+        kept = append(kept, i)
+    }
+}
+show kept
+show len(kept)
+
+# an alias keeps the array as it was; later writes do not reach it
+out = []
+for i to 5 {
+    out = append(out, i)
+}
+before = out
+out = append(out, 5)
+out[0] = -1
+show before
+show out
+
+# a closure reads `cap` when it is called; a record keeps the array it was given
+cap = []
+cap = append(cap, 3)
+last = fn(k) -> cap[len(cap) - 1] * k
+cap = append(cap, 7)
+show last(10)
+record Box {
+    items: Arr
+}
+bx = Box { items: cap }
+cap = append(cap, 11)
+show bx.items
+show cap
+
+# rows onto a matrix; [] takes a first row and becomes 1 x n
+m = []
+for i to 3 {
+    m = append(m, [i, i * i, i * i * i])
+}
+show m
+show shape(m)
+
+# extend joins vectors, itself included
+v = [1, 2]
+v = extend(v, [3])
+v = extend(v, v)
+show v
+
+# a def builds and returns one; the caller keeps growing it
+def squares_below(n) {
+    r = []
+    k = 0
+    while k * k < n {
+        r = append(r, k * k)
+        k += 1
+    }
+    return r
+}
+sq = squares_below(50)
+sq = append(sq, 49)
+show sq
+
+# a def that grows its parameter grows a copy: the caller's array is unchanged
+def with_zero(p) {
+    p = append(p, 0)
+    return p
+}
+base = [5, 6]
+more = with_zero(base)
+show base
+show more
+
+# a top-level array a def reads while it grows
+seen = []
+def seen_sum() {
+    s = 0
+    for i to len(seen) {
+        s += seen[i]
+    }
+    return s
+}
+for i to 4 {
+    seen = append(seen, i + 1)
+    print("sum so far", seen_sum(), sep="")
+}
+
+# many doublings, then every element checked
+big = []
+for i to 5000 {
+    big = append(big, 3 * i + 1)
+}
+bad = 0
+for i to len(big) {
+    if big[i] != 3 * i + 1 {
+        bad += 1
+    }
+}
+show bad
+
+# several values back, one of them grown
+def split_even_odd(n) {
+    ev = []
+    od = []
+    for i to n {
+        if mod(i, 2) == 0 {
+            ev = append(ev, i)
+        } else {
+            od = append(od, i)
+        }
+    }
+    return ev, od
+}
+ev, od = split_even_odd(7)
+show ev
+show od
+
+show []
+show len([])
+
+test "growable arrays" {
+    assert_true(len(kept) == 6)
+    assert_true(len(before) == 5 and before[0] == 0)
+    assert_true(len(out) == 6 and out[0] == -1)
+    assert_true(len(bx.items) == 2 and len(cap) == 3)
+    assert_true(m[2, 2] == 8)
+    assert_true(len(v) == 6 and v[5] == 3)
+    assert_true(len(base) == 2 and len(more) == 3)
+    assert_true(bad == 0)
+    assert_true(len(ev) == 4 and len(od) == 3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

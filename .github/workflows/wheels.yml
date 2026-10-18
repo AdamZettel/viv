@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# Platform wheels of vipyr and its distributions, with every library program
+# precompiled (python/vipyr/_prebuilt.py), so an install needs no C compiler.
+#
+# Why not cibuildwheel: vipyr's wheels are py3-none-<platform> (the code is
+# a ctypes wrapper, the binaries are the `viv` executable and plain shared
+# libraries), so each platform builds ONE set of wheels, not one per Python
+# version; and the distributions' build backend is vipyr itself
+# (vipyr.build), run from the checkout. What cibuildwheel would add is the
+# manylinux container and auditwheel, which the Linux jobs below use
+# directly, the same way cibuildwheel does.
+#
+# Matrix: macOS arm64 (macos-14) and x86_64 (macos-13), each native; Linux
+# x86_64 and aarch64 in manylinux2014 containers on native runners
+# (ubuntu-24.04-arm for aarch64, no emulation); Windows x86_64.
+#
+# Windows: the runtime C that `viv export` writes uses C99 _Complex,
+# __builtin_*_overflow, __attribute__ and <unistd.h>, which MSVC's cl does
+# not accept, and lang/viv/build.rs compiles SQLite with `cc` and `ar`. So
+# the Windows job uses the MinGW-w64 UCRT64 toolchain from MSYS2 (gcc,
+# ar) and builds `viv` for the x86_64-pc-windows-gnu target; the programs'
+# DLLs are linked with -static-libgcc (python/vipyr/_core.py), so they need
+# only the UCRT that every Windows 10+ has. A Windows user who compiles their
+# own .viv needs MinGW-w64 gcc on PATH (vipyr's default $CC there is gcc);
+# without it vipyr runs their file in the interpreter (python/vipyr/_interp.py).
+# clang-cl was the alternative: it has _Complex but not <unistd.h>, and
+# would still need the runtime gated per compiler.
+#
+# Not run yet (the repository has no remote); written against the GitHub
+# runner images and manylinux2014 as documented on 2026-10-12.
+
+name: wheels
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+# Least privilege: the jobs read the repository and upload artifacts, and
+# write nothing back to GitHub.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  # release binaries hold no path of the build machine, and no symbols
+  VIV_RELEASE: "1"
+  VIPYR_PREBUILD_FAST: "1"
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, arch: arm64, target: "11.0" }
+          - { runner: macos-13, arch: x86_64, target: "10.13" }
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target }}
+      # the wheel tag follows the deployment target, not the Python's build
+      _PYTHON_HOST_PLATFORM: macosx-${{ matrix.target }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build viv
+        run: |
+          RUSTFLAGS="-C strip=symbols --remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=." \
+            cargo build --release -p viv
+      - run: pip install numpy pandas
+      - name: wheels
+        run: tools/wheels/build_all.sh dist
+      - name: no-compiler smoke test of the installed wheels
+        run: |
+          python -m venv --system-site-packages /tmp/v
+          /tmp/v/bin/pip install --no-index --no-deps dist/*.whl
+          cp tools/wheels/smoke_nocc.py /tmp/ && cd /tmp
+          env -i HOME=$HOME PATH=/tmp/v/bin:/bin /tmp/v/bin/python smoke_nocc.py
+      - uses: actions/upload-artifact@v4
+        with: { name: "wheels-macos-${{ matrix.arch }}", path: dist/*.whl }
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      # The build runs in manylinux2014 (glibc 2.17) through docker, and
+      # checkout and upload-artifact run on the runner: their node20 cannot
+      # run on glibc 2.17, so the job is not a `container:` job.
+      - uses: actions/checkout@v4
+      - name: build viv and the wheels in manylinux2014
+        run: |
+          docker run --rm -v "$PWD":/io -w /io \
+            -e CARGO_TERM_COLOR -e CARGO_BUILD_JOBS -e VIV_RELEASE -e VIPYR_PREBUILD_FAST \
+            -e PYTHON=/opt/python/cp312-cp312/bin/python \
+            quay.io/pypa/manylinux2014_${{ matrix.arch }} bash -euxc '
+              git config --global --add safe.directory /io
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+              export PATH="$HOME/.cargo/bin:$PATH"
+              # rustc applies the last matching prefix: general first
+              RUSTFLAGS="-C strip=symbols --remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=." \
+                cargo build --release -p viv
+              # manylinux: the binary may need only glibc 2.17 libc, libm, libpthread, libdl
+              ldd target/release/viv
+              $PYTHON -m pip install numpy pandas auditwheel
+              tools/wheels/build_all.sh raw
+              # retag linux_<arch> as manylinux_2_17_<arch> after checking every
+              # shared library against the policy (the viv executable is data
+              # to auditwheel; the ldd above is its check)
+              for w in raw/*.whl; do $PYTHON -m auditwheel repair -w dist "$w"; done
+              # no-compiler smoke test of the installed wheels
+              $PYTHON -m venv --system-site-packages /tmp/v
+              /tmp/v/bin/pip install --no-index --no-deps dist/*.whl
+              cp tools/wheels/smoke_nocc.py /tmp/ && cd /tmp
+              env -i HOME=$HOME PATH=/tmp/v/bin:/bin /tmp/v/bin/python smoke_nocc.py
+            '
+      - uses: actions/upload-artifact@v4
+        with: { name: "wheels-linux-${{ matrix.arch }}", path: dist/*.whl }
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run: { shell: bash }
+    env:
+      CC: gcc
+      VIPYR_PLAT_TAG: win_amd64
+    steps:
+      - uses: actions/checkout@v4
+      # CPython from python.org builds and tests the wheels (win_amd64);
+      # MSYS2 supplies only the MinGW-w64 compiler
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-pc-windows-gnu }
+      - name: build viv (GNU target; build.rs compiles SQLite with gcc and ar)
+        run: |
+          export PATH="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/ucrt64/bin:$PATH"
+          RUSTFLAGS="-C strip=symbols" cargo build --release -p viv --target x86_64-pc-windows-gnu
+          mkdir -p target/release && cp target/x86_64-pc-windows-gnu/release/viv.exe target/release/viv.exe
+      - run: pip install numpy pandas
+      - name: wheels
+        run: |
+          export PATH="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/ucrt64/bin:$PATH"
+          PYTHON=python tools/wheels/build_all.sh dist
+      - name: no-compiler smoke test of the installed wheels
+        run: |
+          python -m venv --system-site-packages "$RUNNER_TEMP/v"
+          "$RUNNER_TEMP/v/Scripts/python" -m pip install --no-index --no-deps dist/*.whl
+          cp tools/wheels/smoke_nocc.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP"
+          env -u CC PATH="$RUNNER_TEMP/v/Scripts:/usr/bin" "$RUNNER_TEMP/v/Scripts/python" smoke_nocc.py
+      - uses: actions/upload-artifact@v4
+        with: { name: wheels-windows-x86_64, path: dist/*.whl }
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: cd python && python -c "import vipyr.build as b; print(b.build_sdist('../dist'))"
+      - uses: actions/upload-artifact@v4
+        with: { name: sdist, path: dist/*.tar.gz }

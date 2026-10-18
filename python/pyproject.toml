@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# vipyr: Viv as a Python package. `pip install vipyr`, then `import vipyr as vp`.
+# Viv is the language; vipyr is the package that carries its compiler.
+#
+#     python -m build --wheel --no-isolation python/     (or pip wheel --no-build-isolation python/)
+#
+# builds a platform wheel that carries the `viv` compiler (vipyr/bin/viv,
+# from $VIPYR_BUNDLE_VIV or the checkout's target/release/viv) and Viv's
+# library modules (vipyr/_root/lib), with vipyr's own backend
+# (vipyr/build.py), so neither maturin nor setuptools is needed.
+
+[build-system]
+requires = []
+build-backend = "vipyr.build"
+backend-path = ["."]
+
+[project]
+name = "vipyr"
+version = "0.0.1"
+description = "Viv as a Python package: the viv compiler, your .viv files as Python functions, and Viv's scientific programs"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+# The domain families are distributions of their own (packages/ in the
+# repository); `pip install vipyr[chem]` adds vp.scf and vp.dft, and so on.
+[project.optional-dependencies]
+chem = ["vipyr-chem==0.0.1"]
+nuclear = ["vipyr-nuclear==0.0.1"]
+plasma = ["vipyr-plasma==0.0.1"]
+xc = ["vipyr-xc==0.0.1"]
+all = ["vipyr-chem==0.0.1", "vipyr-nuclear==0.0.1", "vipyr-plasma==0.0.1", "vipyr-xc==0.0.1"]
+
+[project.scripts]
+vipyr = "vipyr.__main__:main"
+viv = "vipyr.__main__:viv_main"
+
+[tool.vipyr]
+packages = ["vipyr"]
+bundle-compiler = true
+# The wheel carries the compiler, which links SQLite (blessing) and Viv's
+# libm (MIT AND SunPro), so it carries every license text in LICENSES/ and
+# the notices that name them.
+license-files = ["../LICENSE-MIT", "../LICENSE-APACHE", "../LICENSING.md", "../THIRD_PARTY.md", "../LICENSES/*.txt", "../third_party/sqlite/README.md"]
+# every program of the core compiled into the platform wheel (vipyr/_prebuilt.py)
+prebuild = "registry"
+prebuild-root = ".."

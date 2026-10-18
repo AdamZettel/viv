@@ -1,0 +1,722 @@
+###
+post: Probability distributions in standard form
+agent: claude
+
+Fourteen continuous and five discrete families, each in SciPy's standard
+form (loc 0, scale 1; vp.stats applies loc and scale in Python) with SciPy's
+shape parameters. `dist_value(fam, what, x, s1, s2, s3)` evaluates one of
+
+    PDF  LOGPDF  CDF  SF  PPF  ISF
+
+of family `fam` at one point; the family and the function are the named
+codes below. Each tail is computed directly (SF is never 1 - CDF where the
+CDF is near 1), through the functions of lib/stats/special.viv:
+
+- normal and lognormal: `ndtr`, `ndtri`;
+- Student t, F, beta: `betainc`, `betaincc` and their inverses, with the
+  argument (x^2 / (df + x^2) or df / (df + x^2) for t) chosen so that the
+  smaller one is passed;
+- chi-squared and gamma: `gammainc`, `gammaincc` and their inverses; the
+  gamma density is Loader's `dpois_raw` (as R's dgamma);
+- exponential, Weibull, Cauchy, logistic, uniform, Laplace, Pareto: closed
+  forms with `log1p` and `expm1` where they lose digits otherwise;
+- binomial, Poisson, negative binomial: Loader's saddle-point terms for the
+  mass (R's dbinom, dpois, dnbinom) and the incomplete beta or gamma function
+  for the tails; geometric in closed form; hypergeometric as R's dhyper (three
+  binomial terms) with the tails summed from the far end. Discrete quantiles
+  are the smallest k with CDF(k) >= p, searched from the normal approximation.
+
+`dist_sample(fam, s1, s2, s3, n, seed)`: n draws by inversion, PPF of the
+uniforms `np.random.default_rng(seed).random(n)` gives (lib/nprandom's PCG64,
+bit for bit), so a seed gives the same draws in every engine and in Python.
+
+Used with `from stats.dist import ...`.
+###
+
+from stats.tables import LN_SQRT_2PI, SQRT_2PI
+from stats.special import NAN, log1p, expm1, lgamma, lbeta, ndtr, ndtri, exp_mhalfsq, gammainc, gammaincc, gammaincinv, gammainccinv, betainc, betaincc, betaincinv, betainccinv, beta_prefix, beta_delta, dpois_raw, dbinom_raw, stirlerr, bd0
+from nprandom.pcg64 import npr_pcg_from_entropy, npr_pcg_double
+from nprandom.seedseq import npr_ss_words
+
+# the families
+NORM = 0
+LOGNORM = 1
+T = 2
+CHI2 = 3
+F = 4
+GAMMA = 5
+BETA = 6
+EXPON = 7
+WEIBULL = 8
+CAUCHY = 9
+LOGISTIC = 10
+UNIFORM = 11
+LAPLACE = 12
+PARETO = 13
+BINOM = 20
+POISSON = 21
+NBINOM = 22
+GEOM = 23
+HYPERGEOM = 24
+# the first discrete family's code
+DISCRETE = 20
+# the functions
+PDF = 0
+LOGPDF = 1
+CDF = 2
+SF = 3
+PPF = 4
+ISF = 5
+# Student t: the argument x^2 / (df + x^2) is passed below this, df / (df + x^2) above
+T_SWITCH = 0.5
+# a discrete quantile search's steps before it gives up
+MAX_SEARCH = 100000000
+
+# ------------------------------------------------------------ continuous
+
+def norm_value(what, x) {
+    if what == PDF {
+        return exp_mhalfsq(x) / SQRT_2PI
+    }
+    if what == LOGPDF {
+        return -0.5 * x * x - LN_SQRT_2PI
+    }
+    if what == CDF {
+        return ndtr(x)
+    }
+    if what == SF {
+        return ndtr(-x)
+    }
+    if what == PPF {
+        return ndtri(x)
+    }
+    return -ndtri(x)
+}
+
+def lognorm_value(what, x, s) {
+    if what == PPF {
+        return exp(s * ndtri(x))
+    }
+    if what == ISF {
+        return exp(-s * ndtri(x))
+    }
+    if x <= 0.0 {
+        if what == LOGPDF {
+            return -inf
+        }
+        return 1.0 if what == SF else 0.0
+    }
+    z = log(x) / s
+    if what == PDF {
+        return exp_mhalfsq(z) / (s * x * SQRT_2PI)
+    }
+    if what == LOGPDF {
+        return -0.5 * z * z - log(s * x) - LN_SQRT_2PI
+    }
+    if what == CDF {
+        return ndtr(z)
+    }
+    return ndtr(-z)
+}
+
+# the lower tail P(T <= -|x|)
+def t_tail(x, df) {
+    x2 = x * x
+    z = x2 / (df + x2)
+    if z < T_SWITCH {
+        return 0.5 * betaincc(0.5, 0.5 * df, z)
+    }
+    return 0.5 * betainc(0.5 * df, 0.5, df / (df + x2))
+}
+
+# the t quantile for p <= 1/2
+def t_lower_ppf(p, df) {
+    if p == 0.5 {
+        return 0.0
+    }
+    if p < 0.25 {
+        w = betaincinv(0.5 * df, 0.5, 2.0 * p)
+        return -sqrt(df / w - df)
+    }
+    z = betaincinv(0.5, 0.5 * df, 1.0 - 2.0 * p)
+    return -sqrt(df * z / (1.0 - z))
+}
+
+def t_value(what, x, df) {
+    if what == PDF {
+        return exp(t_value(LOGPDF, x, df))
+    }
+    if what == LOGPDF {
+        return -0.5 * (df + 1.0) * log1p(x * x / df) - 0.5 * log(df) - lbeta(0.5 * df, 0.5)
+    }
+    if what == CDF {
+        return t_tail(x, df) if x < 0.0 else 1.0 - t_tail(x, df)
+    }
+    if what == SF {
+        return t_tail(x, df) if x > 0.0 else 1.0 - t_tail(x, df)
+    }
+    if what == PPF {
+        return t_lower_ppf(x, df) if x <= 0.5 else -t_lower_ppf(1.0 - x, df)
+    }
+    return -t_lower_ppf(x, df) if x <= 0.5 else t_lower_ppf(1.0 - x, df)
+}
+
+def gamma_value(what, x, a) {
+    if what == PPF {
+        return gammaincinv(a, x)
+    }
+    if what == ISF {
+        return gammainccinv(a, x)
+    }
+    if x < 0.0 {
+        if what == LOGPDF {
+            return -inf
+        }
+        return 1.0 if what == SF else 0.0
+    }
+    if what == CDF {
+        return gammainc(a, x)
+    }
+    if what == SF {
+        return gammaincc(a, x)
+    }
+    if what == PDF {
+        if x == 0.0 {
+            if a < 1.0 {
+                return inf
+            }
+            return 1.0 if a == 1.0 else 0.0
+        }
+        if a < 1.0 {
+            return dpois_raw(a, x) * a / x
+        }
+        return dpois_raw(a - 1.0, x)
+    }
+    if x == 0.0 {
+        if a < 1.0 {
+            return inf
+        }
+        return 0.0 if a == 1.0 else -inf
+    }
+    if a < 1.0 {
+        return -stirlerr(a) - bd0(a, x) - 0.5 * log(2.0 * pi * a) + log(a / x)
+    }
+    if a == 1.0 {
+        return -x
+    }
+    k = a - 1.0
+    return -stirlerr(k) - bd0(k, x) - 0.5 * log(2.0 * pi * k)
+}
+
+def beta_value(what, x, a, b) {
+    if what == PPF {
+        return betaincinv(a, b, x)
+    }
+    if what == ISF {
+        return betainccinv(a, b, x)
+    }
+    if what == CDF {
+        return betainc(a, b, x)
+    }
+    if what == SF {
+        return betaincc(a, b, x)
+    }
+    if x < 0.0 or x > 1.0 {
+        return -inf if what == LOGPDF else 0.0
+    }
+    if what == LOGPDF {
+        return (a - 1.0) * log(x) + (b - 1.0) * log1p(-x) - lbeta(a, b)
+    }
+    if x == 0.0 or x == 1.0 {
+        return exp(beta_value(LOGPDF, x, a, b))
+    }
+    return beta_prefix(a, b, x, 1.0 - x, beta_delta(a, b, x, 1.0 - x)) / (x * (1.0 - x))
+}
+
+def f_value(what, x, d1, d2) {
+    a = 0.5 * d1
+    b = 0.5 * d2
+    if what == PPF or what == ISF {
+        # p in the lower tail for PPF, q in the upper for ISF
+        lower = x if what == PPF else 1.0 - x
+        if lower <= 0.5 {
+            z = betaincinv(a, b, lower)
+            return d2 * z / (d1 * (1.0 - z))
+        }
+        w = betaincinv(b, a, x if what == ISF else 1.0 - x)
+        return d2 * (1.0 - w) / (d1 * w)
+    }
+    if x <= 0.0 {
+        if what == PDF {
+            return exp(f_value(LOGPDF, x, d1, d2))
+        }
+        if what == LOGPDF {
+            if x < 0.0 {
+                return -inf
+            }
+            return (a - 1.0) * log(x) + a * log(d1 / d2) - lbeta(a, b)
+        }
+        return 1.0 if what == SF else 0.0
+    }
+    if x == inf {
+        return 1.0 if what == CDF else 0.0
+    }
+    z = d1 * x / (d1 * x + d2)
+    w = d2 / (d1 * x + d2)
+    if what == CDF {
+        return betainc(a, b, z) if z < 0.5 else betaincc(b, a, w)
+    }
+    if what == SF {
+        return betainc(b, a, w) if w < 0.5 else betaincc(a, b, z)
+    }
+    # z (a + b) - a = a d2 (x - 1) / (d1 x + d2), with x - 1 exact near 1
+    d = a * d2 * (x - 1.0) / (d1 * x + d2)
+    if what == PDF {
+        return beta_prefix(a, b, z, w, d) / x
+    }
+    return log(beta_prefix(a, b, z, w, d) / x)
+}
+
+def expon_value(what, x) {
+    if what == PPF {
+        return -log1p(-x)
+    }
+    if what == ISF {
+        return -log(x)
+    }
+    if x < 0.0 {
+        if what == LOGPDF {
+            return -inf
+        }
+        return 1.0 if what == SF else 0.0
+    }
+    if what == PDF {
+        return exp(-x)
+    }
+    if what == LOGPDF {
+        return -x
+    }
+    if what == CDF {
+        return -expm1(-x)
+    }
+    return exp(-x)
+}
+
+def weibull_value(what, x, c) {
+    if what == PPF {
+        return pow(-log1p(-x), 1.0 / c)
+    }
+    if what == ISF {
+        return pow(-log(x), 1.0 / c)
+    }
+    if x < 0.0 {
+        if what == LOGPDF {
+            return -inf
+        }
+        return 1.0 if what == SF else 0.0
+    }
+    xc = pow(x, c)
+    if what == PDF {
+        return c * pow(x, c - 1.0) * exp(-xc)
+    }
+    if what == LOGPDF {
+        return log(c) + (c - 1.0) * log(x) - xc
+    }
+    if what == CDF {
+        return -expm1(-xc)
+    }
+    return exp(-xc)
+}
+
+def cauchy_value(what, x) {
+    if what == PDF {
+        return 1.0 / (pi * (1.0 + x * x))
+    }
+    if what == LOGPDF {
+        return -log(pi) - log1p(x * x)
+    }
+    if what == CDF {
+        return atan2(1.0, -x) / pi
+    }
+    if what == SF {
+        return atan2(1.0, x) / pi
+    }
+    if what == ISF {
+        return -cauchy_value(PPF, x)
+    }
+    p = x
+    if p == 0.5 {
+        return 0.0
+    }
+    if p < 0.5 {
+        return -1.0 / tan(pi * p)
+    }
+    return 1.0 / tan(pi * (1.0 - p))
+}
+
+def logistic_value(what, x) {
+    if what == PPF {
+        return log(x) - log1p(-x)
+    }
+    if what == ISF {
+        return log1p(-x) - log(x)
+    }
+    ax = abs(x)
+    e = exp(-ax)
+    if what == PDF {
+        return e / ((1.0 + e) * (1.0 + e))
+    }
+    if what == LOGPDF {
+        return -ax - 2.0 * log1p(e)
+    }
+    # e / (1 + e) is the smaller tail, 1 / (1 + e) the larger
+    small = e / (1.0 + e)
+    big = 1.0 / (1.0 + e)
+    if what == CDF {
+        return small if x < 0.0 else big
+    }
+    return big if x < 0.0 else small
+}
+
+def uniform_value(what, x) {
+    if what == PPF {
+        return x
+    }
+    if what == ISF {
+        return 1.0 - x
+    }
+    inside = x >= 0.0 and x <= 1.0
+    if what == PDF {
+        return 1.0 if inside else 0.0
+    }
+    if what == LOGPDF {
+        return 0.0 if inside else -inf
+    }
+    c = min(1.0, max(0.0, x))
+    return c if what == CDF else 1.0 - c
+}
+
+def laplace_value(what, x) {
+    if what == PPF {
+        return log(2.0 * x) if x <= 0.5 else -log(2.0 * (1.0 - x))
+    }
+    if what == ISF {
+        return -laplace_value(PPF, x)
+    }
+    if what == PDF {
+        return 0.5 * exp(-abs(x))
+    }
+    if what == LOGPDF {
+        return -log(2.0) - abs(x)
+    }
+    small = 0.5 * exp(-abs(x))
+    if what == CDF {
+        return small if x < 0.0 else 1.0 - small
+    }
+    return small if x > 0.0 else 1.0 - small
+}
+
+def pareto_value(what, x, b) {
+    if what == PPF {
+        return exp(-log1p(-x) / b)
+    }
+    if what == ISF {
+        return pow(x, -1.0 / b)
+    }
+    if x < 1.0 {
+        if what == LOGPDF {
+            return -inf
+        }
+        return 1.0 if what == SF else 0.0
+    }
+    if what == PDF {
+        return b * pow(x, -b - 1.0)
+    }
+    if what == LOGPDF {
+        return log(b) - (b + 1.0) * log(x)
+    }
+    if what == CDF {
+        return -expm1(-b * log(x))
+    }
+    return pow(x, -b)
+}
+
+# ------------------------------------------------------------ discrete
+
+def binom_pmf(k, n, p) {
+    return dbinom_raw(k, n, p, 1.0 - p)
+}
+
+def nbinom_pmf(k, n, p) {
+    if k == 0.0 {
+        return pow(p, n)
+    }
+    return n / (n + k) * dbinom_raw(n, n + k, p, 1.0 - p)
+}
+
+def hypergeom_pmf(k, M, n, N) {
+    if k < max(0.0, N - (M - n)) or k > min(n, N) {
+        return 0.0
+    }
+    p = N / M
+    q = (M - N) / M
+    return dbinom_raw(k, n, p, q) * dbinom_raw(N - k, M - n, p, q) / dbinom_raw(N, M, p, q)
+}
+
+# P(X <= k) and P(X > k) of the hypergeometric, the shorter tail summed
+def hypergeom_tails(k, M, n, N) {
+    lo = max(0.0, N - (M - n))
+    hi = min(n, N)
+    if k < lo {
+        return 0.0, 1.0
+    }
+    if k >= hi {
+        return 1.0, 0.0
+    }
+    mode = floor((N + 1.0) * (n + 1.0) / (M + 2.0))
+    if k < mode {
+        s = 0.0
+        for j from lo to k + 1.0 {
+            s += hypergeom_pmf(j, M, n, N)
+        }
+        return s, 1.0 - s
+    }
+    s = 0.0
+    for j from k + 1.0 to hi + 1.0 {
+        s += hypergeom_pmf(j, M, n, N)
+    }
+    return 1.0 - s, s
+}
+
+# P(X <= k) and P(X > k) of a discrete family, k an integer
+def discrete_tails(fam, k, s1, s2, s3) {
+    if fam == BINOM {
+        if k < 0.0 {
+            return 0.0, 1.0
+        }
+        if k >= s1 {
+            return 1.0, 0.0
+        }
+        return betaincc(k + 1.0, s1 - k, s2), betainc(k + 1.0, s1 - k, s2)
+    }
+    if fam == POISSON {
+        if k < 0.0 {
+            return 0.0, 1.0
+        }
+        return gammaincc(k + 1.0, s1), gammainc(k + 1.0, s1)
+    }
+    if fam == NBINOM {
+        if k < 0.0 {
+            return 0.0, 1.0
+        }
+        return betainc(s1, k + 1.0, s2), betaincc(s1, k + 1.0, s2)
+    }
+    if fam == GEOM {
+        if k < 1.0 {
+            return 0.0, 1.0
+        }
+        l = k * log1p(-s1)
+        return -expm1(l), exp(l)
+    }
+    return hypergeom_tails(k, s1, s2, s3)
+}
+
+def discrete_pmf(fam, k, s1, s2, s3) {
+    if k != floor(k) {
+        return 0.0
+    }
+    if fam == BINOM {
+        return binom_pmf(k, s1, s2)
+    }
+    if fam == POISSON {
+        return dpois_raw(k, s1) if k >= 0.0 else 0.0
+    }
+    if fam == NBINOM {
+        return nbinom_pmf(k, s1, s2) if k >= 0.0 else 0.0
+    }
+    if fam == GEOM {
+        if k < 1.0 {
+            return 0.0
+        }
+        return exp((k - 1.0) * log1p(-s1)) * s1
+    }
+    return hypergeom_pmf(k, s1, s2, s3)
+}
+
+# the support's lower end and a starting point for the quantile search
+def discrete_start(fam, p, s1, s2, s3) {
+    z = ndtri(p)
+    if fam == BINOM {
+        return 0.0, floor(s1 * s2 + z * sqrt(s1 * s2 * (1.0 - s2)))
+    }
+    if fam == POISSON {
+        return 0.0, floor(s1 + z * sqrt(s1))
+    }
+    if fam == NBINOM {
+        m = s1 * (1.0 - s2) / s2
+        return 0.0, floor(m + z * sqrt(m / s2))
+    }
+    if fam == GEOM {
+        return 1.0, ceil(log1p(-p) / log1p(-s1))
+    }
+    return max(0.0, s3 - (s1 - s2)), floor(s3 * s2 / s1)
+}
+
+# the smallest k with CDF(k) >= p (upper false), or with SF(k) <= p (upper true)
+def discrete_quantile(fam, p, upper, s1, s2, s3) {
+    lo, k = discrete_start(fam, 1.0 - p if upper else p, s1, s2, s3)
+    if p != p {
+        return NAN
+    }
+    if (p == 1.0 and not upper) or (p == 0.0 and upper) {
+        if fam == BINOM {
+            return s1
+        }
+        if fam == HYPERGEOM {
+            return min(s2, s3)
+        }
+        return inf
+    }
+    if (p == 0.0 and not upper) or (p == 1.0 and upper) {
+        return lo - 1.0
+    }
+    if not (k >= lo) {
+        k = lo
+    }
+    for step to MAX_SEARCH {
+        c, s = discrete_tails(fam, k, s1, s2, s3)
+        ok = s <= p if upper else c >= p
+        if ok {
+            break
+        }
+        k += 1.0
+    }
+    for step to MAX_SEARCH {
+        if k <= lo {
+            break
+        }
+        c, s = discrete_tails(fam, k - 1.0, s1, s2, s3)
+        ok = s <= p if upper else c >= p
+        if not ok {
+            break
+        }
+        k -= 1.0
+    }
+    return k
+}
+
+def discrete_value(fam, what, x, s1, s2, s3) {
+    if what == PDF {
+        return discrete_pmf(fam, x, s1, s2, s3)
+    }
+    if what == LOGPDF {
+        return log(discrete_pmf(fam, x, s1, s2, s3))
+    }
+    if what == PPF {
+        return discrete_quantile(fam, x, false, s1, s2, s3)
+    }
+    if what == ISF {
+        return discrete_quantile(fam, x, true, s1, s2, s3)
+    }
+    c, s = discrete_tails(fam, floor(x), s1, s2, s3)
+    return c if what == CDF else s
+}
+
+# ------------------------------------------------------------ dispatch
+
+#| PDF, LOGPDF, CDF, SF, PPF or ISF (`what`) of family `fam` with shape
+#| parameters s1, s2, s3 (those it does not take are ignored) at x. For a
+#| discrete family PDF and LOGPDF are the mass function.
+def dist_value(fam, what, x, s1, s2, s3) {
+    if x != x {
+        return x
+    }
+    if fam >= DISCRETE {
+        return discrete_value(fam, what, x, s1, s2, s3)
+    }
+    if (what == PPF or what == ISF) and (x < 0.0 or x > 1.0) {
+        return NAN
+    }
+    if fam == NORM {
+        return norm_value(what, x)
+    }
+    if fam == LOGNORM {
+        return lognorm_value(what, x, s1)
+    }
+    if fam == T {
+        return t_value(what, x, s1)
+    }
+    if fam == CHI2 {
+        if what == PPF or what == ISF {
+            return 2.0 * gamma_value(what, x, 0.5 * s1)
+        }
+        v = gamma_value(what, 0.5 * x, 0.5 * s1)
+        if what == PDF {
+            return 0.5 * v
+        }
+        if what == LOGPDF {
+            return v - log(2.0)
+        }
+        return v
+    }
+    if fam == F {
+        return f_value(what, x, s1, s2)
+    }
+    if fam == GAMMA {
+        return gamma_value(what, x, s1)
+    }
+    if fam == BETA {
+        return beta_value(what, x, s1, s2)
+    }
+    if fam == EXPON {
+        return expon_value(what, x)
+    }
+    if fam == WEIBULL {
+        return weibull_value(what, x, s1)
+    }
+    if fam == CAUCHY {
+        return cauchy_value(what, x)
+    }
+    if fam == LOGISTIC {
+        return logistic_value(what, x)
+    }
+    if fam == UNIFORM {
+        return uniform_value(what, x)
+    }
+    if fam == LAPLACE {
+        return laplace_value(what, x)
+    }
+    return pareto_value(what, x, s1)
+}
+
+#| n draws of family `fam` by inversion of default_rng(seed)'s uniforms.
+def dist_sample(fam, s1, s2, s3, n, seed) {
+    rng = npr_pcg_from_entropy(npr_ss_words(seed))
+    out = zeros(n)
+    for i to n {
+        out[i] = dist_value(fam, PPF, npr_pcg_double(rng), s1, s2, s3)
+    }
+    return out
+}
+
+test "standard values" {
+    assert_near(dist_value(NORM, CDF, 1.96, 0.0, 0.0, 0.0), 0.9750021048517795, 1e-15)
+    assert_near(dist_value(T, CDF, 2.0, 5.0, 0.0, 0.0), 0.9490302605850709, 1e-15)
+    assert_near(dist_value(CHI2, SF, 3.84, 1.0, 0.0, 0.0), 0.05004352124870519, 1e-16)
+    assert_near(dist_value(BINOM, CDF, 3.0, 10.0, 0.5, 0.0), 0.171875, 1e-16)
+    assert_near(dist_value(POISSON, PDF, 2.0, 3.0, 0.0, 0.0), 0.22404180765538775, 1e-16)
+    assert_near(dist_value(BINOM, PPF, 0.5, 10.0, 0.5, 0.0), 5.0, 0.0)
+}
+
+test "draws are default_rng(1)'s uniforms inverted" {
+    # the normal quantiles of np.random.default_rng(1).random(4) by mpmath at
+    # 40 digits (SciPy 1.12's ndtri is 2 ulps off the third), and
+    # scipy.stats.poisson.ppf(u, 3)
+    NORM_REF = [0.029636756665895332, 1.649366334483239, -1.0618159984556081, 1.631897381630276]
+    POISSON_REF = [3.0, 6.0, 1.0, 6.0]
+    assert_allclose(dist_sample(NORM, 0.0, 0.0, 0.0, len(NORM_REF), 1.0), NORM_REF, 2e-16)
+    assert_allclose(dist_sample(POISSON, 3.0, 0.0, 0.0, len(POISSON_REF), 1.0), POISSON_REF, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

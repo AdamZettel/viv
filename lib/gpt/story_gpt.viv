@@ -1,0 +1,53 @@
+###
+A small GPT, trained in your browser on one repeated line and then asked to
+continue a prompt, to be read as a story:
+
+    viv story lib/gpt/story_gpt.viv
+
+tells the run in the words of lib/gpt/gpt.intent and lib/nn.intent, one line
+per training step with its loss and gradient norm (the watches in
+lib/gpt/gpt.debug), then one line per sampled character. The program prints
+the model's size, the loss before the first step and at the last, and what the
+model wrote; the tests hold all four.
+###
+from gpt.gpt import decode, encode, Gpt, gpt_size, GptConfig, sample, train
+
+TEXT, PROMPT = "hello world! " * 5, "hello"
+STEPS, SAMPLES = 30, 24
+INIT_SEED, SAMPLE_SEED = 7, 11
+
+step tokenize {
+    vocab = unique(TEXT)
+    tokens = encode(TEXT, vocab)
+}
+step build {
+    cfg = GptConfig { vocab: len(vocab) }
+    srand(INIT_SEED)
+    model = Gpt(cfg)
+    count = gpt_size(model)
+}
+step train: losses = train(model, cfg, tokens, STEPS)
+step generate: written = decode(sample(model, encode(PROMPT, vocab), SAMPLES, SAMPLE_SEED), vocab)
+print(count)
+print(losses[0])
+print(losses[STEPS - 1])
+print(written)
+
+test "the model has 6,560 parameters, and 9 characters make its vocabulary" {
+    assert_true(count == 6560 and len(vocab) == 9)
+}
+
+test "the first loss is log 9 exactly, because the output map starts at zero" {
+    assert_near(losses[0], log(9.0), 1.0e-15)
+}
+
+test "thirty steps take the loss from 2.197 to 0.1991" {
+    assert_near(losses[STEPS - 1], 0.199118, 1.0e-6)
+}
+
+test "from the prompt hello, the model writes the line on" {
+    assert_true(written == "hello world! hello world! hel")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

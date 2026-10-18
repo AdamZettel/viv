@@ -1,0 +1,151 @@
+module lib/hf/basis
+  The Gaussian basis functions every other lib/hf module integrates over:
+  how many components a shell has, their order, and the numbers that
+  normalize them.
+
+  An atomic orbital here is a contraction: a fixed sum of Gaussians
+  $e^{-a r^2}$ (the primitives, one exponent $a$ each) centered on one atom
+  and sharing one angular part $x^{l_x} y^{l_y} z^{l_z}$. A shell is every
+  component with the same angular momentum $l = l_x + l_y + l_z$: one for s,
+  three for p, six Cartesian ones for d. The basis set supplies the exponents
+  and raw coefficients; this module turns them into coefficients under one
+  rule, that every Cartesian component has self-overlap one, and records
+  where PySCF's convention differs from it.
+
+  The packs a molecule carries (`atoms`, `shells`, `prims`) and the column
+  constants below are fixed.
+
+bas_ncart  @d8801c55
+  why   The integral codes size their per-shell blocks with it, and the AO
+        count of a basis is its sum over shells.
+  l     the shell's angular momentum: `0` for s, `1` for p, `2` for d
+
+bas_nsph  @0c094c43
+  why   A spherical shell drops the Cartesian combinations that are
+        lower angular momentum (for d, $x^2 + y^2 + z^2$, which is an s
+        function); PySCF's `mol.nao` counts these.
+  l     the shell's angular momentum
+
+bas_odfact  @136a3fe7
+  why   The moments of a Gaussian, $\int x^{2k} e^{-2 a x^2} dx$, carry
+        $(2k-1)!!$, so the normalization factors are built from it. The loop
+        multiplies $1 \cdot 3 \cdot 5 \cdots (2k-1)$.
+  k     half the power of the moment; `0` gives the empty product
+  r     the product so far
+
+bas_powers  @c20d3dbf
+  why   Every integral routine loops over a shell's components in this order,
+        and the order must be PySCF's for the matrices to line up with PySCF's
+        [test "d and f components come in PySCF's cart_labels order"].
+  l     the shell's angular momentum
+  P     the table being filled: row `c` holds $(l_x, l_y, l_z)$ of component `c`
+  row   the next row of P to fill
+  lx    the power of $x$, counting down from l
+  ly    the power of $y$, counting down from what lx leaves
+
+bas_fc  @1d811539
+  why   This library normalizes every Cartesian component to one; PySCF does
+        not for d and higher. Comparing a Cartesian matrix with PySCF's, or
+        handing one to it, needs this factor.
+  lx    power of $x$
+  ly    power of $y$
+  lz    power of $z$
+  l     the component's angular momentum, $l_x + l_y + l_z$
+
+bas_nc  @9f610254
+  why   With it, two primitives of the same shell have an overlap that does not
+        depend on which component they are, so one contracted coefficient per
+        primitive serves every component of the shell.
+  lx    power of $x$
+  ly    power of $y$
+  lz    power of $z$
+
+bas_nr  @77b31c13
+  why   The part of a primitive's norm that depends on its exponent. Folded into
+        the contracted coefficient by bas_contract, so the integral codes never
+        normalize a primitive themselves.
+  a     the primitive's exponent
+  l     the shell's angular momentum
+
+bas_prim_overlap  @11bf6a28
+  why   bas_contract sums it over pairs of primitives to find the shell's
+        self-overlap before the rescale.
+  a     the first primitive's exponent
+  b     the second primitive's exponent
+  l     the shell's angular momentum, shared by both
+
+bas_nao_cart  @bf12eb04
+  why   The size of every matrix in the Cartesian AO basis: S, H, D, F.
+  shells  the shell pack, one row per shell, `[nshell, SH_LEN]`
+  n       the count so far
+
+bas_nao_sph  @da934aea
+  why   The size of the matrices after the Cartesian-to-spherical transform
+        (lib/hf/cart2sph).
+  shells  the shell pack
+  n       the count so far
+
+bas_ao_table  @1babfb64
+  why   Codes that work AO by AO (the one-electron integrals, the checks against
+        PySCF) look up an AO's shell, atom and powers here instead of walking
+        the shells each time.
+  shells  the shell pack
+  T       the table being filled, `[nao_cart, AO_LEN]`
+  row     the next row of T, the AO index
+  l       the current shell's angular momentum
+  P       that shell's powers, from bas_powers
+
+bas_contract  @723bc623
+  why   Basis-set files print their coefficients rounded, and for primitives
+        that are not normalized; rescaling the whole shell makes the rounding
+        harmless and matches what PySCF does, so the integrals agree with
+        PySCF's.
+  shells  the shell pack
+  prims   the primitive pack: exponent and raw coefficient, `[nprim, PR_LEN]`
+  cn      the result, one number per primitive across all shells
+  l       the current shell's angular momentum
+  p0      the row of prims where this shell's primitives start
+  np      how many primitives the shell has
+  ss      the shell's self-overlap with the raw coefficients
+  scale   $1/\sqrt{ss}$, which brings that self-overlap to one
+
+bas_rng  @86f9708e
+  why   The randomized tests draw their shells from it, so a failing case is
+        reproduced from its seed alone.
+  st    the generator's state, one number, advanced in place
+
+bas_moment_self_overlap  @fa7cf752
+  why   A second way to compute a component's self-overlap, from 1-D moments one
+        axis at a time, so the test of bas_contract does not check a formula
+        against itself.
+  s     the shell
+  nc    the component factor bas_nc
+  p     the sum of two exponents: the product of two Gaussians on one center is
+        a Gaussian with this exponent
+  mx    the 1-D moment along $x$; my and mz likewise
+  tot   the double sum over primitive pairs
+
+bas_random_shells  @ba2590cf
+  why   Test shells of every angular momentum up to f, with exponents and signs
+        that no real basis set is limited to.
+  nsh     how many shells to make
+  seed    the generator's starting state
+  shells  the shells pack: one row per shell
+  st      the generator's state
+  total   the primitives laid out so far
+
+shell_atom  @775a3118
+  shells the shells table, one row per shell
+  s      the shell's row
+
+shell_l  @e7a75fde
+  shells the shells table, one row per shell
+  s      the shell's row
+
+shell_cart0  @1c6f7dc2
+  shells the shells table, one row per shell
+  s      the shell's row
+
+shell_sph0  @b0734359
+  shells the shells table, one row per shell
+  s      the shell's row

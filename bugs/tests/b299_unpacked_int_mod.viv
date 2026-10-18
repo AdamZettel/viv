@@ -1,0 +1,19 @@
+# B300 (bugs/ledger.jsonl), found by vivsmith (tools/fuzz): an Int that comes
+# out of a multiple return, `a, b = f(z)`, is a number after `b = b % 5`
+# (`b = b + 1` keeps it an Int), so passing it to an Int parameter is refused:
+# "argument 1 of `f` should be an Int but is a number".
+def f(p: Int) {
+    return 1.0, p
+}
+z: Int = 0
+a, b = f(z)
+b = b % 5
+c, d = f(b)
+print(fmt(a), b, fmt(c), d)
+
+test "an unpacked Int stays an Int under %" {
+    assert_true(b == 0)
+    assert_true(d == 0)
+}
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,24 @@
+# Automatic forward-mode AD: `deriv(fn(x) -> expr, x0)` returns the EXACT
+# derivative d/dx expr at x0 -- the compiler dualizes the expression (chain rule
+# over + - * /, exp, sqrt, pow), so no dual arithmetic is written by hand. This is
+# the automatic version of the manual dual-number library (autodiff_forward.viv).
+
+# f(x) = x^3 - 2x + exp(-x^2);  f'(2) = 9.926737  (compare autodiff_forward.viv).
+d1 = deriv(fn(x) -> x * x * x - 2.0 * x + exp(-(x * x)), 2.0)
+show d1
+
+# d/dx sqrt(1 + x^2) at x = 3  =  x / sqrt(1 + x^2)  =  3/sqrt(10) = 0.9486833.
+d2 = deriv(fn(x) -> sqrt(1.0 + x * x), 3.0)
+show d2
+
+# Newton's method for sqrt(2): root of g(x) = x^2 - 2, using deriv for g'(x).
+x = 1.0
+for it to 6 {
+    gx = x * x - 2.0
+    gp = deriv(fn(t) -> t * t - 2.0, x)
+    x = x - gx / gp
+}
+show x
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

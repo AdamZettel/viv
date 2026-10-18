@@ -1,0 +1,448 @@
+# Metamorphic checks on the integrals, over random bases (seeds 1 to 32).
+#
+# Each seed makes a basis nobody has a reference for (lib/hf/fuzz: shells up
+# to f, exponents from 0.05 to 50, on three atoms) and asks the integral
+# code a question whose answer is known without one: moving the molecule
+# changes nothing; rotating it only rotates the functions inside each shell;
+# relabeling the atoms relabels the functions; stretching lengths by
+# 1/lambda and exponents by lambda^2 multiplies T by lambda^2 and V and every
+# ERI by lambda; and the kinetic energy is minus half the Laplacian of the
+# overlap with respect to either center. The member sweep runs every S, T,
+# V and contraction implementation, and MD against HGP on the ERIs, on the
+# random basis and asks them to agree.
+#
+# On these random bases the members do not all meet the 1e-12 contract that
+# they meet on molecular bases. Against 40-digit mpmath values (the last
+# test), McMurchie-Davidson is exact to 2e-16, while Obara-Saika's V is off
+# by up to 2.2e-12, HGP by up to 5.4e-12 and Rys by up to 3.4e-11, all on
+# integrals with f functions, exponents near 50 and centers 1-4 bohr apart.
+# The member sweep here measures 2.0e-12 at worst and holds the members to
+# 1e-11.
+#
+# Every check reports through hfz_check, so a failure prints the seed
+# (`hfz_seed_failed: [seed, worst, tol]`) and the FAIL line reads
+# `assert_lt: <seed> >= 0`.
+#
+#     tools/both-engines.sh scf meta_integrals
+import hf.hf
+from hf.basis import (
+    AO_ATOM, AO_SH, AT_CHG, AT_LEN, AT_X, AT_Z, bas_ao_table, bas_nao_cart, bas_nao_sph,
+    SH_CART0, SH_NCART,
+)
+from hf.md_onebody import md1_s, md1_t, md1_v
+from hf.md_eri import (
+    mderi_grid, mderi_qlist, mderi_quartet, mderi_schwarz, mderi_screened, mderi_store,
+)
+from hf.eri_store import es_get, es_len8
+from hf.cart2sph import c2s_basis
+from hf.transform import tr2_blocks, tr4_blocks
+from hf.opts import opt_new
+from hf.eigen import eig_ql, eig_values
+from hf.density import den_stack1
+from hf.jk import jk_packed
+from hf.integrals import (
+    int_check3, int_contract_methods, int_eri_methods, INT_ERI_PAIR, int_kinetic_methods,
+    int_nuclear_methods, int_overlap_methods,
+)
+from hf.sweep import sw_rep_new, SW_REP_WORST
+from hf.fuzz import (
+    hfz_ao_map, hfz_atoms, hfz_check, hfz_nudge, hfz_perm, hfz_permute_atoms,
+    hfz_permute_shells, hfz_prims, hfz_random_basis, hfz_random_blob, hfz_rotate, hfz_rotation,
+    hfz_scale_atoms, hfz_scale_prims, hfz_shells, hfz_shift, hfz_state, hfz_translate,
+    hfz_uniform,
+)
+
+MTI_NSEED = 32
+
+
+#| max |A - B| / (1 + max |A|) over two packed vectors.
+def mti_rel1(A: Arr, B: Arr) {
+    return max(abs(A - B)) / (1.0 + max(abs(A)))
+}
+
+
+
+#| Ascending eigenvalues of a symmetric matrix (lib/hf/eigen, member 0).
+def mti_eigs(A: Arr) {
+    return eig_values(eig_ql(A, A, opt_new()))
+}
+
+
+# ---- one def per seed ------------------------------------------------------------
+
+# columns of the per-seed report
+MTI_TRANS = 0
+MTI_ROT = 1
+MTI_PERM = 2
+MTI_SCALE = 3
+MTI_POS = 4
+MTI_SCREEN = 5
+MTI_LEN = 6
+
+#| S, T and V of one basis as `[3, n, n]`, from the production members.
+def mti_one(at: Arr, sh: Arr, pr: Arr) {
+    S = md1_s(at, sh, pr)
+    X = zeros(3, len(S), len(S))
+    setslab(X, 0, S)
+    setslab(X, 1, md1_t(at, sh, pr))
+    setslab(X, 2, md1_v(at, sh, pr))
+    return X
+}
+
+#| max over S, T, V of |B - s_k A| relative to the size of s_k A, with
+#| scale factors s = [s_S, s_T, s_V].
+def mti_gap3(A: Arr, B: Arr, s: Arr) {
+    w = 0.0
+    for k to 3 {
+        w = max(w, mti_gap_eri(slab(A, k), slab(B, k), s[k]))
+    }
+    return w
+}
+
+#| |B - s A| relative to the size of s A, over two packed ERI vectors or
+#| two matrices.
+def mti_gap_eri(A: Arr, B: Arr, s) {
+    return max(abs(B - s * A)) / max(abs(s * A))
+}
+
+#| The pair index table: `P[m] = [i, j]` for pair m = i(i+1)/2 + j.
+def mti_pairs(n) {
+    P = []
+    for i to n {
+        for j to i + 1 {
+            P = append(P, [i, j])
+        }
+    }
+    return P
+}
+
+#| sum over the full tensor of (ij|kl)^2 from the packed vector: each
+#| stored value stands for 8 orders, halved once per coincidence.
+def mti_eri_norm(G: Arr, n) {
+    P = mti_pairs(n)
+    np = len(P)
+    s = 0.0
+    k = 0
+    for a to np {
+        for b to a + 1 {
+            w = 8.0
+            if P[a, 0] == P[a, 1] {
+                w = 0.5 * w
+            }
+            if P[b, 0] == P[b, 1] {
+                w = 0.5 * w
+            }
+            if a == b {
+                w = 0.5 * w
+            }
+            s = s + w * G[k] * G[k]
+            k = k + 1
+        }
+    }
+    return s
+}
+
+#| Every check that needs the base integrals of seed `seed`'s random basis
+#| (three atoms, three shells): the worst relative changes under
+#| translation, rotation (spectra of the spherical S, T, V and the ERI
+#| norm), atom permutation (entry by entry through the AO map) and scaling
+#| (S, T, V, ERIs times 1, lambda^2, lambda, lambda); the most negative of
+#| (ij|ij), (ii|jj) and Tr(D J[D]); the largest rise in the Schwarz pair
+#| count as the threshold grows.
+def mti_report(seed) {
+    b = hfz_random_basis(seed, 3, 3, 3, 2)
+    at = hfz_atoms(b)
+    sh = hfz_shells(b)
+    pr = hfz_prims(b)
+    n = bas_nao_cart(sh)
+    rep = zeros(MTI_LEN)
+    X = mti_one(at, sh, pr)
+    G = mderi_screened(at, sh, pr)
+    one = [1.0, 1.0, 1.0]
+    # translation
+    a2 = hfz_translate(at, hfz_shift(seed))
+    rep[MTI_TRANS] = max(mti_gap3(X, mti_one(a2, sh, pr), one), mti_gap_eri(G, mderi_screened(a2, sh, pr), 1.0))
+    # rotation, in spherical functions, where it is orthogonal in each shell
+    M = c2s_basis(sh)
+    ns = bas_nao_sph(sh)
+    a2 = hfz_rotate(at, hfz_rotation(seed))
+    X2 = mti_one(a2, sh, pr)
+    w = 0.0
+    for k to 3 {
+        ea = mti_eigs(tr2_blocks(slab(X, k), M, sh))
+        eb = mti_eigs(tr2_blocks(slab(X2, k), M, sh))
+        w = max(w, mti_rel1(ea, eb))
+    }
+    na = mti_eri_norm(tr4_blocks(G, M, sh), ns)
+    nb = mti_eri_norm(tr4_blocks(mderi_screened(a2, sh, pr), M, sh), ns)
+    rep[MTI_ROT] = max(w, abs(na - nb) / na)
+    # atom permutation
+    p = hfz_perm(seed, 3)
+    a2 = hfz_permute_atoms(at, p)
+    s2 = hfz_permute_shells(sh, p)
+    m = hfz_ao_map(sh, p)
+    X2 = mti_one(a2, s2, pr)
+    w = 0.0
+    for k to 3 {
+        for i to n {
+            for j to n {
+                x = X[k, round(m[i]), round(m[j])]
+                w = max(w, abs(X2[k, i, j] - x) / (1.0 + abs(x)))
+            }
+        }
+    }
+    G2 = mderi_screened(a2, s2, pr)
+    P = mti_pairs(n)
+    q = 0
+    for u to len(P) {
+        for v to u + 1 {
+            g = es_get(G, round(m[P[u, 0]]), round(m[P[u, 1]]), round(m[P[v, 0]]), round(m[P[v, 1]]))
+            w = max(w, abs(G2[q] - g) / (1.0 + abs(g)))
+            q = q + 1
+        }
+    }
+    rep[MTI_PERM] = w
+    # lengths over lambda, exponents times lambda^2
+    st = hfz_state(seed + 31)
+    lam = hfz_uniform(st, 0.5, 2.0)
+    a2 = hfz_scale_atoms(at, lam)
+    p2 = hfz_scale_prims(pr, lam)
+    rep[MTI_SCALE] = max(mti_gap3(X, mti_one(a2, sh, p2), [1.0, lam * lam, lam]), mti_gap_eri(G, mderi_screened(a2, sh, p2), lam))
+    rep[MTI_POS] = mti_positive(G, n, seed)
+    rep[MTI_SCREEN] = mti_screen(at, sh, pr)
+    return rep
+}
+
+#| The most negative of (ij|ij), (ii|jj) and Tr(D J[D]) for a random
+#| positive semidefinite D = B B^T; returns max(0, -that).
+def mti_positive(G: Arr, n, seed) {
+    worst = 0.0
+    for i to n {
+        for j to n {
+            worst = min(worst, es_get(G, i, j, i, j))
+            worst = min(worst, es_get(G, i, i, j, j))
+        }
+    }
+    st = hfz_state(seed + 3)
+    B = zeros(n, n)
+    for i to n {
+        for j to n {
+            B[i, j] = hfz_uniform(st, -1.0, 1.0)
+        }
+    }
+    D = B @ transpose(B)
+    JK = jk_packed(G, G, G, den_stack1(D), opt_new())
+    tr = sum(D * transpose(slab(JK, 0)))
+    return max(0.0, -min(worst, tr))
+}
+
+#| Count the significant shell pairs at thresholds 1e-16 .. 1e-6; returns
+#| the largest increase from one threshold to the next (0 when monotone).
+def mti_screen(at: Arr, sh: Arr, pr: Arr) {
+    ST = mderi_store(at, sh, pr)
+    G = mderi_grid(ST)
+    Q = mderi_schwarz(ST, G)
+    npl = ST[0]
+    prev = len(mderi_qlist(Q, npl, 0.0))
+    rise = 0.0
+    for k to 6 {
+        c = len(mderi_qlist(Q, npl, pow(10.0, -16.0 + 2.0 * k)))
+        rise = max(rise, c - prev)
+        prev = c
+    }
+    return rise
+}
+
+#| The Laplacian of S in the position of atom 1 by central differences
+#| with step `h` on each axis.
+def mti_lap_fd(at: Arr, sh: Arr, pr: Arr, h) {
+    S0 = md1_s(at, sh, pr)
+    L = zeros(len(S0), len(S0))
+    for d to 3 {
+        Sp = md1_s(hfz_nudge(at, 1, d, h), sh, pr)
+        Sm = md1_s(hfz_nudge(at, 1, d, -h), sh, pr)
+        L = L + (Sp - 2.0 * S0 + Sm) / (h * h)
+    }
+    return L
+}
+
+#| T against -1/2 of the Laplacian of S in the position of atom 1, over the
+#| rows of functions on the other atom and the columns on atom 1, relative
+#| to the largest |T| in that block. The central difference with h = 1e-3
+#| has a truncation error of h^2/12 times the fourth derivative, which for
+#| an exponent of 50 reaches 1.7e-6 of |T| (measured on these seeds). One
+#| Richardson step, (4 D(h/2) - D(h))/3, cancels the h^2 term; what remains
+#| is the h^4 term and the rounding in S(B+h) - 2S(B) + S(B-h), about
+#| 1e-16/h^2.
+def mti_laplacian(seed) {
+    b = hfz_random_basis(seed, 2, 3, 3, 2)
+    at = hfz_atoms(b)
+    sh = hfz_shells(b)
+    pr = hfz_prims(b)
+    n = bas_nao_cart(sh)
+    h = 1.0e-3
+    T = md1_t(at, sh, pr)
+    L1 = mti_lap_fd(at, sh, pr, h)
+    L2 = mti_lap_fd(at, sh, pr, 0.5 * h)
+    ao = bas_ao_table(sh)
+    w = 0.0
+    big = 0.0
+    for i to n {
+        for j to n {
+            if round(ao[i, AO_ATOM]) != 1 and round(ao[j, AO_ATOM]) == 1 {
+                L = (4.0 * L2[i, j] - L1[i, j]) / 3.0
+                w = max(w, abs(-0.5 * L - T[i, j]))
+                big = max(big, abs(T[i, j]))
+            }
+        }
+    }
+    return w / big
+}
+
+#| V with every charge doubled is 2V, and a ghost atom (Z = 0) adds 0:
+#| the worst absolute gap.
+def mti_charges(seed) {
+    b = hfz_random_basis(seed, 3, 3, 3, 2)
+    at = hfz_atoms(b)
+    sh = hfz_shells(b)
+    pr = hfz_prims(b)
+    V = md1_v(at, sh, pr)
+    a2 = copy(at)
+    a2[:, AT_CHG] = 2.0 * at[:, AT_CHG]
+    ghost = zeros(AT_LEN)
+    ghost[AT_X:AT_Z + 1] = [0.37, -1.3, 0.8]
+    w = max(abs(md1_v(a2, sh, pr) - 2.0 * V))
+    return max(w, max(abs(md1_v(vcat(at, ghost), sh, pr) - V)))
+}
+
+
+
+#| Every member of the S, T, V and contraction registries on a random basis
+#| with shells up to f and 1 to 3 primitives, and MD against HGP on the ERIs
+#| of a two-shell one: the worst deviation from the consensus. (Rys is swept
+#| class by class in scf/coverage; a whole-basis Rys build of f shells
+#| costs tens of seconds in the interpreter.)
+def mti_sweep(seed) {
+    b = hfz_random_blob(seed, 2, 3)
+    at = hfz_atoms(b)
+    sh = hfz_shells(b)
+    pr = hfz_prims(b)
+    n = bas_nao_cart(sh)
+    rep = sw_rep_new()
+    out = zeros(n * n)
+    w = 0.0
+    int_check3(int_overlap_methods(), 0, at, sh, pr, n * n, 1.0, rep, out)
+    w = max(w, rep[SW_REP_WORST])
+    int_check3(int_kinetic_methods(), 0, at, sh, pr, n * n, 1.0, rep, out)
+    w = max(w, rep[SW_REP_WORST])
+    int_check3(int_nuclear_methods(), 0, at, sh, pr, n * n, 1.0, rep, out)
+    w = max(w, rep[SW_REP_WORST])
+    int_check3(int_contract_methods(), 0, at, sh, pr, len(pr), 1.0, rep, out)
+    w = max(w, rep[SW_REP_WORST])
+    b2 = hfz_random_basis(seed, 2, 2, 3, 2)
+    s2 = hfz_shells(b2)
+    n2 = es_len8(bas_nao_cart(s2))
+    g = zeros(n2)
+    int_check3(int_eri_methods(), INT_ERI_PAIR, hfz_atoms(b2), s2, hfz_prims(b2), n2, 1.0, rep, g)
+    return max(w, rep[SW_REP_WORST])
+}
+
+#| `(ij|kl)` of AOs i, j, k, l by McMurchie-Davidson, from the one shell
+#| quartet that holds it (`mderi_quartet`, `[na nb, nc nd]`).
+def mti_md_entry(at: Arr, sh: Arr, pr: Arr, i, j, k, l) {
+    ao = bas_ao_table(sh)
+    s = zeros(4)
+    c = zeros(4)
+    idx = [i, j, k, l]
+    for q to 4 {
+        s[q] = round(ao[round(idx[q]), AO_SH])
+        c[q] = round(idx[q]) - round(sh[round(s[q]), SH_CART0])
+    }
+    B = mderi_quartet(at, sh, pr, s[0], s[1], s[2], s[3])
+    nb = round(sh[round(s[1]), SH_NCART])
+    nd = round(sh[round(s[3]), SH_NCART])
+    return B[round(c[0] * nb + c[1]), round(c[2] * nd + c[3])]
+}
+
+# ---- every seed, once ------------------------------------------------------------
+
+mti_reps = zeros(MTI_NSEED, MTI_LEN + 3)
+for mti_s to MTI_NSEED {
+    mti_reps[mti_s, 0:MTI_LEN] = mti_report(mti_s + 1)
+    mti_reps[mti_s, MTI_LEN] = mti_laplacian(mti_s + 1)
+    mti_reps[mti_s, MTI_LEN + 1] = mti_charges(mti_s + 1)
+    mti_reps[mti_s, MTI_LEN + 2] = mti_sweep(mti_s + 1)
+}
+
+#| hfz_check over the seeds for one report column; returns the failures.
+def mti_col(col, tol) {
+    bad = 0
+    for s to MTI_NSEED {
+        bad = bad + hfz_check(s + 1, mti_reps[s, col], tol)
+    }
+    return bad
+}
+
+# ---- the tests ------------------------------------------------------------------
+
+test "translation leaves S, T, V and the ERIs unchanged within 1e-12 (seeds 1-32)" {
+    assert_near(mti_col(MTI_TRANS, 1.0e-12), 0.0, 0.0)
+}
+
+test "rotation keeps the spectra of spherical S, T, V and the ERI norm within 1e-11 (seeds 1-32)" {
+    assert_near(mti_col(MTI_ROT, 1.0e-11), 0.0, 0.0)
+}
+
+test "permuting the atoms permutes S, T, V and the ERIs within 1e-13 (seeds 1-32)" {
+    assert_near(mti_col(MTI_PERM, 1.0e-13), 0.0, 0.0)
+}
+
+test "lengths over lambda, exponents times lambda^2: S fixed, T times lambda^2, V and ERIs times lambda, within 1e-12 relative (seeds 1-32)" {
+    assert_near(mti_col(MTI_SCALE, 1.0e-12), 0.0, 0.0)
+}
+
+test "T = -1/2 Laplacian of S in the second center within 1e-6 relative (seeds 1-32)" {
+    assert_near(mti_col(MTI_LEN, 1.0e-6), 0.0, 0.0)
+}
+
+test "V is linear in the charges and a ghost atom adds nothing (seeds 1-32)" {
+    assert_near(mti_col(MTI_LEN + 1, 1.0e-15), 0.0, 0.0)
+}
+
+test "(ij|ij), (ii|jj) and Tr(D J[D]) are never negative (seeds 1-32)" {
+    assert_near(mti_col(MTI_POS, 1.0e-300), 0.0, 0.0)
+}
+
+test "a larger Schwarz threshold never keeps more shell pairs (seeds 1-32)" {
+    assert_near(mti_col(MTI_SCREEN, 0.5), 0.0, 0.0)
+}
+
+test "every S, T, V and contraction member, and MD against HGP on the ERIs, agree within 1e-11 on random shells up to f (seeds 1-32)" {
+    assert_near(mti_col(MTI_LEN + 2, 1.0e-11), 0.0, 0.0)
+}
+
+test "McMurchie-Davidson matches 40-digit references where the other members drift" {
+    # (seed, AO indices i j k l) -> mpmath value of (ij|kl), from the
+    # McMurchie-Davidson formulas evaluated at 40 digits with
+    # mpmath.gammainc for the Boys function, on the same random basis
+    # (hfz_random_blob(seed, 2, 3)). Measured gaps of the other members:
+    # HGP 7.1e-13, 4.9e-13, -5.4e-12, 6.4e-16; Rys 3.4e-11, -6.1e-12,
+    # -3.6e-15, 4.1e-12.
+    mti_ref = [[28, 18, 6, 16, 6, -0.0058969956942692751214], [26, 24, 15, 24, 15, 0.0019062533671902157722], [25, 12, 2, 12, 2, 0.0078904988852209565103], [13, 11, 6, 11, 6, 0.0061376006647208755099]]
+    for mti_k to 4 {
+        mti_b = hfz_random_blob(mti_ref[mti_k, 0], 2, 3)
+        mti_g = mti_md_entry(hfz_atoms(mti_b), hfz_shells(mti_b), hfz_prims(mti_b), mti_ref[mti_k, 1], mti_ref[mti_k, 2], mti_ref[mti_k, 3], mti_ref[mti_k, 4])
+        assert_lt(abs(mti_g - mti_ref[mti_k, 5]), 1.0e-16)
+    }
+    # V entries (seed, row, column, value); os_nuclear is off by 2.2e-12,
+    # -1.3e-12 and 1.2e-12 there
+    mti_vref = [[13, 7, 11, 0.092644567888879308887], [26, 14, 24, -0.30214322894616108044], [28, 6, 18, -0.40591660959978750348]]
+    for mti_k to 3 {
+        mti_b = hfz_random_blob(mti_vref[mti_k, 0], 2, 3)
+        mti_V = md1_v(hfz_atoms(mti_b), hfz_shells(mti_b), hfz_prims(mti_b))
+        assert_lt(abs(mti_V[round(mti_vref[mti_k, 1]), round(mti_vref[mti_k, 2])] - mti_vref[mti_k, 3]), 1.0e-15)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

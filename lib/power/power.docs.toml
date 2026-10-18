@@ -1,0 +1,179 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference prose of vp.power.runpf (python -m vipyr.docs reads it into
+# vipyr/spec.json and the /vipyr pages). The parameters and results are
+# listed in vipyr/_registry.py; the solver is lib/power/*.viv.
+
+[runpf]
+summary = "Solve the AC or DC power flow of a MATPOWER case: bus voltages, generator outputs and branch flows."
+description = """
+`vp.power.runpf` is MATPOWER's `runpf`: give it a case and it returns the
+steady state of the network, every bus voltage (magnitude and angle), every
+generator's real and reactive output and the power entering each end of
+every branch, in MATPOWER's units and column order.
+
+The case is a MATPOWER case file, by name for the ones shipped with vipyr
+(`"case9"`, `"case14"`, `"case30"`, `"case118"`, `"case300"`,
+`"case2383wp"`, from the MATPOWER repository), by path for any other `.m`
+file in MATPOWER's case format, or as a dict of MATPOWER's arrays
+(`baseMVA`, `bus`, `gen`, `branch`), the form PYPOWER and pandapower call
+`ppc`.
+
+Three methods, as in MATPOWER:
+
+- `"nr"`: Newton-Raphson in polar coordinates, the default. Converges in
+  2 to 6 iterations on the shipped cases.
+- `"fdxb"`: the fast-decoupled method, XB version. Two constant matrices,
+  factored once; more iterations, each much cheaper.
+- `"dc"`: the linear DC model (flat voltage magnitudes, lossless branches),
+  one sparse solve.
+
+`enforce_q_lims=True` holds every generator that would exceed its reactive
+limits at the limit and solves again, as MATPOWER's `ENFORCE_Q_LIMS` option
+does; a slack generator held at a limit hands the reference role to the
+first remaining PV bus, and the angles are shifted back afterwards.
+
+The whole computation runs in compiled Viv: the case's admittance matrix and
+Jacobian are assembled sparse, and each Newton step is solved by the sparse
+LU of lib/power/splu.viv (left-looking, threshold partial pivoting, a
+minimum-degree column order). The first call compiles the solver once (a
+few seconds); later calls load it from vipyr's cache.
+"""
+notes = """
+**The equations.** With bus voltages $V_i = |V_i| e^{j\\theta_i}$ and the bus
+admittance matrix $Y$, the power injected at bus $i$ is
+$S_i = V_i \\overline{(YV)_i}$. The power flow solves
+$S_i(V) = S_i^{\\text{gen}} - S_i^{\\text{load}}$: the real part at every PV
+and PQ bus, the imaginary part at every PQ bus, for the angles of the PV
+and PQ buses and the magnitudes of the PQ buses.
+
+**Newton-Raphson.** The Jacobian has the closed forms
+$\\partial S/\\partial\\theta = j\\,\\mathrm{diag}(V)\\,\\overline{\\mathrm{diag}(I) - Y\\mathrm{diag}(V)}$ and
+$\\partial S/\\partial|V| = \\mathrm{diag}(V)\\,\\overline{Y\\mathrm{diag}(V/|V|)} + \\overline{\\mathrm{diag}(I)}\\,\\mathrm{diag}(V/|V|)$,
+assembled entry by entry from $Y$'s sparsity. The minimum-degree order is
+found once, from the first Jacobian; every iteration factors anew, with row
+pivoting decided on the values.
+
+**Fast-decoupled.** $B'$ is $-\\mathrm{Im}\\,Y$ of the network with no shunts,
+no line charging, unit tap ratios and no series resistance; $B''$ is
+$-\\mathrm{Im}\\,Y$ with no phase shifts. An iteration solves
+$B'\\Delta\\theta = -\\Delta P/|V|$, then $B''\\Delta|V| = -\\Delta Q/|V|$.
+
+**DC.** $B\\theta = P - P_{\\text{shift}} - G_{\\text{sh}}$ with
+$B_{ft} = -1/(x\\tau)$, the reference angle held fixed; branch flows are
+$(\\theta_f - \\theta_t)/(x\\tau)$ plus the phase shifter's term.
+
+**Generator outputs.** After the solve the reference bus's first generator
+takes the slack in P, and Q at a bus with several generators is shared in
+proportion to their Q ranges, as MATPOWER's `pfsoln` does.
+"""
+references = [
+  { text = "R. D. Zimmerman, C. E. Murillo-Sanchez, R. J. Thomas, MATPOWER: steady-state operations, planning and analysis tools for power systems research and education, IEEE Trans. Power Systems 26 (2011) 12-19", doi = "10.1109/TPWRS.2010.2051168" },
+  { text = "MATPOWER (cases and the reference solution soln9_pf.mat)", url = "https://github.com/MATPOWER/matpower" },
+  { text = "B. Stott, O. Alsac, Fast decoupled load flow, IEEE Trans. PAS 93 (1974) 859-869", doi = "10.1109/TPAS.1974.293985" },
+  { text = "R. A. M. van Amerongen, A general-purpose version of the fast decoupled load flow, IEEE Trans. Power Systems 4 (1989) 760-770", doi = "10.1109/59.193851" },
+  { text = "J. R. Gilbert, T. Peierls, Sparse partial pivoting in time proportional to arithmetic operations, SIAM Journal on Scientific and Statistical Computing 9 (1988) 862-874", doi = "10.1137/0909058" },
+]
+
+[read_raw]
+summary = "Read a PSS/E RAW file (revisions 32 to 34) into MATPOWER's arrays."
+description = """
+`vp.power.read_raw` reads the network in a PSS/E RAW file: buses, loads,
+fixed and switched shunts, generators, branches, two-winding transformers,
+areas and zones, and returns it as MATPOWER's `baseMVA`, `bus`, `gen` and
+`branch` arrays, the form every `vp.power` function takes. A `.raw` path
+given to any of them is read this way.
+
+The reader is lib/power/raw.viv. Loads keep their constant-power part as
+Pd + jQd; their constant-admittance part becomes a bus shunt and their
+constant-current part is taken at the case's voltage. Line-end shunts and
+transformer magnetizing admittances become bus shunts. Transformers are
+read in every winding code (CW 1, 2, 3), impedance code (CZ 1, 2, 3) and
+admittance code (CM 1, 2), and become a branch with the off-nominal ratio
+WINDV1/WINDV2 at the winding 1 end. Each generator's source impedance
+ZR + jZX is kept in `machine` for `vp.power.short_circuit`.
+
+Three-winding transformers, DC lines, FACTS devices and induction machines
+are not read; a file that has any raises.
+"""
+references = [
+  { text = "Siemens PTI, PSS/E Program Operation Manual, chapter 'Power Flow Raw Data File Contents' (revisions 33 and 34)" },
+  { text = "ANDES (H. Cui, F. Li, K. Tomsovic, Hybrid symbolic-numeric framework for power system modeling and analysis, IEEE Trans. Power Systems 36 (2021) 1373-1384), whose RAW reader and sample cases are the reference", doi = "10.1109/TPWRS.2020.3017019" },
+]
+
+[contingency]
+summary = "N-1 contingency analysis: every branch and generator outage solved by AC power flow, with DC PTDF/LODF screening."
+description = """
+`vp.power.contingency` takes each element of the contingency list out of
+service in turn, solves the AC power flow again by Newton's method from the
+base-case voltages, and lists every branch above its rating and every bus
+outside its voltage band. Branch loading is |S| at the more loaded end,
+in MVA, against rate A in the base case and rate B after an outage (a
+rating of 0 is no limit). An outage that splits the network takes the
+buses cut off from the reference out of service with their load, and
+reports them as islanded.
+
+Beside the AC results it returns the DC model's power transfer and line
+outage distribution factors (PTDF, LODF) and the post-outage flows they
+estimate, the linear screen that decides which outages need an AC solve.
+"""
+notes = """
+**LODF.** With H = PTDF A^T (A the branch-bus incidence matrix), the flow
+moved onto branch l by the outage of branch k is
+$\\mathrm{LODF}_{lk} f_k$ with $\\mathrm{LODF}_{lk} = H_{lk}/(1 - H_{kk})$. A
+branch with $H_{kk} = 1$ is a bridge: its outage islands buses.
+"""
+references = [
+  { text = "NERC, TPL-001-5.1 Transmission System Planning Performance Requirements (category P1, single contingency)" },
+  { text = "A. J. Wood, B. F. Wollenberg, G. B. Sheble, Power Generation, Operation, and Control, 3rd ed., Wiley (2014), chapter 7 (contingency analysis, distribution factors)" },
+]
+
+[interconnect]
+summary = "A generator-interconnection study: violations before and after the project, distribution factors, and the transfer limit."
+description = """
+`vp.power.interconnect` runs the steady-state part of a system impact
+study for a new generator of `mw` MW at the bus `poi_bus`. It solves the
+base case and every contingency without the project and with it, marks
+each violation the project creates (new) or aggravates (worsened), gives
+the DC distribution factor of the project's output on every branch, and
+finds the transfer limit: the largest output with no new violation, by
+bisection on the full AC N-1 between 0 and `mw_max`.
+
+The project holds the POI's pre-project voltage within its reactive range
+(by default a 0.95 power factor either way); its power is absorbed by the
+reference bus or, with `sink='gens'`, by the other generators in
+proportion to their output.
+"""
+references = [
+  { text = "FERC Order No. 2023, Improvements to Generator Interconnection Procedures and Agreements, 184 FERC 61,054 (2023): the cluster study and its system impact studies" },
+]
+
+[cpf]
+summary = "The continuation power flow: the PV curve of a transfer into one bus, through the nose."
+description = """
+`vp.power.cpf` traces the bus voltages as the power injected at `poi_bus`
+(and taken out at the sink) grows, past the point where the plain power
+flow stops converging. It is the pseudo-arclength continuation of
+MATPOWER's `runcpf`: the transfer is an unknown, a tangent predictor steps
+along the curve and Newton's method corrects on the power flow augmented
+with the step equation, which stays solvable at the nose. The nose is the
+voltage-stability limit of that transfer.
+"""
+references = [
+  { text = "V. Ajjarapu, C. Christy, The continuation power flow: a tool for steady state voltage stability analysis, IEEE Trans. Power Systems 7 (1992) 416-423", doi = "10.1109/59.141737" },
+]
+
+[short_circuit]
+summary = "Three-phase short-circuit currents by IEC 60909 at the buses of a case."
+description = """
+`vp.power.short_circuit` gives the initial symmetrical short-circuit
+current Ik'' and power Sk'' of a bolted three-phase fault at each bus,
+by IEC 60909-0's equivalent voltage source: c Un / sqrt(3) behind the
+Thevenin impedance of the network seen from the bus, with c = 1.1. Lines
+are their series impedance (charging, shunts and loads left out),
+transformers are at their rated ratio with the correction factor K_T,
+and each generator is its source impedance with the correction K_G.
+"""
+references = [
+  { text = "IEC 60909-0:2016, Short-circuit currents in three-phase a.c. systems, Part 0: Calculation of currents" },
+]

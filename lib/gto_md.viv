@@ -1,0 +1,750 @@
+###
+post: Angular momentum, by McMurchie and Davidson
+agent: claude
+
+`lib/gto` does s functions, which is hydrogen. Oxygen has p functions, and
+handling them is the difference between a toy and something that can put water
+on the screen. This is that difference.
+
+The idea is to stop integrating Cartesian Gaussians directly and expand their
+product in Hermite Gaussians instead, because a Hermite Gaussian integrates
+against `1/r` in closed form. Two things carry the whole scheme:
+
+**The expansion coefficients `E(i, j, t)`.** A product of two one-dimensional
+Cartesian Gaussians of powers `i` and `j` is a sum of `i + j + 1` Hermite
+Gaussians, and `E` says how much of each. `E(0, 0, 0)` is the Gaussian prefactor,
+and two recursions reach the rest: one lowers `i`, the other lowers `j`. Overlap is `E(i, j, 0)` times `sqrt(pi/p)`, per dimension, and
+kinetic energy is three `E` values combined.
+
+**The Hermite Coulomb integrals `R(t, u, v, n)`.** These are what `1/r` becomes.
+`R(0, 0, 0, n)` is `(-2p)^n F_n(pR^2)`, where `F_n` is the Boys function, and
+raising any index costs one more recursion step. Nuclear attraction is a sum of
+`E`s against `R`s; a two-electron integral is a sum of `E`s against `E`s against
+`R`s, with a sign that alternates on the second pair.
+
+So the Boys function is needed at every order up to the total angular momentum,
+rather than only at zero. It comes from its series for small arguments and its
+asymptotic form for large ones, and where to change over is a measured question.
+The largest relative gap between the two, over orders 0 to 5:
+
+    x       20      3.6e-5
+    x       30      9.3e-9
+    x       40      1.5e-12
+    x       50      1.2e-15
+
+So the changeover is at 50, where they agree to the last bit. At 30, which is
+where this started, an integral with an argument near the join would have been
+wrong in the ninth digit and the energy would have followed.
+
+Everything is held against PySCF through `lib/qcref`, one integral at a time and
+then the energy: the Hartree-Fock energies of water and of hydrogen fluoride
+land within 1e-10 hartree of the ones PySCF printed there (`WATER_ERHF` and
+`HF_ERHF`).
+
+Used with `import gto_md`.
+###
+
+from gto import boys0, GTO_DIM, gto_norm_s, GTO_PI, gto_rhf, gto_rhf_full, gto_worst
+from qcref import (
+    water631g_bf_pow, water631g_bf_shell, water631g_charges, water631g_coords, WATER631G_ENUC,
+    WATER631G_ERHF, WATER631G_NATM, WATER631G_NBF, WATER631G_NOCC, WATER631G_NPRIM, water631g_S,
+    water631g_shell_atom, water631g_shell_coef, water631g_shell_expo, water631g_shell_nprim,
+    water631g_T, water631g_V, water_bf_pow, water_bf_shell, water_charges, water_coords,
+    WATER_ENUC, WATER_ERHF, water_ERI, WATER_NATM, WATER_NBF, WATER_NOCC, WATER_NPRIM, water_S,
+    water_shell_atom, water_shell_coef, water_shell_expo, water_shell_nprim, water_T, water_V,
+    hf_bf_pow, hf_bf_shell, hf_charges, hf_coords, HF_ENUC, HF_ERHF, hf_ERI, HF_NATM, HF_NBF,
+    HF_NOCC, HF_NPRIM, hf_S, hf_shell_atom, hf_shell_coef, hf_shell_expo, hf_shell_nprim, hf_T,
+    hf_V,
+)
+
+MD_BOYS_SWITCH = 50.0
+
+#| The most terms the Boys series may take below the switch; it stops as soon
+#| as a term no longer changes the sum.
+MD_BOYS_MAX_TERMS = 300
+
+#| How many SCF iterations the water energies run.
+MD_WATER_SCF_ITERS = 60
+
+#| The Boys function `F_n(x) = int_0^1 t^2n exp(-x t^2) dt`, at any order.
+#|
+#| Small `x`: the series `exp(-x) sum_k (2x)^k / (2n+1)(2n+3)...(2n+2k+1)`,
+#| summed until a term stops mattering -- the terms grow before they shrink, and
+#| the peak is near `k = x`, so a fixed count is wrong at the top of the range.
+#| Large `x`: the integrand
+#| has decayed long before `t = 1`, so the limit `(2n-1)!!/2^(n+1) sqrt(pi/x^(2n+1))`
+#| takes over. The test below checks they agree across the join.
+def boys_n(n, x) {
+    if x < 1.0e-12 {
+        return 1.0 / (2.0 * n + 1.0)
+    }
+    if x > MD_BOYS_SWITCH {
+        dfac = 1.0
+        for k to n {
+            dfac = dfac * (2.0 * k + 1.0)
+        }
+        return dfac / pow(2.0, n + 1.0) * sqrt(GTO_PI / pow(x, 2.0 * n + 1.0))
+    }
+    term = 1.0 / (2.0 * n + 1.0)
+    total = term
+    k = 0
+    while k < MD_BOYS_MAX_TERMS {
+        term = term * 2.0 * x / (2.0 * n + 2.0 * k + 3.0)
+        total = total + term
+        if term < 1.0e-17 * total {
+            break
+        }
+        k = k + 1
+    }
+    return exp(-x) * total
+}
+
+#| `E(i, j, t)`: how much of the `t`-th Hermite Gaussian is in the product of
+#| two one-dimensional Cartesian Gaussians of powers `i` and `j`, separated by
+#| `Q` and with exponents `a` and `b`.
+def herm_e(i, j, t, Q, a, b) {
+    p = a + b
+    mu = a * b / p
+    if t < 0 {
+        return 0.0
+    }
+    if t > i + j {
+        return 0.0
+    }
+    if i == 0 {
+        if j == 0 {
+            return exp(-mu * Q * Q)
+        }
+        return herm_e(i, j - 1, t - 1, Q, a, b) / (2.0 * p) + mu * Q / b * herm_e(i, j - 1, t, Q, a, b) + (t + 1.0) * herm_e(i, j - 1, t + 1, Q, a, b)
+    }
+    return herm_e(i - 1, j, t - 1, Q, a, b) / (2.0 * p) - mu * Q / a * herm_e(i - 1, j, t, Q, a, b) + (t + 1.0) * herm_e(i - 1, j, t + 1, Q, a, b)
+}
+
+#| Every Boys order from 0 to `nmax` at one argument, from a single evaluation
+#| of the series at the top and downward recursion for the rest:
+#| `F(n-1) = (2x F(n) + e^-x) / (2n-1)`.
+#|
+#| This is not a micro-optimization. `herm_r` recurses, and every leaf of that
+#| recursion wanted a Boys value; computing each one from its series meant
+#| running the series again, and the series is long where the argument is large.
+#| Oxygen's 1s exponent is 130 in STO-3G and 5484 in 6-31G, which moves the
+#| arguments into exactly that range -- water took four seconds in one basis and
+#| had not finished in ten minutes in the other.
+def boys_table(nmax, x) {
+    out = zeros(nmax + 1)
+    out[nmax] = boys_n(nmax, x)
+    ex = exp(-x)
+    for k to nmax {
+        n = nmax - k
+        out[n - 1] = (2.0 * x * out[n] + ex) / (2.0 * n - 1.0)
+    }
+    return out
+}
+
+#| `R(t, u, v, n)`: the Hermite Gaussian of index `t, u, v` integrated against
+#| `1/|r - C|`. Lowering any index costs one Boys order, taken from the table.
+def herm_r(t, u, v, n, p, PCx, PCy, PCz, F: Arr) {
+    if t == 0 {
+        if u == 0 {
+            if v == 0 {
+                return pow(-2.0 * p, n) * F[n]
+            }
+            back = 0.0
+            if v > 1 {
+                back = (v - 1.0) * herm_r(t, u, v - 2, n + 1, p, PCx, PCy, PCz, F)
+            }
+            return back + PCz * herm_r(t, u, v - 1, n + 1, p, PCx, PCy, PCz, F)
+        }
+        back = 0.0
+        if u > 1 {
+            back = (u - 1.0) * herm_r(t, u - 2, v, n + 1, p, PCx, PCy, PCz, F)
+        }
+        return back + PCy * herm_r(t, u - 1, v, n + 1, p, PCx, PCy, PCz, F)
+    }
+    back = 0.0
+    if t > 1 {
+        back = (t - 1.0) * herm_r(t - 2, u, v, n + 1, p, PCx, PCy, PCz, F)
+    }
+    return back + PCx * herm_r(t - 1, u, v, n + 1, p, PCx, PCy, PCz, F)
+}
+
+#| `(2k-1)!!`, with `(-1)!! = 1`.
+def dfact2(k) {
+    out = 1.0
+    m = 2.0 * k - 1.0
+    while m > 1.0 {
+        out = out * m
+        m = m - 2.0
+    }
+    return out
+}
+
+#| A Cartesian primitive's normalization, for powers `lx, ly, lz`.
+def md_norm(a, lx, ly, lz) {
+    l = lx + ly + lz
+    return pow(2.0 * a / GTO_PI, 0.75) * pow(4.0 * a, l / 2.0) / sqrt(dfact2(lx) * dfact2(ly) * dfact2(lz))
+}
+
+#| The overlap of two Cartesian primitives, in full.
+def md_overlap_prim(a, A: Arr, la: Arr, b, B: Arr, lb: Arr) {
+    p = a + b
+    out = pow(GTO_PI / p, 1.5)
+    for d to GTO_DIM {
+        out = out * herm_e(la[d], lb[d], 0, A[d] - B[d], a, b)
+    }
+    return out
+}
+
+#| Kinetic energy of the same pair: three `E` values per dimension, combined the
+#| way differentiating a Gaussian twice asks for.
+def md_kinetic_prim(a, A: Arr, la: Arr, b, B: Arr, lb: Arr) {
+    p = a + b
+    s = zeros(GTO_DIM)
+    t = zeros(GTO_DIM)
+    for d to GTO_DIM {
+        Q = A[d] - B[d]
+        j = lb[d]
+        s[d] = herm_e(la[d], j, 0, Q, a, b)
+        back = 0.0
+        if j > 1 {
+            back = 0.5 * j * (j - 1.0) * herm_e(la[d], j - 2, 0, Q, a, b)
+        }
+        t[d] = -2.0 * b * b * herm_e(la[d], j + 2, 0, Q, a, b) + b * (2.0 * j + 1.0) * s[d] - back
+    }
+    total = t[0] * s[1] * s[2] + s[0] * t[1] * s[2] + s[0] * s[1] * t[2]
+    return total * pow(GTO_PI / p, 1.5)
+}
+
+#| Attraction of a primitive pair to a unit charge at `C`.
+def md_nuclear_prim(a, A: Arr, la: Arr, b, B: Arr, lb: Arr, C: Arr) {
+    p = a + b
+    P = zeros(GTO_DIM)
+    for d to GTO_DIM {
+        P[d] = (a * A[d] + b * B[d]) / p
+    }
+    rpc = 0.0
+    for d to GTO_DIM {
+        rpc = rpc + (P[d] - C[d]) * (P[d] - C[d])
+    }
+    nmax = la[0] + lb[0] + la[1] + lb[1] + la[2] + lb[2]
+    F = boys_table(nmax, p * rpc)
+    total = 0.0
+    for t to la[0] + lb[0] + 1 {
+        ex = herm_e(la[0], lb[0], t, A[0] - B[0], a, b)
+        for u to la[1] + lb[1] + 1 {
+            ey = herm_e(la[1], lb[1], u, A[1] - B[1], a, b)
+            for v to la[2] + lb[2] + 1 {
+                ez = herm_e(la[2], lb[2], v, A[2] - B[2], a, b)
+                total = total + ex * ey * ez * herm_r(t, u, v, 0, p, P[0] - C[0], P[1] - C[1], P[2] - C[2], F)
+            }
+        }
+    }
+    return -2.0 * GTO_PI / p * total
+}
+
+#| A two-electron integral over four Cartesian primitives. The second pair's
+#| Hermite indices carry a sign, which is what `(-1)^(tau+nu+phi)` is doing.
+def md_eri_prim(a, A: Arr, la: Arr, b, B: Arr, lb: Arr, c, C: Arr, lc: Arr, d, D: Arr, ld: Arr) {
+    p = a + b
+    q = c + d
+    alpha = p * q / (p + q)
+    P = zeros(GTO_DIM)
+    Q = zeros(GTO_DIM)
+    for e to GTO_DIM {
+        P[e] = (a * A[e] + b * B[e]) / p
+        Q[e] = (c * C[e] + d * D[e]) / q
+    }
+    rpq = 0.0
+    for e to GTO_DIM {
+        rpq = rpq + (P[e] - Q[e]) * (P[e] - Q[e])
+    }
+    nmax = la[0] + lb[0] + la[1] + lb[1] + la[2] + lb[2] + lc[0] + ld[0] + lc[1] + ld[1] + lc[2] + ld[2]
+    F = boys_table(nmax, alpha * rpq)
+    total = 0.0
+    for t to la[0] + lb[0] + 1 {
+        ex = herm_e(la[0], lb[0], t, A[0] - B[0], a, b)
+        for u to la[1] + lb[1] + 1 {
+            ey = herm_e(la[1], lb[1], u, A[1] - B[1], a, b)
+            for v to la[2] + lb[2] + 1 {
+                ez = herm_e(la[2], lb[2], v, A[2] - B[2], a, b)
+                eabc = ex * ey * ez
+                for tt to lc[0] + ld[0] + 1 {
+                    fx = herm_e(lc[0], ld[0], tt, C[0] - D[0], c, d)
+                    for uu to lc[1] + ld[1] + 1 {
+                        fy = herm_e(lc[1], ld[1], uu, C[1] - D[1], c, d)
+                        for vv to lc[2] + ld[2] + 1 {
+                            fz = herm_e(lc[2], ld[2], vv, C[2] - D[2], c, d)
+                            sign = 1.0
+                            if mod(tt + uu + vv, 2.0) == 1.0 {
+                                sign = -1.0
+                            }
+                            total = total + eabc * sign * fx * fy * fz * herm_r(t + tt, u + uu, v + vv, 0, alpha,
+                                    P[0] - Q[0], P[1] - Q[1], P[2] - Q[2], F)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 2.0 * pow(GTO_PI, 2.5) / (p * q * sqrt(p + q)) * total
+}
+
+test "the Boys function agrees with the closed form at order zero" {
+    # across the whole range, and past the changeover at 50, where this is the
+    # asymptotic form being held against an exact erf
+    npts = 40
+    for k to npts {
+        x = 0.05 + 2.5 * k
+        assert_near(boys_n(0, x), boys0(x), 1.0e-14)
+    }
+    # and F_n(0) is 1/(2n+1)
+    norders = 5
+    for n to norders {
+        assert_near(boys_n(n, 0.0), 1.0 / (2.0 * n + 1.0), 1.0e-15)
+    }
+}
+
+test "the Boys series and its asymptotic form meet where they are joined" {
+    # just below the switch the series is used, just above it the limit. They
+    # have to agree there or every integral has a step in it, and at 50 they
+    # agree to the last bit
+    # the gap that is left is the function's own slope across the step in x,
+    # not a disagreement between the two formulas
+    norders = 6
+    for n to norders {
+        lo = boys_n(n, MD_BOYS_SWITCH - 1.0e-9)
+        hi = boys_n(n, MD_BOYS_SWITCH + 1.0e-9)
+        assert_lt(abs(lo - hi) / lo, 1.0e-9)
+    }
+    # and it falls with order and with argument
+    assert_lt(boys_n(3, 4.0), boys_n(2, 4.0))
+    assert_lt(boys_n(2, 5.0), boys_n(2, 4.0))
+}
+
+test "the recursion downgrades to the s-only formulas it should" {
+    # with every power zero, McMurchie-Davidson has to reproduce lib/gto exactly
+    A = [0.0, 0.0, 0.0]
+    B = [0.3, -0.4, 1.1]
+    z = [0.0, 0.0, 0.0]
+    a = 1.7
+    b = 0.6
+    rab = 0.3 * 0.3 + 0.4 * 0.4 + 1.1 * 1.1
+    p = a + b
+    k = exp(-a * b / p * rab)
+    assert_near(md_overlap_prim(a, A, z, b, B, z), k * pow(GTO_PI / p, 1.5), 1.0e-14)
+    assert_near(md_kinetic_prim(a, A, z, b, B, z),
+        a * b / p * (3.0 - 2.0 * a * b / p * rab) * k * pow(GTO_PI / p, 1.5), 1.0e-13)
+    C = [0.9, 0.2, -0.5]
+    zp = 0.0
+    for d to GTO_DIM {
+        pc = (a * A[d] + b * B[d]) / p - C[d]
+        zp = zp + pc * pc
+    }
+    assert_near(md_nuclear_prim(a, A, z, b, B, z, C),
+        -2.0 * GTO_PI / p * k * boys0(p * zp), 1.0e-13)
+}
+
+test "a p function overlaps itself once and its neighbors not at all" {
+    A = [0.0, 0.0, 0.0]
+    px = [1.0, 0.0, 0.0]
+    py = [0.0, 1.0, 0.0]
+    a = 0.8
+    n = md_norm(a, 1.0, 0.0, 0.0)
+    assert_near(n * n * md_overlap_prim(a, A, px, a, A, px), 1.0, 1.0e-14)
+    # px and py on the same center are orthogonal, by symmetry in x
+    assert_near(md_overlap_prim(a, A, px, a, A, py), 0.0, 1.0e-16)
+    # and an s and a p on the same center are too
+    assert_near(md_overlap_prim(a, A, [0.0, 0.0, 0.0], a, A, px), 0.0, 1.0e-16)
+}
+
+test "the Cartesian normalization is the one that makes s and p both unit" {
+    a = 1.3
+    assert_near(md_norm(a, 0.0, 0.0, 0.0), gto_norm_s(a), 1.0e-15)
+    # a p primitive picks up sqrt(4a) over an s one
+    assert_near(md_norm(a, 0.0, 0.0, 1.0) / gto_norm_s(a), sqrt(4.0 * a), 1.0e-14)
+}
+
+#| The contracted coefficients for one shell: the tabulated ones times each
+#| primitive's Cartesian normalization, then the contraction scaled to overlap
+#| itself once. Same reasoning as `lib/gto`, and the same eight-figure tables.
+def md_shell_cn(expo: Arr, coef: Arr, sh, powers: Arr, nprim) {
+    out = zeros(nprim)
+    for i to nprim {
+        out[i] = coef[sh, i] * md_norm(expo[sh, i], powers[0], powers[1], powers[2])
+    }
+    O = [0.0, 0.0, 0.0]
+    self = 0.0
+    for i to nprim {
+        for j to nprim {
+            self = self + out[i] * out[j] * md_overlap_prim(expo[sh, i], O, powers, expo[sh, j], O, powers)
+        }
+    }
+    scale = 1.0 / sqrt(self)
+    for i to nprim {
+        out[i] = out[i] * scale
+    }
+    return out
+}
+
+#| The contraction coefficients of every basis function, computed once. Building
+#| them inside the integral loops meant recomputing the same contraction ten
+#| thousand times for a molecule with seven basis functions.
+def md_prep_cn(bf_shell: Arr, bf_pow: Arr, expo: Arr, coef: Arr, nbf, nprim) {
+    out = zeros(nbf, nprim)
+    for u to nbf {
+        pu = [bf_pow[u, 0], bf_pow[u, 1], bf_pow[u, 2]]
+        cu = md_shell_cn(expo, coef, round(bf_shell[u]), pu, nprim)
+        for i to nprim {
+            out[u, i] = cu[i]
+        }
+    }
+    return out
+}
+
+#| How many primitives each basis function's shell has. The arrays are
+#| padded to the longest shell so that they are rectangular, and looping over
+#| the padding is harmless but not free: in 6-31G it is six to the fourth power
+#| of work where three to the fourth would do, sixteen times more.
+def md_prep_nprim(bf_shell: Arr, shell_nprim: Arr, nbf) {
+    out = zeros(nbf)
+    for u to nbf {
+        out[u] = shell_nprim[round(bf_shell[u])]
+    }
+    return out
+}
+
+#| Where every basis function sits, and with what exponents: the same hoisting.
+def md_prep_center(bf_shell: Arr, sh_atom: Arr, R: Arr, nbf) {
+    out = zeros(nbf, GTO_DIM)
+    for u to nbf {
+        a = round(sh_atom[round(bf_shell[u])])
+        for d to GTO_DIM {
+            out[u, d] = R[a, d]
+        }
+    }
+    return out
+}
+def md_prep_expo(bf_shell: Arr, expo: Arr, nbf, nprim) {
+    out = zeros(nbf, nprim)
+    for u to nbf {
+        for i to nprim {
+            out[u, i] = expo[round(bf_shell[u]), i]
+        }
+    }
+    return out
+}
+
+#| The one-electron matrices. `which` picks overlap (0), kinetic (1) or nuclear
+#| attraction (2), so that one pass over the basis pairs serves all three.
+def md_one_electron(R: Arr, Z: Arr, bf_shell: Arr, bf_pow: Arr, sh_atom: Arr, expo: Arr, coef: Arr, nbf, nprim, natm, which) {
+    M = zeros(nbf, nbf)
+    for u to nbf {
+        su = round(bf_shell[u])
+        pu = [bf_pow[u, 0], bf_pow[u, 1], bf_pow[u, 2]]
+        cu = md_shell_cn(expo, coef, su, pu, nprim)
+        A = [R[round(sh_atom[su]), 0], R[round(sh_atom[su]), 1], R[round(sh_atom[su]), 2]]
+        for v to nbf {
+            sv = round(bf_shell[v])
+            pv = [bf_pow[v, 0], bf_pow[v, 1], bf_pow[v, 2]]
+            cv = md_shell_cn(expo, coef, sv, pv, nprim)
+            B = [R[round(sh_atom[sv]), 0], R[round(sh_atom[sv]), 1], R[round(sh_atom[sv]), 2]]
+            total = 0.0
+            for i to nprim {
+                for j to nprim {
+                    g = 0.0
+                    if which == 0 {
+                        g = md_overlap_prim(expo[su, i], A, pu, expo[sv, j], B, pv)
+                    }
+                    if which == 1 {
+                        g = md_kinetic_prim(expo[su, i], A, pu, expo[sv, j], B, pv)
+                    }
+                    if which == 2 {
+                        for c to natm {
+                            Cn = [R[c, 0], R[c, 1], R[c, 2]]
+                            g = g + Z[c] * md_nuclear_prim(expo[su, i], A, pu, expo[sv, j], B, pv, Cn)
+                        }
+                    }
+                    total = total + cu[i] * cv[j] * g
+                }
+            }
+            M[u, v] = total
+        }
+    }
+    return M
+}
+
+#| The two-electron tensor, `(uv|ls)` in chemist's notation.
+#|
+#| Only the integrals with `u <= v`, `l <= t` and `(uv) <= (lt)` are computed;
+#| the other seven of every eight follow from the symmetry of the integral and
+#| are filled in. That, and hoisting the contractions out, is the difference
+#| between twenty-three seconds and something a browser will sit through.
+def md_eri_fast(CEN: Arr, EXP: Arr, CN: Arr, NP: Arr, bf_pow: Arr, nbf) {
+    G = zeros(nbf, nbf, nbf, nbf)
+    for u to nbf {
+        pu = [bf_pow[u, 0], bf_pow[u, 1], bf_pow[u, 2]]
+        A = [CEN[u, 0], CEN[u, 1], CEN[u, 2]]
+        for v to u + 1 {
+            pv = [bf_pow[v, 0], bf_pow[v, 1], bf_pow[v, 2]]
+            B = [CEN[v, 0], CEN[v, 1], CEN[v, 2]]
+            uv = u * (u + 1.0) / 2.0 + v
+            for l to nbf {
+                pl = [bf_pow[l, 0], bf_pow[l, 1], bf_pow[l, 2]]
+                Cc = [CEN[l, 0], CEN[l, 1], CEN[l, 2]]
+                for t to l + 1 {
+                    lt = l * (l + 1.0) / 2.0 + t
+                    if lt > uv {
+                        continue
+                    }
+                    pt = [bf_pow[t, 0], bf_pow[t, 1], bf_pow[t, 2]]
+                    D = [CEN[t, 0], CEN[t, 1], CEN[t, 2]]
+                    total = 0.0
+                    for i to NP[u] {
+                        for j to NP[v] {
+                            cij = CN[u, i] * CN[v, j]
+                            for m to NP[l] {
+                                for n to NP[t] {
+                                    total = total + cij * CN[l, m] * CN[t, n] * md_eri_prim(EXP[u, i], A, pu, EXP[v, j], B, pv, EXP[l, m], Cc, pl, EXP[t, n], D, pt)
+                                }
+                            }
+                        }
+                    }
+                    G[u, v, l, t] = total
+                    G[v, u, l, t] = total
+                    G[u, v, t, l] = total
+                    G[v, u, t, l] = total
+                    G[l, t, u, v] = total
+                    G[t, l, u, v] = total
+                    G[l, t, v, u] = total
+                    G[t, l, v, u] = total
+                }
+            }
+        }
+    }
+    return G
+}
+
+test "water's one-electron integrals are PySCF's, p functions and all" {
+    nbf = WATER_NBF
+    R = water_coords()
+    S = md_one_electron(R, water_charges(), water_bf_shell(), water_bf_pow(), water_shell_atom(), water_shell_expo(), water_shell_coef(), nbf, WATER_NPRIM, WATER_NATM, 0)
+    T = md_one_electron(R, water_charges(), water_bf_shell(), water_bf_pow(), water_shell_atom(), water_shell_expo(), water_shell_coef(), nbf, WATER_NPRIM, WATER_NATM, 1)
+    V = md_one_electron(R, water_charges(), water_bf_shell(), water_bf_pow(), water_shell_atom(), water_shell_expo(), water_shell_coef(), nbf, WATER_NPRIM, WATER_NATM, 2)
+    assert_lt(gto_worst(S, water_S(), nbf), 1.0e-12)
+    assert_lt(gto_worst(T, water_T(), nbf), 1.0e-12)
+    assert_lt(gto_worst(V, water_V(), nbf), 1.0e-12)
+}
+
+test "water's two-electron integrals and its Hartree-Fock energy are PySCF's" {
+    nbf = WATER_NBF
+    R = water_coords()
+    Z = water_charges()
+    bs = water_bf_shell()
+    bp = water_bf_pow()
+    sa = water_shell_atom()
+    se = water_shell_expo()
+    sc = water_shell_coef()
+    S = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, WATER_NPRIM, WATER_NATM, 0)
+    T = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, WATER_NPRIM, WATER_NATM, 1)
+    V = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, WATER_NPRIM, WATER_NATM, 2)
+    CEN = md_prep_center(bs, sa, R, nbf)
+    EXP = md_prep_expo(bs, se, nbf, WATER_NPRIM)
+    CN = md_prep_cn(bs, bp, se, sc, nbf, WATER_NPRIM)
+    NP = md_prep_nprim(bs, water_shell_nprim(), nbf)
+    G = md_eri_fast(CEN, EXP, CN, NP, bp, nbf)
+    ref = water_ERI()
+    worst = 0.0
+    for u to nbf {
+        for v to nbf {
+            for l to nbf {
+                for t to nbf {
+                    idx = ((u * nbf + v) * nbf + l) * nbf + t
+                    worst = max(worst, abs(G[u, v, l, t] - ref[idx]))
+                }
+            }
+        }
+    }
+    assert_lt(worst, 1.0e-12)
+    e = gto_rhf(T + V, S, G, nbf, WATER_NOCC, WATER_ENUC, MD_WATER_SCF_ITERS)
+    assert_lt(abs(e - WATER_ERHF), 1.0e-10)
+}
+
+test "hydrogen fluoride's integrals and its Hartree-Fock energy are PySCF's" {
+    nbf = HF_NBF
+    R = hf_coords()
+    Z = hf_charges()
+    bs = hf_bf_shell()
+    bp = hf_bf_pow()
+    sa = hf_shell_atom()
+    se = hf_shell_expo()
+    sc = hf_shell_coef()
+    S = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, HF_NPRIM, HF_NATM, 0)
+    T = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, HF_NPRIM, HF_NATM, 1)
+    V = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, HF_NPRIM, HF_NATM, 2)
+    assert_lt(gto_worst(S, hf_S(), nbf), 1.0e-12)
+    assert_lt(gto_worst(T, hf_T(), nbf), 1.0e-12)
+    assert_lt(gto_worst(V, hf_V(), nbf), 1.0e-12)
+    CEN = md_prep_center(bs, sa, R, nbf)
+    EXP = md_prep_expo(bs, se, nbf, HF_NPRIM)
+    CN = md_prep_cn(bs, bp, se, sc, nbf, HF_NPRIM)
+    NP = md_prep_nprim(bs, hf_shell_nprim(), nbf)
+    G = md_eri_fast(CEN, EXP, CN, NP, bp, nbf)
+    ref = hf_ERI()
+    worst = 0.0
+    for u to nbf {
+        for v to nbf {
+            for l to nbf {
+                for t to nbf {
+                    idx = ((u * nbf + v) * nbf + l) * nbf + t
+                    worst = max(worst, abs(G[u, v, l, t] - ref[idx]))
+                }
+            }
+        }
+    }
+    assert_lt(worst, 1.0e-12)
+    e = gto_rhf(T + V, S, G, nbf, HF_NOCC, HF_ENUC, MD_WATER_SCF_ITERS)
+    assert_lt(abs(e - HF_ERHF), 1.0e-10)
+}
+
+test "water in 6-31G, which is the molecule PySCF's own test suite checks" {
+    # pyscf/scf/test/test_h2o.py: self.assertAlmostEqual(rhf.scf(), -75.98394849812, 9)
+    nbf = WATER631G_NBF
+    R = water631g_coords()
+    Z = water631g_charges()
+    bs = water631g_bf_shell()
+    bp = water631g_bf_pow()
+    sa = water631g_shell_atom()
+    se = water631g_shell_expo()
+    sc = water631g_shell_coef()
+    npm = WATER631G_NPRIM
+    S = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, npm, WATER631G_NATM, 0)
+    T = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, npm, WATER631G_NATM, 1)
+    V = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, npm, WATER631G_NATM, 2)
+    assert_lt(gto_worst(S, water631g_S(), nbf), 1.0e-12)
+    assert_lt(gto_worst(T, water631g_T(), nbf), 1.0e-12)
+    assert_lt(gto_worst(V, water631g_V(), nbf), 1.0e-12)
+    CEN = md_prep_center(bs, sa, R, nbf)
+    EXP = md_prep_expo(bs, se, nbf, npm)
+    CN = md_prep_cn(bs, bp, se, sc, nbf, npm)
+    NP = md_prep_nprim(bs, water631g_shell_nprim(), nbf)
+    G = md_eri_fast(CEN, EXP, CN, NP, bp, nbf)
+    iters = 80
+    e = gto_rhf(T + V, S, G, nbf, WATER631G_NOCC, WATER631G_ENUC, iters)
+    assert_lt(abs(e - WATER631G_ERHF), 1.0e-9)
+    # and against the number PySCF's test file asserts, to the places it asserts
+    assert_near(e, -75.98394849812, 1.0e-9)
+}
+
+#| Rotate a table of coordinates about the axis `(ux, uy, uz)` by `th`, by
+#| Rodrigues' formula. Used to ask the energy a question it must answer the same
+#| way every time.
+def rotate_coords(R: Arr, natm, ux, uy, uz, th) {
+    n = sqrt(ux * ux + uy * uy + uz * uz)
+    kx = ux / n
+    ky = uy / n
+    kz = uz / n
+    c = cos(th)
+    s = sin(th)
+    out = zeros(natm, GTO_DIM)
+    for i to natm {
+        x = R[i, 0]
+        y = R[i, 1]
+        z = R[i, 2]
+        dot = kx * x + ky * y + kz * z
+        out[i, 0] = x * c + (ky * z - kz * y) * s + kx * dot * (1.0 - c)
+        out[i, 1] = y * c + (kz * x - kx * z) * s + ky * dot * (1.0 - c)
+        out[i, 2] = z * c + (kx * y - ky * x) * s + kz * dot * (1.0 - c)
+    }
+    return out
+}
+
+#| The Hartree-Fock energy of water at whatever coordinates it is handed, and
+#| the density on the way out.
+def water_energy_at(R: Arr, Pout: Arr) {
+    nbf = WATER_NBF
+    Z = water_charges()
+    bs = water_bf_shell()
+    bp = water_bf_pow()
+    sa = water_shell_atom()
+    se = water_shell_expo()
+    sc = water_shell_coef()
+    npm = WATER_NPRIM
+    S = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, npm, WATER_NATM, 0)
+    T = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, npm, WATER_NATM, 1)
+    V = md_one_electron(R, Z, bs, bp, sa, se, sc, nbf, npm, WATER_NATM, 2)
+    CEN = md_prep_center(bs, sa, R, nbf)
+    EXP = md_prep_expo(bs, se, nbf, npm)
+    CN = md_prep_cn(bs, bp, se, sc, nbf, npm)
+    NP = md_prep_nprim(bs, water_shell_nprim(), nbf)
+    G = md_eri_fast(CEN, EXP, CN, NP, bp, nbf)
+    # nuclear repulsion at these coordinates, not the reference one
+    enuc = 0.0
+    for i to WATER_NATM {
+        for j to i {
+            d = 0.0
+            for k to GTO_DIM {
+                dd = R[i, k] - R[j, k]
+                d = d + dd * dd
+            }
+            enuc = enuc + Z[i] * Z[j] / sqrt(d)
+        }
+    }
+    return gto_rhf_full(T + V, S, G, nbf, WATER_NOCC, enuc, MD_WATER_SCF_ITERS, Pout)
+}
+
+test "the energy does not care which way the molecule is pointing" {
+    # p functions are defined along the fixed axes, so this only comes out right
+    # if the three of them are handled as one shell that spans a rotation
+    # invariant space. It is the check that will catch d functions the day they
+    # are written, and it needs no reference at all.
+    R = water_coords()
+    P = zeros(WATER_NBF, WATER_NBF)
+    e0 = water_energy_at(R, P)
+    assert_lt(abs(e0 - WATER_ERHF), 1.0e-10)
+    worst = 0.0
+    nangles = 5
+    for k to nangles {
+        th = 0.3 + 0.55 * k
+        Rr = rotate_coords(R, WATER_NATM, 0.31, -0.74, 0.59, th)
+        worst = max(worst, abs(water_energy_at(Rr, P) - e0))
+    }
+    assert_lt(worst, 1.0e-10)
+}
+
+test "and it does not care where the molecule is" {
+    R = water_coords()
+    P = zeros(WATER_NBF, WATER_NBF)
+    e0 = water_energy_at(R, P)
+    Rt = zeros(WATER_NATM, GTO_DIM)
+    for i to WATER_NATM {
+        Rt[i, 0] = R[i, 0] + 3.7
+        Rt[i, 1] = R[i, 1] - 1.9
+        Rt[i, 2] = R[i, 2] + 8.25
+    }
+    assert_lt(abs(water_energy_at(Rt, P) - e0), 1.0e-10)
+}
+
+test "the density holds the electrons it is supposed to" {
+    nbf = WATER_NBF
+    R = water_coords()
+    P = zeros(nbf, nbf)
+    junk = water_energy_at(R, P)
+    S = md_one_electron(R, water_charges(), water_bf_shell(), water_bf_pow(), water_shell_atom(), water_shell_expo(), water_shell_coef(), nbf, WATER_NPRIM, WATER_NATM, 0)
+    PS = P @ S
+    tr = 0.0
+    for i to nbf {
+        tr = tr + PS[i, i]
+    }
+    # ten electrons in water, and the trace of PS counts them
+    assert_near(tr, 2.0 * WATER_NOCC, 1.0e-10)
+    # and the density is idempotent through the overlap: P S P = 2 P
+    PSP = PS @ P
+    for i to nbf {
+        for j to nbf {
+            assert_near(PSP[i, j], 2.0 * P[i, j], 1.0e-9)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

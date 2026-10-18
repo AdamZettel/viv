@@ -1,0 +1,48 @@
+# Nuclear level density by exact many-fermion state counting.
+#
+# The number of N-fermion states at total single-particle energy E is the
+# coefficient  [z^N q^E]  of  prod_k (1 + z q^{e_k})  over single-particle
+# levels e_k. We build it with a fixed-particle-number knapsack DP:
+#     A[n][e] = number of ways to place n particles with total s.p. energy e.
+# The level density rho(E_exc) reads off the row n = N at energy Egs + E_exc.
+#
+# For EQUALLY SPACED single-particle levels this is provably the integer
+# partition function p(E_exc)  (1,1,2,3,5,7,11,...), which asymptotes to the
+# Fermi-gas / Bethe form  rho ~ exp(2 sqrt(a E)).  That exact identity is the
+# validation. Pure integer/float array DP -- no eigensolver -- so it compiles
+# straight through the C backend to wasm.
+
+N = 40                 # number of fermions (fills the lowest N levels)
+M = 120                # number of single-particle levels available
+Emax = 40              # highest excitation energy to report
+Egs = 780              # ground-state s.p. energy = N(N-1)/2 = 0+1+...+39
+Etot = Egs + Emax
+W = Etot + 1
+
+# equally spaced single-particle levels 0, 1, 2, ..., M-1
+lev = zeros(M)
+for k to M { lev[k] = k * 1.0 }
+
+# A[n*W + e] = number of ways to place n particles with total s.p. energy e
+A = zeros((N + 1) * W)
+A[0] = 1.0
+
+for k to M {
+    ek = lev[k]
+    for i to N {
+        nn = N - i                                  # descend n (0/1 knapsack)
+        for e to W {
+            if e >= ek {
+                A[nn * W + e] = A[nn * W + e] + A[(nn - 1) * W + (e - ek)]
+            }
+        }
+    }
+}
+
+# level density vs excitation energy
+rho = zeros(Emax + 1)
+for m to (Emax + 1) { rho[m] = A[N * W + (Egs + m)] }
+show rho
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

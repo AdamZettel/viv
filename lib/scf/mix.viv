@@ -1,0 +1,233 @@
+###
+post: Mixing densities in a self-consistent field
+agent: claude
+
+`mix_densities(x_in, x_out, hist)` is a contract: the
+density the next pass of a self-consistent field starts from, made from the
+density the pass started with (`x_in`), the one it produced (`x_out`) and
+the earlier pairs in `hist`. The densities are one flat array; a solver
+packs whatever it mixes (lib/skyrme packs rho, tau and J of both kinds).
+
+- `linear`: (1 - alpha) x_in + alpha x_out. No history.
+- `pulay`: Pulay's direct inversion in the iterative subspace (P. Pulay,
+  Chem. Phys. Lett. 73, 393 (1980)), applied to densities: the combination
+  of the last `history` inputs whose residuals (output minus input) combine
+  to the shortest residual, with the coefficients summing to one, then a
+  linear step of `alpha` along that residual.
+- `broyden`: Johnson's modified Broyden method (D. D. Johnson, Phys. Rev. B
+  38, 12807 (1988)) with every weight 1 and w0 = BROYDEN_W0. It works on
+  differences of consecutive pairs; with w0 = 0 its step equals Pulay's
+  (V. Eyert, J. Comput. Phys. 124, 271 (1996)), so w0 is what makes it a
+  different method here.
+
+Two mixers given the same pair return different next densities on purpose;
+they agree only at the fixed point. The contract's `agree` line compares
+`residual`, the largest |x_out - x_in|, which every method computes from
+the same two arrays; the converged energies and densities of the three are
+compared in the tests of lib/skyrme/spherical.viv.
+
+Used with `from scf.mix import mix_densities, mix_start`.
+###
+
+#: MIX_ALPHA  the default fraction of the residual added in one step
+MIX_ALPHA = 0.5
+
+#: MIX_HISTORY  how many input densities Pulay and Broyden keep by default,
+#:     the current one included
+MIX_HISTORY: Int = 6
+
+#: BROYDEN_W0  Johnson's w0, the weight of the first inverse-Jacobian guess;
+#:     he uses 0.01
+BROYDEN_W0 = 0.01
+
+#: PULAY_CUTOFF  singular values of Pulay's bordered system below this
+#:     fraction of the largest are dropped: the system is singular when the
+#:     remembered residuals are linearly dependent, as they become near the
+#:     fixed point
+PULAY_CUTOFF = 1.0e-12
+
+#| The densities a mixer has seen, oldest first: row i of x is an input
+#| density and row i of r its residual (output minus input); `count` rows
+#| are in use.
+record MixHistory {
+    x: Arr
+    r: Arr
+    count: Int
+}
+
+#| One mixing step as one value, for a solver that takes the mixer as a
+#| function: the next density, the history to pass next time, and the
+#| largest |x_out - x_in|.
+record MixStep {
+    x: Arr
+    hist: MixHistory
+    residual: Num
+}
+
+#| An empty history for densities of n numbers.
+def mix_start(n: Int) -> MixHistory {
+    return MixHistory { x: zeros(1, n), r: zeros(1, n), count: 0 }
+}
+
+#| A new history: the last keep - 1 rows of hist, then x and r.
+def remember(hist: MixHistory, x: Arr, r: Arr, keep: Int) -> MixHistory {
+    take: Int = min(hist.count, keep - 1)
+    m: Int = take + 1
+    xs = zeros(m, len(x))
+    rs = zeros(m, len(x))
+    first: Int = hist.count - take
+    for i to take {
+        xs[i, :] = hist.x[first + i, :]
+        rs[i, :] = hist.r[first + i, :]
+    }
+    xs[take, :] = x
+    rs[take, :] = r
+    return MixHistory { x: xs, r: rs, count: m }
+}
+
+#| The largest |x_out - x_in|: how far this pass moved the density.
+def residual_norm(x_in: Arr, x_out: Arr) -> Num {
+    return max(abs(x_out - x_in))
+}
+
+#| (1 - alpha) x_in + alpha x_out.
+def linear(x_in: Arr, x_out: Arr, hist: MixHistory, alpha: Num = MIX_ALPHA) {
+    x_next = (1.0 - alpha) * x_in + alpha * x_out
+    return x_next, hist, residual_norm(x_in, x_out)
+}
+
+#| Pulay's mixing: coefficients c over the remembered inputs minimizing
+#| |sum c_i r_i| with sum c_i = 1 (a bordered linear system, solved by its
+#| pseudo-inverse), then sum c_i (x_i + alpha r_i).
+def pulay(x_in: Arr, x_out: Arr, hist: MixHistory, alpha: Num = MIX_ALPHA, history: Int = MIX_HISTORY) {
+    h2 = remember(hist, x_in, x_out - x_in, history)
+    m: Int = h2.count
+    step overlaps {
+        A = zeros(m + 1, m + 1)
+        rhs = zeros(m + 1)
+        A[0:m, 0:m] = h2.r @ transpose(h2.r)
+        scale = max(abs(A[0:m, 0:m]))
+        if scale > 0.0 {
+            A[0:m, 0:m] = A[0:m, 0:m] / scale
+        }
+        for i to m {
+            A[i, m] = 1.0
+            A[m, i] = 1.0
+        }
+        rhs[m] = 1.0
+    }
+    step combine {
+        # the pseudo-inverse: U diag(1 / s) V^T, small s dropped
+        U, sv, Vt = svd(A)
+        proj = transpose(U) @ rhs
+        for i to m + 1 {
+            proj[i] = proj[i] / sv[i] if sv[i] > PULAY_CUTOFF * sv[0] else 0.0
+        }
+        c = transpose(Vt) @ proj
+        x_next = c[0:m] @ (h2.x + alpha * h2.r)
+    }
+    return x_next, h2, residual_norm(x_in, x_out)
+}
+
+#| Johnson's modified Broyden mixing, every weight 1: from the normalized
+#| differences dF, dV of consecutive residuals and inputs,
+#| x_next = x_in + alpha r - sum_l gamma_l (alpha dF_l + dV_l), with
+#| gamma = (w0^2 + dF dF^T)^-1 dF r.
+def broyden(x_in: Arr, x_out: Arr, hist: MixHistory, alpha: Num = MIX_ALPHA, history: Int = MIX_HISTORY, w0: Num = BROYDEN_W0) {
+    r = x_out - x_in
+    h2 = remember(hist, x_in, r, history)
+    nd: Int = h2.count - 1
+    x_next = x_in + alpha * r
+    if nd > 0 {
+        step differences {
+            dF = zeros(nd, len(x_in))
+            dV = zeros(nd, len(x_in))
+            for i to nd {
+                df = h2.r[i + 1, :] - h2.r[i, :]
+                nrm = sqrt(dot(df, df))
+                dF[i, :] = df / nrm
+                dV[i, :] = (h2.x[i + 1, :] - h2.x[i, :]) / nrm
+            }
+        }
+        step gamma {
+            a = dF @ transpose(dF) + w0 * w0 * eye(nd)
+            gam = lin_solve(a, dF @ r)
+        }
+        x_next = x_next - gam @ (alpha * dF + dV)
+    }
+    return x_next, h2, residual_norm(x_in, x_out)
+}
+
+contract mix_densities(x_in: Arr, x_out: Arr, hist: MixHistory) -> x_next: Arr, hist_next: MixHistory, residual: Num {
+    intent "the density the next pass of a self-consistent field starts from, made from this pass's input and output densities and the earlier ones"
+    methods
+        simple: linear
+        accelerated: pulay, broyden
+    default pulay
+    agree residual exactly
+}
+
+# ---- tests: a linear fixed-point map x = G x + b, whose fixed point solves (1 - G) x = b
+
+MIX_N: Int = 4
+MIX_TOL = 1.0e-12
+MIX_PASSES: Int = 5000
+
+#| G x + b for a fixed contraction G (spectral radius below 1) and b.
+def probe_map(x: Arr) -> Arr {
+    G = [[0.6, 0.1, 0.0, 0.05], [0.1, 0.5, 0.2, 0.0], [0.0, 0.2, 0.7, 0.1], [0.05, 0.0, 0.1, 0.8]]
+    b = [1.0, -2.0, 0.5, 3.0]
+    return G @ x + b
+}
+
+def by_linear(x_in: Arr, x_out: Arr, hist: MixHistory) -> MixStep {
+    x, hs, res = mix_densities(x_in, x_out, hist) using linear
+    return MixStep { x: x, hist: hs, residual: res }
+}
+def by_pulay(x_in: Arr, x_out: Arr, hist: MixHistory) -> MixStep {
+    x, hs, res = mix_densities(x_in, x_out, hist) using pulay
+    return MixStep { x: x, hist: hs, residual: res }
+}
+def by_broyden(x_in: Arr, x_out: Arr, hist: MixHistory) -> MixStep {
+    x, hs, res = mix_densities(x_in, x_out, hist) using broyden
+    return MixStep { x: x, hist: hs, residual: res }
+}
+
+#| Iterate x -> mix(x, probe_map(x)) until the residual is under MIX_TOL;
+#| the passes taken and the fixed point.
+def probe_solve(mixer) {
+    x = zeros(MIX_N)
+    hist = mix_start(MIX_N)
+    passes: Int = 0
+    res = 1.0
+    while res > MIX_TOL and passes < MIX_PASSES {
+        st = mixer(x, probe_map(x), hist)
+        x = st.x
+        hist = st.hist
+        res = st.residual
+        passes += 1
+    }
+    return passes, x
+}
+
+test "every mixer reaches the fixed point of a linear contraction" {
+    n_lin, x_lin = probe_solve(by_linear)
+    n_pul, x_pul = probe_solve(by_pulay)
+    n_bro, x_bro = probe_solve(by_broyden)
+    assert_true(n_lin < MIX_PASSES and n_pul < MIX_PASSES and n_bro < MIX_PASSES)
+    assert_near(max(abs(probe_map(x_lin) - x_lin)), 0.0, 1.0e-11)
+    assert_near(max(abs(x_pul - x_lin)), 0.0, 1.0e-10)
+    assert_near(max(abs(x_bro - x_lin)), 0.0, 1.0e-10)
+    # on a linear map Pulay's subspace holds the solution after MIX_N + 1 inputs
+    assert_true(n_pul < n_lin and n_bro < n_lin)
+}
+
+test "every method measures the same residual" {
+    x = zeros(MIX_N)
+    hist = mix_start(MIX_N)
+    x, hist, res = mix_densities(x, probe_map(x), hist) using every method
+    assert_near(res, 3.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

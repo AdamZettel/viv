@@ -1,0 +1,459 @@
+###
+post: The error of a linear solve follows the condition number
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: linear algebra, conditioning, hilbert matrix, least squares, householder qr, normal equations, notebook
+equation: \frac{\|\hat x - x\|}{\|x\|} \lesssim \kappa(A)\,\varepsilon, \qquad \kappa(A^T A) = \kappa(A)^2
+agent: claude
+lane: ai
+summary: Gaussian elimination with partial pivoting solves Hilbert systems whose exact solution is all ones. From $n = 3$ to 12 the condition number $\kappa$ grows from 524 to $1.7 \times 10^{16}$, and the error grows with it, staying between 0.005 and 0.18 times $\kappa\varepsilon$, while the residual stays under $\varepsilon$. In least squares, fitting a degree-11 polynomial to 40 points, Householder QR is off by $3.6 \times 10^{-9}$ (about $\kappa\varepsilon$), and the normal equations, which square $\kappa$, by 0.18.
+
+Every computed answer here is compared with an exact one. The Hilbert systems
+are scaled to have integer entries, so the system stored in the computer is the
+exact system and its solution is exactly all ones; the Python reference
+confirms it by solving in rational arithmetic with `fractions`. The exact
+condition numbers come from mpmath at 80 digits, and numpy's
+`linalg.cond` agrees with them to $3 \times 10^{-6}$ through $n = 10$. The
+reference, `posts/refs/the-error-follows-the-condition-number.py`, also repeats
+every solve in Python in the same order of operations (output beside it).
+###
+
+from svd import svd_jacobi
+
+EPS = pow(2.0, -52.0)
+
+###
+## Conditioning
+
+The *condition number* $\kappa(A) = \sigma_{\max}/\sigma_{\min}$, the ratio of
+the largest to the smallest singular value, bounds how much a relative change
+in $b$ or $A$ can change the solution of $Ax = b$: by up to $\kappa$ times as
+much. Rounding a number to double precision changes it, relative to its size,
+by at most half of $\varepsilon = 2^{-52} \approx 2.2 \times 10^{-16}$ (machine
+epsilon, the gap between 1 and the next double), so no method can promise
+better than about $\kappa\varepsilon$.
+
+A method is *backward stable* if its answer is the exact solution of a nearby
+system, one whose data differ from $A$ and $b$ by a few $\varepsilon$ relative.
+Its residual $b - A\hat x$ is then a few $\varepsilon$ relative to
+$\|A\|\,\|\hat x\|$, and its error is about $\kappa\varepsilon$. Gaussian
+elimination with partial pivoting (GEPP) behaves this way in practice. So a small
+residual says the method did its job, and it says nothing about the error when
+$\kappa$ is large.
+
+The Hilbert matrix $H_{ij} = 1/(i + j + 1)$ is the standard ill-conditioned
+example; $\kappa$ grows about 32 times with each row added. Multiplying by
+$L = \mathrm{lcm}(1, \ldots, 2n - 1)$ makes every entry an integer below
+$2^{53}$, stored exactly, with the same $\kappa$. The right side
+$b = H\,(1, \ldots, 1)$ is a sum of integers, also exact.
+
+The condition number has to be computed too, and it runs into the same limit.
+`eig_sym` finds the smallest eigenvalue to within about $\varepsilon$ times the
+largest, so $\kappa$ comes out with a relative error below $\kappa\varepsilon$:
+$1.1 \times 10^{-15}$ at $n = 3$ and 4.4% at $n = 12$, where numpy's `cond` is off by
+1.6%. The tests use the exact values.
+###
+
+#| The greatest common divisor of two whole numbers, by Euclid.
+def gcd(a, b) {
+    x = a
+    y = b
+    while y > 0.0 {
+        r = x % y
+        x = y
+        y = r
+    }
+    return x
+}
+
+#| The Hilbert matrix of order n times lcm(1..2n-1): every entry a whole number.
+def scaled_hilbert(n) {
+    big = 1.0
+    for d from 1 to 2 * n {
+        big = big * d / gcd(big, d)
+    }
+    A = zeros(n, n)
+    for i to n {
+        for j to n {
+            A[i, j] = big / (i + j + 1.0)
+        }
+    }
+    return A
+}
+
+#| Solve A x = b by Gaussian elimination with partial pivoting, into x.
+#| A and b are copied, not changed.
+def gepp(A_in, b_in, x) {
+    n = len(b_in)
+    A = A_in * 1.0
+    b = b_in * 1.0
+    for k to n {
+        p = k
+        for i from k + 1 to n {
+            if abs(A[i, k]) > abs(A[p, k]) {
+                p = i
+            }
+        }
+        for j to n {
+            t = A[k, j]
+            A[k, j] = A[p, j]
+            A[p, j] = t
+        }
+        t = b[k]
+        b[k] = b[p]
+        b[p] = t
+        for i from k + 1 to n {
+            m = A[i, k] / A[k, k]
+            for j from k to n {
+                A[i, j] = A[i, j] - m * A[k, j]
+            }
+            b[i] = b[i] - m * b[k]
+        }
+    }
+    for i from 0 to n reversed {
+        s = b[i]
+        for j from i + 1 to n {
+            s = s - A[i, j] * x[j]
+        }
+        x[i] = s / A[i, i]
+    }
+}
+
+#| kappa of a symmetric positive definite matrix: its largest eigenvalue over its smallest.
+def kappa_spd(A) {
+    n = len(A)
+    vals = zeros(n)
+    vecs = zeros(n, n)
+    eig_sym(A, vals, vecs)
+    lo = vals[0]
+    hi = vals[0]
+    for i to n {
+        lo = min(lo, vals[i])
+        hi = max(hi, vals[i])
+    }
+    return hi / lo
+}
+
+#| kappa of an m by n matrix, m >= n: its largest singular value over its smallest.
+def kappa_tall(V_in, m, n) {
+    A = V_in * 1.0
+    s = zeros(n)
+    W = zeros(n, n)
+    svd_jacobi(A, s, W, m, n)
+    lo = s[0]
+    hi = s[0]
+    for i to n {
+        lo = min(lo, s[i])
+        hi = max(hi, s[i])
+    }
+    return hi / lo
+}
+
+#: N_MIN, N_MAX  the Hilbert orders tried
+N_MIN = 3
+N_MAX = 12
+NH = N_MAX - N_MIN + 1
+KAPPA_H = zeros(NH)
+ERR_H = zeros(NH)
+RES_H = zeros(NH)
+# the largest scaled entry, and how many entries are not whole numbers
+entry_max = 0.0
+entry_fractions = 0
+for k to NH {
+    n = N_MIN + k
+    A = scaled_hilbert(n)
+    for i to n {
+        for j to n {
+            entry_max = max(entry_max, A[i, j])
+            if A[i, j] != floor(A[i, j]) {
+                entry_fractions = entry_fractions + 1
+            }
+        }
+    }
+    b = zeros(n)
+    for i to n {
+        for j to n {
+            b[i] = b[i] + A[i, j]
+        }
+    }
+    x = zeros(n)
+    gepp(A, b, x)
+    # error against the exact solution, all ones; residual relative to |A| |x| in the max norm
+    err = 0.0
+    res = 0.0
+    anorm = 0.0
+    xnorm = 0.0
+    for i to n {
+        err = max(err, abs(x[i] - 1.0))
+        xnorm = max(xnorm, abs(x[i]))
+        r = b[i]
+        row = 0.0
+        for j to n {
+            r = r - A[i, j] * x[j]
+            row = row + abs(A[i, j])
+        }
+        res = max(res, abs(r))
+        anorm = max(anorm, row)
+    }
+    ERR_H[k] = err
+    RES_H[k] = res / (anorm * xnorm)
+    KAPPA_H[k] = kappa_spd(A)
+}
+show KAPPA_H
+show ERR_H
+show ERR_H / (KAPPA_H * EPS)
+show RES_H / EPS
+
+# the exact condition numbers of the Hilbert matrices of order 3 to 12, mpmath at 80 digits (the reference)
+KAPPA_EXACT = [524.0567775860608, 15513.738738932589, 476607.2502425608, 14951058.640131216, 475367354.98817897, 15257575741.646942, 493154926971.5421, 16026286870216.883, 523067739242940.9, 1.713228904697005e+16]
+
+show KAPPA_H / KAPPA_EXACT - 1.0
+# the growth of the exact kappa per row added, n = 3 to 12, as a geometric mean
+kappa_growth = pow(KAPPA_EXACT[NH - 1] / KAPPA_EXACT[0], 1.0 / (NH - 1.0))
+show kappa_growth
+show entry_max
+
+test "kappa grows about 32 times with each row added, from n = 3 to 12" {
+    assert_near(kappa_growth, 31.7, 0.05)
+}
+test "every scaled Hilbert entry is a whole number below 2^53, so it is stored exactly" {
+    assert_near(entry_fractions, 0, 0.0)
+    assert_lt(entry_max, pow(2.0, 53.0))
+}
+
+test "eig_sym's kappa is within kappa eps of the exact one at every n: 4.4% off at n = 12" {
+    for k to NH {
+        assert_lt(abs(KAPPA_H[k] / KAPPA_EXACT[k] - 1.0), KAPPA_EXACT[k] * EPS)
+    }
+    assert_near(KAPPA_H[NH - 1] / KAPPA_EXACT[NH - 1], 1.0 - 0.0444, 1.0e-4)
+}
+test "the errors are the Python reference's, n = 3, 8 and 12" {
+    assert_near(ERR_H[0], 5.329070518200751e-15, 0.0)
+    assert_near(ERR_H[5], 3.5338560455677737e-07, 0.0)
+    assert_near(ERR_H[NH - 1], 0.18678273421994995, 0.0)
+}
+test "the error is between 0.005 and 0.18 times kappa eps at every n from 3 to 12" {
+    for k to NH {
+        ratio = ERR_H[k] / (KAPPA_EXACT[k] * EPS)
+        assert_gt(ratio, 0.005)
+        assert_lt(ratio, 0.18)
+    }
+}
+test "the residual stays under one eps relative to |A| |x|, at every n" {
+    for k to NH {
+        assert_lt(RES_H[k], EPS)
+    }
+}
+
+KAPPA_LINE = zeros(2)
+KAPPA_LINE[0] = 100.0
+KAPPA_LINE[1] = 1.0e17
+figure("Hilbert systems, $n = 3$ to 12: error against $\\kappa$", "condition number $\\kappa$", "max |x - 1|", 100.0, 1.0e17, 1.0e-18, 10.0)
+xscale("log")
+yscale("log")
+plot(KAPPA_LINE, KAPPA_LINE * EPS, "$\\kappa\\epsilon$")
+plot(KAPPA_H, ERR_H, "GEPP error")
+plot(KAPPA_H, RES_H, "residual / (|A| |x|)")
+style("$\\kappa\\epsilon$", "dash s6 nomarker")
+style("GEPP error", "s1 circle")
+style("residual / (|A| |x|)", "s3 ring noline")
+
+###
+## In least squares the method sets the condition number
+
+A least-squares fit asks for the $c$ that minimizes $\|Vc - y\|$ for a tall
+matrix $V$. Here $V$ is the Vandermonde matrix of a polynomial fit,
+$V_{ik} = t_i^k$, at $m = 40$ points $t_i = i/39$, and the data are
+$y = V\,(1, \ldots, 1)$, so the coefficients sought are all ones.
+
+The *normal equations* $V^T V c = V^T y$ are the textbook route: a square
+system, solved here with the same elimination. But
+$\kappa(V^T V) = \kappa(V)^2$, so the error is about $\kappa^2\varepsilon$.
+*Householder QR* multiplies $V$ by reflections $I - 2vv^T/v^Tv$, each of which
+zeroes one column below the diagonal, until $V$ is upper triangular, $R$.
+Reflections are orthogonal and change no lengths, so the problem becomes
+$Rc = Q^T y$ with $\kappa(R) = \kappa(V)$, and the error is about
+$\kappa\varepsilon$.
+
+The data are rounded when they are formed, which moves the exact
+least-squares answer of the stored problem slightly away from all ones. The
+Python reference computes that answer in rational arithmetic: it is at most
+$2.2 \times 10^{-8}$ from ones (at degree 13), a small part of the errors below.
+The singular values for $\kappa(V)$ come from one-sided Jacobi (`lib/svd`).
+###
+
+#| The Vandermonde matrix t_i^k of m points t_i = i/(m - 1), degrees 0 to n - 1.
+def vandermonde(m, n) {
+    V = zeros(m, n)
+    for i to m {
+        t = i / (m - 1.0)
+        V[i, 0] = 1.0
+        for k from 1 to n {
+            V[i, k] = V[i, k - 1] * t
+        }
+    }
+    return V
+}
+
+#| Least squares by Householder QR: reflect V (m by n) to upper triangular R,
+#| applying the same reflections to y, then solve R c = (Q^T y)[0..n) into c.
+def householder_lsq(V_in, y_in, c) {
+    m = len(y_in)
+    n = len(c)
+    A = V_in * 1.0
+    z = y_in * 1.0
+    for k to n {
+        nrm = 0.0
+        for i from k to m {
+            nrm = nrm + A[i, k] * A[i, k]
+        }
+        nrm = sqrt(nrm)
+        alpha = nrm
+        if A[k, k] >= 0.0 {
+            alpha = -nrm
+        }
+        v = zeros(m - k)
+        for i from k to m {
+            v[i - k] = A[i, k]
+        }
+        v[0] = v[0] - alpha
+        vv = 0.0
+        for i to m - k {
+            vv = vv + v[i] * v[i]
+        }
+        for j from k to n {
+            s = 0.0
+            for i from k to m {
+                s = s + v[i - k] * A[i, j]
+            }
+            f = 2.0 * s / vv
+            for i from k to m {
+                A[i, j] = A[i, j] - f * v[i - k]
+            }
+        }
+        s = 0.0
+        for i from k to m {
+            s = s + v[i - k] * z[i]
+        }
+        f = 2.0 * s / vv
+        for i from k to m {
+            z[i] = z[i] - f * v[i - k]
+        }
+    }
+    for i from 0 to n reversed {
+        s = z[i]
+        for j from i + 1 to n {
+            s = s - A[i, j] * c[j]
+        }
+        c[i] = s / A[i, i]
+    }
+}
+
+#| Least squares by the normal equations V^T V c = V^T y, solved by gepp (elimination with partial pivoting) into c.
+def normal_lsq(V, y, c) {
+    m = len(y)
+    n = len(c)
+    G = zeros(n, n)
+    r = zeros(n)
+    for a to n {
+        for b to n {
+            for i to m {
+                G[a, b] = G[a, b] + V[i, a] * V[i, b]
+            }
+        }
+        for i to m {
+            r[a] = r[a] + V[i, a] * y[i]
+        }
+    }
+    gepp(G, r, c)
+}
+
+#: M_PTS  data points in each fit
+M_PTS = 40
+#: D_MIN, D_MAX  the polynomial degrees fitted
+D_MIN = 3
+D_MAX = 13
+ND = D_MAX - D_MIN + 1
+KAPPA_V = zeros(ND)
+ERR_QR = zeros(ND)
+ERR_NE = zeros(ND)
+for k to ND {
+    n = D_MIN + k + 1
+    V = vandermonde(M_PTS, n)
+    y = zeros(M_PTS)
+    for i to M_PTS {
+        for j to n {
+            y[i] = y[i] + V[i, j]
+        }
+    }
+    cq = zeros(n)
+    cn = zeros(n)
+    householder_lsq(V, y, cq)
+    normal_lsq(V, y, cn)
+    eq = 0.0
+    en = 0.0
+    for i to n {
+        eq = max(eq, abs(cq[i] - 1.0))
+        en = max(en, abs(cn[i] - 1.0))
+    }
+    ERR_QR[k] = eq
+    ERR_NE[k] = en
+    KAPPA_V[k] = kappa_tall(V, M_PTS, n)
+}
+show KAPPA_V
+show ERR_QR
+show ERR_NE
+show ERR_QR / (KAPPA_V * EPS)
+show ERR_NE / (KAPPA_V * KAPPA_V * EPS)
+
+# kappa(V) for degrees 3 to 13, mpmath's singular values at 80 digits (the reference)
+KAPPA_V_EXACT = [116.32624505738684, 632.3233086475672, 3482.968340391008, 19382.947364294872, 108841.65411132858, 616409.0014540354, 3520666.4700816376, 20284397.668244053, 117938986.65952855, 692379367.9261343, 4106773885.9169726]
+
+show KAPPA_V / KAPPA_V_EXACT - 1.0
+
+test "one-sided Jacobi's kappa(V) is within 0.05 kappa eps (or 1e-14) of the exact one at every degree: 1.6e-8 at degree 13" {
+    for k to ND {
+        assert_lt(abs(KAPPA_V[k] / KAPPA_V_EXACT[k] - 1.0), max(0.05 * KAPPA_V_EXACT[k] * EPS, 1.0e-14))
+    }
+}
+test "at degree 11, QR is off by 3.55e-9 and the normal equations by 0.175, as in the Python reference" {
+    assert_near(ERR_QR[8], 3.550070903912683e-09, 0.0)
+    assert_near(ERR_NE[8], 0.17512774776887374, 0.0)
+}
+test "QR's error is below kappa eps at every degree" {
+    for k to ND {
+        assert_lt(ERR_QR[k], KAPPA_V_EXACT[k] * EPS)
+    }
+}
+test "the normal equations' error is 0.025 to 0.27 times kappa^2 eps up to degree 12" {
+    for k to ND - 1 {
+        ratio = ERR_NE[k] / (KAPPA_V_EXACT[k] * KAPPA_V_EXACT[k] * EPS)
+        assert_gt(ratio, 0.025)
+        assert_lt(ratio, 0.27)
+    }
+}
+test "from degree 4 on it is 1300 to 1.4e8 times QR's" {
+    for k from 1 to ND {
+        assert_gt(ERR_NE[k] / ERR_QR[k], 1.3e3)
+        assert_lt(ERR_NE[k] / ERR_QR[k], 1.4e8)
+    }
+}
+
+KV_LINE = zeros(2)
+KV_LINE[0] = 50.0
+KV_LINE[1] = 1.0e10
+figure("Fitting degree 3 to 13 at 40 points: coefficient error against $\\kappa(V)$", "condition number of V", "max |c - 1|", 50.0, 1.0e10, 1.0e-16, 100.0)
+xscale("log")
+yscale("log")
+plot(KV_LINE, KV_LINE * EPS, "$\\kappa\\epsilon$")
+plot(KV_LINE, KV_LINE * KV_LINE * EPS, "$\\kappa^2\\epsilon$")
+plot(KAPPA_V, ERR_QR, "Householder QR")
+plot(KAPPA_V, ERR_NE, "normal equations")
+style("$\\kappa\\epsilon$", "dash s1 nomarker")
+style("$\\kappa^2\\epsilon$", "dash s4 nomarker")
+style("Householder QR", "s1 circle")
+style("normal equations", "s4 circle")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

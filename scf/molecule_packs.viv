@@ -1,0 +1,111 @@
+# The molecules of the lock ladder, built in Viv from the basis tables of
+# lib/basis (generated from the Basis Set Exchange by tools/basis_tables.py),
+# against the packs PySCF 2.5.0 built for them (lib/hfref).
+#
+# For every molecule and basis the ladder locks, the atoms pack is PySCF's to
+# the last bit (angstrom times 1/0.52917721092, as PySCF converts), the shells
+# pack is PySCF's column for column, and the exponents are PySCF's to the last
+# bit. The coefficients differ by one factor per shell: PySCF stores each
+# contraction rescaled to unit norm, the tables store the published
+# coefficients, and lib/hf normalizes every shell itself. So the comparison is
+# of the normalized coefficients `bas_contract` makes, which must agree within
+# 1e-14. Then the energies of water from the tables are PySCF's.
+#
+#     tools/both-engines.sh scf molecule_packs
+from hf.scf import rhf, rohf
+from hf.molecule import Molecule, molecule_from
+from basis.basis import Basis
+from hf.basis import bas_contract, PR_EXP
+from basis.sto3g import basis_sto3g
+from basis.pople631g import basis_631g
+from basis.pople631gs import basis_631gs
+from basis.ccpvdz import basis_ccpvdz
+from basis.def2svp import basis_def2svp
+from basis.def2tzvp import basis_def2tzvp
+from hfref.water_sto3g import (
+    watersto3g_atoms, WATERSTO3G_E_RHF, watersto3g_prims, watersto3g_shells,
+)
+from hfref.water_631g import (
+    water631g_atoms, WATER631G_E_CATION_ROHF, WATER631G_E_RHF, water631g_prims,
+    water631g_shells,
+)
+from hfref.water_631gs_sph import (
+    water631gs_sph_atoms, WATER631GS_SPH_E_RHF, water631gs_sph_prims, water631gs_sph_shells,
+)
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.water_svp import watersvp_atoms, watersvp_prims, watersvp_shells
+from hfref.water_tzvp import watertzvp_atoms, watertzvp_prims, watertzvp_shells
+from hfref.oh_sto3g import oh_sto3g_atoms, oh_sto3g_prims, oh_sto3g_shells
+from hfref.oh_631gs import oh_631gs_atoms, oh_631gs_prims, oh_631gs_shells
+from hfref.o2_631g import o2_631g_atoms, o2_631g_prims, o2_631g_shells
+from hfref.hf_631gs import hf_631gs_atoms, hf_631gs_prims, hf_631gs_shells
+from hfref.breadth_631gs import (
+    ch4_631gs_atoms, ch4_631gs_prims, ch4_631gs_shells, n2_631gs_atoms, n2_631gs_prims,
+    n2_631gs_shells, nh3_631gs_atoms, nh3_631gs_prims, nh3_631gs_shells,
+)
+from hfref.he import (
+    he_ccpvdz_atoms, he_ccpvdz_prims, he_ccpvdz_shells, he_sto3g_atoms, he_sto3g_prims,
+    he_sto3g_shells,
+)
+from hfref.h_sto3g import h_sto3g_atoms, h_sto3g_prims, h_sto3g_shells
+
+#| Water as tools/hf_reference.py gives it to PySCF, in basis `b`.
+def mpk_water(b: Basis) -> Molecule {
+    return molecule_from([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]], b)
+}
+
+#| 1 when a molecule built here has the same functions as PySCF's packs:
+#| the atoms, the shells and the exponents exactly, the normalized
+#| coefficients within 1e-14 relative to the largest one; else 0.
+def mpk_same(m: Molecule, atoms: Arr, shells: Arr, prims: Arr) {
+    if len(m.shells) != len(shells) or len(m.prims) != len(prims) {
+        return 0
+    }
+    a = bas_contract(m.shells, m.prims)
+    b = bas_contract(shells, prims)
+    if all(m.atoms == atoms) and all(m.shells == shells) and all(m.prims[:, PR_EXP] == prims[:, PR_EXP]) and max(abs(a - b)) / max(abs(b)) < 1.0e-14 {
+        return 1
+    }
+    return 0
+}
+
+test "water built from the basis tables has PySCF's packs in six basis sets" {
+    mpk_n = 0
+    mpk_n = mpk_n + mpk_same(mpk_water(basis_sto3g()), watersto3g_atoms(), watersto3g_shells(), watersto3g_prims())
+    mpk_n = mpk_n + mpk_same(mpk_water(basis_631g()), water631g_atoms(), water631g_shells(), water631g_prims())
+    mpk_n = mpk_n + mpk_same(mpk_water(basis_631gs()), water631gs_sph_atoms(), water631gs_sph_shells(), water631gs_sph_prims())
+    mpk_n = mpk_n + mpk_same(mpk_water(basis_ccpvdz()), waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+    mpk_n = mpk_n + mpk_same(mpk_water(basis_def2svp()), watersvp_atoms(), watersvp_shells(), watersvp_prims())
+    mpk_n = mpk_n + mpk_same(mpk_water(basis_def2tzvp()), watertzvp_atoms(), watertzvp_shells(), watertzvp_prims())
+    assert_near(mpk_n, 6, 0.0)
+}
+
+test "OH, O2, HF, NH3, CH4, N2, He and H built from the tables have PySCF's packs" {
+    mpk_n = 0
+    mpk_oh = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.9697]]
+    mpk_n = mpk_n + mpk_same(molecule_from([8, 1], mpk_oh, basis_sto3g()), oh_sto3g_atoms(), oh_sto3g_shells(), oh_sto3g_prims())
+    mpk_n = mpk_n + mpk_same(molecule_from([8, 1], mpk_oh, basis_631gs()), oh_631gs_atoms(), oh_631gs_shells(), oh_631gs_prims())
+    mpk_n = mpk_n + mpk_same(molecule_from([8, 8], [[0.0, 0.0, 0.0], [0.0, 0.0, 1.2075]], basis_631g()), o2_631g_atoms(), o2_631g_shells(), o2_631g_prims())
+    mpk_n = mpk_n + mpk_same(molecule_from([9, 1], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.917]], basis_631gs()), hf_631gs_atoms(), hf_631gs_shells(), hf_631gs_prims())
+    mpk_nh3 = [[0.0, 0.0, 0.1173], [0.0, 0.9377, -0.2737], [0.8121, -0.4689, -0.2737], [-0.8121, -0.4689, -0.2737]]
+    mpk_n = mpk_n + mpk_same(molecule_from([7, 1, 1, 1], mpk_nh3, basis_631gs()), nh3_631gs_atoms(), nh3_631gs_shells(), nh3_631gs_prims())
+    mpk_ch4 = [[0.0, 0.0, 0.0], [0.6276, 0.6276, 0.6276], [-0.6276, -0.6276, 0.6276], [-0.6276, 0.6276, -0.6276], [0.6276, -0.6276, -0.6276]]
+    mpk_n = mpk_n + mpk_same(molecule_from([6, 1, 1, 1, 1], mpk_ch4, basis_631gs()), ch4_631gs_atoms(), ch4_631gs_shells(), ch4_631gs_prims())
+    mpk_n = mpk_n + mpk_same(molecule_from([7, 7], [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0977]], basis_631gs()), n2_631gs_atoms(), n2_631gs_shells(), n2_631gs_prims())
+    mpk_at = [[0.0, 0.0, 0.0]]
+    mpk_n = mpk_n + mpk_same(molecule_from([2], mpk_at, basis_sto3g()), he_sto3g_atoms(), he_sto3g_shells(), he_sto3g_prims())
+    mpk_n = mpk_n + mpk_same(molecule_from([2], mpk_at, basis_ccpvdz()), he_ccpvdz_atoms(), he_ccpvdz_shells(), he_ccpvdz_prims())
+    mpk_n = mpk_n + mpk_same(molecule_from([1], mpk_at, basis_sto3g()), h_sto3g_atoms(), h_sto3g_shells(), h_sto3g_prims())
+    assert_near(mpk_n, 10, 0.0)
+}
+
+test "water from the tables: RHF STO-3G -74.9630631297292, 6-31G -75.98394849810573, 6-31G* 5D -76.0090991085974, H2O+ ROHF -75.578396379589748" {
+    assert_lt(abs(rhf(mpk_water(basis_sto3g())).energy - WATERSTO3G_E_RHF), 1.0e-9)
+    mpk_w = mpk_water(basis_631g())
+    assert_lt(abs(rhf(mpk_w).energy - WATER631G_E_RHF), 1.0e-9)
+    assert_lt(abs(rohf(Molecule { charge: 1, spin: 1, ..mpk_w }).energy - WATER631G_E_CATION_ROHF), 1.0e-9)
+    assert_lt(abs(rhf(mpk_water(basis_631gs())).energy - WATER631GS_SPH_E_RHF), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

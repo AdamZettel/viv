@@ -1,0 +1,95 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One post from the repository: the file in four views (PostViews), then what
+// the kind adds -- a ladder's rules, a problem's solutions -- then forks, the
+// post's history and its address.
+import Base from '../../layouts/Base.astro';
+import PostPage from '../../components/PostPage.jsx';
+import PostExtras from '../../components/PostExtras.jsx';
+import PostViews from '../../components/PostViews.jsx';
+import ClaimsPanel from '../../components/ClaimsPanel.astro';
+import { SHOW_NUMBER_CHECKS } from '../../lib/repo.js';
+import { claimsBadge } from '../../lib/claimsView.js';
+import { explorableForPost } from '../../data/explorables.mjs';
+import History from '../../components/History.jsx';
+import feed from '../../data/feed.json';
+import lineage from '../../data/lineage.json';
+import '../../styles/feed.css';
+import '../../styles/run.css';
+import '../../styles/pde.css';
+import '../../styles/ladder.css';
+import '../../styles/history.css';
+import 'katex/dist/katex.min.css';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { proseHtmlOf, expectedError } from '../../lib/notebookBuild.js';
+import FeedPost from '../../components/FeedPost.jsx';
+import { withClaimRefs } from '../../lib/claimRefs.js';
+
+export function getStaticPaths() {
+  // the pager walks the posts; a claim's page links back to its channel instead
+  const plain = feed.posts.filter((q) => q.kind !== 'claim');
+  return feed.posts.map((p) => {
+    const i = plain.indexOf(p);
+    return { params: { slug: p.slug }, props: { p, newer: i > 0 ? plain[i - 1] : null, older: i >= 0 ? plain[i + 1] || null : null } };
+  });
+}
+const { p, newer, older } = Astro.props;
+const { author } = feed;
+const day = (iso: string) => new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+const forks = feed.posts.filter((q) => q.forkedFrom === p.slug).map((q) => ({ slug: q.slug, title: q.title, date: day(q.date), agent: q.agent, author: { handle: author.handle } }));
+// a problem's answers are hidden here too; PostPage asks the server whether this
+// reader has solved it, and falls back to a disclosure when no server answers
+const solutions = (p.solutions || []).map((q) => ({ ...q, date: day(q.date) }));
+const { source, ...card } = p;
+// the family this post belongs to, as the build checked it (scripts/feed-build.mjs)
+const family = (lineage as Record<string, any>)[p.family] || null;
+// Every post's page reads the file itself, in four views (PostViews.jsx):
+// Article, Notebook, Code and Source, all cut from the same parse of the file
+// (src/lib/notebook.js). The prose is rendered here, with its math, and each
+// code cell's output is what feed-build recorded when it ran the cells in order.
+// A claim (kind `claim`) is not a file in posts/: its page is its card, open,
+// with both programs and their recorded runs (scripts/feed-build.mjs staged them).
+const isClaim = p.kind === 'claim';
+const claimFull = isClaim ? JSON.parse(readFileSync(join(process.cwd(), 'public/programs/claims', `${p.slug}.json`), 'utf8')) : null;
+const src = isClaim ? '' : readFileSync(join(process.cwd(), '..', 'posts', p.file), 'utf8');
+const outFile = join(process.cwd(), 'public/programs/posts', p.file.replace(/\.viv$/, '.cells.json'));
+const cellOut = !isClaim && existsSync(outFile) ? JSON.parse(readFileSync(outFile, 'utf8')) : {};
+// the claims an article cites, as cards and badges in its prose (src/lib/claimRefs.js)
+const claimsBySlug = Object.fromEntries(feed.posts.filter((q) => q.kind === 'claim').map((q) => [q.slug, { ...q.claim, claim: q.titleText || q.title, claimHtml: `<span class="cr-title">${q.titleHtml}</span>${q.claim.lineHtml ? ` <span class="cr-line">${q.claim.lineHtml}</span>` : ''}` }]));
+const proseHtml = isClaim ? {} : Object.fromEntries(Object.entries(proseHtmlOf(src)).map(([k, v]) => [k, withClaimRefs(v as string, claimsBySlug)]));
+const explain = explorableForPost(p.slug);
+// what the claims database (scripts/claims-build.mjs) says of the prose's numbers, for the badge
+const claims = SHOW_NUMBER_CHECKS ? claimsBadge(p.slug) : null;
+const viewPost = { claims, slug: p.slug, file: p.file, title: p.title, kind: p.kind, lane: p.lane, channel: p.channel, channelTitle: p.channelTitle, agent: p.agent, address: p.address, parent: p.parent, solves: p.solves, problem: p.problem, summaryHtml: p.summaryHtml, equationHtml: p.equationHtml, ladder: p.ladder, recorded: p.recorded || [] };
+---
+
+<Base title={`${p.titleText || p.title} · Viv posts`} description={p.summaryText || `${p.kind} · ${p.tests.length} tests`}>
+  {isClaim ? (
+    <>
+      <p class="feed-crumb pv-crumb"><a href="/posts">← Posts</a> · <a href={`/c/claims#${p.claim.topic}`}>More claims like this one</a></p>
+      <div class="clp-page"><FeedPost client:load post={card} author={author} dateLabel={day(p.date)} page full={claimFull} /></div>
+    </>
+  ) : (
+    <>
+  <p class="feed-crumb pv-crumb"><a href="/posts">← Posts</a></p>
+  <PostViews client:load src={src} post={viewPost} author={{ name: author.name, handle: author.handle }} dateLabel={day(p.date)} proseHtml={proseHtml} cellOut={cellOut} expectError={expectedError(src)} explain={explain && { slug: explain.slug, title: explain.title }} />
+  {SHOW_NUMBER_CHECKS && <ClaimsPanel slug={p.slug} />}
+    </>
+  )}
+  {!isClaim && <div class="pv-after">
+    <PostPage client:load bare post={{ ...card, figure: '', recorded: [], ladder: null, notes: [], solutions: [] }} author={author} dateLabel={day(p.date)} forks={forks} solutions={solutions}>
+      <History client:load raw={family} focus={p.version} slug={p.slug} />
+      <PostExtras client:load slug={p.slug} heading={false} />
+    </PostPage>
+  </div>}
+  {!isClaim && <nav class="run-pager post-pager nb-pager" aria-label="Other posts">
+    {newer ? <a href={`/p/${newer.slug}`} rel="prev"><span>Newer</span>{newer.title}</a> : <span />}
+    {older ? <a href={`/p/${older.slug}`} rel="next"><span>Older</span>{older.title}</a> : <span />}
+  </nav>}
+  <style>
+    .pv-crumb, .pv-after, .nb-pager, .clp-page { max-width: 820px; margin-left: auto; margin-right: auto; }
+    .pv-after { margin-top: 2.5rem; }
+  </style>
+</Base>

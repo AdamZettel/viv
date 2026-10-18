@@ -1,0 +1,1165 @@
+###
+post: Layered graph layout
+agent: claude
+
+`layered(g)` places the nodes of a directed graph in layers, the way
+Graphviz's `dot` does (Sugiyama, Tagawa and Toda, 1981; Gansner, Koutsofios,
+North and Vo, 1993), and routes every edge between them. The input is a
+`LayoutInput`: each node's size, each edge's ends, and for each edge whether
+it runs against the direction of the layers (a value carried to the next
+pass of a loop), how much it wants to be straight, where it leaves its
+source and enters its target, and the size of its label. The output is a
+`Layered`: each node's center, each edge's route as a polyline, and each
+label's center.
+
+Layers run down the page (the rank axis is y, growing downward); a caller
+that wants them left to right swaps the sizes on the way in and the
+coordinates on the way out. The four phases:
+
+1. **Cycles.** A depth-first search from each node in order turns every edge
+   that closes a cycle around; so does every edge the caller marks `back`.
+   The rest of the layout sees a graph with no cycles.
+2. **Ranks.** Longest path: a node's rank is one more than the largest rank
+   of the nodes with an edge into it. A node with no edge in is then moved
+   down to one rank above the nearest node it points to, so it is not left at
+   the top, far from what it feeds.
+3. **Order.** An edge that spans several ranks gets a dummy node on each rank
+   between, so every edge joins adjacent ranks. The nodes of each rank are
+   ordered by barycenter sweeps, down then up, twelve in all: each node goes
+   to the mean position of its neighbors on the rank before. The order with
+   the fewest crossings is kept; then two neighbors on a rank change places
+   while that removes crossings (the transpose step).
+4. **Coordinates.** Each node wants to sit at the weighted mean of its
+   neighbors' positions (an edge's weight is larger between dummies, so a long
+   edge runs straight). On each rank the positions nearest those wishes that
+   keep the order and the gaps are found exactly, by pool-adjacent-violators
+   (a least-squares fit under ordering constraints). Sweeps alternate down and
+   up.
+
+The output is deterministic: no hash, no random choice, ties broken by node
+index.
+
+Used with `import graphlayout`.
+###
+
+#| What `layered` needs: node sizes and edges.
+#: w          each node's size across the rank axis (its width)
+#: h          each node's size along the rank axis (its height)
+#: efrom      each edge's source node
+#: eto        each edge's target node
+#: eback      1 when the edge is drawn against the ranks (the target comes first)
+#: eweight    how much the edge wants to be straight, 1 by default
+#: elen       the least number of ranks the edge spans, 1 by default
+#: sport      where the edge leaves its source: an offset from the source's center, across
+#: tport      where it enters its target, the same way
+#: label_w    the size of the edge's label (0 for none)
+#: label_h    its height
+#: node_gap   the least space between two nodes of a rank
+#: rank_gap   the space between two ranks
+#: hint       where each node was across in an earlier layout (its center), when `hinted` is 1
+#: hinted     1 for a node that should stay where it was: its order in its rank
+#:            against the other hinted nodes is kept, and it sits at its hint
+#:            unless the gaps push it
+#: sides      1 when an edge may leave or enter a node from its side (toward a
+#:            lane beside it); 0 for always from the node's foot to the next
+#:            node's head
+record LayoutInput {
+    w: Arr
+    h: Arr
+    efrom: Arr
+    eto: Arr
+    eback: Arr
+    eweight: Arr
+    elen: Arr
+    sport: Arr
+    tport: Arr
+    label_w: Arr
+    label_h: Arr
+    node_gap: Num
+    rank_gap: Num
+    hint: Arr
+    hinted: Arr
+    sides: Num
+}
+
+#| Where `layered` put the nodes and the edges.
+#: x          each node's center across
+#: y          each node's center along the ranks (down)
+#: rank       each node's rank
+#: order      each node's place in its rank
+#: reversed   1 for an edge the layout turned around (its route still runs from its source to its target)
+#: route_start where each edge's route begins in route_x, route_y; one more entry than edges
+#: label_x    the center of each edge's label
+#: label_y    the same, along the ranks
+#: width      the extent of the drawing across
+#: height     its extent along the ranks
+#: crossings  the number of edge crossings between adjacent ranks
+record Layered {
+    x: Arr
+    y: Arr
+    rank: Arr
+    order: Arr
+    reversed: Arr
+    route_start: Arr
+    route_x: Arr
+    route_y: Arr
+    label_x: Arr
+    label_y: Arr
+    width: Num
+    height: Num
+    crossings: Num
+}
+
+#| Order sweeps: alternately down and up.
+SWEEPS = 12
+#| Coordinate sweeps: alternately down and up.
+PLACE_SWEEPS = 24
+#| The most passes of the transpose step over the ranks.
+TRANSPOSE_ROUNDS = 8
+#| The width of a dummy node: an edge passing through a rank.
+DUMMY_W = 6
+#| The weight of an edge's piece between a real node and a dummy, and between
+#| two dummies: a long edge bends at its ends and runs straight between.
+REAL_DUMMY_WEIGHT = 0.1
+DUMMY_DUMMY_WEIGHT = 8
+#| How far a port can shift a node's barycenter, as a fraction of a place.
+PORT_PULL = 0.45
+#| How much more a real node's wish counts than a dummy's, when the two
+#| cannot both be met (Sugiyama's priority method gives dummies the higher
+#| priority, to keep long edges straight; here the boxes stay aligned and the
+#| edge bends around them).
+REAL_PRIORITY = 20
+#| The weight that keeps a node with no neighbors where it was.
+STAY_WEIGHT = 0.05
+#| The least sideways step a long edge's route takes between two ranks;
+#| smaller ones are straightened.
+KINK = 4
+#| With hints: the least step between the order keys of two hinted nodes.
+HINT_ORDER_EPS = 1e-6
+#| How far a self-loop reaches out from its node.
+SELF_LOOP_REACH = 16
+#| The gap between an edge and its label, when the label sits beside it.
+LABEL_PAD = 4
+
+#| An input with every edge plain: straight wishes of weight 1, centered
+#| ports, no labels, no hints.
+def layout_input(w: Arr, h: Arr, efrom: Arr, eto: Arr, node_gap, rank_gap) -> LayoutInput {
+    ne = len(efrom)
+    n = len(w)
+    return LayoutInput { w: w, h: h, efrom: efrom, eto: eto, eback: zeros(ne), eweight: zeros(ne) + 1, elen: zeros(ne) + 1, sport: zeros(ne), tport: zeros(ne), label_w: zeros(ne), label_h: zeros(ne), node_gap: node_gap, rank_gap: rank_gap, hint: zeros(n), hinted: zeros(n), sides: 1 }
+}
+
+#| The indices 0 .. len(keys) - 1 grouped by key (keys are 0 .. n - 1), in
+#| order within a group: `items[start[k]] .. items[start[k + 1] - 1]` are
+#| the indices with key k.
+def group_by(n, keys: Arr) {
+    start = zeros(n + 1)
+    for k to len(keys) {
+        start[keys[k] + 1] += 1
+    }
+    for v to n {
+        start[v + 1] += start[v]
+    }
+    next = zeros(n)
+    for v to n {
+        next[v] = start[v]
+    }
+    items = zeros(len(keys))
+    for k to len(keys) {
+        items[next[keys[k]]] = k
+        next[keys[k]] += 1
+    }
+    return start, items
+}
+
+#| Sort `items[lo:hi]` by `key[item]`, keeping the order of equal keys.
+def sort_part(items: Arr, lo, hi, key: Arr) {
+    part = items[lo:hi]
+    items[lo:hi] = take(part, argsort(take(key, part)))
+}
+
+#| Which edges close a cycle: a depth-first search from each node in index
+#| order, following the edges not already marked `back`. 1 for an edge the
+#| layout turns around.
+def cycle_edges(n, efrom: Arr, eto: Arr, eback: Arr) -> Arr {
+    ne = len(efrom)
+    rev = zeros(ne)
+    for e to ne {
+        if eback[e] == 1 and efrom[e] != eto[e] {
+            rev[e] = 1
+        }
+    }
+    ostart, oedges = group_by(n, efrom)
+    # 0 not seen, 1 on the path, 2 finished
+    state = zeros(n)
+    stack = zeros(n)
+    cursor = zeros(n)
+    for root to n {
+        if state[root] != 0 {
+            continue
+        }
+        top = 0
+        stack[0] = root
+        state[root] = 1
+        cursor[root] = ostart[root]
+        while top >= 0 {
+            u = stack[top]
+            if cursor[u] == ostart[u + 1] {
+                state[u] = 2
+                top -= 1
+                continue
+            }
+            e = oedges[cursor[u]]
+            cursor[u] += 1
+            v = eto[e]
+            if eback[e] == 1 or v == u {
+                continue
+            }
+            if state[v] == 1 {
+                rev[e] = 1
+            }
+            else if state[v] == 0 {
+                top += 1
+                stack[top] = v
+                state[v] = 1
+                cursor[v] = ostart[v]
+            }
+        }
+    }
+    return rev
+}
+
+#| Longest-path ranks of the graph with edges `a -> b`, each spanning at
+#| least `elen` ranks (no cycles; self loops are skipped), then each node
+#| with no edge in moved down as near as it may go to the nearest node it
+#| points to.
+def longest_path_ranks(n, a: Arr, b: Arr, elen: Arr) -> Arr {
+    ne = len(a)
+    indeg = zeros(n)
+    for e to ne {
+        if a[e] != b[e] {
+            indeg[b[e]] += 1
+        }
+    }
+    ostart, oedges = group_by(n, a)
+    rank = zeros(n)
+    # Kahn's order: a queue of the nodes whose edges in are all counted
+    queue = zeros(n)
+    head = 0
+    tail = 0
+    for v to n {
+        if indeg[v] == 0 {
+            queue[tail] = v
+            tail += 1
+        }
+    }
+    left = copy(indeg)
+    while head < tail {
+        u = queue[head]
+        head += 1
+        for k from ostart[u] to ostart[u + 1] {
+            e = oedges[k]
+            v = b[e]
+            if v == u {
+                continue
+            }
+            rank[v] = max(rank[v], rank[u] + elen[e])
+            left[v] -= 1
+            if left[v] == 0 {
+                queue[tail] = v
+                tail += 1
+            }
+        }
+    }
+    # sources, latest first: down to one rank above the nearest successor
+    for k from tail - 1 to -1 by -1 {
+        u = queue[k]
+        if indeg[u] != 0 or ostart[u + 1] == ostart[u] {
+            continue
+        }
+        nearest = -1
+        for j from ostart[u] to ostart[u + 1] {
+            e = oedges[j]
+            v = b[e]
+            if v != u and (nearest < 0 or rank[v] - elen[e] < nearest) {
+                nearest = rank[v] - elen[e]
+            }
+        }
+        if nearest > 0 {
+            rank[u] = nearest
+        }
+    }
+    return rank
+}
+
+#| The crossings between rank r and rank r + 1: pairs of pieces whose ends
+#| are in opposite order. `pieces` lists the pieces from rank r.
+def crossings_between(pieces: Arr, lo, hi, psrc: Arr, pdst: Arr, pos: Arr) {
+    c = 0
+    for i from lo to hi {
+        for j from i + 1 to hi {
+            p = pieces[i]
+            q = pieces[j]
+            d1 = pos[psrc[p]] - pos[psrc[q]]
+            d2 = pos[pdst[p]] - pos[pdst[q]]
+            if d1 * d2 < 0 {
+                c += 1
+            }
+        }
+    }
+    return c
+}
+
+#| The crossings between the pieces at `v` and those at `w` when `v` is left
+#| of `w` on their rank: with the rank before (pieces in) and after (pieces out).
+def pair_crossings(v, w, instart: Arr, initems: Arr, psrc: Arr, outstart: Arr, outitems: Arr, pdst: Arr, pos: Arr) {
+    c = 0
+    for a from instart[v] to instart[v + 1] {
+        for b from instart[w] to instart[w + 1] {
+            if pos[psrc[initems[a]]] > pos[psrc[initems[b]]] {
+                c += 1
+            }
+        }
+    }
+    for a from outstart[v] to outstart[v + 1] {
+        for b from outstart[w] to outstart[w + 1] {
+            if pos[pdst[outitems[a]]] > pos[pdst[outitems[b]]] {
+                c += 1
+            }
+        }
+    }
+    return c
+}
+
+#| All crossings of an order.
+def count_crossings(nranks, pstart: Arr, pitems: Arr, psrc: Arr, pdst: Arr, pos: Arr) {
+    c = 0
+    for r to nranks {
+        c += crossings_between(pitems, pstart[r], pstart[r + 1], psrc, pdst, pos)
+    }
+    return c
+}
+
+#| The positions nearest `t` (weights `wt`) that keep the order of `nodes`
+#| and at least `sep[i]` between node i and node i + 1: pool adjacent
+#| violators on t - (the running sum of the gaps). Writes into `x`.
+def place_rank(nodes: Arr, lo, hi, t: Arr, wt: Arr, sep: Arr, x: Arr) {
+    m = hi - lo
+    if m == 0 {
+        return 0
+    }
+    offset = zeros(m)
+    for i from 1 to m {
+        offset[i] = offset[i - 1] + sep[nodes[lo + i - 1]]
+    }
+    # blocks: their mean, weight, and first member
+    bmean = zeros(m)
+    bweight = zeros(m)
+    bfirst = zeros(m)
+    nb = 0
+    for i to m {
+        v = nodes[lo + i]
+        bmean[nb] = t[v] - offset[i]
+        bweight[nb] = wt[v]
+        bfirst[nb] = i
+        nb += 1
+        while nb > 1 and bmean[nb - 2] > bmean[nb - 1] {
+            wsum = bweight[nb - 2] + bweight[nb - 1]
+            bmean[nb - 2] = (bmean[nb - 2] * bweight[nb - 2] + bmean[nb - 1] * bweight[nb - 1]) / wsum
+            bweight[nb - 2] = wsum
+            nb -= 1
+        }
+    }
+    for k to nb {
+        last = m
+        if k + 1 < nb {
+            last = bfirst[k + 1]
+        }
+        for i from bfirst[k] to last {
+            x[nodes[lo + i]] = bmean[k] + offset[i]
+        }
+    }
+    return 0
+}
+
+#| The weighted median of `vals`: the value where half the weight is on
+#| each side; midway between two values when the halves meet between them.
+#| (Graphviz places a node by minimizing the weighted sum of |x_u - x_v|, whose
+#| optimum is this median: a heavy edge wins outright, where a mean would
+#| bend it toward every light one.)
+def weighted_median(vals: Arr, wts: Arr) {
+    m = len(vals)
+    order = zeros(m)
+    for i to m {
+        order[i] = i
+    }
+    sort_part(order, 0, m, vals)
+    half = sum(wts) / 2
+    acc = 0
+    for i to m {
+        acc += wts[order[i]]
+        if abs(acc - half) <= 1e-12 * half and i + 1 < m {
+            return (vals[order[i]] + vals[order[i + 1]]) / 2
+        }
+        if acc > half {
+            return vals[order[i]]
+        }
+    }
+    return vals[order[m - 1]]
+}
+
+#| The elements of `v` in the opposite order.
+def reversed_copy(v: Arr) -> Arr {
+    m = len(v)
+    out = zeros(m)
+    for i to m {
+        out[i] = v[m - 1 - i]
+    }
+    return out
+}
+
+#| Whether no node of `v`'s rank but `v` lies between `v`'s center and `lane`
+#| (nodes are 0 .. n - 1; the rest are dummies): an edge can then leave `v`
+#| from its side toward the lane.
+def clear_beside(v, lane, n, rank: Arr, x: Arr, nw: Arr) {
+    lo = min(x[v], lane)
+    hi = max(x[v], lane)
+    for u to n {
+        if u != v and rank[u] == rank[v] and x[u] + nw[u] / 2 > lo and x[u] - nw[u] / 2 < hi {
+            return false
+        }
+    }
+    return true
+}
+
+#| Lay out the graph (see the module's text).
+def layered(inp: LayoutInput) -> Layered {
+    n = len(inp.w)
+    ne = len(inp.efrom)
+    rev = cycle_edges(n, inp.efrom, inp.eto, inp.eback)
+    # each edge as the layout sees it: from a to b, a on an earlier rank
+    a = zeros(ne)
+    b = zeros(ne)
+    for e to ne {
+        a[e] = inp.efrom[e]
+        b[e] = inp.eto[e]
+        if rev[e] == 1 {
+            a[e] = inp.eto[e]
+            b[e] = inp.efrom[e]
+        }
+    }
+    rank0 = longest_path_ranks(n, a, b, inp.elen)
+
+    # ---- dummies: every edge becomes pieces between adjacent ranks
+    nw = copy(inp.w)
+    nh = copy(inp.h)
+    rank = copy(rank0)
+    psrc = []
+    pdst = []
+    pedge = []
+    pweight = []
+    psoff = []
+    ptoff = []
+    # per edge: its first piece, its piece count, the dummy that holds its label
+    efirst = zeros(ne)
+    ecount = zeros(ne)
+    elabel = zeros(ne) - 1
+    # each dummy's lane: where its edge passes, from its center
+    doff = []
+    total = n
+    for e to ne {
+        efirst[e] = len(psrc)
+        if a[e] == b[e] {
+            continue
+        }
+        span = rank[b[e]] - rank[a[e]]
+        # the ports: an edge turned around leaves from its target's port
+        sp = inp.sport[e]
+        tp = inp.tport[e]
+        if rev[e] == 1 {
+            sp = inp.tport[e]
+            tp = inp.sport[e]
+        }
+        prev = a[e]
+        mid = floor((span - 1) / 2)
+        for k from 1 to span {
+            d = total
+            total += 1
+            dw = DUMMY_W
+            dh = 0
+            # the dummy that holds the label is as wide as the label and a
+            # gap; the edge runs down its left side
+            lane = 0
+            if k - 1 == mid and inp.label_w[e] > 0 {
+                dw = inp.label_w[e] + 2 * LABEL_PAD
+                dh = inp.label_h[e]
+                lane = -dw / 2
+                elabel[e] = d
+            }
+            doff = append(doff, lane)
+            nw = append(nw, dw)
+            nh = append(nh, dh)
+            rank = append(rank, rank[a[e]] + k)
+            psrc = append(psrc, prev)
+            pdst = append(pdst, d)
+            pedge = append(pedge, e)
+            pw = REAL_DUMMY_WEIGHT
+            if k > 1 {
+                pw = DUMMY_DUMMY_WEIGHT
+            }
+            pweight = append(pweight, pw * inp.eweight[e])
+            if k == 1 {
+                psoff = append(psoff, sp)
+            }
+            else {
+                psoff = append(psoff, doff[prev - n])
+            }
+            ptoff = append(ptoff, lane)
+            prev = d
+        }
+        psrc = append(psrc, prev)
+        pdst = append(pdst, b[e])
+        pedge = append(pedge, e)
+        pw = 1
+        if span > 1 {
+            pw = REAL_DUMMY_WEIGHT
+        }
+        pweight = append(pweight, pw * inp.eweight[e])
+        if span == 1 {
+            psoff = append(psoff, sp)
+        }
+        else {
+            psoff = append(psoff, doff[prev - n])
+        }
+        ptoff = append(ptoff, tp)
+        ecount[e] = len(psrc) - efirst[e]
+    }
+    np = len(psrc)
+    nranks = 0
+    for v to total {
+        nranks = max(nranks, rank[v] + 1)
+    }
+
+    # ---- order within each rank
+    lstart, lnodes = group_by(nranks, rank)
+    pos = zeros(total)
+    for r to nranks {
+        for i from lstart[r] to lstart[r + 1] {
+            pos[lnodes[i]] = i - lstart[r]
+        }
+    }
+    prank = zeros(np)
+    for p to np {
+        prank[p] = rank[psrc[p]]
+    }
+    pstart, pitems = group_by(nranks, prank)
+    instart, initems = group_by(total, pdst)
+    outstart, outitems = group_by(total, psrc)
+    # with hints, the first order is the earlier layout's, and each new node
+    # goes where its neighbors put it
+    hinting = sum(inp.hinted) > 0
+    if hinting {
+        est = zeros(total)
+        known = zeros(total)
+        for v to n {
+            if inp.hinted[v] == 1 {
+                est[v] = inp.hint[v]
+                known[v] = 1
+            }
+        }
+        for pass to 2 {
+            for step to nranks {
+                r = step
+                if pass == 1 {
+                    r = nranks - 1 - step
+                }
+                for i from lstart[r] to lstart[r + 1] {
+                    v = lnodes[i]
+                    if known[v] == 1 {
+                        continue
+                    }
+                    s = 0
+                    c = 0
+                    if pass == 0 {
+                        for k from instart[v] to instart[v + 1] {
+                            p = initems[k]
+                            if known[psrc[p]] == 1 {
+                                s += est[psrc[p]] + psoff[p] - ptoff[p]
+                                c += 1
+                            }
+                        }
+                    }
+                    else {
+                        for k from outstart[v] to outstart[v + 1] {
+                            p = outitems[k]
+                            if known[pdst[p]] == 1 {
+                                s += est[pdst[p]] + ptoff[p] - psoff[p]
+                                c += 1
+                            }
+                        }
+                    }
+                    if c > 0 {
+                        est[v] = s / c
+                        known[v] = 1
+                    }
+                }
+            }
+        }
+        # a node nothing placed goes after the rest of its rank, in its order
+        far_right = 0
+        for v to total {
+            if known[v] == 1 {
+                far_right = max(far_right, est[v])
+            }
+        }
+        for v to total {
+            if known[v] == 0 {
+                est[v] = far_right + 1 + pos[v]
+            }
+        }
+        for r to nranks {
+            sort_part(lnodes, lstart[r], lstart[r + 1], est)
+            for i from lstart[r] to lstart[r + 1] {
+                pos[lnodes[i]] = i - lstart[r]
+            }
+        }
+    }
+    best = count_crossings(nranks, pstart, pitems, psrc, pdst, pos)
+    bestpos = copy(pos)
+    key = zeros(total)
+    for sweep to SWEEPS {
+        down = mod(sweep, 2) == 0
+        for step from 1 to nranks {
+            r = step
+            if not down {
+                r = nranks - 1 - step
+            }
+            for i from lstart[r] to lstart[r + 1] {
+                v = lnodes[i]
+                s = 0
+                c = 0
+                if down {
+                    for k from instart[v] to instart[v + 1] {
+                        p = initems[k]
+                        u = psrc[p]
+                        s += pos[u] + min(PORT_PULL, max(-PORT_PULL, psoff[p] / max(nw[u], 1)))
+                        c += 1
+                    }
+                }
+                else {
+                    for k from outstart[v] to outstart[v + 1] {
+                        p = outitems[k]
+                        u = pdst[p]
+                        s += pos[u] + min(PORT_PULL, max(-PORT_PULL, ptoff[p] / max(nw[u], 1)))
+                        c += 1
+                    }
+                }
+                if c > 0 {
+                    key[v] = s / c
+                }
+                else {
+                    key[v] = pos[v]
+                }
+            }
+            # hinted nodes keep their order among themselves
+            if hinting {
+                last = -1
+                for i from lstart[r] to lstart[r + 1] {
+                    v = lnodes[i]
+                    if v < n and inp.hinted[v] == 1 {
+                        if last >= 0 and key[v] <= key[last] {
+                            key[v] = key[last] + HINT_ORDER_EPS
+                        }
+                        last = v
+                    }
+                }
+            }
+            sort_part(lnodes, lstart[r], lstart[r + 1], key)
+            for i from lstart[r] to lstart[r + 1] {
+                pos[lnodes[i]] = i - lstart[r]
+            }
+        }
+        c = count_crossings(nranks, pstart, pitems, psrc, pdst, pos)
+        if c < best {
+            best = c
+            bestpos = copy(pos)
+        }
+    }
+    pos = bestpos
+    for r to nranks {
+        for i from lstart[r] to lstart[r + 1] {
+            key[lnodes[i]] = pos[lnodes[i]]
+        }
+        sort_part(lnodes, lstart[r], lstart[r + 1], key)
+    }
+    # transpose (Gansner et al.): two neighbors on a rank change places when
+    # that leaves fewer crossings with the ranks on both sides; hinted nodes
+    # keep their order
+    for sweep to TRANSPOSE_ROUNDS {
+        swapped = 0
+        for r to nranks {
+            for i from lstart[r] to lstart[r + 1] - 1 {
+                v = lnodes[i]
+                w = lnodes[i + 1]
+                if hinting and v < n and w < n and inp.hinted[v] == 1 and inp.hinted[w] == 1 {
+                    continue
+                }
+                keep = pair_crossings(v, w, instart, initems, psrc, outstart, outitems, pdst, pos)
+                flip = pair_crossings(w, v, instart, initems, psrc, outstart, outitems, pdst, pos)
+                if flip < keep {
+                    lnodes[i] = w
+                    lnodes[i + 1] = v
+                    pos[v] += 1
+                    pos[w] -= 1
+                    swapped += 1
+                }
+            }
+        }
+        if swapped == 0 {
+            break
+        }
+    }
+    best = count_crossings(nranks, pstart, pitems, psrc, pdst, pos)
+
+    # ---- coordinates along the ranks: tops of a rank's nodes aligned
+    rank_h = zeros(nranks)
+    for v to total {
+        rank_h[rank[v]] = max(rank_h[rank[v]], nh[v])
+    }
+    rank_top = zeros(nranks)
+    for r from 1 to nranks {
+        rank_top[r] = rank_top[r - 1] + rank_h[r - 1] + inp.rank_gap
+    }
+    y = zeros(total)
+    for v to total {
+        y[v] = rank_top[rank[v]] + nh[v] / 2
+        if v >= n {
+            y[v] = rank_top[rank[v]] + rank_h[rank[v]] / 2
+        }
+    }
+
+    # ---- coordinates across: packed, then pulled toward the neighbors
+    x = zeros(total)
+    sep = zeros(total)
+    for r to nranks {
+        at = 0
+        for i from lstart[r] to lstart[r + 1] {
+            v = lnodes[i]
+            if i > lstart[r] {
+                at += sep[lnodes[i - 1]]
+            }
+            x[v] = at
+            if i + 1 < lstart[r + 1] {
+                u = lnodes[i + 1]
+                gap = inp.node_gap
+                if v >= n and u >= n {
+                    gap = inp.node_gap / 2
+                }
+                sep[v] = (nw[v] + nw[u]) / 2 + gap
+            }
+        }
+    }
+    t = zeros(total)
+    wt = zeros(total)
+    for sweep to PLACE_SWEEPS {
+        down = mod(sweep, 2) == 0
+        for step to nranks {
+            r = step
+            if not down {
+                r = nranks - 1 - step
+            }
+            for i from lstart[r] to lstart[r + 1] {
+                v = lnodes[i]
+                vals = []
+                wts = []
+                # the last sweeps listen to both sides
+                both = sweep >= PLACE_SWEEPS - 2
+                if down or both {
+                    for k from instart[v] to instart[v + 1] {
+                        p = initems[k]
+                        vals = append(vals, x[psrc[p]] + psoff[p] - ptoff[p])
+                        wts = append(wts, pweight[p])
+                    }
+                }
+                if (not down) or both {
+                    for k from outstart[v] to outstart[v + 1] {
+                        p = outitems[k]
+                        vals = append(vals, x[pdst[p]] + ptoff[p] - psoff[p])
+                        wts = append(wts, pweight[p])
+                    }
+                }
+                # a hinted node outweighs all its edges: it stays where it was
+                if v < n and inp.hinted[v] == 1 {
+                    vals = append(vals, inp.hint[v])
+                    wts = append(wts, sum(wts) + 1)
+                }
+                if len(vals) == 0 {
+                    t[v] = x[v]
+                    wt[v] = STAY_WEIGHT
+                }
+                else {
+                    t[v] = weighted_median(vals, wts)
+                    wt[v] = sum(wts)
+                }
+                # when a rank is too crowded for every wish, the dummies give way
+                if v < n {
+                    wt[v] = wt[v] * REAL_PRIORITY
+                }
+            }
+            place_rank(lnodes, lstart[r], lstart[r + 1], t, wt, sep, x)
+        }
+    }
+    lo = 0
+    hi = 0
+    for v to total {
+        if v == 0 or x[v] - nw[v] / 2 < lo {
+            lo = x[v] - nw[v] / 2
+        }
+        if v == 0 or x[v] + nw[v] / 2 > hi {
+            hi = x[v] + nw[v] / 2
+        }
+    }
+    x = x - lo
+    width = hi - lo
+    height = 0
+    if nranks > 0 {
+        height = rank_top[nranks - 1] + rank_h[nranks - 1]
+    }
+
+    # ---- routes: from the source's bottom through each dummy's rank to the
+    # target's top; a long edge whose first (or last) dummy is beside its
+    # node leaves (or enters) from the node's side
+    route_start = zeros(ne + 1)
+    rx = []
+    ry = []
+    label_x = zeros(ne)
+    label_y = zeros(ne)
+    for e to ne {
+        route_start[e] = len(rx)
+        u = inp.efrom[e]
+        if a[e] == b[e] {
+            # a self loop, on the node's right
+            right = x[u] + nw[u] / 2
+            px = [right, right + SELF_LOOP_REACH, right + SELF_LOOP_REACH, right]
+            py = [y[u] - nh[u] / 4, y[u] - nh[u] / 4, y[u] + nh[u] / 4, y[u] + nh[u] / 4]
+            rx = extend(rx, px)
+            ry = extend(ry, py)
+            label_x[e] = right + SELF_LOOP_REACH + LABEL_PAD + inp.label_w[e] / 2
+            label_y[e] = y[u]
+            continue
+        }
+        px = []
+        py = []
+        first = efirst[e]
+        last = efirst[e] + ecount[e] - 1
+        src = psrc[first]
+        dst = pdst[last]
+        # the source's end: from its side when the edge's first lane is
+        # beside it and no other node of its rank is in the way
+        if ecount[e] > 1 and abs(x[pdst[first]] + doff[pdst[first] - n] - x[src]) > nw[src] / 2 and inp.sides == 1 and clear_beside(src, x[pdst[first]] + doff[pdst[first] - n], n, rank, x, nw) {
+            side = 1
+            if x[pdst[first]] + doff[pdst[first] - n] < x[src] {
+                side = -1
+            }
+            px = append(px, x[src] + side * nw[src] / 2)
+            py = append(py, y[src])
+        }
+        else {
+            px = append(px, x[src] + psoff[first])
+            py = append(py, y[src] + nh[src] / 2)
+            # a node shorter than its rank: straight down to the rank's foot
+            # first, so the edge does not cut across a taller neighbor
+            foot = rank_top[rank[src]] + rank_h[rank[src]]
+            if foot > y[src] + nh[src] / 2 + KINK / 8 {
+                px = append(px, x[src] + psoff[first])
+                py = append(py, foot)
+            }
+        }
+        # through each dummy's lane; a lane within KINK of the one before is
+        # taken as the same, so a long edge runs straight instead of stepping
+        lane = 0
+        for p from first to last {
+            d = pdst[p]
+            lx = x[d] + doff[d - n]
+            if p > first and abs(lx - lane) <= KINK {
+                lx = lane
+            }
+            lane = lx
+            px = append(px, lx)
+            py = append(py, rank_top[rank[d]])
+            px = append(px, lx)
+            py = append(py, rank_top[rank[d]] + rank_h[rank[d]])
+        }
+        if ecount[e] > 1 and abs(x[psrc[last]] + doff[psrc[last] - n] - x[dst]) > nw[dst] / 2 and inp.sides == 1 and clear_beside(dst, x[psrc[last]] + doff[psrc[last] - n], n, rank, x, nw) {
+            side = 1
+            if x[psrc[last]] + doff[psrc[last] - n] < x[dst] {
+                side = -1
+            }
+            px = append(px, x[dst] + side * nw[dst] / 2)
+            py = append(py, y[dst])
+        }
+        else {
+            px = append(px, x[dst] + ptoff[last])
+            py = append(py, y[dst] - nh[dst] / 2)
+        }
+        # the label: on its dummy, or beside the middle of a one-rank edge
+        if elabel[e] >= 0 {
+            label_x[e] = x[elabel[e]] + LABEL_PAD
+            label_y[e] = y[elabel[e]]
+        }
+        else {
+            label_x[e] = (px[0] + px[len(px) - 1]) / 2 + LABEL_PAD + inp.label_w[e] / 2
+            label_y[e] = (py[0] + py[len(py) - 1]) / 2
+        }
+        # a point between two on the same vertical line says nothing
+        tx = [px[0]]
+        ty = [py[0]]
+        for i from 1 to len(px) - 1 {
+            if not (px[i - 1] == px[i] and px[i] == px[i + 1]) {
+                tx = append(tx, px[i])
+                ty = append(ty, py[i])
+            }
+        }
+        tx = append(tx, px[len(px) - 1])
+        ty = append(ty, py[len(py) - 1])
+        px = tx
+        py = ty
+        # a turned edge's route runs back, from its source to its target
+        if rev[e] == 1 {
+            px = reversed_copy(px)
+            py = reversed_copy(py)
+        }
+        rx = extend(rx, px)
+        ry = extend(ry, py)
+    }
+    route_start[ne] = len(rx)
+    xs = zeros(n)
+    ys = zeros(n)
+    ranks = zeros(n)
+    order = zeros(n)
+    for v to n {
+        xs[v] = x[v]
+        ys[v] = y[v]
+        ranks[v] = rank[v]
+        order[v] = pos[v]
+    }
+    return Layered { x: xs, y: ys, rank: ranks, order: order, reversed: rev, route_start: route_start, route_x: rx, route_y: ry, label_x: label_x, label_y: label_y, width: width, height: height, crossings: best }
+}
+
+# ---- checks a layout must pass ---------------------------------------------------
+
+#| 1 when no two nodes' boxes overlap.
+def no_overlaps(inp: LayoutInput, L: Layered) {
+    n = len(inp.w)
+    for i to n {
+        for j from i + 1 to n {
+            dx = abs(L.x[i] - L.x[j]) - (inp.w[i] + inp.w[j]) / 2
+            dy = abs(L.y[i] - L.y[j]) - (inp.h[i] + inp.h[j]) / 2
+            if dx < 0 and dy < 0 {
+                return 0
+            }
+        }
+    }
+    return 1
+}
+
+#| 1 when every edge has a route of at least two points, starting on its
+#| source's box and ending on its target's.
+def every_edge_drawn(inp: LayoutInput, L: Layered) {
+    ne = len(inp.efrom)
+    for e to ne {
+        lo = L.route_start[e]
+        hi = L.route_start[e + 1]
+        if hi - lo < 2 {
+            return 0
+        }
+        if not on_box(L.route_x[lo], L.route_y[lo], L.x[inp.efrom[e]], L.y[inp.efrom[e]], inp.w[inp.efrom[e]], inp.h[inp.efrom[e]]) {
+            return 0
+        }
+        if not on_box(L.route_x[hi - 1], L.route_y[hi - 1], L.x[inp.eto[e]], L.y[inp.eto[e]], inp.w[inp.eto[e]], inp.h[inp.eto[e]]) {
+            return 0
+        }
+    }
+    return 1
+}
+
+#| Whether (px, py) is on the border of the box centered on (x, y), to a
+#| hundredth.
+def on_box(px, py, x, y, w, h) {
+    tol = 0.01
+    inside = abs(px - x) <= w / 2 + tol and abs(py - y) <= h / 2 + tol
+    border = abs(abs(px - x) - w / 2) <= tol or abs(abs(py - y) - h / 2) <= tol
+    return inside and border
+}
+
+#| 1 when every edge not turned around goes to a later rank, and every
+#| turned one to an earlier rank (self loops aside).
+def ranks_follow_edges(inp: LayoutInput, L: Layered) {
+    for e to len(inp.efrom) {
+        u = inp.efrom[e]
+        v = inp.eto[e]
+        if u == v {
+            continue
+        }
+        if L.reversed[e] == 0 and L.rank[v] <= L.rank[u] {
+            return 0
+        }
+        if L.reversed[e] == 1 and L.rank[v] >= L.rank[u] {
+            return 0
+        }
+    }
+    return 1
+}
+
+#| 1 when the two layouts are the same, number for number.
+def same_layout(A: Layered, B: Layered) {
+    same = len(A.x) == len(B.x) and len(A.route_x) == len(B.route_x)
+    if not same {
+        return 0
+    }
+    if not (all(A.x == B.x) and all(A.y == B.y) and all(A.route_x == B.route_x) and all(A.route_y == B.route_y)) {
+        return 0
+    }
+    return 1
+}
+
+#| Every invariant at once.
+def layout_ok(inp: LayoutInput, L: Layered) {
+    return no_overlaps(inp, L) == 1 and every_edge_drawn(inp, L) == 1 and ranks_follow_edges(inp, L) == 1
+}
+
+test "a chain is one node per rank, in a straight line" {
+    inp = layout_input([40, 40, 40], [20, 20, 20], [0, 1], [1, 2], 10, 20)
+    L = layered(inp)
+    assert_true(all(L.rank == [0, 1, 2]))
+    assert_near(L.x[0], L.x[2], 1e-9)
+    assert_near(L.y[1] - L.y[0], 40, 1e-9)
+    assert_true(layout_ok(inp, L))
+}
+
+test "a diamond has no crossings and a symmetric middle" {
+    inp = layout_input([30, 30, 30, 30], [20, 20, 20, 20], [0, 0, 1, 2], [1, 2, 3, 3], 10, 20)
+    L = layered(inp)
+    assert_true(L.crossings == 0)
+    assert_true(L.rank[3] == 2)
+    assert_near(L.x[0], L.x[3], 1e-9)
+    assert_near(L.x[0] - L.x[1], L.x[2] - L.x[0], 1e-9)
+    assert_true(layout_ok(inp, L))
+}
+
+test "the sweeps uncross K2,2, which the input order draws crossed" {
+    # 0 -> 3, 1 -> 2: in index order the two edges cross; the sweeps uncross them
+    inp = layout_input([30, 30, 30, 30], [20, 20, 20, 20], [0, 1], [3, 2], 10, 20)
+    L = layered(inp)
+    assert_true(L.crossings == 0)
+    assert_true(layout_ok(inp, L))
+}
+
+test "a cycle is broken, and a back edge marked by the caller stays back" {
+    inp = layout_input([30, 30, 30], [20, 20, 20], [0, 1, 2], [1, 2, 0], 10, 20)
+    L = layered(inp)
+    assert_true(sum(L.reversed) == 1)
+    assert_true(L.reversed[2] == 1)
+    assert_true(layout_ok(inp, L))
+    # a loop's carried value: step 2 feeds step 0 on the next pass
+    inp2 = layout_input([30, 30, 30], [20, 20, 20], [0, 1, 2], [1, 2, 0], 10, 20)
+    inp2.eback[2] = 1
+    L2 = layered(inp2)
+    assert_true(all(L2.reversed == [0, 0, 1]))
+    assert_true(all(L2.rank == [0, 1, 2]))
+    # its route starts on step 2 and ends on step 0
+    lo = L2.route_start[2]
+    hi = L2.route_start[3]
+    assert_near(L2.route_y[lo], L2.y[2], 10)
+    assert_near(L2.route_y[hi - 1], L2.y[0], 10)
+    assert_true(layout_ok(inp2, L2))
+}
+
+test "a long edge goes around, through dummies, and its label has room" {
+    # 0 -> 1 -> 2 -> 3 and 0 -> 3 labeled
+    inp = layout_input([60, 60, 60, 60], [20, 20, 20, 20], [0, 1, 2, 0], [1, 2, 3, 3], 10, 20)
+    inp.label_w[3] = 50
+    inp.label_h[3] = 12
+    L = layered(inp)
+    lo = L.route_start[3]
+    hi = L.route_start[4]
+    # two dummies in one straight lane: the two ends and the lane's two ends
+    assert_true(hi - lo == 4)
+    # the chain stays straight (to a unit), and the label, beside node 2, is clear of it
+    straight = 1
+    assert_near(L.x[0], L.x[3], straight)
+    assert_near(L.x[1], L.x[2], straight)
+    assert_true(abs(L.label_x[3] - L.x[2]) >= (60 + 50) / 2)
+    # the label's text starts right of the line
+    lane_x = L.route_x[lo + 3]
+    assert_true(L.label_x[3] - 50 / 2 >= lane_x)
+    assert_true(layout_ok(inp, L))
+}
+
+test "a self loop is drawn on its node" {
+    inp = layout_input([30, 30], [20, 20], [0, 1], [1, 1], 10, 20)
+    L = layered(inp)
+    assert_true(L.route_start[2] - L.route_start[1] == 4)
+    assert_true(layout_ok(inp, L))
+}
+
+test "nodes of different sizes do not overlap, and the output is the same twice" {
+    w = [120, 30, 80, 30, 200, 50, 40]
+    h = [60, 20, 90, 20, 30, 20, 20]
+    efrom = [0, 0, 0, 1, 2, 2, 3, 4, 5, 1]
+    eto = [1, 2, 3, 4, 4, 5, 6, 6, 6, 6]
+    inp = layout_input(w, h, efrom, eto, 12, 24)
+    L = layered(inp)
+    assert_true(layout_ok(inp, L))
+    assert_true(same_layout(L, layered(inp)) == 1)
+}
+
+test "ports pull the target toward the side the edge leaves from" {
+    # node 0 is wide and calls 1 from its left part and 2 from its right part
+    inp = layout_input([200, 40, 40], [40, 20, 20], [0, 0], [2, 1], 10, 20)
+    inp.sport[0] = 80
+    inp.sport[1] = -80
+    L = layered(inp)
+    assert_true(L.x[1] < L.x[2])
+    assert_true(layout_ok(inp, L))
+}
+
+test "an edge that must span two ranks leaves one empty between" {
+    inp = layout_input([30, 30, 30], [20, 20, 20], [0, 1], [1, 2], 10, 20)
+    inp.elen[0] = 2
+    L = layered(inp)
+    assert_true(all(L.rank == [0, 2, 3]))
+    assert_true(layout_ok(inp, L))
+}
+
+test "hints keep an earlier layout's nodes where they were" {
+    # 0 -> 1, 0 -> 2, 1 -> 3; then a new node 4 under 2, hinted with the first layout
+    inp = layout_input([40, 40, 40, 40], [20, 20, 20, 20], [0, 0, 1], [1, 2, 3], 10, 20)
+    L = layered(inp)
+    grown = layout_input([40, 40, 40, 40, 40], [20, 20, 20, 20, 20], [0, 0, 1, 2], [1, 2, 3, 4], 10, 20)
+    hint = [L.x[0], L.x[1], L.x[2], L.x[3], 0]
+    L2 = layered(LayoutInput { hint: hint, hinted: [1, 1, 1, 1, 0], ..grown })
+    for k to 4 {
+        assert_near(L2.x[k] - L2.x[0], L.x[k] - L.x[0], 1e-9)
+    }
+    assert_near(L2.x[4], L2.x[2], 1e-9)
+    assert_true(layout_ok(grown, L2))
+    # a hint that puts 2 left of 1 is kept, though the sweeps would not care
+    swapped = [L.x[0], L.x[2], L.x[1], L.x[2], 0]
+    L3 = layered(LayoutInput { hint: swapped, hinted: [1, 1, 1, 0, 0], ..grown })
+    assert_true(L3.x[2] < L3.x[1])
+    assert_true(layout_ok(grown, L3))
+}
+
+test "an edge from a node shorter than its rank drops to the rank's foot first" {
+    # 0 is short beside the tall 1; 0 -> 2 leaves 0 straight down past 1's height
+    inp = layout_input([40, 40, 40], [10, 60, 10], [0, 1], [2, 2], 10, 20)
+    L = layered(inp)
+    lo = L.route_start[0]
+    assert_near(L.route_x[lo + 1], L.route_x[lo], 1e-9)
+    assert_near(L.route_y[lo + 1], 60, 1e-9)
+    assert_true(layout_ok(inp, L))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

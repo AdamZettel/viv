@@ -1,0 +1,108 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/api: every family and function of vipyr, grouped by topic.
+import DocPage from '../../layouts/DocPage.astro';
+import data from '../../data/vipyr.json';
+import { vipyrTree, TOPICS, topicOfFamily } from '../../lib/site';
+import { ALIAS_OF } from '../../data/vipyrAliases.mjs';
+
+type Fn = (typeof data.functions)[keyof typeof data.functions] & Record<string, any>;
+const fns = (Object.values(data.functions) as Fn[]).filter((x) => x.kind !== 'coming');
+const aliasOf = (q: string) => (ALIAS_OF as Record<string, string>)[q];
+const firstSentence = (s: string) => {
+  const m = s.match(/^(.*?[.!?])(\s|$)/);
+  return m ? m[1] : s;
+};
+const fields = data.fields
+  .map((f: any) => ({ ...f, fns: fns.filter((x) => x.family === f.id).sort((a, b) => a.name.localeCompare(b.name)) }))
+  .filter((f: any) => f.fns.length);
+const topics = TOPICS.map((t) => ({ ...t, fields: fields.filter((f: any) => topicOfFamily(f.id) === t.id) })).filter(
+  (t) => t.fields.length,
+);
+---
+
+<DocPage
+  title="API reference · vipyr"
+  icon="/brand/vipyr/vipyr-icon.svg"
+  description="The vipyr functions documented here, by family: Hartree-Fock, plane-wave DFT, nuclear structure, plasma, statistical mechanics, special functions, linear algebra, control, randomized linear algebra, option pricing and event-table features."
+  tree={vipyrTree(Astro.url.pathname)}
+  toc={topics.flatMap((t) => [[t.id, t.title] as [string, string]])}>
+  <h1>API reference</h1>
+  <p class="lede">
+    The functions of vipyr documented here, by topic and family. A function's page gives its signature, parameters, result fields,
+    errors, an example with its output, and what it is checked against.
+  </p>
+  {
+    topics.map((t) => (
+      <section>
+        <h2 id={t.id}>{t.title}</h2>
+        {t.fields.map((f: any) => (
+          <>
+            <h3 id={`fam-${f.id}`}>
+              <a href={`/vipyr/${f.id}`}>
+                <code>vp.{f.id}</code>
+              </a>
+              <span class="api-ft">{f.title}</span>
+            </h3>
+            <p class="api-about">
+              {f.about} <span class="api-inst">{f.dist}</span>
+            </p>
+            <dl class="fn-index">
+              {f.fns.map((x: any) => (
+                <>
+                  <dt>
+                    <a href={`/vipyr/${x.family}/${x.name}`}>
+                      <code>{x.name}</code>
+                    </a>
+                  </dt>
+                  <dd>
+                    {aliasOf(x.qualname) ? (
+                      <>
+                        Alias of{' '}
+                        <a href={`/vipyr/${aliasOf(x.qualname).replace('.', '/')}`}>
+                          <code>vp.{aliasOf(x.qualname)}</code>
+                        </a>
+                        .
+                      </>
+                    ) : (
+                      firstSentence(x.summary)
+                    )}
+                  </dd>
+                </>
+              ))}
+            </dl>
+          </>
+        ))}
+      </section>
+    ))
+  }
+  <p>Ports of upstream codes are distributions too, each under its upstream's license: <a href="/vipyr/ports">ports</a>.</p>
+</DocPage>
+
+<style>
+  h3 a {
+    text-decoration: none;
+  }
+  h3 code {
+    color: var(--accent);
+  }
+  .api-ft {
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-left: 0.6rem;
+    font-size: 0.95rem;
+  }
+  .api-about {
+    color: var(--text-muted);
+    margin-top: -0.2rem;
+  }
+  .api-inst {
+    font-family: var(--font-mono);
+    font-size: 0.82em;
+    white-space: nowrap;
+  }
+  .pill {
+    margin-left: 8px;
+  }
+</style>

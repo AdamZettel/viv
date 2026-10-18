@@ -1,0 +1,133 @@
+# Reverse-mode automatic differentiation via a tape ("micrograd in Viv").
+#
+# The computation graph is recorded as a flat tape in global arrays: each node has
+# an opcode, up to two parent indices, its forward value, and an aux constant.
+# Operation helpers append a node (filling its value) and return its index. After a
+# forward build, one reverse sweep propagates adjoints (dOutput/dNode) using each
+# op's rule, giving the gradient w.r.t. EVERY input in a single backward pass --
+# the property that makes reverse mode scale to many parameters.
+
+# Tape columns. The node count lives in nn[0] so the helpers can bump it (a
+# function can't rebind a scalar global, but it can write nn[0] by index).
+t_op = zeros(256)
+t_a = zeros(256)
+t_b = zeros(256)
+t_val = zeros(256)
+t_grad = zeros(256)
+t_aux = zeros(256)
+nn = zeros(1)
+
+def reset() {
+    nn[0] = 0.0
+}
+def push(op, a, b, val, aux) {
+    i = nn[0]
+    t_op[i] = op
+    t_a[i] = a
+    t_b[i] = b
+    t_val[i] = val
+    t_aux[i] = aux
+    nn[0] = nn[0] + 1.0
+    return i
+}
+def leaf(x) {
+    return push(0.0, 0.0, 0.0, x, 0.0)
+}
+def radd(a, b) {
+    return push(1.0, a, b, t_val[a] + t_val[b], 0.0)
+}
+def rsub(a, b) {
+    return push(2.0, a, b, t_val[a] - t_val[b], 0.0)
+}
+def rmul(a, b) {
+    return push(3.0, a, b, t_val[a] * t_val[b], 0.0)
+}
+def rdiv(a, b) {
+    return push(4.0, a, b, t_val[a] / t_val[b], 0.0)
+}
+def rexp(a) {
+    return push(5.0, a, 0.0, exp(t_val[a]), 0.0)
+}
+def rpown(a, n) {
+    return push(6.0, a, 0.0, pow(t_val[a], n), n)
+}
+
+# One reverse sweep: seed the output adjoint and apply each op's rule backward.
+def backward(out) {
+    for i to nn[0] { t_grad[i] = 0.0 }
+    t_grad[out] = 1.0
+    for k to nn[0] {
+        i = nn[0] - 1.0 - k
+        op = t_op[i]
+        g = t_grad[i]
+        a = t_a[i]
+        b = t_b[i]
+        if op == 1.0 {
+            t_grad[a] = t_grad[a] + g
+            t_grad[b] = t_grad[b] + g
+        }
+        if op == 2.0 {
+            t_grad[a] = t_grad[a] + g
+            t_grad[b] = t_grad[b] - g
+        }
+        if op == 3.0 {
+            t_grad[a] = t_grad[a] + g * t_val[b]
+            t_grad[b] = t_grad[b] + g * t_val[a]
+        }
+        if op == 4.0 {
+            t_grad[a] = t_grad[a] + g / t_val[b]
+            t_grad[b] = t_grad[b] - g * t_val[a] / (t_val[b] * t_val[b])
+        }
+        if op == 5.0 {
+            t_grad[a] = t_grad[a] + g * t_val[i]
+        }
+        if op == 6.0 {
+            ex = t_aux[i]
+            t_grad[a] = t_grad[a] + g * ex * pow(t_val[a], ex - 1.0)
+        }
+    }
+}
+
+# ── Gradient of g(x, y) = x^2 * y + exp(x*y) at (1.5, 0.5), in ONE backward pass.
+# (Matches the forward-mode result -- a cross-check between the two modes.)
+reset()
+xi = leaf(1.5)
+yi = leaf(0.5)
+gx2 = rmul(xi, xi)
+gt1 = rmul(gx2, yi)
+gxy = rmul(xi, yi)
+gt2 = rexp(gxy)
+gout = radd(gt1, gt2)
+backward(gout)
+g_value = t_val[gout]
+dg_dx = t_grad[xi]
+dg_dy = t_grad[yi]
+show g_value
+show dg_dx
+show dg_dy
+
+# ── Gradient descent using reverse-mode gradients: minimize the bowl
+#    q(x, y) = (x - 3)^2 + 2 (y + 1)^2,  minimum at (3, -1).
+x = 0.0
+y = 0.0
+lr = 0.2
+for step to 60 {
+    reset()
+    bx = leaf(x)
+    by = leaf(y)
+    dx = rsub(bx, leaf(3.0))
+    t1 = rmul(dx, dx)
+    dy = radd(by, leaf(1.0))
+    t2 = rmul(rmul(leaf(2.0), dy), dy)
+    q = radd(t1, t2)
+    backward(q)
+    x = x - lr * t_grad[bx]
+    y = y - lr * t_grad[by]
+}
+x_min = x
+y_min = y
+show x_min
+show y_min
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

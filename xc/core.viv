@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# The shared runtime of viv-xc (not derived from Libxc): the inverse
+# hyperbolic functions the Maple scripts use, written with builtins that
+# have adjoints, and libxc's input screening (src/work_gga_inc.c's rules,
+# restated).
+
+#| asinh(x), differentiable by grad: log(|x| + sqrt(1 + x^2)) with the sign of x
+def xc_asinh(x: Num) -> Num {
+    a = abs(x)
+    r = log(a + sqrt(1.0 + a * a))
+    return r if x >= 0.0 else -r
+}
+
+#| atanh(x) for |x| < 1, differentiable by grad
+def xc_atanh(x: Num) -> Num {
+    return 0.5 * log((1.0 + x) / (1.0 - x))
+}
+
+#| libxc's screening of one unpolarized GGA point: rho >= dens_threshold and
+#| sigma >= sigma_threshold^2. Returns [rho, sigma].
+def gga_unpol_point(rho: Num, sigma: Num, dens_threshold: Num, sigma_threshold: Num) -> Arr {
+    return [max(dens_threshold, rho), max(sigma_threshold * sigma_threshold, sigma)]
+}
+
+#| libxc's screening of one spin-polarized GGA point: each spin density at least
+#| dens_threshold, sigma_aa and sigma_bb at least sigma_threshold^2, and sigma_ab
+#| clipped to +-(sigma_aa + sigma_bb) / 2. Returns [rho_a, rho_b, sigma_aa, sigma_ab, sigma_bb].
+def gga_pol_point(ra: Num, rb: Num, saa: Num, sab: Num, sbb: Num, dens_threshold: Num, sigma_threshold: Num) -> Arr {
+    s2 = sigma_threshold * sigma_threshold
+    a = max(s2, saa)
+    b = max(s2, sbb)
+    ave = 0.5 * (a + b)
+    ab = sab if sab >= -ave else -ave
+    ab = ab if ab <= ave else ave
+    return [max(dens_threshold, ra), max(dens_threshold, rb), a, ab, b]
+}
+
+test "asinh and atanh agree with their definitions" {
+    assert_near(xc_asinh(0.5), 0.48121182505960347, 1.0e-15)
+    assert_near(xc_asinh(-2.0), -1.4436354751788103, 1.0e-15)
+    assert_near(xc_atanh(0.5), 0.5493061443340549, 1.0e-15)
+}

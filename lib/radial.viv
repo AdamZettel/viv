@@ -1,0 +1,357 @@
+###
+post: The radial Schrodinger equation, the way dftatom solves it
+agent: claude
+
+An atom's orbitals are one-dimensional. Separate the angular part out and what
+is left is
+
+    u'' = [ l(l+1)/r^2 + 2(V(r) - E) ] u,    u = r R(r),
+
+on `0 < r < infinity`, with `u(0) = 0` and `u -> 0` at infinity. Two boundary
+conditions and one unknown `E` too many, which is what makes it an eigenvalue
+problem: only particular energies admit a solution that vanishes at both ends.
+
+**The mesh.** The 1s of uranium lives inside a hundredth of a Bohr while the
+outer shells run to tens, so the mesh is exponential --
+`r = alpha (e^(beta t) - 1) + r_min` on a uniform `t`. The one used here is
+dftatom's own: `r_min = 1e-8`, `r_max = 50`, a ratio of `1e6` between the last
+interval and the first, 3000 intervals.
+
+**The integrator.** Changing variable from `r` to `t` puts a first derivative
+into the equation, and Numerov's method cannot have one. Substituting
+`w = u / sqrt(dr/dt)` takes it back out, at the cost of one extra term which
+for an exponential mesh is the constant `beta^2/4`:
+
+    w'' = [ (dr/dt)^2 ( l(l+1)/r^2 + 2(V - E) ) + beta^2/4 ] w.
+
+That is Numerov's form on a uniform grid: fourth order, and it reads only mesh
+points, so no interpolation is needed between them.
+
+**The shooting.** Integrate out from `r_min`, where `u ~ r^(l+1)`, and in from
+`r_max`, where `u ~ e^(-sqrt(-2E) r)`. Each direction is integrated the way it
+grows, which is the stable way to do it. They meet at the classical turning
+point; where the two logarithmic derivatives agree, `E` is an eigenvalue. Node
+counting brackets it and the derivative mismatch refines it.
+
+The test is dftatom's own: hydrogen-like uranium, `Z = 92`, where every
+eigenvalue is known exactly to be `-Z^2/2n^2`. It is chosen because it is hard.
+The 1s state sits at -4232 Hartree and is squeezed into the first thousandth of
+the mesh.
+
+Used with `import radial`.
+###
+
+import linalg
+
+#| The iteration limits of the eigenvalue search. Each loop stops early, on its
+#| own test; these only keep a search that has lost its bracket from running
+#| forever. Bisections of a band boundary, steps widening the bracket
+#| downwards, and bisections of the bracketed eigenvalue.
+RADIAL_BAND_BISECTIONS = 200
+RADIAL_BRACKET_STEPS = 300
+RADIAL_BISECTIONS = 300
+
+#| dftatom's exponential mesh: `N + 1` points from `r_min` to `r_max`, with the
+#| last interval `a` times the first.
+def mesh_exp(r_min, r_max, a, N) {
+    beta = log(a) / (N - 1.0)
+    alpha = (r_max - r_min) / (exp(beta * N) - 1.0)
+    out = zeros(N + 1)
+    for i to N + 1 {
+        out[i] = alpha * (exp(beta * i) - 1.0) + r_min
+    }
+    return out
+}
+
+#| `dr/dt` on that mesh, with `t` the uniform index.
+def mesh_exp_deriv(r_min, r_max, a, N) {
+    beta = log(a) / (N - 1.0)
+    alpha = (r_max - r_min) / (exp(beta * N) - 1.0)
+    out = zeros(N + 1)
+    for i to N + 1 {
+        out[i] = alpha * beta * exp(beta * i)
+    }
+    return out
+}
+
+#| The `beta` of a mesh built by `mesh_exp`, which the Numerov substitution
+#| needs.
+def mesh_exp_beta(a, N) {
+    return log(a) / (N - 1.0)
+}
+
+#| The coefficient `f` in `w'' = f w`, at every mesh point.
+def radial_f(R: Arr, Rp: Arr, V: Arr, l, E, beta, np) {
+    f = zeros(np)
+    for i to np {
+        centrifugal = l * (l + 1.0) / (R[i] * R[i])
+        f[i] = Rp[i] * Rp[i] * (centrifugal + 2.0 * (V[i] - E)) + 0.25 * beta * beta
+    }
+    return f
+}
+
+#| One Numerov step, from `w[i-1]` and `w[i]` to `w[i+1]`, with unit spacing.
+def numerov_next(wm, w0, fm, f0, fp) {
+    return ((2.0 + 5.0 * f0 / 6.0) * w0 - (1.0 - fm / 12.0) * wm) / (1.0 - fp / 12.0)
+}
+
+#| Integrate outward from the origin to `imax`, filling `w`. Returns how many
+#| times the solution crossed zero, which is the quantum number the state will
+#| turn out to have.
+#|
+#| The solution grows by many orders of magnitude on the way out, so it is
+#| rescaled whenever it gets large. Only ratios are ever asked of it.
+def radial_outward(R: Arr, Rp: Arr, f: Arr, l, imax, w: Arr) {
+    w[0] = pow(R[0], l + 1.0) / sqrt(Rp[0])
+    w[1] = pow(R[1], l + 1.0) / sqrt(Rp[1])
+    nodes = 0
+    for k to imax - 1 {
+        i = k + 1
+        w[i + 1] = numerov_next(w[i - 1], w[i], f[i - 1], f[i], f[i + 1])
+        if w[i + 1] * w[i] < 0.0 {
+            nodes = nodes + 1
+        }
+        if abs(w[i + 1]) > 1.0e100 {
+            for j to i + 2 {
+                w[j] = w[j] * 1.0e-100
+            }
+        }
+    }
+    return 1.0 * nodes
+}
+
+#| Integrate inward from the outer edge to `imin`. Inward is the direction this
+#| solution grows in, which is why it is done this way round.
+def radial_inward(R: Arr, Rp: Arr, f: Arr, E, imin, np, w: Arr) {
+    lam = sqrt(-2.0 * E)
+    last = np - 1
+    w[last] = 1.0 / sqrt(Rp[last])
+    w[last - 1] = exp(-lam * (R[last - 1] - R[last])) / sqrt(Rp[last - 1])
+    nodes = 0
+    for k to last - imin - 1 {
+        i = last - 1 - k
+        w[i - 1] = numerov_next(w[i + 1], w[i], f[i + 1], f[i], f[i - 1])
+        if w[i - 1] * w[i] < 0.0 {
+            nodes = nodes + 1
+        }
+        if abs(w[i - 1]) > 1.0e100 {
+            for j to last - i + 2 {
+                w[last - j] = w[last - j] * 1.0e-100
+            }
+        }
+    }
+    return 1.0 * nodes
+}
+
+#| The outermost point where the classical kinetic energy is still positive.
+#| Matching there keeps both integrations in the region where they are growing.
+def radial_turning(R: Arr, V: Arr, l, E, np) {
+    best = 2
+    for i to np {
+        eff = V[i] + l * (l + 1.0) / (2.0 * R[i] * R[i])
+        if eff < E {
+            best = i
+        }
+    }
+    if best < 2 {
+        best = 2
+    }
+    if best > np - 3 {
+        best = np - 3
+    }
+    return best
+}
+
+#| How badly the two solutions disagree at the matching point, in logarithmic
+#| derivative. A zero of this, at the right node count, is an eigenvalue.
+def radial_mismatch(R: Arr, Rp: Arr, V: Arr, l, E, beta, np, wout: Arr, win: Arr) {
+    f = radial_f(R, Rp, V, l, E, beta, np)
+    im = radial_turning(R, V, l, E, np)
+    junk = radial_outward(R, Rp, f, l, im + 1, wout)
+    junk = radial_inward(R, Rp, f, E, im - 1, np, win)
+    dout = (wout[im + 1] - wout[im - 1]) / (2.0 * wout[im])
+    din = (win[im + 1] - win[im - 1]) / (2.0 * win[im])
+    return dout - din
+}
+
+#| How many times the outward solution crosses zero inside the classically
+#| allowed region. This is `n - l - 1` for the state the energy belongs to, and
+#| it rises by one at every eigenvalue, so it says which state a trial energy is
+#| nearest without locating it.
+#|
+#| It has to stop at the turning point. Past it the equation is
+#| `w'' = f w` with `f` large and positive -- 450 for hydrogen-like uranium at
+#| the outer edge -- and Numerov needs `|f| < 12` to be stable at all. Counting
+#| across the whole mesh returns hundreds of nodes, all of them the integrator
+#| oscillating on its own.
+def radial_nodes(R: Arr, Rp: Arr, V: Arr, l, E, beta, np, w: Arr) {
+    f = radial_f(R, Rp, V, l, E, beta, np)
+    im = radial_turning(R, V, l, E, np)
+    return radial_outward(R, Rp, f, l, im, w)
+}
+
+#| The lowest energy in `[Elo, Ehi]` whose solution has more than `k` nodes
+#| inside the classically allowed region: the top of the band that belongs to
+#| the state with `k` nodes.
+def radial_band_top(R: Arr, Rp: Arr, V: Arr, l, k, Elo, Ehi, beta, np, w: Arr) {
+    lo = Elo
+    hi = Ehi
+    for it to RADIAL_BAND_BISECTIONS {
+        mid = 0.5 * (lo + hi)
+        if radial_nodes(R, Rp, V, l, mid, beta, np, w) > k {
+            hi = mid
+        }
+        else {
+            lo = mid
+        }
+        # a band boundary only has to be identified, not resolved: the mismatch
+        # does the locating, and every digit spent here is an integration wasted
+        if hi - lo < 1.0e-6 * (abs(hi) + 1.0) {
+            break
+        }
+    }
+    return 0.5 * (lo + hi)
+}
+
+#| The lowest the effective potential goes. No state can lie below it, and no
+#| energy below it has a classically allowed region at all -- which for `l = 2`
+#| in hydrogen-like uranium is everything below -352, because the centrifugal
+#| barrier `l(l+1)/2r^2` lifts the well that far. Searching from an arbitrary
+#| floor like -6000 puts every d and f state outside the region the turning
+#| point is defined in, and they come back wrong.
+def radial_floor(R: Arr, V: Arr, l, np) {
+    lowest = 1.0e30
+    for i to np {
+        lowest = min(lowest, V[i] + l * (l + 1.0) / (2.0 * R[i] * R[i]))
+    }
+    return lowest
+}
+
+#| Solve for the eigenvalue of state `n, l` in the potential `V`.
+#|
+#| Two signals, doing two different jobs, and it matters which is asked what.
+#|
+#| The node count says which state a trial energy belongs to. It carves the
+#| spectrum into one band per state. Its boundaries are NOT the eigenvalues --
+#| for hydrogen-like uranium the count goes from zero to one near -3200 while
+#| the 1s sits at -4232 -- so it can say "this band holds the 1s" and nothing
+#| more precise than that.
+#|
+#| The logarithmic-derivative mismatch locates the state. Inside one band it is
+#| smooth with exactly one zero, and that zero is the eigenvalue. So: the node
+#| count finds the top of the band, the mismatch is stepped downward from there
+#| until it changes sign, and bisection finishes.
+def radial_solve(R: Arr, Rp: Arr, V: Arr, n, l, Ehi, beta, np) {
+    want = n - l - 1.0
+    wout = zeros(np)
+    win = zeros(np)
+    floor = radial_floor(R, V, l, np)
+    guard = floor + 1.0e-9 * abs(floor)
+
+    # the top of this state's band, and the bottom of it if there is one
+    top = radial_band_top(R, Rp, V, l, want, guard, Ehi, beta, np, wout)
+    limit = guard
+    if want > 0.0 {
+        limit = radial_band_top(R, Rp, V, l, want - 1.0, guard, Ehi, beta, np, wout)
+    }
+
+    b = top - 1.0e-4 * abs(top)
+    fb = radial_mismatch(R, Rp, V, l, b, beta, np, wout, win)
+    a = b
+    fa = fb
+    step = max(1.0e-9, 1.0e-3 * abs(b))
+    for it to RADIAL_BRACKET_STEPS {
+        a = a - step
+        if a < limit {
+            a = limit + 1.0e-6 * abs(limit)
+        }
+        fa = radial_mismatch(R, Rp, V, l, a, beta, np, wout, win)
+        if fa * fb <= 0.0 {
+            break
+        }
+        b = a
+        fb = fa
+        step = step * 1.5
+        if a <= limit + 2.0e-6 * abs(limit) {
+            break
+        }
+    }
+    if fa * fb > 0.0 {
+        return a
+    }
+    for it to RADIAL_BISECTIONS {
+        mid = 0.5 * (a + b)
+        fm = radial_mismatch(R, Rp, V, l, mid, beta, np, wout, win)
+        if fa * fm <= 0.0 {
+            b = mid
+            fb = fm
+        }
+        else {
+            a = mid
+            fa = fm
+        }
+        if abs(b - a) < 1.0e-14 * (abs(a) + 1.0) {
+            break
+        }
+    }
+    return 0.5 * (a + b)
+}
+
+test "the mesh is dftatom's, endpoints and ratio included" {
+    N = 3000
+    R = mesh_exp(1.0e-8, 50.0, 1.0e6, N)
+    assert_near(R[0], 1.0e-8, 1.0e-18)
+    assert_near(R[N], 50.0, 1.0e-12)
+    # the last interval is a million times the first, which is what `a` means
+    first = R[1] - R[0]
+    last = R[N] - R[N - 1]
+    assert_near(last / first, 1.0e6, 1.0)
+    # and it ascends
+    for i to N {
+        assert_lt(R[i], R[i + 1])
+    }
+}
+
+test "the mesh derivative is the derivative of the mesh" {
+    N = 500
+    R = mesh_exp(1.0e-6, 20.0, 1.0e4, N)
+    Rp = mesh_exp_deriv(1.0e-6, 20.0, 1.0e4, N)
+    beta = mesh_exp_beta(1.0e4, N)
+    # A central difference of an exponential is not exact; it is out by
+    # beta^2/6 relatively, and that is what the gap should be. Asserting a
+    # tolerance instead would be asserting how bad the check is.
+    npts = 40
+    for k to npts {
+        i = 5 + 12 * k
+        fd = 0.5 * (R[i + 1] - R[i - 1])
+        rel = (fd - Rp[i]) / Rp[i]
+        assert_near(rel, beta * beta / 6.0, 1.0e-9)
+    }
+}
+
+test "for hydrogen-like uranium every level is minus Z squared over two n squared, to a relative 1e-8" {
+    Z = 92.0
+    N = 3000
+    R = mesh_exp(1.0e-8, 50.0, 1.0e6, N)
+    Rp = mesh_exp_deriv(1.0e-8, 50.0, 1.0e6, N)
+    beta = mesh_exp_beta(1.0e6, N)
+    np = N + 1
+    V = zeros(np)
+    for i to np {
+        V[i] = -Z / R[i]
+    }
+    worst = 0.0
+    nshells = 7
+    for n to nshells {
+        nn = n + 1.0
+        exact = -Z * Z / (2.0 * nn * nn)
+        for l to nn {
+            e = radial_solve(R, Rp, V, nn, 1.0 * l, -1.0e-6, beta, np)
+            worst = max(worst, abs(e - exact) / abs(exact))
+        }
+    }
+    assert_lt(worst, 1.0e-8)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

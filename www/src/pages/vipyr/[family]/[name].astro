@@ -1,0 +1,369 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/<family>/<name>: one function of the vipyr package. The data is
+// src/data/vipyr.json, written by `python -m vipyr.docs` from the program's
+// manifest, its `#:` lines and python/vipyr/_registry.py; nothing here is
+// written by hand except the headings.
+import RepoLink from '../../../components/RepoLink.astro';
+import DocPage from '../../../layouts/DocPage.astro';
+import { vipyrTree } from '../../../lib/site';
+import Code from '../../../components/Code.astro';
+import data from '../../../data/vipyr.json';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
+import { renderMarkdown, renderProse, sciNotation } from '../../../lib/richText.js';
+import explore from '../../../data/explore.json';
+import MapLink from '../../../components/MapLink.astro';
+import codemap from '../../../data/codemap.json';
+import { ALIAS_OF } from '../../../data/vipyrAliases.mjs';
+import { creditsForSources } from '../../../data/vipyrCredits.mjs';
+
+export function getStaticPaths() {
+  return Object.keys(data.functions).map((q) => {
+    const [family, name] = q.split('.');
+    return { params: { family, name } };
+  });
+}
+
+type Fn = (typeof data.functions)[keyof typeof data.functions] & Record<string, any>;
+const { family, name } = Astro.params;
+const f = (data.functions as Record<string, Fn>)[`${family}.${name}`];
+const field = data.fields.find((x) => x.id === f.family)!;
+const walk = f.explore && (explore as any).programs.some((p: any) => p.slug === f.explore) ? f.explore : null;
+const LABEL: Record<string, string> = {
+  program: 'Reference',
+  cases: 'Cases',
+  compare: 'Compared by',
+  domain: 'Domain',
+  tolerance: 'Tolerance',
+  why: 'Why that tolerance',
+};
+const label = (k: string) => LABEL[k] || k.replace(/_tol$/, ' tolerance').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+const showDefault = (p: any) => {
+  if (p.required) return 'required';
+  if (p.default_shape) return `the program's ${p.default_shape[0]}×${p.default_shape[1]} array`;
+  const d = p.default;
+  if (d == null) return '';
+  if (typeof d === 'object') {
+    const order: string[] = f.decks && f.decks.length ? f.decks : Object.keys(d);
+    return order.filter((k) => k in d).map((k) => `${k} ${d[k]}`).join(', ');
+  }
+  return String(d);
+};
+const aliasOf = (ALIAS_OF as Record<string, string>)[`${family}.${name}`];
+const sources: string[] = [...new Set([...(f.sources || []), ...(f.about && f.about.endsWith('.intent') ? [f.about] : [])])];
+const coming = f.kind === 'coming';
+const credits = creditsForSources(sources);
+// authored prose (the program's <name>.docs.toml): markdown with $math$, rendered here at build time
+const md = (src: string | null | undefined) => (src ? renderMarkdown(src, katex) : '');
+// a one-line field (a summary, a parameter's doc, a caption): $math$ and `code`
+// through the same renderer, plain text escaped; e-notation set as powers of ten
+// (a field without $ or ` is not prose markup: `1j*sqrt(pi)*w` keeps its asterisks)
+const escHtml = (t: string) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' } as Record<string, string>)[c]);
+const tx = (src: string | null | undefined) => (!src ? '' : /[$`]/.test(String(src)) ? renderProse(String(src), katex) : sciNotation(escHtml(String(src))));
+const allFns = data.functions as Record<string, any>;
+const sentence = (t: string) => (t ? t.replace(/^./, (c) => c.toUpperCase()).replace(/([^.!?])$/, '$1.') : '');
+const paramText = (p: any) =>
+  [
+    sentence(p.help),
+    p.units ? `Units: ${p.units}.` : '',
+    p.range ? `Range: ${p.range}.` : '',
+    sentence(p.range_doc || ''),
+    sentence(p.note || ''),
+  ]
+    .filter(Boolean)
+    .join(' ');
+const examples: any[] = f.examples && f.examples.length ? f.examples : f.example ? [{ code: f.example, output: '' }] : [];
+const TOC: [string, string][] = coming
+  ? [['status', 'Status']]
+  : aliasOf
+  ? [['alias', 'Alias']]
+  : [
+      ['signature', 'Signature'],
+      ['parameters', 'Parameters'],
+      ['returns', 'Returns'],
+      ['raises', 'Raises'],
+      ...((f.see_also || []).length ? [['see-also', 'See also'] as [string, string]] : []),
+      ...(f.notes_md ? [['notes', 'Notes'] as [string, string]] : []),
+      ...((f.references || []).length ? [['references', 'References'] as [string, string]] : []),
+      ['examples', 'Examples'],
+      ['checked', 'Checked against'],
+      ...(credits.length ? [['credits', 'Credits'] as [string, string]] : []),
+      ['source', 'Source'],
+    ];
+---
+
+<DocPage
+  title={`vp.${f.qualname} · vipyr · Viv`}
+  icon="/brand/vipyr/vipyr-icon.svg"
+  image="/brand/vipyr/vipyr-icon-512.png"
+  description={`vipyr.${f.qualname} (vp.${f.qualname}): ${f.summary}`}
+  tree={vipyrTree(Astro.url.pathname)}
+  toc={TOC}
+  crumbs={[['/vipyr/api', 'API reference'], [`/vipyr/${f.family}`, `vp.${f.family}`]]}>
+      <h1 class="vp-h1"><code>vp.{f.qualname}</code>{coming && <span class="pill">Coming soon</span>}</h1>
+      <p class="lede" set:html={tx(f.summary)} />
+      <p class="vp-install">
+        Part of the distribution <code>{f.dist}</code>{coming ? '. ' : <>; it runs from a <a href="/vipyr/install">checkout</a> of the
+        repository. </>}Planned on PyPI as{' '}
+        <code>{f.extra ? `pip install "vipyr[${f.extra}]"` : f.dist === 'vipyr' ? 'pip install vipyr' : `pip install ${f.dist}`}</code>.
+      </p>
+      <MapLink fns={[f.qualname]} />
+      {f.description && <div class="vp-md" set:html={md(f.description)} />}
+
+      {
+        coming ? (
+          <section>
+            <h2 id="status">Status</h2>
+            <p>Coming soon. It is listed but not built yet: calling it raises <code>NotImplementedError</code>.</p>
+            <p>{f.where}</p>
+          </section>
+        ) : aliasOf ? (
+          <section>
+            <h2 id="alias">Alias</h2>
+            <p>
+              <code>vp.{f.qualname}</code> is another name for{' '}
+              <a href={`/vipyr/${aliasOf.replace('.', '/')}`}><code>vp.{aliasOf}</code></a>, the same kernel with the
+              same parameters and results. Its page has the signature, the examples and what it is checked against.
+            </p>
+          </section>
+        ) : (
+          <>
+            <h2 id="signature">Signature</h2>
+            <Code lang="python" code={f.signature} />
+            {f.decks && f.decks.length > 0 && (
+              <p>
+                <code>{f.deck_param}</code> picks a deck, a named set of every parameter's value; a keyword left
+                as <code>None</code> keeps the deck's value. The program's checks are written for each deck's
+                settings.
+              </p>
+            )}
+
+            <h2 id="parameters">Parameters</h2>
+            {f.params.length === 0 ? (
+              <p>None.</p>
+            ) : (
+              <dl class="np-params">
+                {f.params.map((p: any) => (
+                  <>
+                    <dt>
+                      <span class="np-name">{p.name}</span><span class="np-colon"> : </span><span class="np-type">{p.python_type}</span>{showDefault(p) && (showDefault(p) === 'required' ? <span class="np-default">, required</span> : <span class="np-default">, default <code>{showDefault(p)}</code></span>)}
+                    </dt>
+                    <dd>
+                      <span set:html={tx(paramText(p))} />
+                      {p.alias_of && (
+                        <span class="vp-note">
+                          {' '}
+                          The program's <code>{p.alias_of.toUpperCase()}</code>.
+                        </span>
+                      )}
+                    </dd>
+                  </>
+                ))}
+              </dl>
+            )}
+            {f.notes && f.notes.length > 0 && (
+              <ul>
+                {f.notes.map((n: string) => (
+                  <li set:html={tx(n)} />
+                ))}
+              </ul>
+            )}
+
+            <h2 id="returns">Returns</h2>
+            <p>
+              A frozen <code>{f.result}</code>. Iterating it gives the fields below in order; it also has
+              <code>params</code>, <code>tests</code>, <code>log</code> and <code>check()</code>.
+            </p>
+            <dl class="np-params">
+              {f.results.map((r: any) => (
+                <>
+                  <dt>
+                    <span class="np-name">{r.name}</span><span class="np-colon"> : </span><span class="np-type">{r.python_type}</span>{r.units && <span class="np-default">, {r.units}</span>}
+                  </dt>
+                  <dd set:html={tx(sentence(r.doc))} />
+                </>
+              ))}
+            </dl>
+            {f.outputs && f.outputs.length > 0 && (
+              <div class="tablewrap">
+                <table class="vp-params">
+                  <thead>
+                    <tr>
+                      <th>column of frame</th>
+                      <th>definition</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {f.outputs.map((o: any) => (
+                      <tr>
+                        <td>
+                          <code>{o.name}</code>
+                        </td>
+                        <td set:html={tx(o.doc)} />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <h2 id="raises">Raises</h2>
+            <dl class="np-params">
+              {(f.raises || []).map((e: any) => (
+                <>
+                  <dt>
+                    <span class="np-type">{e.name}</span>
+                  </dt>
+                  <dd set:html={tx(e.text.replace(/^./, (c: string) => c.toUpperCase()) + '.')} />
+                </>
+              ))}
+            </dl>
+
+            {f.see_also && f.see_also.length ? (<><h2 id="see-also">See also</h2>
+              <ul class="vp-see">
+                {f.see_also.map((q: string) => (
+                  <li>
+                    <a href={`/vipyr/${q.replace(/^vp\./, '').replace('.', '/')}`}>
+                      <code>vp.{q}</code>
+                    </a>
+                    {allFns[q] && <span set:html={': ' + renderProse(allFns[q].summary.split(/(?<=\.)\s/)[0], katex)} />}
+                  </li>
+                ))}
+              </ul></>
+            ) : null}
+
+            {f.notes_md && (<><h2 id="notes">Notes</h2><div class="vp-md" set:html={md(f.notes_md)} /></>)}
+
+            {f.references && f.references.length ? (<><h2 id="references">References</h2>
+              <ol class="vp-refs">
+                {f.references.map((r: any) => (
+                  <li>
+                    <span set:html={tx(r.text)} />
+                    {r.doi && (
+                      <>
+                        {' '}
+                        <a href={`https://doi.org/${r.doi}`}>doi:{r.doi}</a>
+                      </>
+                    )}
+                    {!r.doi && r.url && (
+                      <>
+                        {' '}
+                        <a href={r.url}>{r.url}</a>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ol></>
+            ) : null}
+
+            <h2 id="examples">Examples</h2>
+            {examples.map((ex: any) => (
+              <>
+                {ex.caption && <p set:html={tx(ex.caption)} />}
+                <Code lang="python" code={ex.code} />
+                {ex.output && <pre class="dump out" aria-label="Output"><code>{ex.output}</code></pre>}
+              </>
+            ))}
+            <p class="vp-note">
+              Each example ran as written when these pages were generated, and the output shown is what it printed.
+            </p>
+
+            <h2 id="checked">Checked against</h2>
+            <dl class="vp-checked">
+              {f.checked.map((c: any) => (
+                <>
+                  <dt>{label(c.label)}</dt>
+                  <dd set:html={tx(c.text)} />
+                </>
+              ))}
+            </dl>
+            {credits.length > 0 && (
+              <>
+                <h2 id="credits">Credits</h2>
+                <ul>
+                  {credits.map((t) => (
+                    <li>{t}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            <h2 id="source">Source</h2>
+            <ul>
+              {f.manifest && (
+                <li>
+                  Manifest: <RepoLink path={f.manifest}>{f.manifest}</RepoLink>
+                </li>
+              )}
+              {sources.map((s) => (
+                <li>
+                  Viv: <RepoLink path={s}>{s}</RepoLink>
+                </li>
+              ))}
+              {(codemap as any).functions[f.qualname] && (
+                <li>
+                  The defs it reaches and the calls between them: <a href={`/vipyr/map/${f.qualname}`}>map of the code</a>
+                </li>
+              )}
+              {walk && (
+                <li>
+                  Watch it run, line by line: <a href={`/explore/walk/${walk}`}>/explore/walk/{walk}</a>
+                </li>
+              )}
+            </ul>
+          </>
+        )
+      }
+</DocPage>
+
+<style>
+  .vp-todo {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .vp-md :global(.katex-display) {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  p code {
+    overflow-wrap: anywhere;
+  }
+  .vp-h1 code {
+    font-size: 0.86em;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+    letter-spacing: -0.02em;
+  }
+  .vp-h1 .pill {
+    margin-left: 10px;
+    vertical-align: middle;
+  }
+  .vp-note {
+    color: var(--text-muted);
+    font-size: 0.94rem;
+  }
+  .vp-checked {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 18px 14px;
+    max-width: var(--measure);
+  }
+  .vp-checked dt {
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-top: 0.9rem;
+  }
+  .vp-checked dd {
+    margin: 0.15rem 0 0;
+  }
+  .vp-hash {
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+    word-break: break-all;
+  }
+</style>

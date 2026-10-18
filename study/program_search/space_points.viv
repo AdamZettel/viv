@@ -1,0 +1,151 @@
+###
+post: Five optimizers as points of one update template
+agent: claude
+
+A measurement, not a library. Every step below
+has the same shape, the template the optimizer search space fills in:
+
+    m <- A(m, g)                 first memory
+    v <- B(v, g)                 second memory
+    u <- C(m, v, g, t)           direction
+    theta <- theta - lr (u + wd theta)
+    (and for Lion only: the memory update comes after the direction)
+
+SGD, momentum and Adam are copies of `lib/optim`'s steps in that shape; Lion
+(Chen et al. 2023) and AdamW are written here. The registry `candidates()` is
+what a search generation would compile: many steps behind one function-array
+dispatch, one C build for all of them. The tests run every point on the two
+problems of `lib/optim`'s contract.
+###
+
+from optim import (
+    ADAM, contract_lr, decayed, OPT_BETA2, OPT_CONTRACT_STEPS, OPT_EPS, OPT_LR, OPT_MU,
+    OPT_TAKEN, optim_state, optimizer_of, quadratic_center, quadratic_gradient,
+    quadratic_layout, quadratic_miss,
+)
+from params import param_zeros
+
+#| Weight decay slot, past `lib/optim`'s own settings.
+OPT_WD = OPT_TAKEN + 1
+CAND_SLOTS = OPT_WD + 1
+
+#| The sign of `x`, with `sign(0) = 0`.
+def sgn(x) {
+    if x > 0.0 {
+        return 1.0
+    }
+    if x < 0.0 {
+        return -1.0
+    }
+    return 0.0
+}
+
+def cand_sgd(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    lr = opt[OPT_LR]
+    for i to len(theta) {
+        u = grad[i]
+        theta[i] = theta[i] - lr * (u + opt[OPT_WD] * theta[i])
+    }
+    return 0.0
+}
+
+def cand_momentum(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    lr = opt[OPT_LR]
+    for i to len(theta) {
+        state[i] = opt[OPT_MU] * state[i] + grad[i]
+        u = state[i]
+        theta[i] = theta[i] - lr * (u + opt[OPT_WD] * theta[i])
+    }
+    return 0.0
+}
+
+#| Adam when `OPT_WD` is 0, AdamW otherwise: the decay is outside the
+#| normalized direction, which is all that separates the two.
+def cand_adamw(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    lr = opt[OPT_LR]
+    beta1 = opt[OPT_MU]
+    beta2 = opt[OPT_BETA2]
+    t = opt[OPT_TAKEN]
+    n = len(theta)
+    for i to n {
+        g = grad[i]
+        state[i] = beta1 * state[i] + (1.0 - beta1) * g
+        state[n + i] = beta2 * state[n + i] + (1.0 - beta2) * g * g
+        u = (state[i] / (1.0 - pow(beta1, t))) / (sqrt(state[n + i] / (1.0 - pow(beta2, t))) + opt[OPT_EPS])
+        theta[i] = theta[i] - lr * (u + opt[OPT_WD] * theta[i])
+    }
+    return 0.0
+}
+
+#| Lion: the direction is the sign of an interpolation between the memory
+#| and the gradient at `beta1`; the memory then moves at `beta2`.
+def cand_lion(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    lr = opt[OPT_LR]
+    beta1 = opt[OPT_MU]
+    beta2 = opt[OPT_BETA2]
+    for i to len(theta) {
+        g = grad[i]
+        u = sgn(beta1 * state[i] + (1.0 - beta1) * g)
+        theta[i] = theta[i] - lr * (u + opt[OPT_WD] * theta[i])
+        state[i] = beta2 * state[i] + (1.0 - beta2) * g
+    }
+    return 0.0
+}
+
+#| One generation's worth of candidates behind one dispatch.
+def candidates() {
+    return [cand_sgd, cand_momentum, cand_adamw, cand_lion]
+}
+
+#| Settings for candidate `k`: its usual constants, no weight decay.
+def cand_settings(k) {
+    opt = zeros(CAND_SLOTS)
+    opt[OPT_MU] = [0.0, 0.9, 0.9, 0.9][k]
+    opt[OPT_BETA2] = [0.0, 0.0, 0.999, 0.99][k]
+    opt[OPT_EPS] = 1.0e-8
+    return opt
+}
+
+#| The starting step size of candidate `k` on the contract.
+def cand_lr(k) {
+    return [0.4, 0.05, 0.1, 0.02][k]
+}
+
+#| `lib/optim`'s quadratic, run with candidate `k`: the largest miss.
+def cand_quadratic_miss(k, steps) {
+    layout = quadratic_layout()
+    theta = param_zeros(layout)
+    grad = param_zeros(layout)
+    state = optim_state(layout)
+    opt = cand_settings(k)
+    for step to steps {
+        quadratic_gradient(theta, grad)
+        opt[OPT_LR] = decayed(cand_lr(k), step, steps)
+        opt[OPT_TAKEN] = opt[OPT_TAKEN] + 1.0
+        apply(candidates()[k], opt, theta, grad, state, layout)
+    }
+    miss = 0.0
+    for i to len(theta) {
+        miss = max(miss, abs(theta[i] - quadratic_center(i)))
+    }
+    return miss
+}
+
+#| measured: SGD 1.1e-16, momentum 9.4e-10, Adam 7.7e-10, Lion 1.7e-4
+test "every point of the template reaches the quadratic's minimum" {
+    for k to len(candidates()) {
+        miss = cand_quadratic_miss(k, OPT_CONTRACT_STEPS)
+        show miss
+        assert_lt(miss, 1.0e-3)
+    }
+}
+
+test "the template's Adam is lib/optim's Adam to the last bit" {
+    ADAM_K = 2
+    ours = cand_quadratic_miss(ADAM_K, OPT_CONTRACT_STEPS)
+    theirs = quadratic_miss(optimizer_of(ADAM), contract_lr(ADAM), OPT_CONTRACT_STEPS)
+    assert_near(ours, theirs, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

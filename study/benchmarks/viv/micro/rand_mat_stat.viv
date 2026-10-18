@@ -1,0 +1,80 @@
+# Microbenchmarks: matrix_statistics. Reference: upstream/Microbenchmarks/julia/perf.jl
+#   function randmatstat(t)
+#       n = 5
+#       v = zeros(t)
+#       w = zeros(t)
+#       for i = 1:t
+#           a = randn(n, n)
+#           b = randn(n, n)
+#           c = randn(n, n)
+#           d = randn(n, n)
+#           P = [a b c d]
+#           Q = [a b; c d]
+#           v[i] = tr((P'P)^4)
+#           w[i] = tr((Q'Q)^4)
+#       end
+#       return (std(v) / mean(v), std(w) / mean(w))
+#   end
+#   (s1, s2) = randmatstat(1000)
+#   @test 0.5 < s1 < 1.0 && 0.5 < s2 < 1.0
+# randn is lib/random's randn_matrix (Box-Muller over MINSTD; Julia's randn is
+# a ziggurat over Xoshiro). X^4 is two squarings, as Julia's power_by_squaring
+# and NumPy's matrix_power both do for p = 4. std is the corrected (n - 1) one.
+from random import randn_matrix
+
+def tr(A: Arr) {
+    s = 0.0
+    for k to len(A) {
+        s = s + A[k, k]
+    }
+    return s
+}
+
+def mean_of(v: Arr) {
+    return sum(v) / len(v)
+}
+
+def std_of(v: Arr) {
+    m = mean_of(v)
+    s = 0.0
+    for k to len(v) {
+        s = s + (v[k] - m) * (v[k] - m)
+    }
+    return sqrt(s / (len(v) - 1))
+}
+
+def randmatstat(t) {
+    n = 5
+    v = zeros(t)
+    w = zeros(t)
+    for i to t {
+        a = randn_matrix(n, n)
+        b = randn_matrix(n, n)
+        c = randn_matrix(n, n)
+        d = randn_matrix(n, n)
+        P = hcat(a, b, c, d)
+        Q = vcat(hcat(a, b), hcat(c, d))
+        PP = transpose(P) @ P
+        PP2 = PP @ PP
+        QQ = transpose(Q) @ Q
+        QQ2 = QQ @ QQ
+        v[i] = tr(PP2 @ PP2)
+        w[i] = tr(QQ2 @ QQ2)
+    }
+    return std_of(v) / mean_of(v), std_of(w) / mean_of(w)
+}
+
+reps = int(strip(read_text("reps.txt")))
+s1, s2 = randmatstat(1000)
+if not (0.5 < s1 and s1 < 1.0 and 0.5 < s2 and s2 < 1.0) {
+    stop("randmatstat out of range")
+}
+acc = 0.0
+for r to reps {
+    x1, x2 = randmatstat(1000)
+    acc = acc + x1
+}
+print("rand_mat_stat ok", fmt(s1, ".4f"), fmt(s2, ".4f"))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

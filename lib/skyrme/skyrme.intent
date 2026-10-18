@@ -1,0 +1,411 @@
+module lib/skyrme/skyrme  documents every variable
+  The ground state of the nucleus $^{16}$O (oxygen-16: eight protons and
+  eight neutrons) from the Skyrme energy functional SLy5, solved on a radial
+  mesh.
+
+  A nucleus is held together by the strong force between its nucleons
+  (protons and neutrons), which has no simple closed form. Skyrme's
+  functional replaces it by an energy that depends only on a few local
+  densities of each kind of nucleon: the number density $\rho_q$, the
+  kinetic-energy density $\tau_q$ and the spin-orbit density $J_q$, with
+  $q = n$ for neutrons and $q = p$ for protons. Minimizing that energy gives
+  each nucleon a Schrödinger equation with a position-dependent effective
+  mass $m^*_q$, a central potential $U_q$ and a spin-orbit field $W_q$, all
+  computed from the densities. The orbitals make the densities and the
+  densities make the fields, so the equations are solved by iteration:
+  densities, then fields, then orbitals, then new densities, until the energy
+  stops changing.
+
+  Oxygen-16 is spherical, so each orbital is a radial function times an
+  angular part fixed by its orbital angular momentum $l$ and total angular
+  momentum $j$. Its nucleons fill three shells of each kind, $1s_{1/2}$,
+  $1p_{3/2}$ and $1p_{1/2}$, each holding $2j + 1$ nucleons: the $1p_{3/2}$
+  shell holds four, and the other two hold two each.
+  The radial equation of each $(l, j)$ block is a symmetric tridiagonal matrix
+  on the mesh, and each occupied orbital is the lowest eigenvector of its
+  block.
+
+  This is the solver of posts/2026-09-25-skyrme-hartree-fock-of-oxygen-16.viv,
+  cut into steps and defs so it can be read in the explorer; the arithmetic
+  is the post's, operation for operation.
+
+grad1  @fa650a85
+  what  The first derivative of a function sampled on the mesh: centered
+        differences inside, second-order one-sided differences at the two
+        ends, as numpy.gradient does with `edge_order = 2`.
+  why   Every derivative the fields need ($\rho'$, $B'$, $J'$, $R'$) comes
+        from here, so the whole solver is second order in the spacing $h$.
+        Both formulas are exact for a quadratic
+        [test "grad1 differentiates a quadratic exactly, at the two ends as well"].
+  f     $f$  the function's values at the mesh points
+  h     $h$  the mesh spacing, fm
+  out   $f'$  the derivative at each mesh point
+  n     the number of mesh points
+
+  $$ f'_i = \frac{f_{i+1} - f_{i-1}}{2h}, \qquad f'_0 = \frac{-\tfrac32 f_0 + 2 f_1 - \tfrac12 f_2}{h} $$  [test "grad1 differentiates a quadratic exactly, at the two ends as well"]
+
+lap_r  @3be5dabf
+  what  The Laplacian of a spherically symmetric function, $f'' + 2 f' / r$,
+        from two applications of grad1.
+  why   The central potential depends on $\nabla^2 \rho$ through the $t_1$
+        and $t_2$ terms of the functional.
+  f     $f$  the function on the mesh
+  r     $r$  the mesh points, fm
+  h     $h$  the spacing
+  d1    $f'$  the first derivative
+
+integrate_r2  @1eb6e6c9
+  what  The integral of a spherically symmetric $f$ over all space,
+        $4\pi \int_0^\infty f(r)\, r^2\, dr$, by the trapezoid rule on the mesh.
+  how   The sum of $f_i r_i^2$ with half weight on the first and last
+        points, times $4\pi h$.
+  f     $f$  the function on the mesh
+  r     $r$  the mesh points
+  h     $h$  the spacing
+  n     the number of mesh points
+  s     the weighted sum of $f_i r_i^2$
+
+particle_number  @db32b98b
+  what  How many nucleons of kind q a density describes:
+        $4\pi h \sum_i r_i^2 \rho_q(r_i)$.
+  why   This is the rule each orbital is normalized by (its mesh vector has
+        unit length), so for the densities an iteration builds it gives
+        the number of nucleons to rounding
+        [hold "the new densities hold 8 neutrons"]. The trapezoid rule of
+        integrate_r2 would differ from it by the half weights at the ends.
+  rho   $\rho$  the densities of both kinds, `[2, nr]`, fm$^{-3}$
+  q     $q$  which kind: NEUTRON or PROTON
+  r     $r$  the mesh points
+  h     $h$  the spacing
+
+coulomb  @85ffef4c
+  what  The electrostatic potential energy of a proton in the charge of the
+        proton density rp: the charge inside radius r acts as if it sat at
+        the center, and each shell outside r contributes its charge over its
+        own radius.
+  rp    $\rho_p$  the proton density on the mesh
+  r     $r$  the mesh points
+  h     $h$  the spacing
+  out   $V_C$  the potential, MeV
+  n     the number of mesh points
+  inner  the running sum of $\rho_p r^2$ from the center out: the charge inside r, over $4\pi h$
+  outer  the running sum of $\rho_p r$ from the edge in: the shells outside r
+  i     a mesh point, going out
+  k     a mesh point, going in
+
+  $$ V_C(r) = 4\pi e^2 \left[ \frac{1}{r} \int_0^r \rho_p(r')\, r'^2 dr' + \int_r^\infty \rho_p(r')\, r'\, dr' \right] $$
+
+proton_coulomb  @65a9f844
+  what  The Coulomb field a proton feels: the direct potential of the
+        proton density (coulomb), minus the exchange term in Slater's
+        approximation, $e^2 (3/\pi)^{1/3} \rho_p^{1/3}$.
+  why   Exchange with the other protons lowers the repulsion; Slater's local
+        form is the one skyrme_rpa uses, so the two programs solve the same
+        equations.
+  rp    $\rho_p$  the proton density
+  r     $r$  the mesh points
+  h     $h$  the spacing
+
+count_below  @5e0eb26b
+  what  How many eigenvalues of the symmetric tridiagonal matrix $H$ (diag,
+        off) lie below $x$.
+  how   Factor $H - x = L D L^\top$ one pivot at a time; by Sylvester's law
+        of inertia the number of negative pivots is the number of
+        eigenvalues below $x$ (the Sturm count). A zero pivot is replaced by
+        a tiny number so the next division stays finite.
+  diag  the diagonal of $H$
+  off   the entries beside the diagonal
+  x     $x$  the trial value, MeV
+  n     the size of the matrix
+  cnt   the number of negative pivots so far
+  p     the current pivot, $d_i - x - e_{i-1}^2 / p_{i-1}$
+  i     the row being factored
+
+lowest_eigenvalue  @4d04cda4
+  what  The lowest eigenvalue of the symmetric tridiagonal matrix (diag,
+        off), between lo and hi, to EIG_TOL.
+  how   Bisection: halve the interval, and keep the half whose Sturm count
+        says the lowest eigenvalue is in it
+        [test "bisection and inverse iteration find the lowest eigenvalue of the matrix with 2 on the diagonal and -1 beside it, 2 - 2 cos(pi / (n + 1))"].
+  why   Used on the first pass only, to put inverse iteration on the right
+        state. On that pass there is no orbital energy from a last pass (the
+        energies start at zero), and a shift near zero would lead inverse
+        iteration to a state near zero energy, not to the bound orbital.
+  diag  the diagonal
+  off   the entries beside it
+  lo    a value below every eigenvalue
+  hi    a value above every eigenvalue
+  a     the lower end of the interval: no eigenvalue below it
+  b     the upper end: at least one eigenvalue below it
+  mid   the middle of the interval
+  EIG_TOL  the width at which bisection stops, MeV
+
+inverse_iteration  @e77fa48a
+  what  The eigenvector of the tridiagonal matrix $H$ whose eigenvalue is
+        nearest the shift $\sigma$, and its eigenvalue.
+  how   Solve $(H - \sigma) w = u$ and normalize, INV_SWEEPS times, starting
+        from the u given. Each solve is the Thomas algorithm: eliminate the
+        entries below the diagonal in one sweep down (c and d), then
+        back-substitute in one sweep up. The eigenvalue is the Rayleigh
+        quotient $u^\top H u$ of the final unit vector.
+  why   Each solve multiplies the component of the eigenvalue $\lambda_k$
+        by $1 / (\lambda_k - \sigma)$, so the one nearest $\sigma$ grows
+        fastest. With $\sigma$ a little below the orbital's energy from the
+        last pass and u its vector from the last pass, a few sweeps are
+        enough, and each costs a number of operations proportional to the
+        mesh size
+        [test "bisection and inverse iteration find the lowest eigenvalue of the matrix with 2 on the diagonal and -1 beside it, 2 - 2 cos(pi / (n + 1))"].
+  diag   the diagonal of $H$
+  off    the entries beside the diagonal
+  sigma  $\sigma$  the shift, MeV
+  u      $u$  the starting vector; the unit eigenvector on return
+  n      the size of the matrix
+  c      the eliminated upper entries of the factored $H - \sigma$
+  d      the right-hand side as the elimination changes it
+  w      $w$  the solution of $(H - \sigma) w = u$
+  sweep  the solve being done
+  i      a row, going down
+  m      the pivot of row i after elimination
+  k      a row, going up in the back substitution
+  nrm    the length of w, with the sign that keeps w pointing the way u did
+  lam    $\lambda$  the Rayleigh quotient, the eigenvalue's estimate, MeV
+  INV_SWEEPS  how many solves each call makes
+
+  $$ (H - \sigma)\, w = u, \qquad u \leftarrow \frac{w}{\lVert w \rVert}, \qquad \lambda = u^\top H u $$  [test "bisection and inverse iteration find the lowest eigenvalue of the matrix with 2 on the diagonal and -1 beside it, 2 - 2 cos(pi / (n + 1))"]
+  = c#2    the first row of the elimination: divide by the first pivot
+  = m      row i's pivot, after the row above has been subtracted from it
+  = d#3    the right-hand side of row i after the same subtraction, over the pivot
+  = w#3    back substitution: each entry of w from the one below it
+  = nrm    the length of w; its sign flips if w points against u, so the vector does not change sign from sweep to sweep
+  = u      the new vector: w scaled to unit length
+  = lam#2  the Rayleigh quotient $u^\top H u$, from the diagonal and the entries beside it
+
+skyrme_fields  @203e9102
+  what  The mean fields a nucleon of kind q feels in the current densities:
+        B, the coefficient $\hbar^2 / 2m^*_q$ of its kinetic energy, U, its
+        central potential, and W, its spin-orbit form factor.
+  how   Each field is the derivative of the Skyrme energy with respect to
+        one density of kind q: B with respect to $\tau_q$, U with respect
+        to $\rho_q$ and W with respect to $J_q$. Each is a sum of terms,
+        one per parameter of the force, in the totals over both kinds
+        ($\rho = \rho_n + \rho_p$, and likewise $\tau$ and $J$) and the
+        densities of kind q.
+  why   These are the potentials in the radial equation that
+        skyrme_hamiltonian builds. The same formulas as skyrme_rpa's give the
+        same orbital energies as its published run, to within the mesh error
+        [test "on 150 points of 0.1 fm skyrme_o16 gives the post's numpy twin to 1e-7, in 38 iterations"].
+  f      the Skyrme force: its parameters $t_0 \ldots t_3$, $x_0 \ldots x_3$, $W_0$ and $\alpha$ (a SkyrmeForce; SLY5 in skyrme_o16)
+  q      $q$  the kind of nucleon: NEUTRON or PROTON
+  rho    $\rho$  the number densities of both kinds, `[2, nr]`, fm$^{-3}$
+  tau    $\tau$  the kinetic-energy densities, `[2, nr]`
+  jso    $J$  the spin-orbit densities, `[2, nr]`
+  r      $r$  the mesh points, fm
+  h      $h$  the spacing
+  B      $B$  $\hbar^2 / 2m^*_q$ at each point, MeV fm$^2$
+  U      $U_q$  the central potential, MeV, summed term by term
+  W      $W_q$  the spin-orbit form factor, MeV fm
+  rt     $\rho$  the total number density, neutrons plus protons
+  tt     $\tau$  the total kinetic-energy density
+  jt     $J$  the total spin-orbit density
+  rq     $\rho_q$  the number density of kind q
+  sj     $J + J_q$  the spin-orbit density that enters the central potential
+  lap_t  $\nabla^2 \rho$  the Laplacian of the total density
+  lap_q  $\nabla^2 \rho_q$  the Laplacian of the density of kind q
+  drt    $\rho'$  the radial derivative of the total density
+  drq    $\rho_q'$  the radial derivative of the density of kind q
+  dsj    $(J + J_q)'$  the radial derivative of sj
+  ra     $\rho^\alpha$  the total density to the power $\alpha$, for the $t_3$ term
+  rsq    $\rho_n^2 + \rho_p^2$  the sum of the squares of the two kinds' densities, for the $t_3$ term
+  HB     $\hbar^2 / 2m$  the kinetic coefficient of a free nucleon, with the
+         center-of-mass correction $1 - 1/A$
+
+  densities       the total densities, the densities of kind q, and their derivatives and Laplacians
+  effective_mass  B, the coefficient of the kinetic energy, set by the effective mass
+    $$ \frac{\hbar^2}{2m^*_q} = \frac{\hbar^2}{2m} + \frac{t_1(2 + x_1) + t_2(2 + x_2)}{8}\,\rho + \frac{t_2(1 + 2x_2) - t_1(1 + 2x_1)}{8}\,\rho_q $$
+    why            The momentum-dependent terms of the force ($t_1$, $t_2$) make a nucleon inside the nucleus move as if it had a mass $m^*$ different from the free mass. For SLy5 both coefficients are positive, so $B$ rises above its free value where the density is high: $m^* < m$ inside the nucleus.
+  central         U, the central potential: a term for each parameter of the force, and one from the spin-orbit density
+    $$ U_q = t_0\Big[\big(1 + \tfrac{x_0}{2}\big)\rho - \big(x_0 + \tfrac12\big)\rho_q\Big] + \tfrac{t_1}{4}\Big[\big(1 + \tfrac{x_1}{2}\big)\big(\tau - \tfrac32\nabla^2\rho\big) - \big(x_1 + \tfrac12\big)\big(\tau_q - \tfrac32\nabla^2\rho_q\big)\Big] + \cdots - W_0\Big(\frac{J + J_q}{r} + \frac{(J + J_q)'}{2}\Big) $$
+    why            The $t_0$ term is attractive and grows with the density; the $t_3$ term, which grows faster than the density, is repulsive and keeps the nucleus from collapsing. Their balance sets the nucleus's density and size.
+  spin_orbit      W, the spin-orbit form factor, from the density gradients and the spin-orbit densities
+    $$ W_q = \frac{W_0}{2}\left(\rho' + \rho_q'\right) + \frac{t_1 - t_2}{8}\, J_q - \frac{t_1 x_1 + t_2 x_2}{8}\, J $$
+    why            The spin-orbit force acts where the density changes, at the surface: the density falls outward, so $W_q < 0$ there, and the term $\langle\boldsymbol\sigma\cdot\mathbf l\rangle W_q / r$ lowers the orbital with $j = l + 1/2$ and raises the one with $j = l - 1/2$ [hold "the spin-orbit field puts 1p3/2 below 1p1/2, for neutrons and for protons"].
+
+skyrme_hamiltonian  @e72dfbba
+  what  The radial Hamiltonian of one $(l, j)$ block of nucleons of kind q,
+        as the symmetric tridiagonal matrix (diag, off) whose eigenvectors
+        are the block's orbitals $u(r) = r R(r)$ on the mesh.
+  how   The kinetic term $-\frac{d}{dr} B \frac{du}{dr}$ is differenced with
+        $B$ at the half points $r_{i \pm 1/2}$, which keeps the matrix
+        symmetric. Past the last point $B$ is taken as its free value HB.
+        The diagonal adds the centrifugal term, the $B'/r$ term that comes
+        from writing the equation for $u = r R$ instead of $R$, the central
+        potential, the spin-orbit term, and for protons the Coulomb field.
+  why   A symmetric tridiagonal matrix has real eigenvalues and can be
+        solved in a number of operations proportional to its size, by the
+        Sturm count and the Thomas algorithm.
+  B      $B$  $\hbar^2 / 2m^*_q$ on the mesh
+  dB     $B'$  its radial derivative
+  U      $U_q$  the central potential
+  W      $W_q$  the spin-orbit form factor
+  V      $V$  the Coulomb field, used for protons only
+  q      $q$  the kind of nucleon
+  l      $l$  the orbital angular momentum of the block
+  sdl    $\langle\boldsymbol\sigma\cdot\mathbf l\rangle$  $j(j+1) - l(l+1) - 3/4$: $l$ for $j = l + 1/2$, $-(l + 1)$ for $j = l - 1/2$
+  r      $r$  the mesh points
+  h      $h$  the spacing
+  diag   the diagonal of the matrix
+  off    the entries beside the diagonal
+  nr     the number of mesh points
+  bm     $B_{i-1/2}$  B halfway to the point inside of each point (at the first point, B there)
+  bp     $B_{i+1/2}$  B halfway to the point outside of each point
+  HB     $\hbar^2 / 2m$  the free value of B, beyond the mesh
+
+  $$ -\frac{d}{dr}\Big(B \frac{du}{dr}\Big) + \Big[B\frac{l(l+1)}{r^2} + \frac{B'}{r} + U_q + V_C + \frac{\langle\boldsymbol\sigma\cdot\mathbf l\rangle W_q}{r}\Big] u = \varepsilon u $$  [test "on 150 points of 0.1 fm skyrme_o16 gives the post's numpy twin to 1e-7, in 38 iterations"]
+  = off    the coupling between neighboring points, $-B_{i+1/2} / h^2$
+  = diag   the kinetic term's diagonal $(B_{i-1/2} + B_{i+1/2}) / h^2$, then the centrifugal, $B'/r$, central and spin-orbit terms
+
+skyrme_o16  @424ddbd4
+  what  Hartree-Fock of $^{16}$O with the SLy5 force on nr points of spacing
+        h: skyrme_hf with SLY5 and the module's MIX, E_TOL and MAX_ITER.
+  why   The solver as the post runs it, under the name the story and the
+        tests call
+        [test "on 150 points of 0.1 fm skyrme_o16 gives the post's numpy twin to 1e-7, in 38 iterations"].
+  h     $h$  the mesh spacing, fm
+  nr    the number of mesh points
+  SLY5  the force: SLy5's ten parameters
+  MIX   the fraction of each new density mixed in, one half
+  E_TOL  the change of the energy, MeV, below which the iteration stops
+  MAX_ITER  the most passes it runs
+
+skyrme_hf  @5541c956
+  what  The general solver: Hartree-Fock of $^{16}$O for a given Skyrme
+        force, mixing fraction and stopping rule, on nr points of spacing h:
+        the self-consistent densities, the energy per nucleon, the radii and
+        the six orbital energies.
+  how   Start from a Woods-Saxon density (a smoothed step, the usual shape
+        of a nucleus) holding the right numbers of neutrons and protons. Each
+        pass computes the fields of each kind from the densities, builds the
+        radial Hamiltonian of each of the three occupied blocks, takes its
+        lowest eigenvector by inverse iteration, and adds the orbital's
+        nucleons to new densities. The next densities are the old ones plus
+        the fraction mix of the change (half, in skyrme_o16). Stop when the
+        energy changes by less than e_tol between passes, or after
+        max_iter passes.
+  why   Mixing only half of each new density in keeps the iteration from
+        oscillating: the densities move toward self-consistency by a fixed
+        fraction per pass, and the energy's change shrinks by about half
+        each pass. From this start the energy settles in a few dozen passes
+        [test "on 150 points of 0.1 fm skyrme_o16 gives the post's numpy twin to 1e-7, in 38 iterations"].
+  h           $h$  the mesh spacing, fm
+  nr          the number of mesh points; the box is $nr \cdot h$ wide
+  force       the Skyrme force (a SkyrmeForce)
+  mix         the fraction of each new density mixed in
+  e_tol       the change of the energy, MeV, below which the iteration stops
+  max_iter    the most passes the iteration runs
+  nsh         the number of occupied shells of each kind
+  r           $r$  the mesh points $r_i = (i + 1) h$: the center is not a point, since the equation for $u = rR$ has $u(0) = 0$ built in
+  i           a mesh point
+  rho         $\rho$  the number densities of both kinds, `[2, nr]`, fm$^{-3}$
+  tau         $\tau$  the kinetic-energy densities, `[2, nr]`
+  jso         $J$  the spin-orbit densities, `[2, nr]`
+  prof        the Woods-Saxon profile the iteration starts from
+  pn          $4\pi\int f r^2 dr$ of the profile, which normalizes it
+  uvec        each block's orbital from the last pass, `[2 nsh, nr]`: the
+              start of the next inverse iteration
+  lam         $\varepsilon$  each block's orbital energy from the last pass, MeV
+  k           the block, $q \cdot nsh + s$
+  B           $B$  $\hbar^2 / 2m^*_q$ for the kind being solved
+  dB          $B'$  its derivative
+  U           $U_q$  the central potential for the kind being solved
+  W           $W_q$  the spin-orbit form factor for the kind being solved
+  V           $V$  the Coulomb field of the protons
+  diag        the diagonal of the block's Hamiltonian
+  off         the entries beside its diagonal
+  u           $u$  the block's orbital on the mesh, as a unit vector
+  R           $R$  the radial wave function $u / (\sqrt h\, r)$, normalized so that $\int R^2 r^2 dr = 1$
+  dR          $R'$  its derivative
+  nrho        the new number densities this pass's orbitals make
+  ntau        the new kinetic-energy densities
+  njso        the new spin-orbit densities
+  e_old       the energy of the last pass, MeV
+  E           $E$  the total energy of the mixed densities, MeV
+  it          the number of passes run
+  done        `1` once the energy has settled
+  de          $\Delta E$  the change of the energy in this pass (read by the debug lens)
+  n_neutrons  $N$  the neutrons in the new densities (read by the debug lens)
+  n_protons   $Z$  the protons in the new densities (read by the debug lens)
+  split_n     the neutrons' spin-orbit splitting, $\varepsilon(1p_{1/2}) - \varepsilon(1p_{3/2})$ (read by the debug lens)
+  split_p     the protons' spin-orbit splitting (read by the debug lens)
+  q           $q$  the kind being solved: NEUTRON, then PROTON
+  s           the shell being solved
+  l           $l$  its orbital angular momentum
+  j           $j$  its total angular momentum
+  sdl         $\langle\boldsymbol\sigma\cdot\mathbf l\rangle$  $j(j+1) - l(l+1) - 3/4$
+  sigma       $\sigma$  the shift for inverse iteration, MeV
+  big         the largest entry beside the diagonal, for the Gershgorin bounds
+  wt          $(2j + 1) / 4\pi$  the shell's nucleons, spread over the directions
+  r2p         $\langle r^2 \rangle_p$  the protons' mean square radius, fm$^2$
+  r2n         $\langle r^2 \rangle_n$  the neutrons' mean square radius, fm$^2$
+  NEAR        how far below the last orbital energy the shift sits, MeV
+
+  mesh         the mesh points, h apart, the first one h from the center
+  start        a Woods-Saxon density holding the right numbers of neutrons and protons, orbitals of all ones, and the work arrays
+    $$ \rho_q(r) = \frac{N_q}{p_n} \cdot \frac{1}{1 + e^{(r - 1.2 A^{1/3})/0.6}} $$
+    run          The profile's integral is {pn}; each kind's density is the profile times its count over that.
+  repeat until the energy changes by less than e_tol, or max_iter passes have run
+    for each kind q, neutrons and then protons
+      fields       the fields of kind q from the current densities, and for protons the Coulomb field
+      for each occupied shell s of kind q
+        hamiltonian  the radial Hamiltonian of shell s
+        diagonalize  its lowest eigenvector by inverse iteration, found by bisection on the first pass
+          why          Inverse iteration converges to the eigenvalue nearest the shift. On the first pass there is no last energy to shift from, so bisection on the Sturm count finds the lowest eigenvalue first, between the Gershgorin bounds (every eigenvalue lies within the diagonal entry plus or minus the entries beside it).
+          run          On the first pass the shifts for the neutron $1s_{1/2}$, $1p_{3/2}$ and $1p_{1/2}$ blocks are {sigma}, {sigma#2} and {sigma#3} MeV: the bisection's eigenvalues, less EIG_TOL.
+        occupy       fill the shell: add its 2j + 1 nucleons to the new densities
+          $$ \rho_q = \sum \frac{2j+1}{4\pi} R^2, \quad \tau_q = \sum \frac{2j+1}{4\pi}\Big(R'^2 + \frac{l(l+1)}{r^2}R^2\Big), \quad J_q = \sum \frac{2j+1}{4\pi} \frac{\langle\boldsymbol\sigma\cdot\mathbf l\rangle}{r} R^2 $$  [hold "the new densities hold 8 neutrons"]
+    mix          count the nucleons in the new densities, then mix the fraction mix of them into the old
+      $$ \rho \leftarrow (1 - m)\, \rho + m\, \rho_{\text{new}}, \quad \text{and the same for } \tau, J $$  [hold "the new densities hold 8 protons"]
+    energy       the total energy of the mixed densities, and the spin-orbit splittings of the 1p shells
+      run          The first pass gives $E$ = {E} MeV and the second {E#2}.
+      predict      Each pass moves the densities half of the way to the new ones. Once the iteration is close, how should the change of the energy shrink from one pass to the next?
+      run          By about half per pass: on the tenth pass $\Delta E$ = {de#10} MeV, on the eleventh {de#11}, on the twelfth {de#12}.
+    convergence  stop once the energy changes by less than e_tol, after at least MIN_ITER passes
+  observables  the mean square radii of both kinds
+    $$ \langle r^2 \rangle_q = \frac{4\pi}{N_q}\int \rho_q\, r^4\, dr, \qquad r_{ch} = \sqrt{\langle r^2 \rangle_p + \tfrac32 a^2} $$
+    run          $\langle r^2 \rangle_p$ = {r2p} fm$^2$ and $\langle r^2 \rangle_n$ = {r2n} fm$^2$.
+
+skyrme_energy  @4e65597d
+  what  The total energy of the densities: the Skyrme energy density
+        integrated over the nucleus, plus the protons' Coulomb energy: the
+        direct term, and the exchange term in Slater's approximation.
+  how   The energy density $\mathcal H(r)$ is a sum of terms, one per
+        parameter of the force, each a product of densities and their
+        gradients; integrate_r2 integrates it and the Coulomb energy density.
+  why   The energy decides when the iteration stops, and at convergence
+        it is the binding energy the program reports as E/A
+        [test "on 150 points of 0.1 fm skyrme_o16 gives the post's numpy twin to 1e-7, in 38 iterations"].
+  f     the Skyrme force (a SkyrmeForce)
+  rho   $\rho$  the number densities, `[2, nr]`
+  tau   $\tau$  the kinetic-energy densities
+  jso   $J$  the spin-orbit densities
+  r     $r$  the mesh points
+  h     $h$  the spacing
+  rn    $\rho_n$  the neutron density
+  rp    $\rho_p$  the proton density
+  rt    $\rho$  the total density
+  drt   $\rho'$  its derivative
+  drn   $\rho_n'$  the derivative of the neutron density
+  drp   $\rho_p'$  the derivative of the proton density
+  H     $\mathcal H$  the Skyrme energy density at each point, MeV fm$^{-3}$, summed term by term
+  ec    the Coulomb energy density: half the direct term, and Slater exchange
+  tn    $\tau_n$  the neutrons' kinetic-energy density
+  tp    $\tau_p$  the protons' kinetic-energy density
+  tt    $\tau$  the total kinetic-energy density
+  jn    $J_n$  the neutrons' spin-orbit density
+  jp    $J_p$  the protons' spin-orbit density
+  jt    $J$  the total spin-orbit density
+  rsq   $\rho_n^2 + \rho_p^2$  the sum of the squares of the two kinds' densities
+
+  $$ E = 4\pi\int \mathcal H\, r^2 dr + \frac12 \int V_C\, \rho_p\, d^3r - \frac34 e^2 \Big(\frac{3}{\pi}\Big)^{1/3} \int \rho_p^{4/3}\, d^3r $$  [test "on 150 points of 0.1 fm skyrme_o16 gives the post's numpy twin to 1e-7, in 38 iterations"]
+  = rt    the total density, and below it the derivatives of the three densities
+  = H     the kinetic term $\frac{\hbar^2}{2m}\tau$ and the $t_0$ term; the lines after add the $t_1$, $t_2$, $t_3$ and spin-orbit terms
+  = ec    the Coulomb energy density: half the direct potential of the protons times their density, and Slater exchange

@@ -1,0 +1,197 @@
+###
+post: Excitation energies from the Casida equation
+agent: claude
+
+Linear response of a closed-shell RHF ground state: the singlet or triplet
+excitation energies, in the Tamm-Dancoff approximation (TDA) and in
+time-dependent Hartree-Fock (TDHF, also called the random-phase
+approximation), from the orbital energies and the two-electron integrals in
+the molecular-orbital basis.
+
+    import basis.pople631g
+    from hf.mole import molecule
+    from hf.opts import scf_defaults
+    from hf.scf import integrals
+    from hf.scf_loop import scf
+    from hf.casida import CASIDA_SINGLET, casida_mo, casida_solve
+
+    mol = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")
+    p = integrals(mol, scf_defaults())
+    mo = casida_mo(p, scf(p))
+    singlets = casida_solve(mo, CASIDA_SINGLET)
+    show singlets.tdhf[0]
+
+With orbital energies $\varepsilon$ and integrals $(pq|rs)$ over real
+orbitals (chemists' notation), for occupied $i, j$ and virtual $a, b$,
+
+    A_ia,jb = d_ij d_ab (e_a - e_i) + c (ia|jb) - (ij|ab)
+    B_ia,jb = c (ia|jb) - (ib|ja)
+
+with `c = 2` for singlets and `c = 0` for triplets. TDA diagonalizes $A$.
+TDHF solves the non-symmetric problem of size $2 n$ through the symmetric
+one of size $n$, $(A - B)^{1/2} (A + B) (A - B)^{1/2} Z = \omega^2 Z$, which
+needs $A - B$ positive definite: the ground state must be stable against
+these orbital rotations.
+
+The integrals are dense, `[m, m, m, m]`, from lib/hf/stab's four quarter
+transforms, and $A$ and $B$ are dense too: meant for small molecules.
+posts/2026-09-25-casida-tdhf-and-tda-for-water.viv holds all 160 energies of
+water in 6-31G to PySCF's.
+
+Used with `import hf.casida`.
+###
+
+from hf.stab import stab_fock_mo, stab_mo_eri, stab_orbitals
+from hf.scf_loop import scf_densities, scf_nocc, ScfResult, ScfSetup
+from hf.eri_store import es_unpack8
+
+CASIDA_SINGLET = 0
+CASIDA_TRIPLET = 1
+
+#| What the Casida equation needs from a ground state.
+record CasidaMo {
+    eps: Arr
+    mo: Arr
+    nocc: Num
+    nvir: Num
+}
+
+#| The excitation energies of one spin kind, both ways, ascending.
+record Casida {
+    tda: Arr
+    tdhf: Arr
+}
+
+#| The orbital energies $\varepsilon$ and the integrals over orbitals
+#| $(pq|rs)$ of the RHF result `r` of setup `p`, and its numbers of occupied
+#| and virtual orbitals.
+def casida_mo(p: ScfSetup, r: ScfResult) -> CasidaMo {
+    n = len(p.h)
+    step orbitals {
+        orb = stab_orbitals(p, scf_densities(r))
+        m = shape(orb)[2]
+    }
+    step energies {
+        Fm = stab_fock_mo(orb, p.h, p.eri)
+        eps = zeros(m)
+        for q to m {
+            eps[q] = Fm[0, q, q]
+        }
+    }
+    step integrals {
+        M = stab_mo_eri(es_unpack8(p.eri, n), orb, 0, 0)
+    }
+    nocc = scf_nocc(p, 0)
+    return CasidaMo { eps: eps, mo: M, nocc: nocc, nvir: m - nocc }
+}
+
+#| The Casida matrices $A$ and $B$ for singlets (`spin = 0`) or triplets
+#| (`spin = 1`), from the orbital energies and the integrals over orbitals.
+def casida_ab(eps: Arr, M: Arr, nocc, nvir, spin) {
+    A = zeros(nocc * nvir, nocc * nvir)
+    B = zeros(nocc * nvir, nocc * nvir)
+    coul = 2.0
+    if spin > 0.5 {
+        coul = 0.0
+    }
+    for i to nocc {
+        for a to nvir {
+            ia = i * nvir + a
+            for j to nocc {
+                for b to nvir {
+                    jb = j * nvir + b
+                    A[ia, jb] = coul * M[i, nocc + a, j, nocc + b] - M[i, j, nocc + a, nocc + b]
+                    B[ia, jb] = coul * M[i, nocc + a, j, nocc + b] - M[i, nocc + b, j, nocc + a]
+                }
+            }
+            A[ia, ia] += eps[nocc + a] - eps[i]
+        }
+    }
+    return A, B
+}
+
+#| The TDA energies: the eigenvalues of $A$, ascending.
+def casida_tda(A: Arr) -> Arr {
+    n = len(A)
+    w = zeros(n)
+    V = zeros(n, n)
+    eig_sym(A, w, V)
+    sort(w)
+    return w
+}
+
+#| The TDHF energies, ascending: $\omega = \sqrt{\lambda}$ for the
+#| eigenvalues $\lambda$ of $(A - B)^{1/2} (A + B) (A - B)^{1/2}$. Returns
+#| `-1` in place of the energies if $A - B$ is not positive definite.
+def casida_tdhf(A: Arr, B: Arr) -> Arr {
+    n = len(A)
+    step stability {
+        w = zeros(n)
+        V = zeros(n, n)
+        eig_sym(A - B, w, V)
+        wmin = min(w)
+    }
+    if wmin <= 0.0 {
+        return zeros(n) - 1.0
+    }
+    step square_root {
+        # V diag(sqrt(w)) V^T
+        Vs = copy(V)
+        for k to n {
+            Vs[:, k] = V[:, k] * sqrt(w[k])
+        }
+        R = Vs @ transpose(V)
+    }
+    step fold {
+        C = R @ ((A + B) @ R)
+    }
+    step solve {
+        lam = zeros(n)
+        eig_sym(C, lam, V)
+        om = sqrt(lam)
+        sort(om)
+    }
+    return om
+}
+
+#| The excitation energies of spin kind `spin` (CASIDA_SINGLET or
+#| CASIDA_TRIPLET) from the ground state's orbitals and integrals `mo`: TDA
+#| and TDHF, each ascending.
+def casida_solve(mo: CasidaMo, spin) -> Casida {
+    nov = mo.nocc * mo.nvir
+    step build {
+        A, B = casida_ab(mo.eps, mo.mo, mo.nocc, mo.nvir, spin)
+    }
+    step tda {
+        tda = casida_tda(A)
+        lowest_tda = tda[0]
+    }
+    step tdhf {
+        tdhf = casida_tdhf(A, B)
+        lowest_tdhf = tdhf[0]
+    }
+    return Casida { tda: tda, tdhf: tdhf }
+}
+
+test "for one occupied-virtual pair TDA gives A and TDHF gives sqrt(A^2 - B^2)" {
+    casida_a = [[0.5]]
+    casida_b = [[0.2]]
+    assert_near(casida_tda(casida_a)[0], 0.5, 1.0e-15)
+    assert_near(casida_tdhf(casida_a, casida_b)[0], sqrt(0.5 * 0.5 - 0.2 * 0.2), 1.0e-15)
+}
+
+test "with B = 0 the TDHF energies are the TDA energies" {
+    casida_a = [[0.5, 0.1, 0.0], [0.1, 0.7, 0.05], [0.0, 0.05, 0.9]]
+    casida_z = casida_a * 0.0
+    casida_gap = max(abs(casida_tdhf(casida_a, casida_z) - casida_tda(casida_a)))
+    assert_lt(casida_gap, 1.0e-14)
+}
+
+test "an A - B that is not positive definite gives -1 in place of the TDHF energies" {
+    casida_a = [[0.5]]
+    casida_b = [[0.6]]
+    assert_near(casida_tdhf(casida_a, casida_b)[0], -1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

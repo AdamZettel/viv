@@ -1,0 +1,54 @@
+# Jacobi iteration for Laplace's equation on a 128 x 128 grid: the top edge
+# held at 1, the other three at 0, 1000 sweeps of the five-point average. A
+# stencil is nothing but loads, four adds and a multiply per point, so this
+# measures an engine's loops and element access and nothing else. One of the
+# four kernels the engines are raced on.
+#
+#     tools/race.sh bench/jacobi_stencil.viv
+
+jac_n = 128
+jac_u = zeros(jac_n, jac_n)
+jac_v = zeros(jac_n, jac_n)
+for jac_j to jac_n {
+    jac_u[0, jac_j] = 1.0
+    jac_v[0, jac_j] = 1.0
+}
+
+#| One sweep: every interior point of `dst` becomes the average of its four
+#| neighbors in `src`.
+def jac_sweep(src: Arr, dst: Arr, n) {
+    for ii to n - 2 {
+        i = ii + 1
+        for jj to n - 2 {
+            j = jj + 1
+            dst[i, j] = 0.25 * (src[i - 1, j] + src[i + 1, j] + src[i, j - 1] + src[i, j + 1])
+        }
+    }
+    return 0.0
+}
+
+for jac_s to 500 {
+    jac_sweep(jac_u, jac_v, jac_n)
+    jac_sweep(jac_v, jac_u, jac_n)
+}
+jac_mid = jac_u[jac_n / 2, jac_n / 2]
+show jac_mid
+
+test "the field is mirror-symmetric and obeys the maximum principle" {
+    jac_asym = 0.0
+    jac_lo = 1.0
+    jac_hi = 0.0
+    for i to jac_n {
+        for j to jac_n {
+            jac_asym = max(jac_asym, abs(jac_u[i, j] - jac_u[i, jac_n - 1 - j]))
+            jac_lo = min(jac_lo, jac_u[i, j])
+            jac_hi = max(jac_hi, jac_u[i, j])
+        }
+    }
+    assert_lt(jac_asym, 1.0e-12)
+    assert_true(jac_lo >= 0.0 and jac_hi <= 1.0)
+    assert_gt(jac_mid, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

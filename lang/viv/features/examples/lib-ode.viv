@@ -1,0 +1,17 @@
+# lib/ode: Robertson's stiff kinetics to t = 40 by Radau IIA, with the exact
+# Jacobian from grad (lib/ode/problems.viv); the published value of y1 at 40 is 0.7158271
+from ode.solve import ode_cfg, ode_solve, no_events
+from ode.core import RADAU, JAC_GIVEN
+from ode.problems import robertson, robertson_jac
+
+c = ode_cfg(RADAU, 40.0, 1.0e-8, 1.0e-12 * ones(3), 0.0, inf, 100000, JAC_GIVEN)
+r = ode_solve(robertson, robertson_jac, no_events, 0.0, 40.0, [1.0, 0.0, 0.0], [0.04, 1.0e4, 3.0e7], c, [40.0], zeros(0), zeros(0))
+y = r.y[0, :]
+show y, r.nsteps
+test "Robertson at t = 40" {
+    assert_near(y[0], 0.7158270687, 1.0e-8)
+    assert_near(sum(y), 1.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

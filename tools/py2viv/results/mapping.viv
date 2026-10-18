@@ -1,0 +1,1083 @@
+###
+Translated from mapping.py by py2viv 0.2.0 (numeric Python -> Viv).
+Python source sha256: 0dc43eaaa23326423b6f39edce12b1d27167d1f2ff55218364a7303e692ce58b
+Each print(...) is one print(...) line; fmt(x) writes a float as Python's repr does.
+A `raise`, a failed assert and every guard `stop` with Python's exception line.
+###
+
+#| 0, 1, ..., n - 1.
+def py_iota(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+
+#| Every entry of a real array, row-major, as a vector (a copy).
+def py_flat(a: Arr) {
+    return take(a, py_iota(numel(a)))
+}
+
+#| Python's round(x): halves go to the even neighbor (round(2.5) is 2, round(-2.5) is -2).
+def py_round(x) {
+    if x != x {
+        stop("ValueError: cannot convert float NaN to integer")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("OverflowError: cannot convert float infinity to integer")
+    }
+    return py_rint(x) + 0.0
+}
+
+#| Round half to even (C's rint, NumPy's round); a zero result comes back +0.
+def py_rint(x) {
+    if abs(x) >= 4503599627370496 or x != x {
+        return x
+    }
+    f = floor(x)
+    d = x - f
+    if d > 0.5 {
+        return f + 1
+    }
+    if d < 0.5 {
+        return f
+    }
+    if f % 2 == 0 {
+        return f
+    }
+    return f + 1
+}
+
+#| Python's int(x) on a float: toward zero (int(-2.5) is -2).
+def py_trunc(x) {
+    if x != x {
+        stop("ValueError: cannot convert float NaN to integer")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("OverflowError: cannot convert float infinity to integer")
+    }
+    if x < 0 {
+        return ceil(x) + 0.0
+    }
+    return floor(x)
+}
+
+#| A copy of a real array (np.copy, a.copy(), np.array(a)).
+def py_copy(a: Arr) {
+    return a * 1.0
+}
+
+#| np.arange(start, stop, step), as NumPy fills it: ceil((stop - start) / step) entries,
+#| entry k = start + k * delta with delta = (start + step) - start.
+def py_arange(start, stop_, step) {
+    if step == 0 {
+        stop("ZeroDivisionError: division by zero")
+    }
+    if not (abs((stop_ - start) / step) < 1.0 / 0.0) {
+        stop("py2viv: np.arange of a length that is not finite (NumPy raises ValueError)")
+    }
+    n = max(ceil((stop_ - start) / step), 0)
+    a = zeros(n)
+    delta = (start + step) - start
+    for k to n {
+        a[k] = start + k * delta
+    }
+    return a
+}
+
+#| np.eye(n, k=d): ones on the d-th diagonal.
+def py_eye(n, d) {
+    E = zeros(n, n)
+    for i to n {
+        j = i + d
+        if j >= 0 and j < n {
+            E[i, j] = 1
+        }
+    }
+    return E
+}
+
+#| np.diag(v) for a vector: the square matrix with v on its diagonal.
+def py_diag(v: Arr) {
+    n = len(v)
+    D = zeros(n, n)
+    for i to n {
+        D[i, i] = v[i]
+    }
+    return D
+}
+
+#| np.diag(A) for a matrix: its diagonal, as a vector.
+def py_diagonal(A: Arr) {
+    n = min(shape(A)[0], shape(A)[1])
+    d = zeros(n)
+    for i to n {
+        d[i] = A[i, i]
+    }
+    return d
+}
+
+#| np.trace(A): NumPy's pairwise sum of the diagonal.
+def py_trace(A: Arr) {
+    d = py_diagonal(A)
+    return py_pw(d, 0, len(d))
+}
+
+#| np.outer(u, v).
+def py_outer(u: Arr, v: Arr) {
+    M = zeros(len(u), len(v))
+    for i to len(u) {
+        for j to len(v) {
+            M[i, j] = u[i] * v[j]
+        }
+    }
+    return M
+}
+
+#| np.cumsum(a) of a vector: entry i is entry i - 1 plus a[i], from a[0] itself (so a -0.0
+#| first stays -0.0).
+def py_cumsum(a: Arr) {
+    c = zeros(len(a))
+    if len(a) == 0 {
+        return c
+    }
+    s = a[0]
+    c[0] = s
+    for i from 1 to len(a) {
+        s += a[i]
+        c[i] = s
+    }
+    return c
+}
+
+#| np.prod(a): the product of every entry, left to right.
+def py_prod(a: Arr) {
+    f = py_flat(a)
+    p = 1.0
+    for i to len(f) {
+        p *= f[i]
+    }
+    return p
+}
+
+#| np.argmax(a): the flat index of the first largest entry.
+def py_argmax(a: Arr) {
+    f = py_flat(a)
+    k = 0
+    if f[0] != f[0] {
+        return 0
+    }
+    for i from 1 to len(f) {
+        if f[i] != f[i] {
+            return i
+        }
+        if f[i] > f[k] {
+            k = i
+        }
+    }
+    return k
+}
+
+#| np.argmin(a): the flat index of the first smallest entry.
+def py_argmin(a: Arr) {
+    f = py_flat(a)
+    k = 0
+    if f[0] != f[0] {
+        return 0
+    }
+    for i from 1 to len(f) {
+        if f[i] != f[i] {
+            return i
+        }
+        if f[i] < f[k] {
+            k = i
+        }
+    }
+    return k
+}
+
+#| np.mean(a): NumPy's pairwise sum over numel(a).
+def py_mean(a: Arr) {
+    return py_npsum(a) / numel(a)
+}
+
+#| np.var(a): the pairwise sum of the squared deviations over n, as NumPy's _var computes it.
+def py_var(a: Arr) {
+    d = a - py_mean(a)
+    return py_npsum(d * d) / numel(a)
+}
+
+#| np.std(a): divides by n, as NumPy does (lib/stats `std`).
+def py_std(a: Arr) {
+    return sqrt(py_var(a))
+}
+
+#| np.sort(a) / sorted(a): a sorted COPY. Viv's sort(a) sorts in place and returns 0.
+def py_sort(a: Arr) {
+    if any(a != a) {
+        stop("py2viv: sorting a NaN (Python's sorted and NumPy's sort each put it somewhere of their own)")
+    }
+    if any(a == 0) and any(1.0 / a == -1.0 / 0.0) and any(1.0 / a == 1.0 / 0.0) {
+        stop("py2viv: sorting 0.0 and -0.0 together (their order is the sort algorithm's)")
+    }
+    b = a * 1.0
+    sort(b)
+    return b
+}
+
+#| np.diff(a) of a vector: a[i + 1] - a[i].
+def py_diff(a: Arr) {
+    d = zeros(len(a) - 1)
+    for i to len(a) - 1 {
+        d[i] = a[i + 1] - a[i]
+    }
+    return d
+}
+
+#| np.cross(u, v) of two 3-vectors.
+def py_cross(u: Arr, v: Arr) {
+    if len(u) != 3 or len(v) != 3 {
+        stop("py2viv: np.cross of vectors that are not both 3-vectors (NumPy gives a number for 2-vectors)")
+    }
+    c = zeros(3)
+    c[0] = u[1] * v[2] - u[2] * v[1]
+    c[1] = u[2] * v[0] - u[0] * v[2]
+    c[2] = u[0] * v[1] - u[1] * v[0]
+    return c
+}
+
+#| a % b for a vector a and a number b, as NumPy's remainder: npy_divmod entry by entry; a
+#| zero divisor gives fmod's nan for a float array and 0 for an integer one (`isint`).
+def py_mod(a: Arr, b, isint) {
+    r = zeros(len(a))
+    for i to len(a) {
+        if b == 0 {
+            if isint {
+                r[i] = 0
+            }
+            else {
+                r[i] = mod(a[i], b)
+            }
+        }
+        else {
+            r[i] = py_fdm(a[i], b, 1)
+        }
+    }
+    return r
+}
+
+#| a // b for a vector a and a number b, as NumPy's floor_divide: a zero divisor gives a / b
+#| for a float array and 0 for an integer one (`isint`).
+def py_floordiv(a: Arr, b, isint) {
+    r = zeros(len(a))
+    for i to len(a) {
+        if b == 0 {
+            if isint {
+                r[i] = 0
+            }
+            else {
+                r[i] = a[i] / b
+            }
+        }
+        else {
+            r[i] = py_fdm(a[i], b, 0)
+        }
+    }
+    return r
+}
+
+#| [v] * n, np.full(n, v): n copies of v.
+def py_full(n, v) {
+    a = zeros(n)
+    fill(a, v)
+    return a
+}
+
+#| np.full((n, m), v).
+def py_full2(n, m, v) {
+    a = zeros(n, m)
+    fill(a, v)
+    return a
+}
+
+#| An int result, as Python's int: a -0.0 becomes 0 (an int has no sign on zero), and the run
+#| stops at 2^53, past which a double no longer holds every integer (Python's int does).
+def py_int(x) {
+    if abs(x) >= 9007199254740992 {
+        stop("py2viv: an integer reached 2^53; Python's int is exact there and a double is not")
+    }
+    return x + 0.0
+}
+
+#| 0.0 with the sign of w (C's copysign(0.0, w)).
+def py_zero_f(w) {
+    if w < 0 or (w == 0 and 1.0 / w < 0) {
+        return -0.0
+    }
+    return 0.0
+}
+
+#| Floored division (k = 0) or remainder (k = 1) of doubles, as CPython's float_divmod and
+#| NumPy's npy_divmod compute them (fmod first, then the sign fix and the rounding fix).
+def py_fdm(a, b, k) {
+    m = mod(a, b)
+    d = (a - m) / b
+    if m != 0 {
+        if (b < 0) != (m < 0) {
+            m = m + b
+            d = d - 1.0
+        }
+    }
+    else {
+        m = py_zero_f(b)
+    }
+    if k == 1 {
+        return m
+    }
+    if d != 0 {
+        f = floor(d)
+        if d - f > 0.5 {
+            f = f + 1.0
+        }
+        return f
+    }
+    return py_zero_f(a / b)
+}
+
+#| a / b with a float: ZeroDivisionError on a zero divisor.
+def py_div_f(a, b) {
+    if b == 0 {
+        stop("ZeroDivisionError: float division by zero")
+    }
+    return a / b
+}
+
+#| a // b of two ints.
+def py_floordiv_i(a, b) {
+    if b == 0 {
+        stop("ZeroDivisionError: integer division or modulo by zero")
+    }
+    return py_int(py_fdm(a, b, 0))
+}
+
+#| a % b of two ints.
+def py_mod_i(a, b) {
+    if b == 0 {
+        stop("ZeroDivisionError: integer modulo by zero")
+    }
+    return py_int(py_fdm(a, b, 1))
+}
+
+#| a % b with a float.
+def py_mod_f(a, b) {
+    if b == 0 {
+        stop("ZeroDivisionError: float modulo")
+    }
+    return py_fdm(a, b, 1)
+}
+
+#| a ** b with a float, as CPython's float_pow: ZeroDivisionError for 0.0 to a negative
+#| power, OverflowError when a finite pair overflows; a negative base to a fractional power
+#| (a complex number in Python) stops.
+def py_fpow(a, b) {
+    if a == 0 and b < 0 {
+        stop("ZeroDivisionError: 0.0 cannot be raised to a negative power")
+    }
+    if a < 0 and abs(a) < 1.0 / 0.0 and floor(b) != b and abs(b) < 1.0 / 0.0 {
+        stop("py2viv: a negative number to a fractional power is a complex number in Python")
+    }
+    r = a ^ b
+    if abs(r) == 1.0 / 0.0 and abs(a) < 1.0 / 0.0 and abs(b) < 1.0 / 0.0 {
+        stop("OverflowError: (34, 'Result too large')")
+    }
+    return r
+}
+
+#| math.sqrt(x).
+def py_msqrt(x) {
+    if x < 0 {
+        stop("ValueError: math domain error")
+    }
+    return sqrt(x)
+}
+
+#| math.log(x).
+def py_mlog(x) {
+    if x == 0 {
+        stop("ValueError: math domain error")
+    }
+    if x < 0 {
+        stop("ValueError: math domain error")
+    }
+    return log(x)
+}
+
+#| math.asin(x).
+def py_masin(x) {
+    if abs(x) > 1 {
+        stop("ValueError: math domain error")
+    }
+    return asin(x)
+}
+
+#| math.acos(x).
+def py_macos(x) {
+    if abs(x) > 1 {
+        stop("ValueError: math domain error")
+    }
+    return acos(x)
+}
+
+#| math.exp(x): OverflowError when a finite x overflows.
+def py_mexp(x) {
+    r = exp(x)
+    if r == 1.0 / 0.0 and x < 1.0 / 0.0 {
+        stop("OverflowError: math range error")
+    }
+    return r
+}
+
+#| The argument of math.sin, cos or tan: ValueError for an infinity.
+def py_mtrig(x) {
+    if abs(x) == 1.0 / 0.0 {
+        stop("ValueError: math domain error")
+    }
+    return x
+}
+
+#| math.sinh or cosh's value r at x: OverflowError when a finite x overflows.
+def py_mhyp(r, x) {
+    if abs(r) == 1.0 / 0.0 and abs(x) < 1.0 / 0.0 {
+        stop("OverflowError: math range error")
+    }
+    return r
+}
+
+#| math.gamma(x): ValueError at a pole (0, a negative integer, -inf), OverflowError past 171.6.
+def py_mgamma(x) {
+    if x == -1.0 / 0.0 or (x <= 0 and floor(x) == x) {
+        stop("ValueError: math domain error")
+    }
+    if x == 1.0 / 0.0 {
+        return x
+    }
+    r = gamma(x)
+    if abs(r) == 1.0 / 0.0 and abs(x) < 1.0 / 0.0 {
+        stop("OverflowError: math range error")
+    }
+    return r
+}
+
+#| math.fmod(x, y): ValueError for y = 0 or an infinite x.
+def py_mfmod(x, y) {
+    if y == 0 or abs(x) == 1.0 / 0.0 {
+        stop("ValueError: math domain error")
+    }
+    return mod(x, y)
+}
+
+#| math.floor(x), an int.
+def py_mfloor(x) {
+    if x != x {
+        stop("ValueError: cannot convert float NaN to integer")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("OverflowError: cannot convert float infinity to integer")
+    }
+    return floor(x) + 0.0
+}
+
+#| math.ceil(x), an int.
+def py_mceil(x) {
+    if x != x {
+        stop("ValueError: cannot convert float NaN to integer")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("OverflowError: cannot convert float infinity to integer")
+    }
+    return ceil(x) + 0.0
+}
+
+#| NumPy's pairwise sum of f[lo], ..., f[lo + n - 1] (numpy/core/src/umath/loops_utils.h):
+#| below 8 terms left to right from 0; to 128, eight running sums combined as a tree, then
+#| the rest; above, the two halves (the first a multiple of 8 long) summed apart.
+def py_pw(f: Arr, lo, n) {
+    if n < 8 {
+        s = 0.0
+        for i to n {
+            s += f[lo + i]
+        }
+        return s
+    }
+    if n <= 128 {
+        r = zeros(8)
+        for j to 8 {
+            r[j] = f[lo + j]
+        }
+        i = 8
+        while i < n - n % 8 {
+            for j to 8 {
+                r[j] += f[lo + i + j]
+            }
+            i += 8
+        }
+        s = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+        while i < n {
+            s += f[lo + i]
+            i += 1
+        }
+        return s
+    }
+    n2 = floor(n / 2)
+    n2 = n2 - n2 % 8
+    return py_pw(f, lo, n2) + py_pw(f, lo + n2, n - n2)
+}
+
+#| NumPy's sum of f[lo], ..., f[lo + n - 1] along one axis: from 0.0, a pairwise sum of each
+#| block of NumPy's buffer size (8192 entries), added in order.
+def py_blk(f: Arr, lo, n) {
+    bufsize = 8192
+    s = 0.0
+    b = 0
+    while b < n {
+        s = s + py_pw(f, lo + b, min(bufsize, n - b))
+        b += bufsize
+    }
+    return s
+}
+
+#| np.sum(a), a.sum() of a float array: NumPy's sum over the entries in row-major order (py_blk).
+def py_npsum(a: Arr) {
+    f = py_flat(a)
+    return py_blk(f, 0, len(f))
+}
+
+#| np.max(a): NaN if any entry is NaN, else the largest (+0 over -0).
+def py_npmax(a: Arr) {
+    if any(a != a) {
+        return 0.0 / 0.0
+    }
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        m = py_zmax2(m, f[i])
+    }
+    return m
+}
+
+#| np.min(a): NaN if any entry is NaN, else the smallest (-0 under +0).
+def py_npmin(a: Arr) {
+    if any(a != a) {
+        return 0.0 / 0.0
+    }
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        m = py_zmin2(m, f[i])
+    }
+    return m
+}
+
+#| Python's max over a sequence: the first entry, replaced by each later one that is greater
+#| (so a NaN first stays, a NaN later is skipped, and of -0.0 and 0.0 the first wins).
+def py_bmax(a: Arr) {
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        if f[i] > m {
+            m = f[i]
+        }
+    }
+    return m
+}
+
+#| Python's min over a sequence (the first of equals wins).
+def py_bmin(a: Arr) {
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        if f[i] < m {
+            m = f[i]
+        }
+    }
+    return m
+}
+
+#| np.isclose(a, b, rtol, atol) of two numbers: |a - b| <= atol + rtol |b| when both are
+#| finite, a == b otherwise (a NaN is never close).
+def py_npisclose(a, b, rtol, atol) {
+    if abs(a) < 1.0 / 0.0 and abs(b) < 1.0 / 0.0 {
+        return abs(a - b) <= atol + rtol * abs(b)
+    }
+    return a == b
+}
+
+#| np.allclose(a, b, rtol, atol) of two arrays of one shape: np.isclose entry by entry.
+def py_allclose(a: Arr, b: Arr, rtol, atol) {
+    fa = py_flat(a)
+    fb = py_flat(b)
+    if len(fa) != len(fb) {
+        stop("py2viv: np.allclose of two arrays of different sizes (NumPy broadcasts them)")
+    }
+    for i to len(fa) {
+        if not py_npisclose(fa[i], fb[i], rtol, atol) {
+            return false
+        }
+    }
+    return true
+}
+
+#| np.maximum(a, y) of an array and a number: NaN where either is.
+def py_npmaxs(a: Arr, y) {
+    b = a * 0.0
+    fill(b, y)
+    return py_npmaxv(a, b)
+}
+
+#| np.minimum(a, y) of an array and a number: NaN where either is.
+def py_npmins(a: Arr, y) {
+    b = a * 0.0
+    fill(b, y)
+    return py_npminv(a, b)
+}
+
+#| np.linspace(start, stop, num), as NumPy 1.24 computes it: entry k is k * step + start with
+#| step = (stop - start) / (num - 1), and the last entry is stop itself.
+def py_linspace(start, stop_, num) {
+    if num < 0 {
+        stop("py2viv: np.linspace of a negative count (NumPy raises ValueError)")
+    }
+    y = zeros(num)
+    if num == 0 {
+        return y
+    }
+    if num == 1 {
+        y[0] = start
+        return y
+    }
+    step = (stop_ - start) / (num - 1)
+    for k to num {
+        y[k] = k * step + start
+    }
+    y[num - 1] = stop_
+    return y
+}
+
+#| Every entry of a real array set to v (np.full_like: the sign of a zero kept); returns it.
+def py_fillin(a: Arr, v) {
+    fill(a, v)
+    return a
+}
+
+#| hypot(x, y): sqrt(x*x + y*y) where the squares neither overflow nor underflow, scaled by
+#| the larger where they would; an infinity wins over a NaN, as C's hypot.
+def py_hypot(x, y) {
+    ax = abs(x)
+    ay = abs(y)
+    if ax == 1.0 / 0.0 or ay == 1.0 / 0.0 {
+        return 1.0 / 0.0
+    }
+    if ax != ax or ay != ay {
+        return ax + ay
+    }
+    s = ax * ax + ay * ay
+    if s < 1.0 / 0.0 and s >= 2.2250738585072014e-308 {
+        return sqrt(s)
+    }
+    m = max(ax, ay)
+    if m == 0 {
+        return 0.0
+    }
+    r = min(ax, ay) / m
+    return m * sqrt(1.0 + r * r)
+}
+
+#| np.sign of an array: -1, 0 or 1 per entry, and NaN where the entry is NaN.
+def py_signs(a: Arr) {
+    return where(a != a, a, (a > 0.0) - (a < 0.0))
+}
+
+#| The larger of two numbers that are not NaN, +0 over -0 (NumPy's rule; Viv's max of two
+#| zeros differs between engines).
+def py_zmax2(a, b) {
+    if a > b {
+        return a
+    }
+    if b > a {
+        return b
+    }
+    if a == 0 {
+        return a + b
+    }
+    return a
+}
+
+#| The smaller of two numbers that are not NaN, -0 under +0.
+def py_zmin2(a, b) {
+    if a < b {
+        return a
+    }
+    if b < a {
+        return b
+    }
+    if a == 0 {
+        return -1.0 * ((-1.0 * a) + (-1.0 * b))
+    }
+    return a
+}
+
+#| np.maximum of two arrays of one shape: NaN where either is, +0 over -0.
+def py_npmaxv(a: Arr, b: Arr) {
+    m = where(a > b, a, where(b > a, b, where(a == 0.0, a + b, a)))
+    return where(a != a, a, where(b != b, b, m))
+}
+
+#| np.minimum of two arrays of one shape: NaN where either is, -0 under +0.
+def py_npminv(a: Arr, b: Arr) {
+    m = where(a < b, a, where(b < a, b, where(a == 0.0, -1.0 * ((-1.0 * a) + (-1.0 * b)), a)))
+    return where(a != a, a, where(b != b, b, m))
+}
+
+#| np.clip(a, lo, hi) of an array and two numbers, entry by entry as py_clip.
+def py_clipv(a: Arr, lo, hi) {
+    m = a * 1.0
+    if lo == lo {
+        L = a * 0.0
+        fill(L, lo)
+        m = where(a != a, a, where(a > L, a, L))
+    }
+    r = m
+    if hi == hi {
+        H = a * 0.0
+        fill(H, hi)
+        r = where(m != m, m, where(m < H, m, H))
+    }
+    return r
+}
+
+#| math.erf(x): 1 and -1 at the infinities (Viv's erf gives NaN there).
+def py_merf(x) {
+    if x == 1.0 / 0.0 {
+        return 1.0
+    }
+    if x == -1.0 / 0.0 {
+        return -1.0
+    }
+    return erf(x)
+}
+
+#| a ^ y of an array: through this def, whose parameter is typed an array (Viv types `a ^ y`
+#| of an array a def returned as a number).
+def py_apow(a: Arr, y) {
+    return a ^ y
+}
+
+#| A @ B of two matrices, the shapes checked (Viv's compiled engines do not check them).
+def py_mm(A: Arr, B: Arr) {
+    if shape(A)[1] != shape(B)[0] {
+        stop("py2viv: a matrix product of shapes that do not align (NumPy raises ValueError)")
+    }
+    return A @ B
+}
+
+#| A @ v of a matrix and a vector, the shapes checked.
+def py_mv(A: Arr, v: Arr) {
+    if shape(A)[1] != len(v) {
+        stop("py2viv: a matrix product of shapes that do not align (NumPy raises ValueError)")
+    }
+    return A @ v
+}
+
+#| sum(u * v) of two real vectors, the lengths checked (Viv's compiled engines do not check
+#| them).
+def py_vdot(u: Arr, v: Arr) {
+    if len(u) != len(v) {
+        stop("py2viv: a dot product of vectors of different lengths (NumPy raises ValueError)")
+    }
+    return sum(u * v)
+}
+
+#| The shape NumPy broadcasts two shapes da and db to (aligned at the last axis, a length 1
+#| stretched); the run stops where NumPy raises ValueError.
+def py_bdims(da: Arr, db: Arr) {
+    n = len(da)
+    if len(db) > n {
+        n = len(db)
+    }
+    e = zeros(n)
+    for i to n {
+        x = 1
+        y = 1
+        if i >= n - len(da) {
+            x = da[i - n + len(da)]
+        }
+        if i >= n - len(db) {
+            y = db[i - n + len(db)]
+        }
+        if x == y or y == 1 {
+            e[i] = x
+        }
+        else {
+            if x == 1 {
+                e[i] = y
+            }
+            else {
+                stop("ValueError: operands could not be broadcast together with shapes")
+            }
+        }
+    }
+    return e
+}
+
+#| The flat indices, in row-major order of the shape e, of the entries of an array of shape d
+#| that broadcasting to e reads (a length 1 of d is read again along that axis of e).
+def py_bidx(d: Arr, e: Arr) {
+    n = len(e)
+    m = len(d)
+    st = zeros(n)
+    s = 1
+    for k to m {
+        j = m - 1 - k
+        if d[j] != 1 {
+            st[j + n - m] = s
+        }
+        s = s * d[j]
+    }
+    idx = zeros(1)
+    for i to n {
+        w = e[i]
+        nxt = zeros(len(idx) * w)
+        for p to len(idx) {
+            for c to w {
+                nxt[p * w + c] = idx[p] + c * st[i]
+            }
+        }
+        idx = nxt
+    }
+    return idx
+}
+
+#| a broadcast to the shape e (a shape py_bdims gave for a and another array): a itself when
+#| it has that shape, else a new array whose entries are copies of a's.
+def py_bto(a: Arr, e: Arr) {
+    d = shape(a)
+    if len(d) == len(e) {
+        if all(d == e) {
+            return a
+        }
+    }
+    return py_shaped(take(a, py_bidx(d, e)), e)
+}
+
+#| np.where(m, x, y) of three arrays, broadcast together (a number is passed as a vector of
+#| one entry, which broadcasts to any shape).
+def py_bwhere(m: Arr, x: Arr, y: Arr) {
+    e = py_bdims(py_bdims(shape(m), shape(x)), shape(y))
+    return where(py_bto(m, e), py_bto(x, e), py_bto(y, e))
+}
+
+#| np.allclose(a, b, rtol, atol) of two arrays, broadcast.
+def py_ballclose(a: Arr, b: Arr, rtol, atol) {
+    e = py_bdims(shape(a), shape(b))
+    return py_allclose(py_bto(a, e), py_bto(b, e), rtol, atol)
+}
+
+#| The entries of f, row-major, as an array of shape e (a vector of 1 to 4 lengths).
+def py_shaped(f: Arr, e: Arr) {
+    if len(e) == 1 {
+        return f
+    }
+    if len(e) == 2 {
+        z = zeros(e[0], e[1])
+    }
+    else {
+        if len(e) == 3 {
+            z = zeros(e[0], e[1], e[2])
+        }
+        else {
+            z = zeros(e[0], e[1], e[2], e[3])
+        }
+    }
+    put(z, py_iota(numel(z)), f)
+    return z
+}
+
+# Every NumPy and math function in py2viv's mapping (SUBSET.md), called once and printed, so
+# diff.py checks each against NumPy in three engines. The calling-convention adapters (sort,
+# fft, solve, cholesky, inv, eigh, eigvalsh) are in adapters.py.
+# 
+# Viv's libm is its own (lang/viv/src/vmath), not the platform's, and its sum runs left to
+# right where NumPy's is pairwise, so agreement is to rounding.
+# # py2viv: rtol=1e-15 atol=0
+x = py_linspace(-1.5, 2.0, 8)
+p = py_linspace(0.1, 3.0, 8)
+M = [[1.0, 2.0, -0.5], [0.25, -3.0, 4.0], [2.0, 0.5, 1.5]]
+v = [3.0, -1.0, 2.5]
+w = [0.5, 2.0, -1.0]
+print("zeros", fmt(zeros(3)), fmt(zeros(2, 2)))
+print("ones full", fmt(zeros(3) + 1.0), fmt(py_full(3, 2.5)), fmt(py_full2(2, 2, -1.0)))
+print("arange", fmt(py_arange(0, 5, 1), "d"), fmt(py_arange(1.0, 2.0, 0.25)), fmt(py_arange(10, 0, -3), "d"))
+print("linspace", fmt(x))
+print("eye", fmt(py_eye(3, 0)), fmt(py_eye(3, 1)), fmt(py_eye(2, 0)))
+print("like", fmt(zeros(len(M), shape(M)[1])), fmt(zeros(len(v)) + 1.0), fmt(py_fillin(zeros(len(v)), 4.0)))
+print("diag", fmt(py_diag(v)), fmt(py_diagonal(M)))
+print("trace outer", fmt(py_trace(M)), fmt(py_outer(v, w)))
+print("cumsum prod", fmt(py_cumsum(x)), fmt(py_prod(v)))
+print("argmax argmin", fmt((py_argmax(x)) + 0.0, "d"), fmt((py_argmin(M)) + 0.0, "d"))
+print("sum mean std var", fmt(py_npsum(M)), fmt(py_mean(x)), fmt(py_std(x)), fmt(py_var(x)))
+print("max min", fmt(py_npmax(M)), fmt(py_npmin(x)), fmt(py_npmax(v)), fmt(py_npmin(v)), fmt(py_bmax(v)), fmt(py_bmin(w)))
+print("dot matmul", fmt(py_vdot(v, w)), fmt(py_mv(M, v)), fmt(M @ M), fmt(v @ M), fmt(py_mm(M, M)))
+print("transpose", fmt(transpose(M)), fmt(transpose(M)))
+print("elementwise", fmt(sqrt(p)), fmt(exp(x)), fmt(log(p)), fmt(sin(x)), fmt(cos(x)), fmt(tan(x)))
+print("more", fmt(tanh(x)), fmt(sinh(x)), fmt(cosh(x)), fmt(atan(x)), fmt(abs(x)), fmt(floor(x)), fmt(ceil(x)))
+print("inverse trig", fmt(asin(x / 2.0)), fmt(acos(x / 2.0)))
+print("maximum minimum", fmt(py_npmaxs(x, 0.0)), fmt(py_npmins(x, w[0])), fmt(py_clipv(x, -1.0, 1.0)))
+print("sign where", fmt(py_signs(x)), fmt(py_bwhere(x > 0.0, x, -1.0 * x)), fmt(x * x))
+py_v1 = all(p > 0.0)
+py_v2 = any(x > 1.9)
+py_v3 = all(x > 0.0)
+if py_v1 {
+    if py_v2 {
+        if py_v3 {
+            print("all any True True True")
+        }
+        else {
+            print("all any True True False")
+        }
+    }
+    else {
+        if py_v3 {
+            print("all any True False True")
+        }
+        else {
+            print("all any True False False")
+        }
+    }
+}
+else {
+    if py_v2 {
+        if py_v3 {
+            print("all any False True True")
+        }
+        else {
+            print("all any False True False")
+        }
+    }
+    else {
+        if py_v3 {
+            print("all any False False True")
+        }
+        else {
+            print("all any False False False")
+        }
+    }
+}
+print("power", fmt(py_apow(p, 1.5)), fmt(py_apow(p, 2.0)), fmt(py_fpow(2.0, 0.5)))
+print("norm", fmt(sqrt(sum(v * v))), fmt(sqrt(sum(M * M))))
+print("roll diff cross", fmt(roll(x, 2)), fmt(roll(x, -1)), fmt(py_diff(x)), fmt(py_cross(v, w)))
+py_v4 = py_npisclose(0.1 + 0.2, 0.3, 1e-05, 1e-08)
+py_v5 = py_ballclose(v, v + 1e-12, 1e-05, 1e-08)
+py_v6 = x[0] != x[0]
+if py_v4 {
+    if py_v5 {
+        if py_v6 {
+            print("isclose allclose True True True")
+        }
+        else {
+            print("isclose allclose True True False")
+        }
+    }
+    else {
+        if py_v6 {
+            print("isclose allclose True False True")
+        }
+        else {
+            print("isclose allclose True False False")
+        }
+    }
+}
+else {
+    if py_v5 {
+        if py_v6 {
+            print("isclose allclose False True True")
+        }
+        else {
+            print("isclose allclose False True False")
+        }
+    }
+    else {
+        if py_v6 {
+            print("isclose allclose False False True")
+        }
+        else {
+            print("isclose allclose False False False")
+        }
+    }
+}
+print("math", fmt(py_msqrt(2.0)), fmt(py_mexp(1.5)), fmt(py_mlog(10.0)), fmt(py_div_f(py_mlog(8.0), py_mlog(2.0))), fmt(py_mlog(1000.0) / log(10.0)), fmt(py_mlog(0.125) / log(2.0)))
+print("math trig", fmt(sin(py_mtrig(0.5))), fmt(cos(py_mtrig(0.5))), fmt(tan(py_mtrig(0.5))), fmt(py_masin(0.5)), fmt(py_macos(0.5)), fmt(atan(0.5)), fmt(atan2(1.0, -2.0)))
+py_x7 = 0.5
+py_x8 = 0.5
+print("math hyp", fmt(py_mhyp(sinh(py_x7), py_x7)), fmt(py_mhyp(cosh(py_x8), py_x8)), fmt(tanh(0.5)), fmt(py_merf(0.5)), fmt(py_mgamma(4.5)))
+print("math misc", fmt((py_mfloor(-2.5)) + 0.0, "d"), fmt((py_mceil(-2.5)) + 0.0, "d"), fmt(abs(-3.0)), fmt(py_hypot(3.0, 4.0)), fmt(py_mfmod(-7.0, 3.0)), fmt(3.141592653589793), fmt(2.718281828459045))
+print("python", fmt(abs(-2.5)), fmt((py_round(2.5)) + 0.0, "d"), fmt((py_round(-3.5)) + 0.0, "d"), fmt((py_trunc(-7.9)) + 0.0, "d"), fmt(3), fmt(py_fpow(2.0, 10)), fmt((py_mod_i(-7, 3)) + 0.0, "d"), fmt((py_floordiv_i(-7, 2)) + 0.0, "d"), fmt(py_mod_f(7.5, -2.0)))
+print("sorted copy", fmt(py_sort([3.0, 1.0, 2.0])), fmt(py_copy(v)), fmt(py_copy(v)))
+print("methods", fmt(py_npsum(M)), fmt(py_npmax(M)), fmt(py_npmin(M)), fmt(py_mean(M)), fmt(py_std(x)), fmt(py_vdot(v, w)), fmt((shape(M)[1]) + 0.0, "d"), fmt((numel(M)) + 0.0, "d"), fmt(2 + 0.0, "d"))
+py_v9 = abs(1.0) < (1.0 / 0.0)
+py_v10 = abs((1.0 / 0.0)) == (1.0 / 0.0)
+py_v11 = abs(x[0]) == (1.0 / 0.0)
+if py_v9 {
+    if py_v10 {
+        if py_v11 {
+            print("isfinite isinf True True True")
+        }
+        else {
+            print("isfinite isinf True True False")
+        }
+    }
+    else {
+        if py_v11 {
+            print("isfinite isinf True False True")
+        }
+        else {
+            print("isfinite isinf True False False")
+        }
+    }
+}
+else {
+    if py_v10 {
+        if py_v11 {
+            print("isfinite isinf False True True")
+        }
+        else {
+            print("isfinite isinf False True False")
+        }
+    }
+    else {
+        if py_v11 {
+            print("isfinite isinf False False True")
+        }
+        else {
+            print("isfinite isinf False False False")
+        }
+    }
+}
+print("vector % //", fmt(py_mod(x + 0.5, 1.0, false) - 0.5), fmt(py_floordiv(x, 0.75, false)))
+py_l12 = []
+for py_i13 to 3 {
+    py_l14 = zeros(3)
+    for py_j15 to 3 {
+        py_l14[py_j15] = py_div_f(1.0, py_int(py_int(1 + py_i13) + py_j15)) + (1.0 if py_i13 == py_j15 else 0.0)
+    }
+    if len(py_l12) > 0 {
+        if shape(py_l12)[1] != len(py_l14) {
+            stop("py2viv: a list of rows of different lengths; Viv's rows share one length")
+        }
+    }
+    py_l12 = append(py_l12, py_l14)
+}
+print("nested comprehension", fmt(py_l12))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

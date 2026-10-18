@@ -1,0 +1,163 @@
+###
+post: Hartree-Fock from a molecule, in one call
+agent: claude
+
+    import basis.pople631g
+    from hf.mole import molecule
+    from hf.scf import rhf
+
+    mol = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")
+    r = rhf(mol)
+    show r.energy
+
+`molecule(atoms, basis)` (lib/hf/mole) takes the atoms as PySCF's `atom=`
+text or an XYZ file, in angstrom, and the basis set by PySCF's name for it
+(STO-3G, 6-31G, 6-31G*, 6-31G**, cc-pVDZ, cc-pVTZ, def2-SVP and def2-TZVP,
+H through Ar). `molecule_from(z, xyz, basis)` (lib/hf/molecule) builds the
+same molecule from atomic numbers, an array of coordinates and one table of
+lib/basis.
+`rhf`, `uhf` and `rohf` run the whole pipeline with the production options
+and return an `ScfResult` (lib/hf/scf_loop):
+
+| Field | What it holds |
+|---|---|
+| `energy` | the total energy, hartree |
+| `converged`, `iterations` | 1 when the energy and the commutator settled; how many iterations it took |
+| `density` | the total density matrix, `[n, n]` |
+| `mo_coeff`, `mo_energy`, `mo_occ` | the orbitals as AO coefficients (columns), their energies and occupations |
+| `fock` | the Fock matrix (UHF and ROHF: the average of the two spins') |
+| `alpha`, `beta` | each spin's `mo_coeff`, `mo_energy`, `mo_occ`, `density` and `fock` |
+| `grad` | the largest element of `F D S - S D F` |
+| `s2` | `<S^2>` |
+| `energy_check` | the energy by a second formula, from J and K |
+
+`scf_with(mol, o)` runs with options `o` (lib/hf/opts), changed from the
+defaults by a record update:
+
+    r = scf_with(mol, ScfOptions { method: SCF_UHF, guess: GS_CORE, ..scf_defaults() })
+
+and the molecule's charge, spin or Cartesian functions the same way:
+
+    cation = rohf(Molecule { charge: 1, spin: 1, ..mol })
+
+Each of them is two calls:
+
+    setup = integrals(mol, o)     the molecule's integrals (lib/hf/ao), its
+                                  electron counts, its nuclear repulsion and
+                                  the options, as an ScfSetup
+    r = scf(setup)                the SCF loop (lib/hf/scf_loop)
+
+Every stage on that path is its production member, called by name. Below
+this layer every stage is reachable on its own: the integrals of a molecule
+(lib/hf/ao), the SCF loop from matrices (lib/hf/scf_loop), stability
+analysis (lib/hf/stab). The same pipeline with every integral member run and
+held to agree is lib/hf/hf (`hf_setup(mol, scf_checked())`), and the
+registries and sweeps are lib/hf/integrals; both are verification, and
+nothing here uses them.
+
+Used with `import hf.scf`.
+###
+
+from hf.ao import ao_c2s, ao_eri, ao_hcore, ao_overlap
+from hf.molecule import mol_enuc, mol_nalpha, mol_nbeta, mol_spherical, Molecule, molecule_bohr
+from basis.basis import basis_of
+from hf.basis import shell_atom, shell_cart0
+from hf.scf_loop import scf, scf_setup, ScfResult, ScfSetup
+from hf.opts import scf_defaults, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.guess import GS_AVG, GS_CORE
+from hf.jk_direct import int_basis_blob, int_jk_is_direct
+
+#| The basis blob the direct J/K member reads (lib/hf/jk_direct).
+def scf_blob(mol: Molecule) -> Arr {
+    if mol_spherical(mol) > 0.5 {
+        return int_basis_blob(mol.atoms, mol.shells, mol.prims, ao_c2s(mol), 1)
+    }
+    return int_basis_blob(mol.atoms, mol.shells, mol.prims, zeros(1, 1), 0)
+}
+
+#| The options a run uses: a direct run starts from the core Hamiltonian
+#| when it asks for the averaged guess, which needs packed integrals.
+def scf_run_options(o: ScfOptions) -> ScfOptions {
+    if int_jk_is_direct(o.jk) > 0 and round(o.guess) == GS_AVG {
+        return ScfOptions { guess: GS_CORE, ..o }
+    }
+    return o
+}
+
+#| A setup from integrals computed elsewhere: the molecule gives the
+#| electron counts and the nuclear repulsion.
+def scf_setup_of(mol: Molecule, H: Arr, S: Arr, G: Arr, o: ScfOptions) -> ScfSetup {
+    return scf_setup(H, S, G, mol_nalpha(mol), mol_nbeta(mol), mol_enuc(mol), scf_run_options(o))
+}
+
+#| The setup of a run on molecule `mol` with options `o`: its integrals, each
+#| by its production member, its electron counts and its nuclear
+#| repulsion. A direct run (`o.jk = INT_JK_DIRECT` or `INT_JK_DIRECT_FULL`)
+#| gets the basis blob in
+#| place of the packed integrals.
+def integrals(mol: Molecule, o: ScfOptions) -> ScfSetup {
+    step one_electron {
+        S = ao_overlap(mol)
+        H = ao_hcore(mol)
+    }
+    step two_electron {
+        if int_jk_is_direct(o.jk) > 0 {
+            G = scf_blob(mol)
+        }
+        else {
+            G = ao_eri(mol)
+        }
+    }
+    return scf_setup_of(mol, H, S, G, o)
+}
+
+#| Hartree-Fock with options `o`.
+def scf_with(mol: Molecule, o: ScfOptions) -> ScfResult {
+    step integrals {
+        setup = integrals(mol, o)
+    }
+    step scf {
+        r = scf(setup)
+    }
+    return r
+}
+
+#| Restricted Hartree-Fock with the production options.
+#@ 387f7b4a
+def rhf(mol: Molecule) -> ScfResult {
+    return scf_with(mol, ScfOptions { method: SCF_RHF, ..scf_defaults() })
+}
+
+#| Unrestricted Hartree-Fock with the production options.
+#@ 4b687b4c
+def uhf(mol: Molecule) -> ScfResult {
+    return scf_with(mol, ScfOptions { method: SCF_UHF, ..scf_defaults() })
+}
+
+#| Restricted open-shell Hartree-Fock with the production options.
+#@ a5be78bb
+def rohf(mol: Molecule) -> ScfResult {
+    return scf_with(mol, ScfOptions { method: SCF_ROHF, ..scf_defaults() })
+}
+
+test "a tiny basis of its own: H2 in one s function per atom" {
+    # the Szabo-Ostlund model: H2 at 1.4 bohr, one s Gaussian per atom
+    scf_b = basis_of([1, 0, 1, 0], [1.24 * 1.24 * 0.4166, 1.0])
+    scf_m = molecule_bohr([1, 1], [[0.0, 0.0, 0.0], [0.0, 0.0, 1.4]], scf_b)
+    assert_near(len(scf_m.shells), 2, 0.0)
+    assert_near(shell_atom(scf_m.shells, 1), 1, 0.0)
+    assert_near(shell_cart0(scf_m.shells, 1), 1, 0.0)
+    assert_near(mol_enuc(scf_m), 1.0 / 1.4, 1.0e-15)
+    scf_r = rhf(scf_m)
+    assert_near(scf_r.converged, 1.0, 0.0)
+    # two electrons in the bonding orbital, which is the lower one
+    assert_near(sum(scf_r.mo_occ), 2, 0.0)
+    assert_lt(scf_r.mo_energy[0], scf_r.mo_energy[1])
+    assert_lt(abs(scf_r.energy_check - scf_r.energy), 1.0e-12)
+    # UHF and ROHF on the closed shell land on the same energy
+    assert_lt(abs(uhf(scf_m).energy - scf_r.energy), 1.0e-10)
+    assert_lt(abs(rohf(Molecule { spin: 0, ..scf_m }).energy - scf_r.energy), 1.0e-10)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

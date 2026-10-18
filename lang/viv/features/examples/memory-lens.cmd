@@ -1,0 +1,1 @@
+view {} --lens memory

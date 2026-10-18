@@ -1,0 +1,204 @@
+###
+Reverse mode on array code, checked element by element against central
+differences.
+
+`fd_grad(f, x)` perturbs one entry of `x` at a time by +-h. With h = 1e-5 the
+truncation error is about h^2 |f'''| / 6, near 1e-11 here, and the rounding
+error about eps |f| / h, near 1e-10 for |f| < 10; so a gradient entry is
+checked to 1e-7 absolute, which leaves two orders of margin. Where an exact
+answer exists (a linear function, a sum), the check is exact or at rounding.
+###
+
+H = 1.0e-5
+FD_TOL = 1.0e-7
+
+#| The central-difference gradient of a def of one array, flattened.
+def fd_grad(f, x: Arr) {
+    g = zeros(numel(x))
+    for i to numel(x) {
+        at = [i]
+        xp = x + 0.0
+        xm = x + 0.0
+        put(xp, at, take(x, at) + H)
+        put(xm, at, take(x, at) - H)
+        g[i] = (f(xp) - f(xm)) / (2.0 * H)
+    }
+    return g
+}
+
+#| The largest difference between a gradient and its central difference.
+def fd_miss(g: Arr, fd: Arr) {
+    return max(abs(g - fd))
+}
+
+W = [[0.3, -1.2, 0.5], [0.8, 0.1, -0.7]]
+V = [0.4, -0.9, 1.3]
+IDX = [2.0, 0.0, 2.0, 1.0, 2.0]
+MASK = [1.0, 0.0, 1.0]
+TARGET_WEIGHTS = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+def elementwise(x: Arr) {
+    y = exp(x) * sin(x) + x / (2.0 + x * x) - 3.0 * x
+    return sum(tanh(y) * V) + sum(sqrt(x * x + 1.0))
+}
+
+def broadcast(x: Arr) {
+    s = sum(x * x)
+    return sum(s * x + s) / (1.0 + s)
+}
+
+def mat_vec(x: Arr) {
+    # W is 2x3, x is 3: W @ x is a 2-vector
+    return sum(tanh(W @ x))
+}
+
+def vec_mat(x: Arr) {
+    # x is 2, W is 2x3: x @ W is a 3-vector
+    return sum((x @ W) * V)
+}
+
+def mat_mat(x: Arr) {
+    # x is 3x2: W @ x is 2x2, then transpose and square
+    A = W @ x
+    B = transpose(A) @ A
+    return sum(B * B) / 100.0
+}
+
+def reductions(x: Arr) {
+    return max(x) * 2.0 - min(x) + sum(x) / numel(x)
+}
+
+def indexing(x: Arr) {
+    # reads with scatter-add adjoints, writes into a fresh array
+    y = zeros(len(x))
+    for i to len(x) {
+        y[i] = x[i] * x[len(x) - 1 - i]
+    }
+    y[0] = y[0] + x[1] * 3.0
+    return y[0] + 2.0 * y[1] + y[2] * y[2]
+}
+
+def gather(x: Arr) {
+    # take with an index that repeats: its adjoint collects every share
+    t = take(x, IDX)
+    return sum(t * t * [1.0, 2.0, 3.0, 4.0, 5.0])
+}
+
+def slabs(x: Arr) {
+    # x is 3x2; rows out and back in, last row first
+    rows = len(x)
+    A = zeros(rows, shape(x)[1])
+    for r to rows {
+        setslab(A, r, slab(x, rows - 1 - r) * (r + 1.0))
+    }
+    return sum(A * A * transpose(W))
+}
+
+def scatter(x: Arr) {
+    # put overwrites: the overwritten entries pass nothing back
+    A = zeros(len(TARGET_WEIGHTS))
+    put(A, [4.0, 1.0], x * x)
+    A[1] = A[1] * 3.0
+    return sum(A * TARGET_WEIGHTS)
+}
+
+def masked(x: Arr) {
+    # a ReLU by where, a mask by comparison, and abs
+    r = where(x > 0.0, x, 0.1 * x)
+    m = x * (x > 0.5)
+    return sum(r * r) + sum(m * V) + sum(abs(x - 0.2) * MASK)
+}
+
+def elementwise_max(x: Arr) {
+    return sum(max(x, V) * [1.0, 2.0, 3.0]) + sum(min(x * x, 0.5))
+}
+
+def lookup_mat(x: Arr) {
+    # a matrix built element by element from a vector, then multiplied
+    M = zeros(2, 2)
+    M[0, 0] = x[0]
+    M[0, 1] = x[1] * x[0]
+    M[1, 0] = sin(x[1])
+    M[1, 1] = 1.0
+    P = M @ M @ M
+    return P[0, 1] + P[1, 0] * 2.0
+}
+
+test "elementwise math, and a number broadcast over an array" {
+    x = [0.3, -0.8, 1.1]
+    assert_lt(fd_miss(grad(elementwise, x), fd_grad(elementwise, x)), FD_TOL)
+    assert_lt(fd_miss(grad(broadcast, x), fd_grad(broadcast, x)), FD_TOL)
+}
+
+test "@ in its three shapes: matrix-vector, vector-matrix, matrix-matrix" {
+    x = [0.3, -0.8, 1.1]
+    assert_lt(fd_miss(grad(mat_vec, x), fd_grad(mat_vec, x)), FD_TOL)
+    # vec_mat is linear in x: its gradient is W @ V, to rounding
+    x2 = [0.7, -0.2]
+    assert_lt(max(abs(grad(vec_mat, x2) - W @ V)), 1.0e-15)
+    X = [[0.2, -0.5], [1.0, 0.3], [-0.4, 0.9]]
+    g = grad(mat_mat, X)
+    fd = fd_grad(mat_mat, X)
+    assert_lt(fd_miss(take(g, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), fd), FD_TOL)
+}
+
+test "max, min and sum of an array" {
+    x = [0.3, -0.8, 1.1, 0.4]
+    g = grad(reductions, x)
+    assert_allclose(g, [0.25, -0.75, 2.25, 0.25], 1.0e-15)
+}
+
+test "max of an array shares the gradient evenly on a tie, as torch.amax" {
+    x = [1.1, 0.3, 1.1, -0.8]
+    g = grad(reductions, x)
+    assert_allclose(g, [1.25, 0.25, 1.25, -0.75], 1.0e-15)
+}
+
+test "indexing: reads scatter back, writes restore" {
+    x = [0.3, -0.8, 1.1, 0.6]
+    assert_lt(fd_miss(grad(indexing, x), fd_grad(indexing, x)), FD_TOL)
+}
+
+test "take with a repeated index collects every share" {
+    x = [0.3, -0.8, 1.1]
+    g = grad(gather, x)
+    # index 2 is taken three times, at positions 0, 2 and 4
+    assert_near(g[2], 2.0 * x[2] * (1.0 + 3.0 + 5.0), 1.0e-14)
+    assert_lt(fd_miss(g, fd_grad(gather, x)), FD_TOL)
+}
+
+test "slab and setslab" {
+    X = [[0.2, -0.5], [1.0, 0.3], [-0.4, 0.9]]
+    g = grad(slabs, X)
+    assert_lt(fd_miss(take(g, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), fd_grad(slabs, X)), FD_TOL)
+}
+
+test "put, then a write over what it put" {
+    x = [0.7, -1.3]
+    g = grad(scatter, x)
+    # A[4] = x0^2 carries weight 5; A[1] = 3 x1^2 carries weight 2
+    assert_near(g[0], 5.0 * 2.0 * x[0], 1.0e-15)
+    assert_near(g[1], 2.0 * 3.0 * 2.0 * x[1], 1.0e-14)
+}
+
+test "where, masks from comparisons, and abs" {
+    x = [0.3, -0.8, 1.1]
+    assert_lt(fd_miss(grad(masked, x), fd_grad(masked, x)), FD_TOL)
+}
+
+test "max(a, b) and min(a, b) elementwise, a tie splitting in half" {
+    x = [0.3, -0.9, 1.5]
+    g = grad(elementwise_max, x)
+    # entry 0: x < V, max passes nothing; x^2 < 0.5 passes 2x
+    # entry 1: x == V, a tie: half of the weight 2; x^2 > 0.5 passes nothing
+    # entry 2: x > V, max passes the weight 3; x^2 > 0.5 passes nothing
+    assert_allclose(g, [0.6, 1.0, 3.0], 1.0e-15)
+}
+
+test "a matrix built from entries, then cubed" {
+    x = [0.6, -0.4]
+    assert_lt(fd_miss(grad(lookup_mat, x), fd_grad(lookup_mat, x)), FD_TOL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

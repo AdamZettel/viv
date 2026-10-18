@@ -1,0 +1,97 @@
+#! pde The heat equation
+#! equation u_t = \kappa\,u_{xx}
+#! kind parabolic
+#! method Crank-Nicolson: implicit, second order in space and time, stable at any time step
+#! checks the exact decay of a sine mode; the measured order of accuracy; and that the explicit scheme blows up exactly where theory says it must
+#! | A rod with its ends held at zero and a half-sine of heat along it. Diffusion damps a mode
+#! | $\sin(m\pi x)$ at the rate $\kappa (m\pi)^2$, so the exact solution is
+#! | $u(x,t) = e^{-\kappa\pi^2 t}\sin(\pi x)$ -- one number to get right, at every point.
+#! |
+#! | The obvious scheme, forward in time and centered in space, is stable only while
+#! | $r = \kappa\,\Delta t/\Delta x^2 \le \tfrac12$: halve the grid spacing and the time step must
+#! | fall by four. Crank-Nicolson averages the space derivative between the old and new time
+#! | levels. That costs a tridiagonal solve per step and buys unconditional stability and second
+#! | order in time. `tridiag_solve` is the Thomas algorithm.
+
+pi = 3.141592653589793
+KAPPA = 1.0
+
+#| One Crank-Nicolson run on n interior points to time t_end; returns the L2 error
+#| against the exact solution.
+#|| (I - r/2 D) u_new = (I + r/2 D) u_old, with D the second-difference stencil [1, -2, 1].
+def cn_error(n, steps, t_end) {
+    h = 1.0 / (n + 1.0)
+    dt = t_end / steps
+    r = KAPPA * dt / (h * h)
+    x = linspace(h, 1.0 - h, n)
+    u = sin(pi * x)
+    lo = zeros(n) - 0.5 * r
+    di = zeros(n) + (1.0 + r)
+    up = zeros(n) - 0.5 * r
+    for s to steps {
+        # the right-hand side: (1 - r) u + r/2 (left + right neighbors), ends held at zero
+        rhs = (1.0 - r) * u
+        for i to n {
+            if i > 0.0 { rhs[i] = rhs[i] + 0.5 * r * u[i - 1.0] }
+            if i < n - 1.0 { rhs[i] = rhs[i] + 0.5 * r * u[i + 1.0] }
+        }
+        u = tridiag_solve(lo, di, up, rhs)
+    }
+    d = u - exp(-KAPPA * pi * pi * t_end) * sin(pi * x)
+    return sqrt(sum(d * d) * h)
+}
+
+#| The explicit scheme's amplification of the most oscillatory mode after `steps` steps.
+#|| That mode is multiplied by 1 - 4r each step: it decays for r < 1/2 and grows for r > 1/2.
+def ftcs_growth(n, r, steps) {
+    u = zeros(n)
+    for i to n {
+        u[i] = 1.0 - 2.0 * mod(i, 2.0)
+    }
+    start = take the norm of u
+    for s to steps {
+        v = (1.0 - 2.0 * r) * u
+        for i to n {
+            if i > 0.0 { v[i] = v[i] + r * u[i - 1.0] }
+            if i < n - 1.0 { v[i] = v[i] + r * u[i + 1.0] }
+        }
+        u = v
+    }
+    return (take the norm of u) / start
+}
+
+T_END = 0.1
+e1 = cn_error(20.0, 20.0, T_END)
+e2 = cn_error(41.0, 40.0, T_END)
+order = log(e1 / e2) / log(2.0)
+show e1
+show e2
+show order
+stable = ftcs_growth(30.0, 0.45, 60.0)
+unstable = ftcs_growth(30.0, 0.55, 60.0)
+show stable
+show unstable
+
+# the picture: the rod cooling
+N = 60
+H = 1.0 / (N + 1.0)
+X = linspace(H, 1.0 - H, N)
+figure("A half-sine of heat, cooling", "x", "u(x, t)")
+plot(X, sin(pi * X), "t = 0")
+plot(X, exp(-pi * pi * 0.05) * sin(pi * X), "t = 0.05")
+plot(X, exp(-pi * pi * 0.1) * sin(pi * X), "t = 0.1")
+plot(X, exp(-pi * pi * 0.2) * sin(pi * X), "t = 0.2")
+
+test "Crank-Nicolson matches the exact decay exp(-kappa pi^2 t) sin(pi x)" {
+    assert_lt(e2, 2.0e-4)
+}
+test "it is second order: halving h and dt together cuts the error by four" {
+    assert_near(order, 2.0, 0.1)
+}
+test "the explicit scheme is stable at r = 0.45 and unstable at r = 0.55, either side of 1/2" {
+    assert_lt(stable, 1.0)
+    assert_gt(unstable, 100.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

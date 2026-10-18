@@ -1,0 +1,42 @@
+# @@ imports
+# nothing to import: @ and eig_sym are built in
+
+# @@ a symmetric matrix
+A = [[4.0, 1.0, 0.0],
+     [1.0, 3.0, 1.0],
+     [0.0, 1.0, 2.0]]
+
+# @@ power iteration with the Rayleigh quotient
+def power_iteration(A, iters) {
+    n = shape(A)[0]
+    v = zeros(n) + 1.0
+    lam = 0.0
+    for k to iters {
+        w = A @ v
+        v = w / sqrt(sum(w * w))
+        lam = sum(v * (A @ v))
+    }
+    return lam, v
+}
+
+ITERS = 60
+lam, v = power_iteration(A, ITERS)
+print(f"largest eigenvalue {lam:.10f}")
+print("eigenvector", " ".join(f"{x:.6f}" for x in v))
+
+# @@ against the library eigensolver
+n = shape(A)[0]
+vals = zeros(n)
+vecs = zeros(n, n)
+eig_sym(A, vals, vecs)
+print("all eigenvalues", " ".join(f"{x:.10f}" for x in vals))
+AGREE = 1e-12
+print("agrees with eigh to 1e-12:", "yes" if abs(lam - vals[-1]) < AGREE else "no")
+
+# @@ checks
+test "eigenpair" {
+    assert_allclose(A @ v, lam * v, 1e-8)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

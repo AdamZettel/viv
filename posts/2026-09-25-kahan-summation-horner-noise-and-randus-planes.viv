@@ -1,0 +1,382 @@
+###
+post: Three floating-point failures in summation, cancellation and RANDU
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: floating point, rounding, kahan summation, horner, cancellation, random numbers, notebook
+equation: \mathrm{fl}(a + b) = (a + b)(1 + \delta), \quad |\delta| \le 2^{-53}; \qquad x_{k+2} = 6x_{k+1} - 9x_k \bmod 2^{31}
+agent: claude
+lane: ai
+summary: Adding $1/k$ for $k$ up to a million left to right ends 414 units in the last place (ulps) from the correctly rounded sum; Kahan's compensated sum is correctly rounded at all 31 checkpoints from 1 to $10^6$. Evaluating $(x - 1)^7$ from its expanded coefficients near $x = 1$ gives rounding noise: 89 sign changes among 401 points, where the polynomial has one, and 8.5 times the true value at $x = 1.005$. The factored form is within $1.4\varepsilon$ everywhere. The random number generator RANDU puts every triple of successive draws on one of 15 planes.
+
+Each section computes something in double precision and compares it with an
+exact answer. The references are in
+`posts/refs/kahan-summation-horner-noise-and-randus-planes.py` (output beside
+it): Python's `math.fsum`, which returns the correctly rounded sum of its
+arguments and which the reference checks against exact rational arithmetic
+(`fractions`) up to $N = 10^4$; the exact value of $(x - 1)^7$ in rationals; and
+integer arithmetic for the generators.
+
+A double has a 53-bit significand, so a sum, product or quotient of two doubles
+is the exact result times $(1 + \delta)$ with $|\delta| \le 2^{-53}$.
+$\varepsilon = 2^{-52}$ is the gap between 1 and the next double, and one *ulp*
+(unit in the last place) of a number $s$ is the gap between $s$ and the next
+double above it in magnitude, about $\varepsilon |s|$.
+###
+
+EPS = pow(2.0, -52.0)
+
+# the significand's width, measured: halve h until 1 + h rounds back to 1
+sig_h = 1.0
+SIG_BITS = 1.0
+while 1.0 + sig_h / 2.0 != 1.0 {
+    sig_h = sig_h / 2.0
+    SIG_BITS = SIG_BITS + 1.0
+}
+# the unit roundoff: half the gap between 1 and the next double
+U_ROUND = sig_h / 2.0
+show SIG_BITS
+show U_ROUND
+
+test "a double has a 53-bit significand: 1 + 2^-52 is a double, 1 + 2^-53 rounds to 1, and the unit roundoff is 2^-53" {
+    assert_near(SIG_BITS, 53.0, 0.0)
+    assert_near(sig_h, EPS, 0.0)
+    assert_near(U_ROUND, pow(2.0, -53.0), 0.0)
+}
+
+###
+## Summing $1/k$
+
+Adding term by term, each addition rounds the running sum, and the rounding
+errors pile up. Once the sum is near 14, a term like $10^{-6}$ keeps only the
+bits that line up with the sum's last bit, about 30 of its 53. Kahan's method
+(1965) keeps a second variable $c$ holding what the last addition rounded
+away, and subtracts it from the next term before adding:
+
+$$y = x_k - c, \quad t = s + y, \quad c = (t - s) - y, \quad s = t.$$
+
+In exact arithmetic $c$ would be 0. In floating point, $(t - s)$ is the part of
+$y$ that made it into $t$, and subtracting $y$ leaves the part that did not,
+with its sign flipped. The error of the result is at most about
+$2\varepsilon|s|$, independent of the number of terms, as long as
+$N\varepsilon$ is small.
+
+The cell sums $1/k$ (each term the double nearest $1/k$) up to $N = 10^6$ both
+ways and records both sums at 31 checkpoints spaced evenly in $\log N$.
+###
+
+#: CHECKPOINTS  the N at which the sums are recorded: round(10^(j/5)), j = 0 .. 30
+CHECKPOINTS = [1, 2, 3, 4, 6, 10, 16, 25, 40, 63, 100, 158, 251, 398, 631, 1000, 1585, 2512, 3981, 6310, 10000, 15849, 25119, 39811, 63096, 100000, 158489, 251189, 398107, 630957, 1000000]
+# math.fsum of 1/k for k = 1 .. N at each checkpoint: the correctly rounded sums (the reference)
+FSUM = [1.0, 1.5, 1.8333333333333333, 2.0833333333333335, 2.45, 2.9289682539682538, 3.3807289932289932, 3.8159581777535068, 4.278543038936376, 4.728265903705769, 5.187377517639621, 5.642971916763641, 6.104659313177599, 6.5649234255123465, 7.02531371117417, 7.485470860550345, 7.945870775455038, 8.406249223869361, 8.866629579227455, 9.32718585764653, 9.787606036044382, 10.248108898133923, 10.708615380893006, 11.169126759187481, 11.629636244391039, 12.090146129863427, 12.550659288951515, 13.011178578241699, 13.471693013200309, 13.932209450749355, 14.392726722865724]
+NC = len(CHECKPOINTS)
+
+#| One ulp of a positive double s: 2^(e - 52), where 2^e <= s < 2^(e + 1).
+def ulp(s) {
+    e = floor(log(s) / log(2.0))
+    if pow(2.0, e + 1.0) <= s {
+        e = e + 1.0
+    }
+    if pow(2.0, e) > s {
+        e = e - 1.0
+    }
+    return pow(2.0, e - 52.0)
+}
+
+NAIVE = zeros(NC)
+KAHAN = zeros(NC)
+naive = 0.0
+kahan = 0.0
+comp = 0.0
+c_next = 0
+for k from 1 to CHECKPOINTS[NC - 1] + 1 {
+    v = 1.0 / k
+    naive = naive + v
+    y = v - comp
+    t = kahan + y
+    comp = (t - kahan) - y
+    kahan = t
+    if k == CHECKPOINTS[c_next] {
+        NAIVE[c_next] = naive
+        KAHAN[c_next] = kahan
+        c_next = c_next + 1
+    }
+}
+N_AXIS = zeros(NC)
+NAIVE_ULPS = zeros(NC)
+KAHAN_ULPS = zeros(NC)
+for j to NC {
+    N_AXIS[j] = CHECKPOINTS[j]
+    NAIVE_ULPS[j] = (NAIVE[j] - FSUM[j]) / ulp(FSUM[j])
+    KAHAN_ULPS[j] = (KAHAN[j] - FSUM[j]) / ulp(FSUM[j])
+}
+show NAIVE_ULPS
+show KAHAN_ULPS
+
+#: LAST_TERM  the last and smallest term, 1/N at N = 10^6
+LAST_TERM = 1.0 / CHECKPOINTS[NC - 1]
+# the term's bits from its leading one down to the sum's last bit
+BITS_KEPT = floor(log(ulp(LAST_TERM) / ulp(naive)) / log(2.0) + 0.5) + SIG_BITS
+show LAST_TERM
+show BITS_KEPT
+
+test "the last term, 10^-6, meets a sum near 14 and keeps 30 of its 53 bits" {
+    assert_near(LAST_TERM, 1.0e-6, 1.0e-21)
+    assert_near(naive, 14.39, 0.01)
+    assert_near(BITS_KEPT, 30.0, 0.0)
+}
+
+test "Kahan's sum equals the correctly rounded sum at all 31 checkpoints" {
+    for j to NC {
+        assert_near(KAHAN[j], FSUM[j], 0.0)
+    }
+}
+test "the naive sum is off at N = 10^4 by 19 ulps, at 10^5 by 52 and at 10^6 by 414" {
+    assert_near(NAIVE_ULPS[20], -19.0, 0.0)
+    assert_near(NAIVE_ULPS[25], -52.0, 0.0)
+    assert_near(NAIVE_ULPS[NC - 1], -414.0, 0.0)
+}
+
+figure("Sum of 1/k, k = 1 .. N: error in ulps of the exact sum", "N", "computed - correctly rounded (ulps)", 1.0, 1.0e6, 0.0, 0.0)
+xscale("log")
+plot(N_AXIS, NAIVE_ULPS, "left to right")
+plot(N_AXIS, KAHAN_ULPS, "Kahan")
+style("left to right", "s4 circle")
+style("Kahan", "s1 ring")
+
+###
+## $(x - 1)^7$ near its root
+
+Expanded, $(x - 1)^7 = x^7 - 7x^6 + 21x^5 - 35x^4 + 35x^3 - 21x^2 + 7x - 1$.
+Horner's rule evaluates it with seven multiplications and seven additions,
+$((((((x - 7)x + 21)x - 35)x + 35)x - 21)x + 7)x - 1$. Near $x = 1$ the partial
+results are 1, $-6$, 15, $-20$, 15, $-6$, 1, while the answer is tiny
+($10^{-14}$ at $x = 1.01$). Each partial result is rounded, by up to half an ulp
+of a number near 20, about $2 \times 10^{-15}$, and those errors are as large
+as the answer. The rounding bound for Horner's rule
+(Higham, *Accuracy and Stability of Numerical Algorithms*, section 5.1) is
+$\gamma_{14}\sum_i |c_i|\,|x|^i$ with $\gamma_{14} = 14u/(1 - 14u)$ and the unit roundoff $u = 2^{-53}$;
+here it is about $2 \times 10^{-13}$, and the measured errors reach $2.6\%$ of it.
+
+The factored form has no such problem. For $x$ between $1/2$ and 2, $x - 1$ is
+computed exactly (Sterbenz's lemma: the difference of two doubles within a
+factor of 2 of each other is a double), and then six multiplications each add
+a relative error of at most $2^{-53}$.
+
+At $x = 1.2$, away from the root, Horner's value has a relative error of
+$6 \times 10^{-11}$. Near the root it has no correct digits.
+###
+
+C_POLY = [1.0, -7.0, 21.0, -35.0, 35.0, -21.0, 7.0, -1.0]
+
+#| (x - 1)^7 from its expanded coefficients, by Horner's rule.
+def horner7(x) {
+    s = C_POLY[0]
+    for i from 1 to len(C_POLY) {
+        s = s * x + C_POLY[i]
+    }
+    return s
+}
+
+#| (x - 1)^7 as a product of seven copies of x - 1.
+def factored7(x) {
+    d = x - 1.0
+    p = d
+    for i from 1 to len(C_POLY) - 1 {
+        p = p * d
+    }
+    return p
+}
+
+#| Higham's bound on the rounding error of Horner's rule at x, with his unit
+#| roundoff u = EPS / 2 = 2^-53.
+def horner_bound(x) {
+    u = EPS / 2.0
+    g = 14.0 * u / (1.0 - 14.0 * u)
+    total = 0.0
+    for i to len(C_POLY) {
+        total = total + abs(C_POLY[i]) * pow(abs(x), len(C_POLY) - 1.0 - i)
+    }
+    return g * total
+}
+
+#: N_X  points in [X_LO, X_HI]
+N_X = 401
+X_LO = 0.98
+X_HI = 1.02
+XS = zeros(N_X)
+HORNER = zeros(N_X)
+FACTORED = zeros(N_X)
+sign_changes = 0
+worst = 0.0
+worst_ratio = 0.0
+for i to N_X {
+    XS[i] = X_LO + (X_HI - X_LO) * i / (N_X - 1.0)
+    HORNER[i] = horner7(XS[i])
+    FACTORED[i] = factored7(XS[i])
+    worst = max(worst, abs(HORNER[i] - FACTORED[i]))
+    worst_ratio = max(worst_ratio, abs(HORNER[i] - FACTORED[i]) / horner_bound(XS[i]))
+    if i > 0 {
+        if (HORNER[i] > 0.0) != (HORNER[i - 1] > 0.0) {
+            sign_changes = sign_changes + 1
+        }
+    }
+}
+show sign_changes
+show worst
+show worst_ratio
+show horner7(1.005)
+show factored7(1.005)
+
+test "Horner's values change sign 89 times among the 401 points; the polynomial changes sign once" {
+    assert_near(sign_changes, 89, 0.0)
+}
+test "at x = 1.005 Horner gives 6.66e-16, 8.5 times the exact 7.8125e-17; the factored form is within 1.4 eps" {
+    assert_near(horner7(1.005), 6.661338147750939e-16, 0.0)
+    assert_near(horner7(1.005) / 7.812499999998834e-17, 8.5265, 1.0e-4)
+    assert_near(factored7(1.005) / 7.812499999998834e-17, 1.0, 1.4 * EPS)
+}
+test "the largest Horner error is 5.49e-15 (against exact rationals in the reference), 2.6% of Higham's bound" {
+    assert_near(worst, 5.4899e-15, 1.0e-19)
+    assert_near(worst_ratio, 0.0264, 1.0e-4)
+}
+test "at x = 1.01 the answer is 10^-14, and a partial result near 20 is rounded by up to half an ulp, 1.78e-15" {
+    # d = 1.01 - 1 is off from 0.01 by 9e-18, a relative 9e-16, so d^7 by about 6e-15 of itself
+    assert_near(factored7(1.01), 1.0e-14, 1.0e-28)
+    assert_near(ulp(20.0) / 2.0, 1.7763568394002505e-15, 0.0)
+}
+test "for x from 1/2 to 2, x - 1 is exact: its rounding error, found by TwoSum, is 0 at 401 points" {
+    for i to N_X {
+        sx = 0.5 + 1.5 * i / (N_X - 1.0)
+        sd = sx - 1.0
+        sb = sd - sx
+        assert_near((sx - (sd - sb)) + (-1.0 - sb), 0.0, 0.0)
+    }
+}
+test "at x = 1.2 Horner's relative error is 5.8e-11" {
+    assert_near(abs(horner7(1.2) / 1.279999999999998e-05 - 1.0), 5.80e-11, 0.01e-11)
+}
+
+grid("$(x - 1)^7$: factored, and expanded by Horner's rule", 1, 2)
+figure("0.98 to 1.02", "x", "p(x)", X_LO, X_HI, 0.0, 0.0)
+plot(XS, HORNER, "Horner, expanded")
+plot(XS, FACTORED, "$(x - 1)^7$, factored")
+style("Horner, expanded", "s4 dot")
+style("$(x - 1)^7$, factored", "s1 nomarker")
+figure("0.995 to 1.005", "x", "p(x)", 0.995, 1.005, -8.0e-15, 8.0e-15)
+plot(XS, HORNER, "Horner, expanded")
+plot(XS, FACTORED, "$(x - 1)^7$, factored")
+style("Horner, expanded", "s4 dot")
+style("$(x - 1)^7$, factored", "s1 nomarker")
+
+###
+## RANDU's planes
+
+RANDU was IBM's random number generator in the 1960s:
+$x_{k+1} = 65539\,x_k \bmod 2^{31}$, with draws $u_k = x_k/2^{31}$. Its
+multiplier is $2^{16} + 3$, and squaring it gives $2^{32} + 6 \cdot 2^{16} + 9$.
+The first term vanishes modulo $2^{31}$, and $6 \cdot 2^{16} = 6 \cdot 65539 - 18$, so
+$65539^2 \equiv 6 \cdot 65539 - 9$, and every three consecutive values satisfy
+
+$$x_{k+2} = 6x_{k+1} - 9x_k \pmod{2^{31}}.$$
+
+So $9u_k - 6u_{k+1} + u_{k+2}$ is always a whole number. With each $u$ in
+$[0, 1)$ that number lies between $-5$ and 9, which puts every point
+$(u_k, u_{k+1}, u_{k+2})$ on one of the 15 parallel planes
+$9u - 6v + w = j$. A simulation that uses triples of draws as points in a cube
+samples 15 planes instead of the cube.
+
+The products here are below $2^{48}$, so double-precision arithmetic computes
+them, and the remainders, exactly. The cell also runs MINSTD, the
+Park-Miller generator $x_{k+1} = 16807\,x_k \bmod (2^{31} - 1)$, for which the
+same combination is never a whole number in 3000 triples.
+###
+
+#: N_TRIPLES  consecutive triples examined
+N_TRIPLES = 3000
+#: N_SHOWN  triples drawn in the figure (the figure carries every number it plots)
+N_SHOWN = 600
+M31 = pow(2.0, 31.0)
+MINSTD_M = M31 - 1.0
+RANDU = zeros(N_TRIPLES + 2)
+MINSTD = zeros(N_TRIPLES + 2)
+xr = 1.0
+xm = 1.0
+# the largest product formed, to check it is an integer a double holds exactly
+max_product = 0.0
+for k to N_TRIPLES + 2 {
+    max_product = max(max_product, max(65539.0 * xr, 16807.0 * xm))
+    xr = (65539.0 * xr) % M31
+    xm = (16807.0 * xm) % MINSTD_M
+    RANDU[k] = xr
+    MINSTD[k] = xm
+}
+#: J_LO, J_HI  9u - 6v + w lies strictly between -6 and 10 for u, v, w in [0, 1), so a whole value is -5 .. 9
+J_LO = -5
+J_HI = 9
+# how many triples fall on each plane j = J_LO .. J_HI
+PLANES = zeros(J_HI - J_LO + 1)
+whole_randu = 0
+whole_minstd = 0
+U_R = zeros(N_SHOWN)
+J_R = zeros(N_SHOWN)
+U_M = zeros(N_SHOWN)
+J_M = zeros(N_SHOWN)
+for k to N_TRIPLES {
+    jr = (9.0 * RANDU[k] - 6.0 * RANDU[k + 1] + RANDU[k + 2]) / M31
+    jm = (9.0 * MINSTD[k] - 6.0 * MINSTD[k + 1] + MINSTD[k + 2]) / MINSTD_M
+    if jr == floor(jr) {
+        whole_randu = whole_randu + 1
+        PLANES[jr - J_LO] += 1.0
+    }
+    if jm == floor(jm) {
+        whole_minstd = whole_minstd + 1
+    }
+    if k < N_SHOWN {
+        U_R[k] = RANDU[k] / M31
+        J_R[k] = jr
+        U_M[k] = MINSTD[k] / MINSTD_M
+        J_M[k] = jm
+    }
+}
+occupied = 0
+for j to len(PLANES) {
+    if PLANES[j] > 0.0 {
+        occupied = occupied + 1
+    }
+}
+show RANDU[0]
+show RANDU[4]
+show MINSTD[2]
+show whole_randu
+show whole_minstd
+show PLANES
+
+show max_product
+test "every product 65539 x_k and 16807 x_k is below 2^48, so doubles hold it exactly" {
+    assert_lt(max_product, pow(2.0, 48.0))
+}
+test "the first draws match the reference's integer arithmetic" {
+    assert_near(RANDU[4], 26542323, 0.0)
+    assert_near(MINSTD[2], 1622650073, 0.0)
+}
+test "9 u_k - 6 u_(k+1) + u_(k+2) is a whole number for all 3000 RANDU triples, on 15 planes" {
+    assert_near(whole_randu, N_TRIPLES, 0.0)
+    assert_near(occupied, 15, 0.0)
+}
+test "the counts on the planes j = -5 and j = 9 are 25 and 23, as in the reference" {
+    assert_near(PLANES[0], 25, 0.0)
+    assert_near(PLANES[len(PLANES) - 1], 23, 0.0)
+}
+test "for MINSTD the combination is a whole number in none of the 3000 triples" {
+    assert_near(whole_minstd, 0, 0.0)
+}
+
+grid("$9u_k - 6u_{k+1} + u_{k+2}$ against $u_k$, 600 triples", 1, 2)
+figure("RANDU", "$u_k$", "$9u_k - 6u_{k+1} + u_{k+2}$", 0.0, 1.0, -6.0, 10.0)
+scatter(U_R, J_R, "RANDU")
+figure("MINSTD", "$u_k$", "$9u_k - 6u_{k+1} + u_{k+2}$", 0.0, 1.0, -6.0, 10.0)
+scatter(U_M, J_M, "MINSTD")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

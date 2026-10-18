@@ -1,0 +1,573 @@
+###
+post: N-1 contingency analysis by AC re-solves and DC distribution factors
+agent: claude
+
+A transmission network is planned to survive the loss of any one element
+(NERC TPL-001, category P1): with a line, a transformer or a generator out
+of service, every branch must stay within its emergency rating and every
+bus voltage within its emergency band. `n1_ac` checks that the slow way
+and the exact way: for each outage it takes the element out, solves the
+AC power flow again by Newton's method starting from the base-case
+voltages (a warm start, two or three iterations each), and lists every
+limit the solution breaks.
+
+Each branch's loading is the larger of the apparent powers entering its
+two ends, |S| in MVA, held to rate A in the base case and rate B after an
+outage (MATPOWER's columns RATE_A and RATE_B; a rating of 0 is no limit).
+Voltages are held to [vmin, vmax] before and [vmin_post, vmax_post] after.
+
+An outage that splits the network leaves the buses no longer joined to
+the reference bus without supply: they are taken out (type 4), with their
+loads and generators, and counted as islanded. A lost generator's power is
+made up by the reference bus's generator, as in a power flow; when the
+lost generator was the reference's, the first remaining PV bus takes over.
+
+`dc_factors` gives the linear sensitivities of the DC model (MATPOWER's
+makePTDF and makeLODF):
+
+  - PTDF[l, j]: the change in the flow of branch l per unit of power
+    injected at bus j and withdrawn at the reference bus;
+  - LODF[l, k]: the share of branch k's pre-outage flow that moves onto
+    branch l when k is taken out, H[l, k] / (1 - H[k, k]) with
+    H[l, k] = PTDF[l, f_k] - PTDF[l, t_k] (and -1 on the diagonal).
+
+With them, `dc_screen` estimates every post-outage flow in one matrix
+product and flags the ones above a fraction of rate B, the screening that
+decides which outages earn a full AC solve. A branch whose outage islands
+part of the network has 1 - H[k, k] = 0; its LODF column is left at zero
+and the branch is reported as a bridge.
+###
+
+from power.case import (
+    BR_STATUS, BR_X, BUS_TYPE, Case, GEN_STATUS, GS, NONE, PD, PF, PG, PT, QD, QF, QT, SHIFT, TAP, VA, VG, VM,
+    read_case,
+)
+from power.pf import DC, Net, bus_types, internal, make_sbus, newton_pf, pf_solution, runpf
+from power.splu import lu_solve, mindeg_order, splu
+from power.ybus import full_network, make_ybus
+
+#: what a contingency takes out
+BRANCH_OUT: Int = 1
+GEN_OUT: Int = 2
+#: the kinds of violation
+THERMAL: Int = 1
+LOW_V: Int = 2
+HIGH_V: Int = 3
+DIVERGED: Int = 4
+#: the columns of a violation row
+V_CONT: Int = 0
+V_KIND: Int = 1
+V_ELEM: Int = 2
+V_VALUE: Int = 3
+V_LIMIT: Int = 4
+V_PCT: Int = 5
+VIOL_W: Int = 6
+#: the row of the base case in the result matrices, and its contingency number in violation rows
+BASE_ROW: Int = 0
+BASE_CASE: Num = -1.0
+#: the columns of a screening row: contingency, branch, DC flow, rating
+SCREEN_W: Int = 4
+#: MATPOWER's rating columns
+RATE_A: Int = 5
+RATE_B: Int = 6
+PIVOT: Num = 0.001
+PERCENT: Num = 100.0
+#: 1 - H[k, k] below this: the branch is a bridge
+BRIDGE_TOL: Num = 1e-10
+
+record Limits {
+    vmin: Num
+    vmax: Num
+    vmin_post: Num
+    vmax_post: Num
+    rate_pre: Int
+    rate_post: Int
+}
+
+record N1 {
+    #: per row (row 0 the base case, then one per contingency)
+    converged: [Int]
+    iterations: [Int]
+    islanded: [Int]
+    lost_mw: Arr
+    #: |S| at the more loaded end of each branch, MVA (rows x branches)
+    flows: Arr
+    #: bus voltage magnitudes, per unit; 0 at a bus left without supply
+    vm: Arr
+    #: one row per violation: contingency (-1: base), kind, element, value, limit, percent of the limit
+    viol: Arr
+}
+
+record Dc {
+    ptdf: Arr
+    lodf: Arr
+    bridge: [Int]
+    #: the base-case DC flows, MW, and the branches' series susceptances 1/(x tap)
+    flow: Arr
+    bsus: Arr
+    ref: Int
+}
+
+def default_limits() -> Limits {
+    return Limits { vmin: 0.95, vmax: 1.05, vmin_post: 0.9, vmax_post: 1.1, rate_pre: RATE_A, rate_post: RATE_B }
+}
+
+#| Which buses are joined to bus `root` through branches in service (1) or not (0).
+def energized(net: Net, root: Int) -> [Int] {
+    nb = net.nb
+    nl: Int = len(net.fbus)
+    deg = int_zeros(nb + 1)
+    for k to nl {
+        if net.branch[k, BR_STATUS] > 0.0 {
+            deg[net.fbus[k] + 1] += 1
+            deg[net.tbus[k] + 1] += 1
+        }
+    }
+    for i to nb {
+        deg[i + 1] += deg[i]
+    }
+    adj = int_zeros(deg[nb])
+    put: [Int] = [deg[i] for i to nb]
+    for k to nl {
+        if net.branch[k, BR_STATUS] > 0.0 {
+            adj[put[net.fbus[k]]] = net.tbus[k]
+            put[net.fbus[k]] += 1
+            adj[put[net.tbus[k]]] = net.fbus[k]
+            put[net.tbus[k]] += 1
+        }
+    }
+    #: depth-first from the root; each bus is pushed once
+    seen = int_zeros(nb)
+    stack = int_zeros(nb)
+    top: Int = 1
+    stack[0] = root
+    seen[root] = 1
+    while top > 0 {
+        top -= 1
+        b = stack[top]
+        for p from deg[b] to deg[b + 1] {
+            o = adj[p]
+            if seen[o] == 0 {
+                seen[o] = 1
+                stack[top] = o
+                top += 1
+            }
+        }
+    }
+    return seen
+}
+
+#| Take out the buses not joined to the reference, with their loads and
+#| generators; returns how many and the load lost, MW.
+def drop_islands(net: Net) {
+    ref, _, _ = bus_types(net)
+    on = energized(net, ref[0])
+    n: Int = 0
+    lost = 0.0
+    for b to net.nb {
+        if on[b] == 0 and int(net.bus[b, BUS_TYPE]) != NONE {
+            n += 1
+            lost += net.bus[b, PD]
+            net.bus[b, BUS_TYPE] = 1.0 * NONE
+            net.bus[b, PD] = 0.0
+            net.bus[b, QD] = 0.0
+        }
+    }
+    for g to len(net.gbus) {
+        if on[net.gbus[g]] == 0 {
+            net.gen[g, GEN_STATUS] = 0.0
+        }
+    }
+    for k to len(net.fbus) {
+        if on[net.fbus[k]] == 0 or on[net.tbus[k]] == 0 {
+            net.branch[k, BR_STATUS] = 0.0
+        }
+    }
+    return n, lost
+}
+
+#| Solve the network as it stands from the voltages v0 (warm start): the
+#| Newton result, with net's result columns filled.
+def solve_from(net: Net, v0: CArr, tol: Num, max_it: Int) {
+    y = make_ybus(net.nb, net.fbus, net.tbus, net.bus, net.branch, net.base, full_network())
+    ref, pv, pq = bus_types(net)
+    sbus = make_sbus(net)
+    v = copy(v0)
+    for g to len(net.gbus) {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            b = net.gbus[g]
+            #: a generator bus starts at its set point, at the warm angle
+            v[b] = v[b] / abs(v[b]) * net.gen[g, VG] if abs(v[b]) > 0.0 else net.gen[g, VG] + 0.0i
+        }
+    }
+    for b to net.nb {
+        if int(net.bus[b, BUS_TYPE]) == NONE {
+            v[b] = 0.0 + 0.0i
+        }
+    }
+    r = newton_pf(y, sbus, v, pv, pq, tol, max_it)
+    pf_solution(net, y, r.v, ref)
+    return r
+}
+
+#| The base case and every contingency, solved by AC power flow;
+#| kinds[c] is BRANCH_OUT or GEN_OUT and elems[c] the branch or generator
+#| (row in the case, from 0).
+def n1_ac(c: Case, kinds: [Int], elems: [Int], lim: Limits, tol: Num, max_it: Int) -> N1 {
+    nc: Int = len(kinds)
+    base = internal(c)
+    nb = base.nb
+    nl: Int = len(base.fbus)
+    rows: Int = nc + 1
+    conv = int_zeros(rows)
+    its = int_zeros(rows)
+    isl = int_zeros(rows)
+    lost = zeros(rows)
+    flows = zeros(rows, nl)
+    vms = zeros(rows, nb)
+    viol = []
+
+    #: the base case, from the case's own starting voltages
+    n0, lost0 = drop_islands(base)
+    r0 = solve_from(base, _case_v(base), tol, max_it)
+    _record(base, r0.converged, r0.iterations, n0, lost0, BASE_ROW, BASE_CASE, lim.vmin, lim.vmax, lim.rate_pre,
+            conv, its, isl, lost, flows, vms)
+    viol = _violations(base, r0.converged, BASE_CASE, lim.vmin, lim.vmax, lim.rate_pre, viol)
+    warm = copy(r0.v)
+
+    for k to nc {
+        net = internal(c)
+        if kinds[k] == BRANCH_OUT {
+            net.branch[elems[k], BR_STATUS] = 0.0
+        }
+        else {
+            net.gen[elems[k], GEN_STATUS] = 0.0
+        }
+        n, lmw = drop_islands(net)
+        r = solve_from(net, warm, tol, max_it)
+        _record(net, r.converged, r.iterations, n, lmw, k + 1, 1.0 * k, lim.vmin_post, lim.vmax_post,
+                lim.rate_post, conv, its, isl, lost, flows, vms)
+        viol = _violations(net, r.converged, 1.0 * k, lim.vmin_post, lim.vmax_post, lim.rate_post, viol)
+    }
+    if len(viol) == 0 {
+        viol = zeros(0, VIOL_W)
+    }
+    return N1 { converged: conv, iterations: its, islanded: isl, lost_mw: lost, flows: flows, vm: vms,
+                viol: viol }
+}
+
+def _case_v(net: Net) -> CArr {
+    v = czeros(net.nb)
+    for b to net.nb {
+        a = net.bus[b, VA] * pi / 180.0
+        v[b] = net.bus[b, VM] * (cos(a) + sin(a) * 1.0i)
+    }
+    return v
+}
+
+def _record(net: Net, ok: Bool, it: Int, n: Int, lmw: Num, row: Int, cont: Num, vmin: Num, vmax: Num,
+            rate: Int, conv: [Int], its: [Int], isl: [Int], lost: Arr, flows: Arr, vms: Arr) {
+    if ok {
+        conv[row] = 1
+    }
+    its[row] = it
+    isl[row] = n
+    lost[row] = lmw
+    flows[row, :] = branch_mva(net)
+    for b to net.nb {
+        vms[row, b] = net.bus[b, VM] if int(net.bus[b, BUS_TYPE]) != NONE else 0.0
+    }
+}
+
+#| |S| at the more loaded end of each branch, MVA.
+def branch_mva(net: Net) -> Arr {
+    nl: Int = len(net.fbus)
+    s = zeros(nl)
+    for k to nl {
+        sf = hypot(net.branch[k, PF], net.branch[k, QF])
+        st = hypot(net.branch[k, PT], net.branch[k, QT])
+        s[k] = max(sf, st)
+    }
+    return s
+}
+
+def _violations(net: Net, ok: Bool, cont: Num, vmin: Num, vmax: Num, rate: Int, viol: Arr) -> Arr {
+    if not ok {
+        viol = append(viol, [cont, 1.0 * DIVERGED, -1.0, 0.0, 0.0, 0.0])
+        return viol
+    }
+    s = branch_mva(net)
+    for k to len(net.fbus) {
+        lim = net.branch[k, rate]
+        if lim > 0.0 and net.branch[k, BR_STATUS] > 0.0 and s[k] > lim {
+            viol = append(viol, [cont, 1.0 * THERMAL, 1.0 * k, s[k], lim, PERCENT * s[k] / lim])
+        }
+    }
+    for b to net.nb {
+        if int(net.bus[b, BUS_TYPE]) != NONE {
+            vm = net.bus[b, VM]
+            if vm < vmin {
+                viol = append(viol, [cont, 1.0 * LOW_V, 1.0 * b, vm, vmin, PERCENT * vm / vmin])
+            }
+            else if vm > vmax {
+                viol = append(viol, [cont, 1.0 * HIGH_V, 1.0 * b, vm, vmax, PERCENT * vm / vmax])
+            }
+        }
+    }
+    return viol
+}
+
+#| Sum the duplicates of a matrix given as triplets into compressed sparse columns.
+def csc_from_triplets(n: Int, ri: [Int], ci: [Int], vals: Arr) {
+    m: Int = len(ri)
+    cnt = int_zeros(n + 1)
+    for p to m {
+        cnt[ci[p] + 1] += 1
+    }
+    for j to n {
+        cnt[j + 1] += cnt[j]
+    }
+    rows = int_zeros(m)
+    vs = zeros(m)
+    put: [Int] = [cnt[j] for j to n]
+    for p to m {
+        rows[put[ci[p]]] = ri[p]
+        vs[put[ci[p]]] = vals[p]
+        put[ci[p]] += 1
+    }
+    #: merge repeated rows within a column
+    last = int_zeros(n)
+    for i to n {
+        last[i] = -1
+    }
+    colptr = int_zeros(n + 1)
+    outr: [Int] = []
+    outv = []
+    for j to n {
+        colptr[j] = len(outr)
+        for p from cnt[j] to cnt[j + 1] {
+            i = rows[p]
+            if last[i] >= colptr[j] {
+                outv[last[i]] += vs[p]
+            }
+            else {
+                last[i] = len(outr)
+                outr = append(outr, i)
+                outv = append(outv, vs[p])
+            }
+        }
+    }
+    colptr[n] = len(outr)
+    return colptr, outr, outv
+}
+
+#| The DC model's PTDF and LODF (MATPOWER's makePTDF with the reference
+#| bus as the slack, and makeLODF) and its base-case flows.
+def dc_factors(c: Case) -> Dc {
+    net = internal(c)
+    nb = net.nb
+    nl: Int = len(net.fbus)
+    ref, pv, pq = bus_types(net)
+    r: Int = ref[0]
+    bsus = zeros(nl)
+    for k to nl {
+        if net.branch[k, BR_STATUS] > 0.0 {
+            tp = net.branch[k, TAP]
+            bsus[k] = 1.0 / (net.branch[k, BR_X] * (tp if tp != 0.0 else 1.0))
+        }
+    }
+    #: B on the buses other than the reference, numbered in bus order
+    sel = int_zeros(nb)
+    m: Int = 0
+    for b to nb {
+        sel[b] = -1 if b == r else m
+        if b != r {
+            m += 1
+        }
+    }
+    ri: [Int] = []
+    ci: [Int] = []
+    vals = []
+    for k to nl {
+        if bsus[k] != 0.0 {
+            f = sel[net.fbus[k]]
+            t = sel[net.tbus[k]]
+            for side to 2 {
+                i = f if side == 0 else t
+                o = t if side == 0 else f
+                if i >= 0 {
+                    ri = append(ri, i)
+                    ci = append(ci, i)
+                    vals = append(vals, bsus[k])
+                    if o >= 0 {
+                        ri = append(ri, o)
+                        ci = append(ci, i)
+                        vals = append(vals, -bsus[k])
+                    }
+                }
+            }
+        }
+    }
+    cp, rr, vv = csc_from_triplets(m, ri, ci, vals)
+    lu = splu(m, cp, rr, vv, mindeg_order(m, cp, rr), PIVOT)
+    ptdf = zeros(nl, nb)
+    for b to nb {
+        if b != r {
+            unit = zeros(m)
+            unit[sel[b]] = 1.0
+            th = lu_solve(lu, unit)
+            for k to nl {
+                tf = th[sel[net.fbus[k]]] if sel[net.fbus[k]] >= 0 else 0.0
+                tt = th[sel[net.tbus[k]]] if sel[net.tbus[k]] >= 0 else 0.0
+                ptdf[k, b] = bsus[k] * (tf - tt)
+            }
+        }
+    }
+    #: LODF from H = PTDF A^T
+    lodf = zeros(nl, nl)
+    bridge = int_zeros(nl)
+    for k to nl {
+        if bsus[k] != 0.0 {
+            f = net.fbus[k]
+            t = net.tbus[k]
+            den = 1.0 - (ptdf[k, f] - ptdf[k, t])
+            if abs(den) < BRIDGE_TOL {
+                bridge[k] = 1
+            }
+            else {
+                for l to nl {
+                    lodf[l, k] = (ptdf[l, f] - ptdf[l, t]) / den
+                }
+                lodf[k, k] = -1.0
+            }
+        }
+    }
+    #: the base-case flows: P = PTDF (injections), plus the phase shifters' own term
+    p = re(make_sbus(net)) * net.base - net.bus[:, GS]
+    flow = zeros(nl)
+    for k to nl {
+        acc = 0.0
+        for b to nb {
+            acc += ptdf[k, b] * p[b]
+        }
+        flow[k] = acc
+    }
+    for k to nl {
+        if net.branch[k, SHIFT] != 0.0 {
+            stop("dc_factors: phase-shifting transformers are not in this DC model")
+        }
+    }
+    return Dc { ptdf: ptdf, lodf: lodf, bridge: bridge, flow: flow, bsus: bsus, ref: r }
+}
+
+#| The DC estimate of every post-contingency flow (MW; rows: contingencies,
+#| columns: branches): a branch outage moves LODF[:, k] times its flow, a
+#| generator outage moves -Pg PTDF[:, bus] (the reference makes it up).
+def dc_post_flows(c: Case, d: Dc, kinds: [Int], elems: [Int]) -> Arr {
+    net = internal(c)
+    nl: Int = len(net.fbus)
+    nc: Int = len(kinds)
+    out = zeros(nc, nl)
+    for k to nc {
+        e = elems[k]
+        if kinds[k] == BRANCH_OUT {
+            for l to nl {
+                out[k, l] = d.flow[l] + d.lodf[l, e] * d.flow[e]
+            }
+            out[k, e] = 0.0
+        }
+        else {
+            pg = net.gen[e, PG] if net.gen[e, GEN_STATUS] > 0.0 else 0.0
+            b = net.gbus[e]
+            for l to nl {
+                out[k, l] = d.flow[l] - pg * d.ptdf[l, b]
+            }
+        }
+    }
+    return out
+}
+
+#| The contingency-branch pairs whose DC post-outage flow exceeds
+#| `fraction` of the rating in column `rate`: rows (contingency, branch,
+#| DC flow MW, rating MVA).
+def dc_screen(c: Case, d: Dc, kinds: [Int], elems: [Int], rate: Int, fraction: Num) -> Arr {
+    post = dc_post_flows(c, d, kinds, elems)
+    nl: Int = int(shape(post)[1])
+    out = []
+    for k to len(kinds) {
+        bridged = kinds[k] == BRANCH_OUT and d.bridge[elems[k]] == 1
+        for l to nl {
+            lim = c.branch[l, rate]
+            if not bridged and lim > 0.0 and abs(post[k, l]) > fraction * lim {
+                out = append(out, [1.0 * k, 1.0 * l, post[k, l], lim])
+            }
+        }
+    }
+    if len(out) == 0 {
+        return zeros(0, SCREEN_W)
+    }
+    return out
+}
+
+#| Every branch and every generator in service, as contingency lists.
+def all_n1(c: Case) {
+    kinds: [Int] = []
+    elems: [Int] = []
+    nl: Int = int(shape(c.branch)[0])
+    ng: Int = int(shape(c.gen)[0])
+    for k to nl {
+        if c.branch[k, BR_STATUS] > 0.0 {
+            kinds = append(kinds, BRANCH_OUT)
+            elems = append(elems, k)
+        }
+    }
+    for g to ng {
+        if c.gen[g, GEN_STATUS] > 0.0 {
+            kinds = append(kinds, GEN_OUT)
+            elems = append(elems, g)
+        }
+    }
+    return kinds, elems
+}
+
+test "LODF: every single-branch outage of case30 moves the DC flows as a full DC re-solve does" {
+    c = read_case("lib/power/cases/case30.m")
+    d = dc_factors(c)
+    base = runpf(c, DC, false, 1e-8, 1)
+    assert_allclose(d.flow, base.branch[:, PF], 1e-9)
+    kinds, elems = all_n1(c)
+    post = dc_post_flows(c, d, kinds, elems)
+    worst = 0.0
+    for k to len(kinds) {
+        if kinds[k] == BRANCH_OUT and d.bridge[elems[k]] == 0 {
+            m = Case { base_mva: c.base_mva, bus: c.bus, gen: c.gen, branch: copy(c.branch) }
+            m.branch[elems[k], BR_STATUS] = 0.0
+            r = runpf(m, DC, false, 1e-8, 1)
+            worst = max(worst, amax(abs(post[k, :] - r.branch[:, PF])))
+        }
+    }
+    assert_near(worst, 0.0, 1e-9)
+}
+
+test "case30: the base case converges, an outage of a radial branch islands its bus" {
+    c = read_case("lib/power/cases/case30.m")
+    kinds, elems = all_n1(c)
+    res = n1_ac(c, kinds, elems, default_limits(), 1e-8, 10)
+    assert_true(res.converged[0] == 1)
+    d = dc_factors(c)
+    nbridge: Int = 0
+    nisl: Int = 0
+    for k to len(kinds) {
+        if kinds[k] == BRANCH_OUT and d.bridge[elems[k]] == 1 {
+            nbridge += 1
+        }
+        if res.islanded[k + 1] > 0 {
+            nisl += 1
+        }
+    }
+    assert_true(nbridge > 0)
+    assert_true(nisl == nbridge)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

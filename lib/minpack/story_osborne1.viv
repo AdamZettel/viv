@@ -1,0 +1,31 @@
+# Osborne 1, a data-fitting problem (33 points, the sum of two decaying
+# exponentials, 5 parameters), solved by lmder1 from the standard start, to
+# read as a story:
+#
+#     viv story lib/minpack/story_osborne1.viv
+#
+from minpack.lmder import H_X, lmder1
+from minpack.enorm import enorm, EPSMCH
+from minpack.mgh import mgh_data, mgh_fcn, mgh_start
+
+# problem 17 of the test driver: 33 residuals in 5 unknowns
+SO_NPROB = 17.0
+SO_M = 33.0
+SO_N = 5.0
+so_x = mgh_start(SO_NPROB, SO_N, 1.0)
+so_fvec = zeros(SO_M)
+so_counts = zeros(2)
+so_info = lmder1(mgh_fcn, mgh_data(SO_NPROB, SO_M, SO_N), so_x, so_fvec, zeros(SO_M, SO_N), sqrt(EPSMCH), zeros(SO_N), so_counts, zeros(1, H_X + SO_N))
+print(so_info)
+print(enorm(len(so_fvec), so_fvec))
+
+test "lmder1 stops with info 1 after 18 evaluations of f and 15 of J, at the Fortran's norm 7.3924926e-3" {
+    assert_near(so_info, 1.0, 0.0)
+    assert_near(so_counts[0], 18.0, 0.0)
+    assert_near(so_counts[1], 15.0, 0.0)
+    assert_near(enorm(len(so_fvec), so_fvec), 0.007392492609048511, 1.0e-15)
+    assert_near(so_x[0], 0.375410049244025656, 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

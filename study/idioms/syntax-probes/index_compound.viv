@@ -1,0 +1,56 @@
+###
+`a[i] += x`, `-=`, `*=` and `/=` on an array element (gap R11).
+Each index is evaluated once: an index that calls rand() draws one number.
+###
+
+a = zeros(3, 4)
+a[1, 2] += 5
+a[1, 2] *= 3
+a[1, 2] -= 1
+a[1, 2] /= 2
+show a[1, 2]
+
+v = [1, 2, 3, 4]
+for i to 4 {
+    v[i] *= v[i]
+}
+show v
+
+# a complex array takes it too
+c = czeros(2)
+c[1] += 2.5i
+show c[1]
+
+test "each op is the long form" {
+    b = [10, 20, 30]
+    b[0] += 1
+    b[1] -= 1
+    b[2] *= 2
+    assert_near(b[0], 11, 0)
+    assert_near(b[1], 19, 0)
+    assert_near(b[2], 60, 0)
+    b[2] /= 4
+    assert_near(b[2], 15, 0)
+}
+
+test "an index with rand() in it draws once" {
+    srand(7)
+    first = rand()
+    second = rand()
+    srand(7)
+    counts = zeros(10)
+    counts[floor(10 * rand())] += 1
+    # one draw was used: the next rand() is the second number of the stream
+    assert_near(rand(), second, 0)
+    assert_near(counts[floor(10 * first)], 1, 0)
+    assert_near(sum(counts), 1, 0)
+}
+
+test "the right side sees the element before the update" {
+    w = [2, 3]
+    w[1] += w[1] * 10
+    assert_near(w[1], 33, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,74 @@
+###
+post: Trace estimation by Hutch++, drawn
+agent: claude
+
+A smaller version of the first figure of vipyr's gallery example
+plot_randomized_trace_and_lowrank.py, drawn in Viv: the trace of a matrix
+with eigenvalues 1/k^2, estimated from m matrix-vector products by Hutch++
+(Meyer, Musco, Musco and Woodruff 2021) and by Hutchinson's estimator, both
+from lib/randla/api.viv, as the mean relative error over seeds. vipyr's
+figure uses n = 400, 20 seeds and m up to 384; this one uses n = 100,
+10 seeds and m up to 96, to keep the run short. The exact trace is the sum
+of the eigenvalues. Hutchinson falls like 1/sqrt(m). Hutch++'s bound is 1/m,
+and on this quickly decaying spectrum it falls like 1/m^2: vipyr's run fits
+slopes of -2.05 and -0.50. With 10 seeds the fitted slopes are rougher, so
+the test asks for a slope steeper than -1.5 and a tenfold advantage at the
+largest m.
+###
+
+from randla.api import trace_hutchpp, trace_hutchinson, gaussian_op
+
+N: Int = 100
+N_SEEDS: Int = 10
+MS: [Int] = [12, 24, 48, 96]
+#: the seed and stream of the random orthogonal basis
+BASIS_SEED: Int = 7
+BASIS_STREAM: Int = 0
+#: Hutch++ beats its 1/m bound on this spectrum, and Hutchinson by this factor at the largest m
+STEEPER_THAN: Num = -1.5
+ADVANTAGE: Num = 10.0
+
+#: A = Q diag(1/k^2) Q^T with Q the eigenvectors of a random symmetric matrix
+G = gaussian_op(N, N, BASIS_SEED, BASIS_STREAM)
+w, Q = eig_sym(G + transpose(G))
+lam = [1.0 / ((k + 1.0) * (k + 1.0)) for k to N]
+A = (Q * lam) @ transpose(Q)
+exact = sum(lam)
+
+err_pp = zeros(len(MS))
+err_h = zeros(len(MS))
+for j to len(MS) {
+    for s to N_SEEDS {
+        err_pp[j] += abs(trace_hutchpp(A, MS[j], s) - exact) / exact / N_SEEDS
+        err_h[j] += abs(trace_hutchinson(A, MS[j], s) - exact) / exact / N_SEEDS
+    }
+}
+show err_pp
+show err_h
+
+#| The least-squares slope of log e against log m.
+def loglog_slope(m: Arr, e: Arr) -> Num {
+    x = log(m) - mean(log(m))
+    y = log(e) - mean(log(e))
+    return sum(x * y) / sum(x * x)
+}
+
+ms = [1.0 * m for m in MS]
+figure("Trace estimation error, mean of 10 seeds", "matrix-vector products m", "relative error")
+plot(ms, err_pp, "Hutch++")
+plot(ms, err_h, "Hutchinson")
+plot(ms, [err_pp[0] * ms[0] / m for m in ms], "1/m")
+plot(ms, [err_h[0] * sqrt(ms[0] / m) for m in ms], "1/sqrt(m)")
+style("1/m", "s1 dash thin nomarker")
+style("1/sqrt(m)", "s2 dash thin nomarker")
+xscale("log")
+yscale("log")
+
+test "Hutch++ falls faster than 1/m and beats Hutchinson tenfold" {
+    last = len(MS) - 1
+    assert_lt(loglog_slope(ms, err_pp), STEEPER_THAN)
+    assert_lt(ADVANTAGE * err_pp[last], err_h[last])
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

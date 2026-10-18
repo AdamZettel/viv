@@ -1,0 +1,350 @@
+###
+post: Least squares for linear models and GLMs
+agent: claude
+
+The least-squares solver slot of vp.stats. Every solver takes the design X
+(n by p) and y and returns the coefficients, the rank, the columns used,
+and (X^T X)^-1 over those columns (NaN rows and columns for the others):
+
+- `lstsq_qr`: Householder QR with column pivoting (the column of largest
+  remaining norm first, as LAPACK's dgeqp3) on X with its columns scaled to
+  unit norm; a column whose pivot is below `tol` times the first is
+  dropped. With `refine` 1, two steps of Bjorck's iterative refinement of
+  the augmented system [I X; X^T 0] [r; b] = [y; 0] follow: its residuals
+  y - r - X b and -X^T r summed exactly (each product split by fma, the terms
+  added by `fsum`), the corrections of b and r solved with the same factors
+  (A. Bjorck, BIT 7 (1967) 257-278). Refining r as well as b is what keeps
+  the digits of a fit with large residuals, whose coefficients are
+  sensitive to cond(X)^2.
+- `lstsq_chol`: the normal equations X^T X b = X^T y by Cholesky, on the
+  scaled columns (no rank detection).
+- `lstsq_svd`: the pseudo-inverse from the SVD (Viv's one-sided Jacobi), the
+  singular values below `tol` times the largest dropped (statsmodels' pinv).
+
+`glm_irls` (lib/stats/glm.viv) calls `lstsq_qr` for each weighted step.
+
+Used with `from stats.linmod import ...`.
+###
+
+EPS = 2.220446049250313e-16
+LSTSQ_QR = 0
+LSTSQ_CHOL = 1
+LSTSQ_SVD = 2
+# refinement steps of the augmented system
+REFINE_STEPS = 2
+
+# column norms, with a zero column kept at 1 so that scaling leaves it zero
+def col_scale(X: Arr) {
+    n, p = shape(X)
+    s = zeros(p)
+    for j to p {
+        s[j] = norm(X[:, j])
+        if s[j] == 0.0 {
+            s[j] = 1.0
+        }
+    }
+    return s
+}
+
+# exact residual y - X b: each product a two-product, the terms summed by fsum
+def exact_residual(X: Arr, y: Arr, b: Arr) {
+    n, p = shape(X)
+    r = zeros(n)
+    terms = zeros(2 * p + 1)
+    for i to n {
+        terms[0] = y[i]
+        for j to p {
+            prod = X[i, j] * b[j]
+            terms[2 * j + 1] = -prod
+            terms[2 * j + 2] = -fma(X[i, j], b[j], -prod)
+        }
+        r[i] = fsum(terms)
+    }
+    return r
+}
+
+# exchange columns i and j of A in place
+def swap_columns(A: Arr, i, j) {
+    n, p = shape(A)
+    for r to n {
+        t = A[r, i]
+        A[r, i] = A[r, j]
+        A[r, j] = t
+    }
+}
+
+# Householder QR with column pivoting in place: A holds R above the
+# diagonal and the reflectors (v[0] = 1 implied) below; returns tau and the
+# column order
+def qr_pivot(A: Arr) {
+    n, p = shape(A)
+    k_max = min(n, p)
+    tau = zeros(k_max)
+    piv = arange(p)
+    for k to k_max {
+        # the column of largest remaining norm
+        trailing = A[k:, k:]
+        best = k + argmax(sum(trailing * trailing, axis=0))
+        if best != k {
+            swap_columns(A, k, best)
+            t = piv[k]
+            piv[k] = piv[best]
+            piv[best] = t
+        }
+        x0 = A[k, k]
+        nx = norm(A[k:, k])
+        if nx == 0.0 {
+            continue
+        }
+        beta = -copysign(nx, x0)
+        v0 = x0 - beta
+        tau[k] = (beta - x0) / beta
+        for i from k + 1 to n {
+            A[i, k] = A[i, k] / v0
+        }
+        A[k, k] = beta
+        for j from k + 1 to p {
+            s = A[k, j]
+            for i from k + 1 to n {
+                s += A[i, k] * A[i, j]
+            }
+            s *= tau[k]
+            A[k, j] -= s
+            for i from k + 1 to n {
+                A[i, j] -= s * A[i, k]
+            }
+        }
+    }
+    return tau, piv
+}
+
+# Q^T y from the reflectors of qr_pivot
+def apply_qt(A: Arr, tau: Arr, y: Arr) {
+    n, p = shape(A)
+    z = copy(y)
+    for k to len(tau) {
+        s = z[k]
+        for i from k + 1 to n {
+            s += A[i, k] * z[i]
+        }
+        s *= tau[k]
+        z[k] -= s
+        for i from k + 1 to n {
+            z[i] -= s * A[i, k]
+        }
+    }
+    return z
+}
+
+# Q v from the reflectors of qr_pivot (the reflections in reverse order)
+def apply_q(A: Arr, tau: Arr, v: Arr) {
+    n, p = shape(A)
+    z = copy(v)
+    for k to len(tau) reversed {
+        s = z[k]
+        for i from k + 1 to n {
+            s += A[i, k] * z[i]
+        }
+        s *= tau[k]
+        z[k] -= s
+        for i from k + 1 to n {
+            z[i] -= s * A[i, k]
+        }
+    }
+    return z
+}
+
+# X^T r with each column's sum exact (two-products added by fsum)
+def exact_xtr(X: Arr, r: Arr) {
+    n, p = shape(X)
+    out = zeros(p)
+    terms = zeros(2 * n)
+    for j to p {
+        for i to n {
+            prod = X[i, j] * r[i]
+            terms[2 * i] = prod
+            terms[2 * i + 1] = fma(X[i, j], r[i], -prod)
+        }
+        out[j] = fsum(terms)
+    }
+    return out
+}
+
+# solve R[:r, :r]^T h = g by forward substitution
+def forward_solve_rt(A: Arr, g: Arr, r) {
+    h = zeros(r)
+    for i to r {
+        h[i] = (g[i] - dot(A[:i, i], h[:i])) / A[i, i]
+    }
+    return h
+}
+
+# solve R[:r, :r] c = z[:r] by back substitution
+def back_solve(A: Arr, z: Arr, r) {
+    c = zeros(r)
+    for i to r reversed {
+        s = z[i]
+        for j from i + 1 to r {
+            s -= A[i, j] * c[j]
+        }
+        c[i] = s / A[i, i]
+    }
+    return c
+}
+
+# (X^T X)^-1 in the original column order from R's leading r by r block,
+# R^-1 R^-T, unscaled; NaN where a column was dropped
+def cov_from_r(A: Arr, piv: Arr, r, scale: Arr) {
+    p = len(piv)
+    Rinv = zeros(r, r)
+    for j to r {
+        e = zeros(r)
+        e[j] = 1.0
+        Rinv[:, j] = back_solve(A, e, r)
+    }
+    C = Rinv @ transpose(Rinv)
+    out = zeros(p, p)
+    fill(out, inf - inf)
+    for i to r {
+        for j to r {
+            out[piv[i], piv[j]] = C[i, j] / (scale[piv[i]] * scale[piv[j]])
+        }
+    }
+    return out
+}
+
+#| Least squares by pivoted Householder QR on unit-norm columns; one step of
+#| refinement with an exact residual when refine is 1. Returns b, rank, the
+#| pivot order and (X^T X)^-1.
+def lstsq_qr(X: Arr, y: Arr, tol, refine) {
+    n, p = shape(X)
+    scale = col_scale(X)
+    A = X / scale
+    tau, piv = qr_pivot(A)
+    r = float(count_nonzero(abs(diag(A)) > tol * abs(A[0, 0])))
+    z = apply_qt(A, tau, y)
+    c = back_solve(A, z, r)
+    b = zeros(p)
+    for i to r {
+        b[piv[i]] = c[i] / scale[piv[i]]
+    }
+    if refine == 1.0 {
+        # Bjorck's refinement of the augmented system [I X; X^T 0] [res; b] = [y; 0]:
+        # its two residuals summed exactly, the corrections from the same QR
+        res = exact_residual(X, y, b)
+        for step to REFINE_STEPS {
+            f = exact_residual(X, y - res, b)
+            g = exact_xtr(X, res)
+            gp = zeros(r)
+            for i to r {
+                gp[i] = -g[piv[i]] / scale[piv[i]]
+            }
+            h = forward_solve_rt(A, gp, r)
+            d = apply_qt(A, tau, f)
+            dc = back_solve(A, d[:r] - h, r)
+            v = copy(d)
+            v[:r] = h
+            res += apply_q(A, tau, v)
+            for i to r {
+                b[piv[i]] += dc[i] / scale[piv[i]]
+            }
+        }
+    }
+    return b, r, piv, cov_from_r(A, piv, r, scale)
+}
+
+#| Least squares by the normal equations and Cholesky, on unit-norm columns.
+def lstsq_chol(X: Arr, y: Arr) {
+    n, p = shape(X)
+    scale = col_scale(X)
+    A = X / scale
+    L = cholesky(transpose(A) @ A)
+    c = cho_solve(L, transpose(A) @ y)
+    C = zeros(p, p)
+    for j to p {
+        e = zeros(p)
+        e[j] = 1.0
+        C[:, j] = cho_solve(L, e)
+    }
+    return c / scale, p, arange(p), C / outer(scale, scale)
+}
+
+# solve L L^T x = v: forward then back substitution
+def cho_solve(L: Arr, v: Arr) {
+    p = len(v)
+    w = zeros(p)
+    for i to p {
+        w[i] = (v[i] - dot(L[i, :i], w[:i])) / L[i, i]
+    }
+    x = zeros(p)
+    for i to p reversed {
+        s = w[i]
+        for j from i + 1 to p {
+            s -= L[j, i] * x[j]
+        }
+        x[i] = s / L[i, i]
+    }
+    return x
+}
+
+#| Least squares by the SVD's pseudo-inverse, singular values below tol times
+#| the largest dropped.
+def lstsq_svd(X: Arr, y: Arr, tol) {
+    n, p = shape(X)
+    U, s, Vt = svd(X)
+    r = 0.0
+    sinv = zeros(len(s))
+    for i to len(s) {
+        if s[i] > tol * max(s) {
+            sinv[i] = 1.0 / s[i]
+            r += 1.0
+        }
+    }
+    V = transpose(Vt)
+    b = V @ (sinv * (transpose(U) @ y))
+    C = V @ diag(sinv * sinv) @ Vt
+    return b, r, arange(p), C
+}
+
+#| The solver named by `method` (LSTSQ_QR, LSTSQ_CHOL, LSTSQ_SVD).
+def lstsq(X: Arr, y: Arr, method, tol, refine) {
+    if method == LSTSQ_CHOL {
+        return lstsq_chol(X, y)
+    }
+    if method == LSTSQ_SVD {
+        return lstsq_svd(X, y, tol)
+    }
+    return lstsq_qr(X, y, tol, refine)
+}
+
+test "a line through three points" {
+    X = [[1.0, 0.0], [1.0, 1.0], [1.0, 2.0]]
+    y = [1.0, 3.0, 5.0]
+    b, r, piv, C = lstsq_qr(X, y, 1e-10, 1.0)
+    assert_allclose(b, [1.0, 2.0], 1e-15)
+    assert_near(r, 2.0, 0.0)
+    # (X^T X)^-1 = [[5, -3], [-3, 3]] / 6
+    assert_allclose(C[0, :], [5.0 / 6.0, -0.5], 1e-15)
+}
+
+test "a repeated column is dropped" {
+    X = [[1.0, 2.0, 2.0], [1.0, 3.0, 3.0], [1.0, 5.0, 5.0], [1.0, 7.0, 7.0]]
+    y = [1.0, 2.0, 4.0, 5.0]
+    b, r, piv, C = lstsq_qr(X, y, 1e-7, 1.0)
+    assert_near(r, 2.0, 0.0)
+}
+
+test "the three solvers agree on a well-conditioned problem" {
+    X = [[1.0, 0.5, 2.0], [1.0, 1.5, -1.0], [1.0, 2.5, 0.5], [1.0, 3.0, 1.5], [1.0, 4.5, -2.0]]
+    y = [1.0, 2.0, 2.5, 4.0, 4.5]
+    bq, rq, pq, Cq = lstsq(X, y, LSTSQ_QR, 1e-10, 1.0)
+    bc, rc, pc, Cc = lstsq(X, y, LSTSQ_CHOL, 1e-10, 1.0)
+    bs, rs, ps, Cs = lstsq(X, y, LSTSQ_SVD, 1e-15, 1.0)
+    assert_allclose(bc, bq, 1e-13)
+    assert_allclose(bs, bq, 1e-13)
+    assert_allclose(Cc, Cq, 1e-13)
+    assert_allclose(Cs, Cq, 1e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

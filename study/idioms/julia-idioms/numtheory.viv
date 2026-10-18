@@ -1,0 +1,187 @@
+###
+post: Sieve, Collatz, prime factors and Catalan numbers from TheAlgorithms/Julia
+agent: claude
+
+Ports of math/sieve_of_eratosthenes.jl, math/collatz_sequence.jl,
+math/prime_factors.jl and math/catalan_number.jl, plus the generator,
+comprehension and range one-liners from the Julia manual. All four
+originals return a list whose length is not known in advance, so each port
+here either counts first or fills a buffer and trims it.
+
+prime_factors reproduces a bug in the original: it tests number % i == 1
+where it means number % i != 0, so 97 comes out as [5, 19]. The port keeps
+the bug so the two can be compared.
+###
+
+from ref_values import (
+    REF_CATALAN, REF_CATALAN_30, REF_COLLATZ_LEN, REF_COLLATZ_MAX, REF_COMP_TABLE,
+    REF_GEN_ODDSQ, REF_PFACT_35, REF_PFACT_360, REF_PFACT_97, REF_PRIMES, REF_RANGE_LEN,
+    REF_RANGE_STEP,
+)
+
+#| The first `count` entries of `buf`, as their own array.
+def first_n(buf, count) {
+    out = zeros(count)
+    for i to count {
+        out[i] = buf[i]
+    }
+    return out
+}
+
+def eratosthenes(n) {
+    is_prime = zeros(n + 1.0) + 1.0
+    is_prime[0] = 0.0
+    is_prime[1] = 0.0
+    found = 0.0
+    for p to n + 1.0 {
+        if is_prime[p] == 1.0 {
+            found += 1.0
+            for i to floor(n / p) - 1.0 {
+                is_prime[p * (i + 2.0)] = 0.0
+            }
+        }
+    }
+    primes = zeros(found)
+    k = 0.0
+    for p to n + 1.0 {
+        if is_prime[p] == 1.0 {
+            primes[k] = p
+            k += 1.0
+        }
+    }
+    return primes
+}
+
+def collatz_length(n) {
+    count = 1.0
+    while n != 1.0 {
+        if mod(n, 2.0) == 1.0 {
+            n = 3.0 * n + 1.0
+        }
+        else {
+            n = n / 2.0
+        }
+        count += 1.0
+    }
+    return count
+}
+
+def collatz_sequence(n) {
+    seq = zeros(collatz_length(n))
+    seq[0] = n
+    k = 1.0
+    while n != 1.0 {
+        if mod(n, 2.0) == 1.0 {
+            n = 3.0 * n + 1.0
+        }
+        else {
+            n = n / 2.0
+        }
+        seq[k] = n
+        k += 1.0
+    }
+    return seq
+}
+
+def prime_factors(number) {
+    buf = zeros(64)
+    count = 0.0
+    i = 2.0
+    while i * i <= number {
+        if mod(number, i) == 1.0 {
+            i += 1.0
+        }
+        else {
+            number = floor(number / i)
+            buf[count] = i
+            count += 1.0
+        }
+    }
+    if number > 1.0 {
+        buf[count] = number
+        count += 1.0
+    }
+    return first_n(buf, count)
+}
+
+def gcd(a, b) {
+    while b != 0.0 {
+        t = mod(a, b)
+        a = b
+        b = t
+    }
+    return a
+}
+
+#| C(n) by C(k+1) = C(k) * 2(2k+1) / (k+2), with the division taken out of
+#| C(k) first so no intermediate passes 2^53. Julia's version is
+#| factorial(2n) / (factorial(n)^2 (n+1)) in BigInt.
+def catalan(n) {
+    c = 1.0
+    for k to n {
+        g = gcd(c, k + 2.0)
+        c = (c / g) * (2.0 * (2.0 * k + 1.0) / ((k + 2.0) / g))
+    }
+    return c
+}
+
+primes = eratosthenes(100.0)
+seq = collatz_sequence(27.0)
+show len(primes)
+show len(seq)
+show catalan(30.0)
+
+test "sieve up to 100" {
+    assert_allclose(primes, REF_PRIMES, 0.0)
+}
+
+test "Collatz from 27: 112 terms, peak 9232" {
+    assert_near(len(seq), REF_COLLATZ_LEN, 0.0)
+    assert_near(max(seq), REF_COLLATZ_MAX, 0.0)
+}
+
+test "prime_factors, bug included" {
+    assert_allclose(prime_factors(360.0), REF_PFACT_360, 0.0)
+    assert_allclose(prime_factors(97.0), REF_PFACT_97, 0.0)
+    assert_allclose(prime_factors(35.0), REF_PFACT_35, 0.0)
+}
+
+test "Catalan numbers 0..25 and C(30) exactly" {
+    c = zeros(26)
+    for n to 26 {
+        c[n] = catalan(n)
+    }
+    assert_allclose(c, REF_CATALAN, 0.0)
+    assert_near(catalan(30.0), REF_CATALAN_30, 0.0)
+}
+
+# ---------------------------------------------- the manual's one-liners
+
+test "sum(x^2 for x in 1:100 if isodd(x))" {
+    s = 0.0
+    for i to 100 {
+        x = i + 1.0
+        if mod(x, 2.0) == 1.0 {
+            s += x * x
+        }
+    }
+    assert_near(s, REF_GEN_ODDSQ, 0.0)
+}
+
+test "[i * j for i in 1:3, j in 1:4]" {
+    T = zeros(3, 4)
+    for i to 3 {
+        for j to 4 {
+            T[i, j] = (i + 1.0) * (j + 1.0)
+        }
+    }
+    assert_allclose(T, REF_COMP_TABLE, 0.0)
+}
+
+test "collect(0:0.25:2) and length(0.1:0.1:0.9)" {
+    assert_allclose(linspace(0.0, 2.0, 9.0), REF_RANGE_STEP, 0.0)
+    assert_near(round((0.9 - 0.1) / 0.1) + 1.0, REF_RANGE_LEN, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

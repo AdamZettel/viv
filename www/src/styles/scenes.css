@@ -1,0 +1,366 @@
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* The scenes (components/Scenes.jsx, SceneViz.jsx, the /gallery cards and the
+   /show heroes), in the site's own tokens and the reader's light or dark
+   setting, with cyan as the data accent. Sections sit in the page's normal
+   scroll: no snapping, no inner scroll box, no sticky. */
+.scn-list {
+  background: var(--bg);
+}
+.scn {
+  box-sizing: border-box;
+  display: flex;
+  justify-content: center;
+  padding: clamp(2.8rem, 6vw, 4.5rem) var(--gutter, 16px);
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+.scn-in {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: clamp(1.5rem, 5vw, 4.5rem);
+  align-items: center;
+  width: 100%;
+  max-width: 1240px;
+  min-width: 0;
+}
+.scn-flip .scn-text {
+  order: 2;
+}
+.scn-text {
+  min-width: 0;
+}
+.scn-title {
+  margin: 0 0 1.1rem;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(1.6rem, 3vw, 2.3rem);
+  line-height: 1.12;
+  letter-spacing: -0.01em;
+  color: var(--heading, var(--text));
+  text-wrap: balance;
+}
+.scn-line {
+  margin: 0 0 1.4rem;
+  max-width: 38ch;
+  font: 400 1rem/1.6 var(--font-sans, system-ui);
+  color: var(--text-muted);
+}
+.scn-readout {
+  margin: 0 0 0.9rem;
+  min-height: 2.8em;
+  font: 500 0.88rem/1.4 var(--font-mono, monospace);
+  color: var(--data-text);
+  font-variant-numeric: tabular-nums;
+}
+.scn-ref {
+  margin: 0 0 1.4rem;
+  font: 400 0.8rem var(--font-mono, monospace);
+  color: var(--text-faint);
+}
+.scn-link {
+  font: 500 0.95rem var(--font-sans, system-ui);
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-soft, var(--accent));
+  padding-bottom: 1px;
+}
+.scn-link + .scn-link-more {
+  margin-left: 1.4rem;
+}
+.scn-link:hover {
+  border-color: var(--accent);
+}
+
+/* the picture: a box with a fixed aspect, the canvas fills it */
+.scn-viz {
+  position: relative;
+  width: 100%;
+  max-height: 78svh;
+  min-width: 0;
+  justify-self: center;
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--border);
+  overflow: hidden;
+  touch-action: pan-y;
+}
+.scn-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.scn-run {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  font: 600 0.82rem var(--font-sans, system-ui);
+  color: var(--on-accent, #fff);
+  background: var(--accent-fill);
+  border: 0;
+  border-radius: 6px;
+  padding: 0.45rem 0.95rem;
+  cursor: pointer;
+}
+.scn-run:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+.scn-err {
+  position: absolute;
+  left: 12px;
+  bottom: 8px;
+  margin: 0;
+  font: 0.8rem var(--font-mono, monospace);
+  color: var(--text);
+}
+.scn-hold {
+  margin: 0;
+  color: var(--text-faint);
+  font: 0.9rem var(--font-mono, monospace);
+}
+
+/* reveal: the text rises in once; the picture fades */
+.scn .scn-text,
+.scn .scn-viz,
+.scn .scn-walk {
+  transition: opacity 0.8s cubic-bezier(0.16, 0.84, 0.34, 1), transform 0.8s cubic-bezier(0.16, 0.84, 0.34, 1);
+}
+.scn:not(.is-in) .scn-text {
+  opacity: 0;
+  transform: translateY(26px);
+}
+.scn:not(.is-in) .scn-viz,
+.scn:not(.is-in) .scn-walk {
+  opacity: 0;
+  transform: scale(0.98);
+}
+@media (prefers-reduced-motion: reduce) {
+  .scn .scn-text,
+  .scn .scn-viz,
+  .scn .scn-walk {
+    transition: none;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* the walk: full width under its text, the site's tokens turned to the scene's */
+.scn-is-walk .scn-in {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.6rem;
+}
+.scn-is-walk .scn-line {
+  max-width: 60ch;
+}
+.scn-walk {
+  height: min(80svh, 760px);
+  min-height: 520px;
+  min-width: 0;
+  padding: 14px 16px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 0 0 1px var(--border);
+  overflow: hidden;
+}
+/* before Run: the walk's box, holding its place, with the button in the middle */
+.scn-walk.is-idle {
+  height: auto;
+  min-height: 0;
+  padding: 2rem 16px;
+}
+.scn-walk-start {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  text-align: center;
+}
+.scn-walk-start .scn-hold {
+  max-width: 44ch;
+}
+.scn-walk-start .scn-walk-run {
+  position: static;
+  font-size: 0.95rem;
+  padding: 0.6rem 1.4rem;
+}
+.scn-walk .zw-card {
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+.scn-walk .zw-card > * {
+  min-width: 0;
+}
+/* nothing in the card moves while it plays: every text line has a fixed height */
+.scn-walk .zw-card-bar {
+  flex-wrap: nowrap;
+  height: 40px;
+  padding: 0;
+  margin-bottom: 8px;
+}
+.scn-walk .zw-card-stop {
+  flex: none;
+  min-width: 11ch;
+}
+/* the call path: one line, cut on the left so the running def stays in view */
+.scn-walk .zw-card-route {
+  flex: 1 1 0;
+  display: flex;
+  justify-content: flex-end;
+  white-space: nowrap;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 2.5em);
+  mask-image: linear-gradient(90deg, transparent, #000 2.5em);
+}
+.scn-walk .zw-card-route > span {
+  flex: none;
+}
+/* what is happening: a head line and a step line, each one line, fixed */
+.scn-walk .zw-card-now {
+  font-size: clamp(17px, 1.8vw, 22px);
+  height: calc(1.35em + 1.05em + 16px);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.scn-walk .zw-card-now .zw-now {
+  margin: 0;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 6px 0 6px 12px;
+  font-size: inherit;
+}
+.scn-walk .zw-now > * {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.scn-walk .zw-now-head {
+  font-family: var(--font-display);
+  font-size: 1em;
+  line-height: 1.35;
+  color: var(--heading, var(--text));
+}
+.scn-walk .zw-step {
+  font-size: 0.7em;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.scn-walk .zw-step * {
+  display: inline;
+  margin: 0;
+}
+.scn-walk .zw-card-now .zw-values {
+  display: none;
+}
+@media (max-width: 860px) {
+  .scn {
+    min-height: auto;
+    padding: 3.5rem 16px;
+  }
+  .scn-in,
+  .scn-flip .scn-in {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .scn-flip .scn-text {
+    order: 0;
+  }
+  .scn-walk {
+    height: 86svh;
+    min-height: 480px;
+    padding: 10px;
+  }
+}
+
+/* ---- /show pages: the scene as the picture at the top ---- */
+.scn-hero {
+  margin: 0 0 1.5rem;
+  padding: clamp(14px, 3vw, 24px);
+  border-radius: 12px;
+  background: var(--bg-soft, var(--bg));
+  box-shadow: 0 0 0 1px var(--border);
+}
+.scn-hero .scn-viz {
+  box-shadow: none;
+  border-radius: 10px;
+}
+.scn-hero .scn-readout {
+  margin: 0.8rem 0 0;
+  min-height: 1.4em;
+}
+
+/* ---- /gallery: the scenes as cards ---- */
+.scn-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
+  gap: 18px;
+}
+.scn-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 0 0 1px var(--border);
+  overflow: hidden;
+  text-decoration: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.scn-card-link {
+  color: inherit;
+  text-decoration: none;
+}
+.scn-card-link::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+.scn-card-link:focus-visible {
+  outline: none;
+}
+.scn-card:has(.scn-card-link:focus-visible) {
+  box-shadow: 0 0 0 2px var(--accent, currentColor);
+}
+.scn-card .scn-run,
+.scn-card .scn-err {
+  z-index: 2;
+}
+.scn-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+.scn-card .scn-viz {
+  border-radius: 0;
+  box-shadow: none;
+  max-height: none;
+}
+.scn-card-text {
+  padding: 14px 18px 18px;
+}
+.scn-card-title {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.2rem;
+  line-height: 1.25;
+  color: var(--heading, var(--text));
+}
+.scn-card .scn-readout {
+  min-height: 1.4em;
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+}
+.scn-card .scn-ref {
+  margin: 0;
+}

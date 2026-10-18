@@ -1,0 +1,34 @@
+# Kernel collection K1: MINPACK's overflow-safe Euclidean norm.
+#
+# The adapter over lib/minpack/enorm.viv, a port of netlib's enorm.f, takes
+# the array alone, as numpy.linalg.norm does; the library def also takes
+# the count.
+
+import minpack.enorm
+
+#| The Euclidean norm of x, with no overflow or underflow in the sum of
+#| squares (MINPACK enorm). An empty x has norm 0.
+def enorm(x: Arr) -> Num {
+    if len(shape(x)) != 1 {
+        stop("enorm: x must be one-dimensional")
+    }
+    if len(x) == 0 {
+        return 0.0
+    }
+    return minpack.enorm.enorm(len(x), x)
+}
+
+test "3-4-12-84 gives 85, at ordinary and at extreme scales" {
+    v = [3.0, 4.0, 12.0, 84.0]
+    assert_near(enorm(v), 85.0, 0.0)
+    assert_near(enorm(1.0e300 * v) / 8.5e301, 1.0, 1.0e-15)
+    assert_near(enorm(1.0e-300 * v) / 8.5e-299, 1.0, 1.0e-15)
+}
+
+test "the empty vector has norm 0" {
+    assert_near(enorm(zeros(0)), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: LicenseRef-Minpack
+# SPDX-FileCopyrightText: 1999 University of Chicago (Argonne National Laboratory, MINPACK)
+# SPDX-FileCopyrightText: 2026 The Viv authors

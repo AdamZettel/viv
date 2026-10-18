@@ -1,0 +1,136 @@
+###
+title: Conjugate gradients take √κ iterations
+line: Iterations grow like $\sqrt{\kappa}$ (slope 1.05); bad scaling stalls CG past 10,000 iterations, and Jacobi brings it back to 2 times the unscaled count.
+claim: Conjugate gradients on the 5-point Laplacian of an $n \times n$ grid ($n = 16$ to 128) needs a number of iterations to cut the residual by $10^{-8}$ that grows like the square root of the condition number (log-log slope between 0.85 and 1.15 against $\sqrt{\kappa}$). When the same matrix is badly scaled (rows and columns multiplied by factors spread over 1 to $10^{4}$), plain CG at $n = 64$ does not reach the tolerance in 10,000 iterations (more than 80 times the unscaled count), and the Jacobi (diagonal) preconditioner brings it to between 1.5 and 2.5 times the unscaled count.
+topic: math
+section: linear algebra
+reference: The condition number from the Laplacian's exact eigenvalues $4\sin^2\frac{j\pi}{2(n + 1)} + 4\sin^2\frac{k\pi}{2(n + 1)}$; the CG bound $2\bigl((\sqrt{\kappa} - 1)/(\sqrt{\kappa} + 1)\bigr)^k$ on the error in the energy norm (Saad, Iterative Methods for Sparse Linear Systems (2nd ed., 2003), section 6.11.3).
+scope: Right-hand side all ones, zero start, stopping on the 2-norm residual. The scaling factors are drawn log-uniformly with a fixed seed. In exact arithmetic Jacobi would recover the unscaled count exactly, since the scaling is diagonal; the gap comes from the stopping test, which measures the residual of the scaled system, and from rounding at a scale range of $10^{8}$. Jacobi does not improve the Laplacian's own $\sqrt{\kappa}$ growth, which needs a multigrid or incomplete-factorization preconditioner.
+lane: ai
+by: claude
+cost: fast
+###
+
+#: pi
+PI_K = 4.0 * atan(1.0)
+SIZES = [16, 32, 64, 128]
+RTOL = 1.0e-8
+MAX_IT: Int = 10000
+SEED: Int = 5
+#: the scaled problem: factors 10^(4 u), u uniform in [0, 1), on this grid size
+SCALE_DECADES = 4.0
+N_SCALED: Int = 64
+
+#| y = D A D x for the n x n grid Laplacian A (Dirichlet), with D = diag(d).
+def apply(x: Arr, d: Arr, n: Int) -> Arr {
+    y = zeros(n * n)
+    for i to n {
+        for j to n {
+            p: Int = i * n + j
+            v = 4.0 * d[p] * x[p]
+            if i > 0 {
+                v = v - d[p - n] * x[p - n]
+            }
+            if i < n - 1 {
+                v = v - d[p + n] * x[p + n]
+            }
+            if j > 0 {
+                v = v - d[p - 1] * x[p - 1]
+            }
+            if j < n - 1 {
+                v = v - d[p + 1] * x[p + 1]
+            }
+            y[p] = d[p] * v
+        }
+    }
+    return y
+}
+
+#| Preconditioned CG on D A D x = b with the preconditioner diag(m); returns the iterations.
+def pcg(n: Int, d: Arr, m: Arr) -> Int {
+    b = ones(n * n)
+    x = zeros(n * n)
+    r = copy(b)
+    z = r / m
+    p = copy(z)
+    rz = sum(r * z)
+    bnorm = sqrt(sum(b * b))
+    for it to MAX_IT {
+        q = apply(p, d, n)
+        alpha = rz / sum(p * q)
+        x = x + alpha * p
+        r = r - alpha * q
+        if sqrt(sum(r * r)) <= RTOL * bnorm {
+            return it + 1
+        }
+        z = r / m
+        rz_new = sum(r * z)
+        p = z + (rz_new / rz) * p
+        rz = rz_new
+    }
+    return MAX_IT
+}
+
+def kappa(n: Int) -> Num {
+    s_lo = sin(PI_K / (2.0 * (n + 1.0)))
+    s_hi = sin(n * PI_K / (2.0 * (n + 1.0)))
+    return (8.0 * s_hi * s_hi) / (8.0 * s_lo * s_lo)
+}
+
+n_sizes: Int = len(SIZES)
+sqrt_kappa = zeros(n_sizes)
+iterations = zeros(n_sizes)
+for k to n_sizes {
+    nk: Int = int(SIZES[k])
+    sqrt_kappa[k] = sqrt(kappa(nk))
+    iterations[k] = float(pcg(nk, ones(nk * nk), ones(nk * nk)))
+}
+lx = log(sqrt_kappa)
+ly = log(iterations)
+slope_vs_sqrt_kappa = sum((lx - mean(lx)) * (ly - mean(ly))) / sum((lx - mean(lx)) * (lx - mean(lx)))
+show iterations
+show slope_vs_sqrt_kappa
+
+srand(SEED)
+scale = zeros(N_SCALED * N_SCALED)
+for p to N_SCALED * N_SCALED {
+    scale[p] = pow(10.0, SCALE_DECADES * rand())
+}
+#: the diagonal of D A D: 4 d^2
+jacobi = 4.0 * scale * scale
+it_unscaled = pcg(N_SCALED, ones(N_SCALED * N_SCALED), ones(N_SCALED * N_SCALED))
+it_scaled_plain = pcg(N_SCALED, scale, ones(N_SCALED * N_SCALED))
+it_scaled_jacobi = pcg(N_SCALED, scale, jacobi)
+show it_unscaled
+show it_scaled_plain
+show it_scaled_jacobi
+scaled_over_unscaled = it_scaled_plain / (it_unscaled * 1.0)
+jacobi_over_unscaled = it_scaled_jacobi / (it_unscaled * 1.0)
+show scaled_over_unscaled
+show jacobi_over_unscaled
+
+#: the figure: iterations against sqrt(kappa), with a line of slope 1 through the first point
+fg_ref = iterations[0] * sqrt_kappa / sqrt_kappa[0]
+figure("Conjugate gradient iterations on the grid Laplacian", "square root of the condition number", "iterations to a 1e-8 residual")
+xscale("log")
+yscale("log")
+plot(sqrt_kappa, fg_ref, "proportional to sqrt(kappa)")
+style("proportional to sqrt(kappa)", "dash s6 nomarker thin")
+plot(sqrt_kappa, iterations, "CG, n = 16 to 128")
+style("CG, n = 16 to 128", "s1 circle")
+
+test "iterations grow like sqrt(kappa): slope between 0.85 and 1.15" {
+    assert_gt(slope_vs_sqrt_kappa, 0.85)
+    assert_lt(slope_vs_sqrt_kappa, 1.15)
+}
+test "badly scaled, plain CG does not converge in 10,000 iterations at n = 64: more than 80 times the unscaled count" {
+    assert_true(it_scaled_plain == MAX_IT)
+    assert_gt(scaled_over_unscaled, 80.0)
+}
+test "the Jacobi preconditioner brings it to between 1.5 and 2.5 times the unscaled count" {
+    assert_gt(jacobi_over_unscaled, 1.5)
+    assert_lt(jacobi_over_unscaled, 2.5)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

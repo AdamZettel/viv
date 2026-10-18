@@ -1,0 +1,113 @@
+#! engine hf-energy
+#! title Hartree-Fock energy of a molecule, from an XYZ file and a basis name
+#! program lib/hf/scf
+#! input molecule: xyz
+#! input settings: basis (sto-3g | 6-31g | 6-31g* | cc-pvdz | def2-svp), charge, spin, method (rhf | uhf | rohf), spherical or cartesian
+#! output total-energy, orbital-energies
+#! limit tab: elements H to Ar, up to an estimated 60 s in the interpreter; larger runs natively with viv run
+#! validated water 6-31g: lib/hfref/water_631g.viv
+#! validated water cc-pvdz: lib/hfref/water_ccpvdz.viv
+#
+# lib/hf as a program you feed a molecule. An adapter (www/src/lib/engines/
+# molecule.js) reads an XYZ file, looks the basis up in a table taken from
+# PySCF (www/src/lib/engines/hf-bases.json), and writes the three basis packs
+# lib/hf takes: atoms (Z, x, y, z in bohr), shells and
+# primitives. This program wraps them in a `Molecule` (lib/hf/molecule) and
+# runs lib/hf/scf's `scf_with` on it, with every stage at its production
+# member; the `ScfResult` carries the energy and the orbital energies.
+
+from hf.scf import scf_with
+from hf.molecule import mol_enuc, mol_nalpha, mol_nbeta, Molecule, molecule_packs
+from hf.opts import scf_defaults, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions
+import basis.pople631g
+from hf.mole import molecule
+from engines.precise import precise_hi, precise_lo, precise_mid
+from hfref.water_631g import WATER631G_E_RHF
+
+# ---- input: the page replaces everything from here to "end of input".
+# This default is water in 6-31G at the geometry of tools/hf_reference.py,
+# written as PySCF takes it (lib/hf/mole); the page writes the three packs
+# from its XYZ adapter instead.
+MOL_DEFAULT = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")
+#: MOL_ATOMS      [natm, 4]: Z, x, y, z in bohr
+#: MOL_SHELLS     [nsh, 8]: atom, l, nprim, p0, cart0, sph0, ncart, nsph
+#: MOL_PRIMS      [nprim, 2]: exponent, raw contraction coefficient
+#: MOL_CHARGE     net charge
+#: MOL_SPIN       Na - Nb, as PySCF's spin
+#: MOL_SPHERICAL  1 for spherical AOs (PySCF's default), 0 for Cartesian
+#: MOL_METHOD     0 auto (RHF when closed, else UHF), 1 RHF, 2 UHF, 3 ROHF
+MOL_ATOMS = MOL_DEFAULT.atoms
+MOL_SHELLS = MOL_DEFAULT.shells
+MOL_PRIMS = MOL_DEFAULT.prims
+MOL_CHARGE = 0.0
+MOL_SPIN = 0.0
+MOL_SPHERICAL = 1.0
+MOL_METHOD = 0.0
+#: HAS_REF  1 when REF_E is the lib/hfref energy for exactly this molecule, basis and state
+#: REF_E    that energy, hartree (PySCF, conv_tol 1e-12)
+HAS_REF = 1.0
+REF_E = WATER631G_E_RHF
+# ---- end of input
+
+narrate "integrals and SCF"
+MOL = Molecule { charge: MOL_CHARGE, spin: MOL_SPIN, cart: 1.0 - MOL_SPHERICAL, ..molecule_packs(MOL_ATOMS, MOL_SHELLS, MOL_PRIMS) }
+RESULT = scf_with(MOL, ScfOptions { method: MOL_METHOD, ..scf_defaults() })
+
+NAO = len(RESULT.density)
+METHOD = RESULT.method
+E_TOTAL = RESULT.energy
+E_NUC = mol_enuc(MOL)
+NALPHA = mol_nalpha(MOL)
+NBETA = mol_nbeta(MOL)
+CONVERGED = RESULT.converged
+GRADIENT = RESULT.grad
+ITERATIONS = RESULT.iterations
+E_HI = precise_hi(E_TOTAL)
+E_MID = precise_mid(E_TOTAL)
+E_LO = precise_lo(E_TOTAL)
+show NAO
+show METHOD
+show NALPHA
+show NBETA
+show E_TOTAL
+show E_HI
+show E_MID
+show E_LO
+show E_NUC
+show CONVERGED
+show GRADIENT
+show ITERATIONS
+if METHOD != SCF_RHF {
+    S2 = RESULT.s2
+    show S2
+}
+
+# ---- orbital energies: the eigenvalues of the last Fock matrix, which the
+# result carries per spin. The SCF stops when F D S - S D F is below 1e-9, so
+# these are the eigenvalues of the converged Fock matrix to that accuracy.
+# ROHF has no unique orbital energies (they depend on how the effective Fock
+# matrix is built), so none are shown for it.
+narrate "orbital energies"
+if METHOD != SCF_ROHF {
+    NMO = len(RESULT.alpha.mo_energy)
+    MO_ALPHA = RESULT.alpha.mo_energy
+    show NMO
+    show MO_ALPHA
+    if METHOD == SCF_UHF {
+        MO_BETA = RESULT.beta.mo_energy
+        show MO_BETA
+    }
+}
+
+test "the SCF converged: energy change below 1e-12 and max |FDS - SDF| below 1e-9" {
+    assert_near(CONVERGED, 1.0, 0.0)
+}
+
+#: REF_DE  |E - REF_E|, when there is a reference
+if HAS_REF > 0.5 {
+    REF_DE = abs(E_TOTAL - REF_E)
+    show REF_DE
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

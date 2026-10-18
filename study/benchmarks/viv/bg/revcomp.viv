@@ -1,0 +1,111 @@
+# The Computer Language Benchmarks Game: reverse-complement.
+# Reference: upstream/benchmarksgame/programs/revcomp.python3-3.python3
+# (Ruben Vorderman), ported line by line. Differences: viv/NOTES.md.
+# The input is read from input.txt (the reference reads stdin in 32 KiB
+# blocks; here the file is read whole, then taken in the same 32 KiB blocks).
+# The generator parse_fasta is written inline in reverse_complement, calling
+# write_sequence where the reference yields.
+
+BLOCK_SIZE = 32 * 1024
+LINE_LENGTH = 60
+
+# bytes.maketrans(letters + letters.lower(), complmn + complmn): a 256-entry
+# table, character code -> replacement (every other character maps to itself)
+letters = "ACGTUMRYKVHDB"
+complmn = "TGCAAKYRMBDHV"
+TABLE = []
+for code to 256 {
+    TABLE = append(TABLE, chr(code))
+}
+TABLE_FIX = map()
+for k to len(letters) {
+    TABLE_FIX[letters[k]] = complmn[k]
+    TABLE_FIX[lower(letters[k])] = complmn[k]
+}
+TRANS = []
+for code to 256 {
+    TRANS = append(TRANS, get(TABLE_FIX, TABLE[code], TABLE[code]))
+}
+
+# part.translate(translate_table, b'\n'): map each character through the
+# table and delete the newlines
+def translate(part) {
+    out = []
+    for c in part {
+        if c != "\n" {
+            out = append(out, TRANS[ord(c)])
+        }
+    }
+    return join("", out)
+}
+
+# the body of the reference's `for name, sequence_parts in parse_fasta(inp)` loop
+def write_sequence(name, sequence_parts) {
+    out = [name, "\n"]
+    last_line_length = 0
+    for pi to len(sequence_parts) {
+        part = sequence_parts[len(sequence_parts) - 1 - pi]
+        translated = translate(part)
+        reverse = translated[::-1]
+        offset = LINE_LENGTH - last_line_length
+        out = append(out, reverse[:offset])
+        out = append(out, "\n")
+        fasta_lines = []
+        for i from offset to len(reverse) by LINE_LENGTH {
+            fasta_lines = append(fasta_lines, reverse[i:i + LINE_LENGTH])
+        }
+        last_line_length = len(fasta_lines[-1])
+        out = append(out, join("\n", fasta_lines))
+    }
+    # outp.write(b"\n") ends the sequence: print writes that newline
+    print(join("", out))
+    return 0
+}
+
+def reverse_complement(text) {
+    pos = 0
+    block_size = BLOCK_SIZE
+    name_index = 0
+    block = text[pos:pos + block_size]
+    pos = pos + len(block)
+    while true {
+        name_end = find(block, "\n", name_index)
+        name = ""
+        if name_end == -1 {
+            name_part = block[name_index:]
+            block = text[pos:pos + block_size]
+            pos = pos + len(block)
+            if block == "" {
+                stop("truncated FASTA file")
+            }
+            name_end = find(block, "\n", name_index)
+            name = name_part + block[:name_end]
+        }
+        else {
+            name = block[name_index:name_end]
+        }
+        seq_parts = []
+        while true {
+            name_index = find(block, ">", name_end)
+            if name_index != -1 {
+                seq_parts = append(seq_parts, block[name_end:name_index])
+                write_sequence(name, seq_parts)
+                break
+            }
+            seq_parts = append(seq_parts, block[name_end:])
+            block = text[pos:pos + block_size]
+            pos = pos + len(block)
+            if block == "" {
+                write_sequence(name, seq_parts)
+                return 0
+            }
+            name_end = 0
+        }
+    }
+    return 0
+}
+
+reverse_complement(read_text("input.txt"))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

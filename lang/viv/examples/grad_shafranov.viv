@@ -1,0 +1,181 @@
+# Grad-Shafranov equilibrium of a tokamak: the self-consistent MHD force balance
+# J x B = grad p, written for the poloidal flux psi(R,Z). The operator is the
+# R-weighted "Grad-Shafranov" Laplacian
+#
+#     Delta* psi = d2psi/dR2 - (1/R) dpsi/dR + d2psi/dZ2 = -mu0 R^2 p'(psi) - F F'(psi)
+#
+# For a SOLOV'EV equilibrium the source is linear, Delta* psi = A R^2 + B, so the
+# equilibrium has a closed-form answer -- the perfect thing to grade a solver on
+# (the same manufactured-solution trick as fem_poisson.viv). Here
+#
+#     psi_exact(R,Z) = (1/8)(R^2 - 1)^2 + (kappa/2) Z^2        (R0 = 1)
+#     Delta* psi_exact = R^2 + kappa                            (so A = 1, B = kappa)
+#
+# We discretize Delta* on an (R,Z) grid, pin psi = psi_exact on the boundary, and
+# relax the interior to equilibrium by SOR (each sweep is one update; the residual
+# falls to ~1e-9). Then we read the physics straight off the converged flux:
+#   * the magnetic axis (the O-point, where psi is minimal) sits at (R,Z) = (1,0);
+#   * the flux surfaces are nested, and their geometric centre is shifted INBOARD
+#     of the axis -- equivalently the axis is pushed OUTBOARD: the Shafranov shift.
+#
+# Validation: interior RMS error vs psi_exact falls at O(h^2); the axis lands at
+# R = 1; the measured Shafranov shift matches the analytic 0.0326.
+
+def absf(x) {
+    if x < 0.0 {
+        return -x
+    }
+    return x
+}
+
+# --- grid: axis (R0=1, Z=0) sits exactly on a node (NR, NZ odd) ---
+NR = 41
+NZ = 41
+Rmin = 0.6
+Rmax = 1.4
+Zmin = -0.4
+Zmax = 0.4
+hR = (Rmax - Rmin) / (NR - 1.0)
+hZ = (Zmax - Zmin) / (NZ - 1.0)
+kappa = 2.0
+
+Rc = zeros(NR)
+Zc = zeros(NZ)
+for i to NR {
+    Rc[i] = Rmin + i * hR
+}
+for j to NZ {
+    Zc[j] = Zmin + j * hZ
+}
+
+# --- exact Solov'ev flux, and psi seeded with it on the boundary only ---
+psi_ex = zeros(NR, NZ)
+psi = zeros(NR, NZ)
+for i to NR {
+    for j to NZ {
+        t = Rc[i] * Rc[i] - 1.0
+        psi_ex[i, j] = 0.125 * t * t + 0.5 * kappa * Zc[j] * Zc[j]
+        onb = i == 0.0 or i == NR - 1.0 or j == 0.0 or j == NZ - 1.0
+        if onb {
+            psi[i, j] = psi_ex[i, j]
+        }
+    }
+}
+
+# --- relax the interior to equilibrium by SOR ---
+omega = 1.85
+maxsweep = 5000
+sweeps = 0.0
+for sweep to maxsweep {
+    resid = 0.0
+    for i to NR {
+        if i > 0 {
+            if i < NR - 1.0 {
+                for j to NZ {
+                    if j > 0 {
+                        if j < NZ - 1.0 {
+                            ri = Rc[i]
+                            aE = 1.0 / (hR * hR) - 1.0 / (2.0 * ri * hR)
+                            aW = 1.0 / (hR * hR) + 1.0 / (2.0 * ri * hR)
+                            aN = 1.0 / (hZ * hZ)
+                            aP = -2.0 / (hR * hR) - 2.0 / (hZ * hZ)
+                            src = ri * ri + kappa
+                            gs = (src - aE * psi[i + 1.0, j] - aW * psi[i - 1.0, j] - aN * psi[i, j + 1.0] - aN * psi[i, j - 1.0]) / aP
+                            old = psi[i, j]
+                            newv = (1.0 - omega) * old + omega * gs
+                            psi[i, j] = newv
+                            d = absf(newv - old)
+                            if d > resid {
+                                resid = d
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sweeps = sweep + 1.0
+    if resid < 1.0e-9 {
+        break
+    }
+}
+
+# --- validation 1: interior RMS error against the exact Solov'ev flux ---
+err2 = 0.0
+cnt = 0.0
+for i to NR {
+    if i > 0 {
+        if i < NR - 1.0 {
+            for j to NZ {
+                if j > 0 {
+                    if j < NZ - 1.0 {
+                        dd = psi[i, j] - psi_ex[i, j]
+                        err2 += dd * dd
+                        cnt += 1.0
+                    }
+                }
+            }
+        }
+    }
+}
+rms = sqrt(err2 / cnt)
+
+# --- validation 2: the magnetic axis (O-point) = min of psi ---
+psimin = 1.0e30
+Raxis = 0.0
+Zaxis = 0.0
+for i to NR {
+    for j to NZ {
+        if psi[i, j] < psimin {
+            psimin = psi[i, j]
+            Raxis = Rc[i]
+            Zaxis = Zc[j]
+        }
+    }
+}
+
+# --- validation 3: the Shafranov shift of the psi = psib flux surface ---
+# On the midplane (Z = 0) find the inboard/outboard radii where psi = psib; the
+# surface's geometric centre is (Rin+Rout)/2, and the axis sits outboard of it.
+jmid = (0.0 - Zmin) / hZ
+psib = 0.03
+Rout = 0.0
+found = false
+for i to NR {
+    if not found {
+        if i > 20.0 {
+            if psi[i, jmid] >= psib {
+                p0 = psi[i - 1.0, jmid]
+                p1 = psi[i, jmid]
+                Rout = Rc[i - 1.0] + hR * (psib - p0) / (p1 - p0)
+                found = true
+            }
+        }
+    }
+}
+Rin = 0.0
+foundin = false
+for kk to NR {
+    i = 20.0 - kk
+    if i >= 0.0 {
+        if not foundin {
+            if psi[i, jmid] >= psib {
+                p0 = psi[i, jmid]
+                p1 = psi[i + 1.0, jmid]
+                Rin = Rc[i] + hR * (psib - p0) / (p1 - p0)
+                foundin = true
+            }
+        }
+    }
+}
+Rgeo = (Rin + Rout) / 2.0
+shift = Raxis - Rgeo
+
+show sweeps    # SOR sweeps to converge
+show rms       # interior error vs exact Solov'ev  (O(h^2))
+show Raxis     # magnetic axis major radius        (should be 1.0)
+show psimin    # flux on axis                       (should be ~0)
+show shift     # Shafranov shift, axis outboard of surface centre (~0.0326)
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

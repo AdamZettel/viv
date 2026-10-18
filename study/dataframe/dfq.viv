@@ -1,0 +1,503 @@
+#| Dataframe benchmark kernels: H2O groupby q1-q5, TPC-H Q1/Q6, one join.
+#| Keys arrive as int64 codes; values as int64 or float64 columns.
+
+#| q1 hash: sum v1 by id1, through a map from key to group slot.
+def q1_map(id1: [Int], v1: [Int]) {
+    g = map()
+    ks = zeros(0)
+    s = zeros(0)
+    for i to len(id1) {
+        k = float(id1[i])
+        j = get(g, k, -1)
+        if j < 0 {
+            j = len(ks)
+            g[k] = j
+            ks = append(ks, k)
+            s = append(s, 0.0)
+        }
+        s[j] += v1[i]
+    }
+    return ks, s
+}
+
+#| q1 dense: key codes index an accumulator directly.
+def q1_dense(id1: [Int], v1: [Int], nk: Int) {
+    s = int_zeros(nk)
+    for i to len(id1) {
+        s[id1[i]] += v1[i]
+    }
+    return s
+}
+
+#| q2 hash: sum v1 by (id1, id2), composite key.
+def q2_map(id1: [Int], id2: [Int], v1: [Int], nk2: Int) {
+    g = map()
+    ks = zeros(0)
+    s = zeros(0)
+    for i to len(id1) {
+        k = float(id1[i] * nk2 + id2[i])
+        j = get(g, k, -1)
+        if j < 0 {
+            j = len(ks)
+            g[k] = j
+            ks = append(ks, k)
+            s = append(s, 0.0)
+        }
+        s[j] += v1[i]
+    }
+    return ks, s
+}
+
+def q2_dense(id1: [Int], id2: [Int], v1: [Int], nk1: Int, nk2: Int) {
+    s = int_zeros(nk1 * nk2)
+    for i to len(id1) {
+        s[id1[i] * nk2 + id2[i]] += v1[i]
+    }
+    return s
+}
+
+#| q3 hash: sum v1, mean v3 by id3 (1e5 groups).
+def q3_map(id3: [Int], v1: [Int], v3: Arr) {
+    g = map()
+    ks = zeros(0)
+    s1 = zeros(0)
+    s3 = zeros(0)
+    c = zeros(0)
+    for i to len(id3) {
+        k = float(id3[i])
+        j = get(g, k, -1)
+        if j < 0 {
+            j = len(ks)
+            g[k] = j
+            ks = append(ks, k)
+            s1 = append(s1, 0.0)
+            s3 = append(s3, 0.0)
+            c = append(c, 0.0)
+        }
+        s1[j] += v1[i]
+        s3[j] += v3[i]
+        c[j] += 1.0
+    }
+    return ks, s1, s3 / c
+}
+
+def q3_dense(id3: [Int], v1: [Int], v3: Arr, nk: Int) {
+    s1 = int_zeros(nk)
+    s3 = zeros(nk)
+    c = int_zeros(nk)
+    for i to len(id3) {
+        k = id3[i]
+        s1[k] += v1[i]
+        s3[k] += v3[i]
+        c[k] += 1
+    }
+    return s1, s3, c
+}
+
+#| q4 hash: mean v1, v2, v3 by id4 (100 groups).
+def q4_map(id4: [Int], v1: [Int], v2: [Int], v3: Arr) {
+    g = map()
+    ks = zeros(0)
+    s1 = zeros(0)
+    s2 = zeros(0)
+    s3 = zeros(0)
+    c = zeros(0)
+    for i to len(id4) {
+        k = float(id4[i])
+        j = get(g, k, -1)
+        if j < 0 {
+            j = len(ks)
+            g[k] = j
+            ks = append(ks, k)
+            s1 = append(s1, 0.0)
+            s2 = append(s2, 0.0)
+            s3 = append(s3, 0.0)
+            c = append(c, 0.0)
+        }
+        s1[j] += v1[i]
+        s2[j] += v2[i]
+        s3[j] += v3[i]
+        c[j] += 1.0
+    }
+    return ks, s1 / c, s2 / c, s3 / c
+}
+
+def q4_dense(id4: [Int], v1: [Int], v2: [Int], v3: Arr, nk: Int) {
+    s1 = int_zeros(nk)
+    s2 = int_zeros(nk)
+    s3 = zeros(nk)
+    c = int_zeros(nk)
+    for i to len(id4) {
+        k = id4[i]
+        s1[k] += v1[i]
+        s2[k] += v2[i]
+        s3[k] += v3[i]
+        c[k] += 1
+    }
+    return s1, s2, s3, c
+}
+
+#| q5 hash: sum v1, v2, v3 by id6 (1e5 groups).
+def q5_map(id6: [Int], v1: [Int], v2: [Int], v3: Arr) {
+    g = map()
+    ks = zeros(0)
+    s1 = zeros(0)
+    s2 = zeros(0)
+    s3 = zeros(0)
+    for i to len(id6) {
+        k = float(id6[i])
+        j = get(g, k, -1)
+        if j < 0 {
+            j = len(ks)
+            g[k] = j
+            ks = append(ks, k)
+            s1 = append(s1, 0.0)
+            s2 = append(s2, 0.0)
+            s3 = append(s3, 0.0)
+        }
+        s1[j] += v1[i]
+        s2[j] += v2[i]
+        s3[j] += v3[i]
+    }
+    return ks, s1, s2, s3
+}
+
+def q5_dense(id6: [Int], v1: [Int], v2: [Int], v3: Arr, nk: Int) {
+    s1 = int_zeros(nk)
+    s2 = int_zeros(nk)
+    s3 = zeros(nk)
+    for i to len(id6) {
+        k = id6[i]
+        s1[k] += v1[i]
+        s2[k] += v2[i]
+        s3[k] += v3[i]
+    }
+    return s1, s2, s3
+}
+
+#| TPC-H Q6: one fused filtered scan.
+def tpch_q6(ship: [Int], disc: Arr, qty: Arr, price: Arr, d0: Int, d1: Int) -> Num {
+    rev = 0.0
+    for i to len(ship) {
+        if ship[i] >= d0 and ship[i] < d1 and disc[i] >= 0.05 and disc[i] <= 0.07 and qty[i] < 24.0 {
+            rev += price[i] * disc[i]
+        }
+    }
+    return rev
+}
+
+#| TPC-H Q1: filter on shipdate, group by (returnflag, linestatus) codes
+#| 0..2 and 0..1, eight aggregates per group in one pass.
+def tpch_q1(ship: [Int], rf: [Int], ls: [Int], qty: Arr, price: Arr, disc: Arr, tax: Arr, cutoff: Int) {
+    ng = 6
+    sq = zeros(ng)
+    sp = zeros(ng)
+    sd = zeros(ng)
+    sc = zeros(ng)
+    sdisc = zeros(ng)
+    cnt = int_zeros(ng)
+    for i to len(ship) {
+        if ship[i] <= cutoff {
+            g = rf[i] * 2 + ls[i]
+            dp = price[i] * (1.0 - disc[i])
+            sq[g] += qty[i]
+            sp[g] += price[i]
+            sd[g] += dp
+            sc[g] += dp * (1.0 + tax[i])
+            sdisc[g] += disc[i]
+            cnt[g] += 1
+        }
+    }
+    return sq, sp, sd, sc, sdisc, cnt
+}
+
+#| Join, hash: inner join left (key, v1) to right (key, v2) on key;
+#| returns count, sum of v1 and sum of v2 over the joined rows.
+def join_map(lk: [Int], lv: [Int], rk: [Int], rv: Arr) {
+    h = map()
+    for j to len(rk) {
+        h[float(rk[j])] = j
+    }
+    n: Int = 0
+    s1 = 0.0
+    s2 = 0.0
+    for i to len(lk) {
+        j = get(h, float(lk[i]), -1)
+        if j >= 0 {
+            n += 1
+            s1 += lv[i]
+            s2 += rv[j]
+        }
+    }
+    return n, s1, s2
+}
+
+#| Join, direct-address: the right key range is small enough to index.
+def join_dense(lk: [Int], lv: [Int], rk: [Int], rv: Arr, kmax: Int) {
+    slot = int_zeros(kmax + 1)
+    for j to len(rk) {
+        slot[rk[j]] = int(j) + 1
+    }
+    n: Int = 0
+    s1 = 0.0
+    s2 = 0.0
+    for i to len(lk) {
+        p = slot[lk[i]]
+        if p > 0 {
+            n += 1
+            s1 += lv[i]
+            s2 += rv[p - 1]
+        }
+    }
+    return n, s1, s2
+}
+
+
+#| Threaded versions: each pass of `parallel for` owns one chunk of rows
+#| and one row of a partial-sum matrix; the partials are added afterward.
+def q1_par(id1: [Int], v1: [Int], nk: Int, nt: Int) {
+    n = len(id1)
+    p = zeros(nt, nk)
+    parallel for c to nt {
+        lo = int(c) * n // nt
+        hi = (int(c) + 1) * n // nt
+        for t to hi - lo {
+            i = lo + t
+            p[c, id1[i]] += v1[i]
+        }
+    }
+    s = zeros(nk)
+    for c to nt {
+        for k to nk {
+            s[k] += p[c, k]
+        }
+    }
+    return s
+}
+
+def q5_par(id6: [Int], v1: [Int], v2: [Int], v3: Arr, nk: Int, nt: Int) {
+    n = len(id6)
+    p1 = zeros(nt, nk)
+    p2 = zeros(nt, nk)
+    p3 = zeros(nt, nk)
+    parallel for c to nt {
+        lo = int(c) * n // nt
+        hi = (int(c) + 1) * n // nt
+        for t to hi - lo {
+            i = lo + t
+            k = id6[i]
+            p1[c, k] += v1[i]
+            p2[c, k] += v2[i]
+            p3[c, k] += v3[i]
+        }
+    }
+    s1 = zeros(nk)
+    s2 = zeros(nk)
+    s3 = zeros(nk)
+    for c to nt {
+        for k to nk {
+            s1[k] += p1[c, k]
+            s2[k] += p2[c, k]
+            s3[k] += p3[c, k]
+        }
+    }
+    return s1, s2, s3
+}
+
+#| Q6 with the scan split over threads: the scalar total is a reduction.
+def tpch_q6_par(ship: [Int], disc: Arr, qty: Arr, price: Arr, d0: Int, d1: Int) -> Num {
+    rev = 0.0
+    parallel for i to len(ship) {
+        if ship[i] >= d0 and ship[i] < d1 and disc[i] >= 0.05 and disc[i] <= 0.07 and qty[i] < 24.0 {
+            rev += price[i] * disc[i]
+        }
+    }
+    return rev
+}
+
+#| Join probe over threads against the direct-address table.
+def join_par(lk: [Int], lv: [Int], rk: [Int], rv: Arr, kmax: Int) {
+    slot = int_zeros(kmax + 1)
+    for j to len(rk) {
+        slot[rk[j]] = int(j) + 1
+    }
+    n = 0.0
+    s1 = 0.0
+    s2 = 0.0
+    parallel for i to len(lk) {
+        p = slot[lk[i]]
+        if p > 0 {
+            n += 1.0
+            s1 += lv[i]
+            s2 += rv[p - 1]
+        }
+    }
+    return n, s1, s2
+}
+
+#| A def that only touches its arguments: the Python call overhead.
+def noop(a: [Int], b: Arr) -> Num {
+    return len(a) + len(b)
+}
+
+test "q1 dense and map agree" {
+    id: [Int] = [1, 2, 1, 0]
+    v: [Int] = [5, 3, 2, 7]
+    s = q1_dense(id, v, 3)
+    ks, m = q1_map(id, v)
+    assert_near(s[1], 7.0, 0.0)
+    assert_near(m[0], 7.0, 0.0)
+    assert_near(ks[2], 0.0, 0.0)
+}
+
+# ---- the fair versions: raw int64 key columns, every key step inside the call
+# `factorize` (lang/viv/std/groupby.viv) hashes the keys once into group ids;
+# the aggregation is then a dense loop over those ids.
+
+#| q1: sum v1 by id1.
+def q1_fact(id1: [Int], v1: [Int]) {
+    u, g = factorize(id1)
+    s = int_zeros(len(u))
+    for i to len(id1) {
+        s[g[i]] += v1[i]
+    }
+    return u, s
+}
+
+#| q2: sum v1 by (id1, id2).
+def q2_fact(id1: [Int], id2: [Int], v1: [Int]) {
+    ka, kb, g = factorize2(id1, id2)
+    s = int_zeros(len(ka))
+    for i to len(id1) {
+        s[g[i]] += v1[i]
+    }
+    return ka, kb, s
+}
+
+#| q3: sum v1, mean v3 by id3.
+def q3_fact(id3: [Int], v1: [Int], v3: Arr) {
+    u, g = factorize(id3)
+    ng = len(u)
+    s1 = int_zeros(ng)
+    s3 = zeros(ng)
+    c = int_zeros(ng)
+    for i to len(id3) {
+        j = g[i]
+        s1[j] += v1[i]
+        s3[j] += v3[i]
+        c[j] += 1
+    }
+    for j to ng {
+        s3[j] = s3[j] / c[j]
+    }
+    return u, s1, s3
+}
+
+#| q4: mean v1, v2, v3 by id4.
+def q4_fact(id4: [Int], v1: [Int], v2: [Int], v3: Arr) {
+    u, g = factorize(id4)
+    ng = len(u)
+    s1 = int_zeros(ng)
+    s2 = int_zeros(ng)
+    s3 = zeros(ng)
+    c = int_zeros(ng)
+    for i to len(id4) {
+        j = g[i]
+        s1[j] += v1[i]
+        s2[j] += v2[i]
+        s3[j] += v3[i]
+        c[j] += 1
+    }
+    m1 = zeros(ng)
+    m2 = zeros(ng)
+    for j to ng {
+        m1[j] = s1[j] / c[j]
+        m2[j] = s2[j] / c[j]
+        s3[j] = s3[j] / c[j]
+    }
+    return u, m1, m2, s3
+}
+
+#| q5: sum v1, v2, v3 by id6.
+def q5_fact(id6: [Int], v1: [Int], v2: [Int], v3: Arr) {
+    u, g = factorize(id6)
+    ng = len(u)
+    s1 = int_zeros(ng)
+    s2 = int_zeros(ng)
+    s3 = zeros(ng)
+    for i to len(id6) {
+        j = g[i]
+        s1[j] += v1[i]
+        s2[j] += v2[i]
+        s3[j] += v3[i]
+    }
+    return u, s1, s2, s3
+}
+
+#| join: inner join on k, then count, sum lv, sum rv; `match_rows` probes a
+#| table built from the right side.
+def join_fact(lk: [Int], lv: [Int], rk: [Int], rv: Arr) {
+    m = match_rows(rk, lk)
+    n: Int = 0
+    s1: Int = 0
+    s2 = 0.0
+    for i to len(lk) {
+        p = m[i]
+        if p >= 0 {
+            n += 1
+            s1 += lv[i]
+            s2 += rv[p]
+        }
+    }
+    return n, s1, s2
+}
+
+#| TPC-H Q1 with its groups found by `factorize2` instead of the known code
+#| domain (rf in 0..2, ls in 0..1) the plain `tpch_q1` indexes by.
+def tpch_q1_fact(ship: [Int], rf: [Int], ls: [Int], qty: Arr, price: Arr, disc: Arr, tax: Arr, cutoff: Int) {
+    ka, kb, g = factorize2(rf, ls)
+    ng = len(ka)
+    sq = zeros(ng)
+    sp = zeros(ng)
+    sd = zeros(ng)
+    sc = zeros(ng)
+    sdisc = zeros(ng)
+    cnt = int_zeros(ng)
+    for i to len(ship) {
+        if ship[i] <= cutoff {
+            j = g[i]
+            dp = price[i] * (1.0 - disc[i])
+            sq[j] += qty[i]
+            sp[j] += price[i]
+            sd[j] += dp
+            sc[j] += dp * (1.0 + tax[i])
+            sdisc[j] += disc[i]
+            cnt[j] += 1
+        }
+    }
+    return ka, kb, sq, sp, sd, sc, sdisc, cnt
+}
+
+# ---- fused: the aggregate computed in the pass that finds the groups
+# (`group_sum`, `group_sum_num`, `group_sum2` in lang/viv/std/groupby.viv).
+# Each call finds the key span first (one pass over the keys, inside the
+# call); keys spanning few values take the direct path (slot = key - lo),
+# others the hash path with the sums beside the table. No id column. For
+# several value columns (q3, q4, q5) one call per column measured slower
+# than `factorize` and one loop (62, 53, 79 ms against 56, 41, 55), so those
+# stay `*_fact`, whose `factorize` takes the same direct path.
+
+#| q1: sum v1 by id1, one pass after the span.
+def q1_fused(id1: [Int], v1: [Int]) {
+    u, s, c = group_sum(id1, v1)
+    return u, s
+}
+
+#| q2: sum v1 by (id1, id2): one pass over the pair slots.
+def q2_fused(id1: [Int], id2: [Int], v1: [Int]) {
+    ka, kb, s, c = group_sum2(id1, id2, v1)
+    return ka, kb, s
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

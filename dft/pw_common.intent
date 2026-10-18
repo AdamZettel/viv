@@ -1,0 +1,155 @@
+module dft/pw_common
+  What the dense and the iterative plane-wave engines share: everything that
+  does not depend on how the Kohn-Sham equations are solved.
+
+  Kohn-Sham DFT replaces the many-electron problem by one electron moving in
+  an effective potential: the attraction of the ions, the classical repulsion
+  of the electron density (Hartree), and an exchange-correlation term that
+  carries the rest. The potential depends on the density and the density on
+  the orbitals the potential produces, so the equations are solved by
+  iteration (the SCF loop, in dft/pwdft.viv and dft/pwdft_it.viv).
+
+  In a crystal each orbital is a Bloch wave, `exp(i k.r)` times a function
+  with the period of the lattice. That periodic function is a Fourier series,
+  a sum of plane waves `exp(i G.r)` over the reciprocal lattice vectors G.
+  The basis at one k is every plane wave whose kinetic energy
+  `|k + G|^2 / 2` is at most the cutoff ECUT. Raising ECUT adds shorter waves
+  and converges the answer from above.
+
+  The file runs top to bottom as part of the program, after the input deck
+  (which sets the crystal, the pseudopotential and the settings) and
+  dft/kmesh.viv (the k-points). In order, it computes:
+
+  1. Geometry. The cell volume OMEGA from the primitive vectors A, the
+     reciprocal vectors B (`b_i . a_j = 2 pi delta_ij`), the atom positions
+     TAU in bohr, and the valence electron count NELEC.
+  2. Projector channels. Each nonlocal projector is a (species, l, i)
+     triple; this numbers them, so one array can hold them all.
+  3. The pseudopotential in reciprocal space: gth_vloc and gth_proj.
+  4. Plane-wave bookkeeping. MM bounds the integer triples m of G = m . B
+     that can pass the cutoff; pw_extent sizes the arrays, over the SCF
+     k-points and every point of the band path (PATHK, built from the
+     path's corners here, with PATHX, the distance along it).
+  5. The FFT grid. H needs V(G - G') for every pair of basis vectors, so the
+     grid must hold differences up to twice the largest m without aliasing.
+     NG is the next size with no prime factor above five. On that grid it
+     tabulates `|G|^2` (G2, for the Hartree term) and VPS, the ionic local
+     potential: each atom's gth_vloc times its structure factor
+     `exp(-i G.tau)`, summed over atoms. VPS does not change during the SCF.
+  6. The Teter-93 Pade fit to the LDA exchange-correlation energy, the
+     functional the GTH pseudopotentials were generated with: its
+     constants, RHO_FLOOR (a smaller density is raised to it before the fit
+     is evaluated), and lda_xc, which both engines call.
+  7. Occupations: electrons_at, fermi_level, fill_occupations.
+  8. Density mixing: anderson_step and its history arrays.
+
+gth_proj  @b94030bc
+  what  One radial projector of the nonlocal pseudopotential, `p_i^l(K)`, in
+        reciprocal space at `K = |k + G|`, including the factor
+        `1 / sqrt(OMEGA)`.
+  how   Closed forms from Hartwigsen, Goedecker and Hutter: a Gaussian
+        `exp(-K^2 r^2 / 2)` times a polynomial in `K r`, one form per (l, i),
+        with i counted from zero.
+  why   The nonlocal pseudopotential acts differently on each angular
+        momentum l, which is how it reproduces the scattering of the core
+        electrons it replaces. It is separable:
+        `<K|V_nl|K'> = sum_l (2l+1)/(4 pi) P_l(cos) sum_ij p_i(K) h_ij p_j(K')`.
+        The closed forms are checked against radial quadrature of their
+        real-space definitions in dft/ref/verify_formulas.py, and the band
+        energies they produce against the numpy reference
+        [test "band energies at L, Gamma and X agree with the numpy reference (eV)"].
+
+gth_vloc  @cdabb365
+  what  The local pseudopotential of one atom of species s at `|G| = g`,
+        divided by the cell volume.
+  how   `-4 pi Z exp(-x^2/2) / g^2` (the screened ionic charge, with
+        `x = g r_loc`) plus a Gaussian times a polynomial in `x^2` with the
+        coefficients CLOC. At `g = 0` it returns the finite part only.
+  why   At `g = 0` the term `-4 pi Z / g^2` diverges, and so do the Hartree
+        and the ion-ion energies. In a neutral cell the three divergences
+        cancel. The code keeps the finite remainder of the local term here,
+        sets the Hartree `G = 0` term to zero, and leaves the ion-ion (Ewald)
+        energy out of the total; for fixed atoms that is a constant, and it
+        moves no band.
+
+legendre  @1470d92e
+  what  The Legendre polynomial `P_l(c)` for `l` up to three: the angular
+        factor of the nonlocal pseudopotential in the dense engine.
+
+pw_extent  @7041bad8
+  what  At a k given as fractions of the reciprocal vectors: how many plane
+        waves pass the cutoff, `|k + G|^2 / 2 <= ECUT`, and the largest
+        `|m_i|` among them.
+  why   The largest count over all k-points, NPWMAX, is the size of every
+        Hamiltonian and wavefunction array. The FFT grid must hold
+        differences of basis vectors, so its size follows from the largest
+        `|m_i|`.
+
+fft_nice  @929b9ceb
+  what  The smallest integer at least n whose prime factors are all two,
+        three or five.
+  why   Any grid at least `4 max|m| + 2` wide is exact. Viv's FFT has a
+        butterfly for each of those primes; a factor of seven or larger goes
+        through a slower general path. The numpy reference uses the same rule,
+        because the exchange-correlation energy is a sum over this grid and a
+        different grid gives a slightly different total energy
+        [test "total energy agrees with the numpy reference"].
+
+wrap  @1a06a51c
+  what  An integer index taken modulo the grid size NG into `0 .. NG-1`: where
+        the plane wave with that component sits in the FFT box.
+
+lda_xc  @f6618334
+  what  The LDA exchange-correlation energy per electron `e_xc` at every
+        grid point, in hartree, and the potential
+        `v_xc = d(rho e_xc) / d rho`, returned as a pair.
+  how   The Teter-93 Pade form: with the Wigner-Seitz radius
+        `r_s = (3 / (4 pi rho))^(1/3)`, the energy is minus a ratio of two
+        polynomials in `r_s`, and `v_xc = e_xc - (r_s / 3) de_xc/dr_s`,
+        written with the derivatives of the numerator and denominator. The
+        density is floored at RHO_FLOOR first.
+  why   A mixed density is an extrapolation and can dip below zero where the
+        true density is small; the logarithm of that would give NaN, and the
+        NaN would reach every eigenvalue one iteration later.
+
+electrons_at  @c697ae36
+  what  The number of electrons the bands hold if every level is filled with
+        Fermi-Dirac occupation at chemical potential mu and width SMEAR,
+        summed over k-points with their weights.
+
+fermi_level  @9b8fbfbd
+  what  The chemical potential mu at which the bands hold exactly NELEC
+        electrons, found by bisection on electrons_at.
+  how   Start from a bracket from below the lowest level to above the highest,
+        and halve it a fixed number of times, far more than double precision
+        needs, so the result does not depend on a stopping rule.
+  why   A metal has a partly filled band, so which states are occupied
+        depends on where the Fermi level falls; the dense and the iterative
+        engines and the numpy reference all bisect the same way.
+
+fill_occupations  @689ca974
+  what  Fill FOCC, the occupation of each band at each k-point, and return
+        the electronic entropy.
+  how   For an insulator (SMEAR zero) the lowest `NELEC / 2` bands hold two
+        electrons each and the rest hold none. For a metal each band gets
+        `2 / (1 + exp((e - mu) / SMEAR))`.
+  why   The entropy term `-SMEAR * S` turns the total energy into a free
+        energy that is stationary with respect to the occupations, which the
+        SCF needs when occupations change from one iteration to the next.
+
+anderson_step  @f0bdb55d
+  what  The next input density for the SCF loop, from the current input
+        density rho, its residual `f = rho_out - rho_in`, and up to three
+        earlier pairs held in AND_R1..3 and AND_F1..3.
+  how   Find the combination of the current and earlier iterates whose
+        residual is smallest in the least-squares sense (a small linear
+        system for the weights theta), form the combined density `rbar` and
+        residual `fbar`, and step to `rbar + MIX * fbar`. With no history it
+        is linear mixing, `rho + MIX * f`.
+  why   The fixed point is the same whichever mixer is used; the history
+        changes only how fast it is reached. Linear mixing crawls or
+        oscillates when the density responds strongly to the potential, as
+        copper's d electrons do; dft/cu_it_check.viv is the run that needs
+        the history.
+  rho   the input density of this iteration, on the real-space grid
+  f     its residual: the output density minus the input density

@@ -1,0 +1,67 @@
+###
+title: Logistic regression on separated data never converges
+line: The slope grows by 2.0 per IRLS iteration, from 4.6 to 44.7, while the deviance falls by a factor of about $e$ each step.
+claim: On ten completely separated points ($y = 1$ exactly when $x > 5.5$), logistic regression by IRLS (R's glm.fit) has no finite estimate to converge to. From 5 to 25 iterations the slope grows by 2.0 per iteration (between 9.5 and 10.5 per 5 iterations, from 4.6 to 44.7) while the deviance falls by a factor between 2.6 and 2.8, about $e$, per iteration (from 0.39 to $7.9 \times 10^{-10}$), so a fit stopped by a deviance test reports a large slope that only measures how long it ran.
+topic: stats
+section: generalized linear models
+reference: R 4.3.3's glm.fit, which lib/stats/glm follows step for step (agreement to $10^{-15}$ on eight of R's datasets, lib/stats/glm_check.json, including a separated fit); Albert and Anderson, "On the existence of maximum likelihood estimates in logistic regression models", Biometrika 71 (1984) 1-10: with completely separated data the maximum likelihood estimate does not exist.
+scope: Ten points, $x = 1$ to 10, $y = 1$ exactly when $x > 5.5$, an intercept and a slope, logit link; the IRLS iteration is run for a fixed number of steps (convergence test off) to watch it. R stops it at 25 iterations by default with the warning "fitted probabilities numerically 0 or 1 occurred".
+lane: ai
+by: claude
+cost: fast
+###
+
+from stats.glm import FAM_BINOMIAL, LINK_LOGIT, glm_irls
+
+N_POINTS: Int = 10
+ITERS = [5, 10, 15, 20, 25]
+#: the convergence test off: run exactly maxit steps
+NO_STOP = 0.0
+
+x_sep = zeros(N_POINTS, 2)
+y_sep = zeros(N_POINTS)
+for i to N_POINTS {
+    x_sep[i, 0] = 1.0
+    x_sep[i, 1] = i + 1.0
+    if i + 1.0 > 5.5 {
+        y_sep[i] = 1.0
+    }
+}
+n_runs: Int = len(ITERS)
+slopes = zeros(n_runs)
+deviances = zeros(n_runs)
+for ri to n_runs {
+    coef, cov, dev, nulldev, its, conv, mu, eta, wt, rank = glm_irls(y_sep, x_sep, ones(N_POINTS), zeros(N_POINTS), FAM_BINOMIAL, LINK_LOGIT, 1.0, NO_STOP, ITERS[ri])
+    slopes[ri] = coef[1]
+    deviances[ri] = dev
+}
+show slopes
+show deviances
+#: per iteration, between the runs of 10 and 25 steps
+slope_per_iteration = (slopes[n_runs - 1] - slopes[1]) / (ITERS[n_runs - 1] - ITERS[1])
+deviance_factor = exp(log(deviances[1] / deviances[n_runs - 1]) / (ITERS[n_runs - 1] - ITERS[1]))
+show slope_per_iteration
+show deviance_factor
+
+#: the figures: the slope and the deviance against the iteration count
+figure("IRLS slope on separated data", "iterations", "fitted slope")
+plot(ITERS * 1.0, slopes, "slope")
+style("slope", "s1 circle")
+figure("IRLS deviance on separated data", "iterations", "deviance")
+yscale("log")
+plot(ITERS * 1.0, deviances, "deviance")
+style("deviance", "s2 square")
+
+test "from 10 iterations on, every 5 more add between 9.5 and 10.5 to the slope" {
+    for ri from 2 to n_runs {
+        assert_gt(slopes[ri] - slopes[ri - 1], 9.5)
+        assert_lt(slopes[ri] - slopes[ri - 1], 10.5)
+    }
+}
+test "the deviance falls by a factor between 2.6 and 2.8 per iteration" {
+    assert_gt(deviance_factor, 2.6)
+    assert_lt(deviance_factor, 2.8)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

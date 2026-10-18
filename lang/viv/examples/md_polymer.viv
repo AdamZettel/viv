@@ -1,0 +1,179 @@
+# Molecular dynamics of a Lennard-Jones bead-spring polymer.
+#
+# A second scientific axis (after quantum chemistry) and a different stress test
+# for the language: struct-of-arrays state (no structs needed), an O(N^2) force
+# kernel parallelized with `parallel for`, and symplectic velocity-Verlet time
+# integration. Correctness is validated by physics: a velocity-Verlet trajectory
+# must conserve total energy. Watching the radius of gyration shrink shows the
+# initially-extended chain coiling under non-bonded attraction.
+
+# ---- Model parameters (reduced LJ units, mass = 1). ----
+n_beads = 40
+dt = 0.004
+n_steps = 6000
+k_bond = 200.0   # harmonic bond stiffness
+r0 = 1.0         # bond rest length
+eps = 1.0        # LJ well depth
+sigma = 1.0      # LJ diameter
+sig2 = sigma * sigma
+
+# ---- State: struct-of-arrays, each n_beads x 3. ----
+pos = zeros(n_beads, 3)
+vel = zeros(n_beads, 3)
+force = zeros(n_beads, 3)
+
+# Extended chain along x, with a gentle transverse arc to break symmetry.
+for i to n_beads {
+    frac = i / (n_beads - 1.0)
+    pos[i, 0] = i * r0
+    pos[i, 1] = 2.0 * frac * (1.0 - frac)
+    pos[i, 2] = 0.0
+}
+
+# ---- Net force on every bead. Each bead sums its own interactions and writes
+#      only its own row, so the loop parallelizes with no data races. ----
+def compute_forces() {
+    parallel for i to n_beads {
+        fx = 0.0
+        fy = 0.0
+        fz = 0.0
+        for j to n_beads {
+            if j == i {
+                continue
+            }
+            dx = pos[i, 0] - pos[j, 0]
+            dy = pos[i, 1] - pos[j, 1]
+            dz = pos[i, 2] - pos[j, 2]
+            r2 = dx * dx + dy * dy + dz * dz
+            sep = i - j
+            if sep < 0.0 {
+                sep = -sep
+            }
+            if sep == 1.0 {
+                # bonded neighbor: harmonic spring
+                r = sqrt(r2)
+                fmag = -k_bond * (1.0 - r0 / r)
+                fx += fmag * dx
+                fy += fmag * dy
+                fz += fmag * dz
+            }
+            else {
+                # non-bonded: Lennard-Jones
+                sr2 = sig2 / r2
+                sr6 = sr2 * sr2 * sr2
+                sr12 = sr6 * sr6
+                fmag = 24.0 * eps * (2.0 * sr12 - sr6) / r2
+                fx += fmag * dx
+                fy += fmag * dy
+                fz += fmag * dz
+            }
+        }
+        force[i, 0] = fx
+        force[i, 1] = fy
+        force[i, 2] = fz
+    }
+}
+
+def kinetic_energy() {
+    ke = 0.0
+    for i to n_beads {
+        for d to 3 {
+            ke += 0.5 * vel[i, d] * vel[i, d]
+        }
+    }
+    return ke
+}
+
+def potential_energy() {
+    pe = 0.0
+    for i to n_beads {
+        for j to n_beads {
+            if j > i {
+                dx = pos[i, 0] - pos[j, 0]
+                dy = pos[i, 1] - pos[j, 1]
+                dz = pos[i, 2] - pos[j, 2]
+                r2 = dx * dx + dy * dy + dz * dz
+                sep = j - i
+                if sep == 1.0 {
+                    r = sqrt(r2)
+                    pe += 0.5 * k_bond * (r - r0) * (r - r0)
+                }
+                else {
+                    sr2 = sig2 / r2
+                    sr6 = sr2 * sr2 * sr2
+                    sr12 = sr6 * sr6
+                    pe += 4.0 * eps * (sr12 - sr6)
+                }
+            }
+        }
+    }
+    return pe
+}
+
+def radius_of_gyration() {
+    cx = 0.0
+    cy = 0.0
+    cz = 0.0
+    for i to n_beads {
+        cx += pos[i, 0]
+        cy += pos[i, 1]
+        cz += pos[i, 2]
+    }
+    cx = cx / n_beads
+    cy = cy / n_beads
+    cz = cz / n_beads
+    rg2 = 0.0
+    for i to n_beads {
+        dx = pos[i, 0] - cx
+        dy = pos[i, 1] - cy
+        dz = pos[i, 2] - cz
+        rg2 += dx * dx + dy * dy + dz * dz
+    }
+    return sqrt(rg2 / n_beads)
+}
+
+# ---- Velocity-Verlet integration. ----
+compute_forces()
+e_start = kinetic_energy() + potential_energy()
+rg_start = radius_of_gyration()
+
+e_min = e_start
+e_max = e_start
+
+for step to n_steps {
+    for i to n_beads {
+        for d to 3 {
+            vel[i, d] = vel[i, d] + 0.5 * dt * force[i, d]
+            pos[i, d] = pos[i, d] + dt * vel[i, d]
+        }
+    }
+    compute_forces()
+    for i to n_beads {
+        for d to 3 {
+            vel[i, d] = vel[i, d] + 0.5 * dt * force[i, d]
+        }
+    }
+    e_now = kinetic_energy() + potential_energy()
+    if e_now < e_min {
+        e_min = e_now
+    }
+    if e_now > e_max {
+        e_max = e_now
+    }
+}
+
+e_final = kinetic_energy() + potential_energy()
+rg_final = radius_of_gyration()
+
+narrate "Lennard-Jones bead-spring polymer, velocity-Verlet"
+show n_beads
+show n_steps
+show e_start
+show e_final
+show e_max
+show e_min
+show rg_start
+show rg_final
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

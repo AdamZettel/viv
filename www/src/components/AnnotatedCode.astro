@@ -1,0 +1,249 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import { highlight as highlightCode } from '../lib/highlight.js';
+// Render `viv doc` output directly.
+//
+// This component takes the JSON the compiler emits, with no reshaping step in
+// between — which is the claim the annotations design makes: the language owns
+// the annotation layer, and a code browser is just a consumer. The only work
+// here is flattening, because viv doc nests a function's notes inside its
+// entry and leaves file-level notes at the top.
+//
+// Levels: 1 = what, 2 = how, 3 = why. A line's levels merge into one note.
+
+export interface Props {
+  /** the parsed output of `viv doc <file>` */
+  doc: {
+    code: string;
+    functions: {
+      name: string;
+      line: number;
+      end: number;
+      what: string;
+      how: string;
+      why: string;
+      tags: string[];
+      vars: { name: string; desc: string }[];
+      lineNotes: { line: number; level: number; note: string }[];
+    }[];
+    vars: { name: string; desc: string }[];
+    lineNotes: { line: number; level: number; note: string }[];
+    blockNotes: { from: number; to: number; label: string; note: string }[];
+  };
+}
+
+const { doc } = Astro.props;
+const LEVEL = ['what', 'how', 'why'];
+
+// Flatten every note onto its line. Line numbers in viv doc's output refer to
+// the STRIPPED source it hands back in `code`, so no reconciliation is needed.
+const notes = new Map<number, { level: number; note: string }[]>();
+const add = (n: { line: number; level: number; note: string }) => {
+  if (!notes.has(n.line)) notes.set(n.line, []);
+  notes.get(n.line)!.push({ level: n.level, note: n.note });
+};
+for (const n of doc.lineNotes) add(n);
+for (const f of doc.functions) {
+  for (const n of f.lineNotes) add(n);
+  // a function's own doc block attaches to its `def` line
+  if (f.what) add({ line: f.line, level: 1, note: f.what });
+  if (f.how) add({ line: f.line, level: 2, note: f.how });
+  if (f.why) add({ line: f.line, level: 3, note: f.why });
+}
+for (const list of notes.values()) list.sort((a, b) => a.level - b.level);
+
+const blocks = doc.blockNotes;
+
+// Per-line render state, computed HERE rather than in the template: Astro's
+// template parser reads a `<=` inside an expression as the start of a tag, so
+// `n <= b.to` cannot appear below the fence.
+const rows = doc.code.split('\n').map((text, i) => {
+  const n = i + 1;
+  return {
+    n,
+    text,
+    notes: notes.get(n) ?? null,
+    opens: blocks.filter((b) => b.from === n),
+    inBlock: blocks.some((b) => b.from <= n && b.to >= n),
+    closes: blocks.some((b) => b.to === n),
+  };
+});
+
+// Syntax highlighting: the site's one tokenizer, a line at a time.
+const highlight = (src: string) => highlightCode(src, 'viv');
+---
+
+<figure class="ac">
+  <figcaption>
+    Hover a marked line for its note. The brackets on the left are the labeled regions
+    (<code>#[ … #]</code>).
+  </figcaption>
+  <div class="ac-body">
+    {
+      rows.map((r) => (
+        <Fragment>
+          {r.opens.map((b) => (
+            <div class="ac-blockhead">
+              <span class="ac-gut" />
+              <span class="ac-blocktext">
+                {b.label && <b>{b.label}</b>}
+                {b.note}
+              </span>
+            </div>
+          ))}
+          <div class={`ac-row${r.notes ? ' ac-noted' : ''}`} id={`A${r.n}`} tabindex={r.notes ? 0 : undefined}>
+            <span class="ac-ln">{r.n}</span>
+            <span
+              class={`ac-bar${r.inBlock ? ' ac-inblock' : ''}${r.closes ? ' ac-blockend' : ''}`}
+            />
+            <code class="ac-code" set:html={highlight(r.text) || '&nbsp;'} />
+            {r.notes && (
+              <span class="ac-dot" aria-hidden="true">
+                {r.notes.length}
+              </span>
+            )}
+            {r.notes && (
+              <span class="ac-note" role="note">
+                {r.notes.map((x) => (
+                  <span class="ac-lvl">
+                    <b>{LEVEL[x.level - 1]}</b>
+                    {x.note}
+                  </span>
+                ))}
+              </span>
+            )}
+          </div>
+        </Fragment>
+      ))
+    }
+  </div>
+</figure>
+
+<style>
+  .ac {
+    margin: 1.2rem 0;
+    max-width: 100%;
+  }
+  .ac figcaption {
+    font-size: 0.83rem;
+    color: var(--text-faint);
+    margin-bottom: 0.5rem;
+  }
+  .ac-body {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-soft);
+    padding: 11px 0;
+    overflow-x: auto;
+    font: 12.5px/1.75 var(--font-mono);
+  }
+  .ac-row {
+    display: grid;
+    grid-template-columns: 2.9rem 0.85rem 1fr auto;
+    align-items: start;
+    position: relative;
+    white-space: pre;
+  }
+  .ac-noted {
+    cursor: help;
+  }
+  .ac-noted:hover,
+  .ac-noted:focus-visible {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    outline: none;
+  }
+  .ac-ln {
+    text-align: right;
+    padding-right: 11px;
+    color: var(--text-faint);
+    user-select: none;
+    font-size: 11px;
+  }
+  .ac-bar {
+    align-self: stretch;
+    border-left: 2px solid transparent;
+    margin-left: 2px;
+  }
+  .ac-inblock {
+    border-left-color: var(--accent-soft);
+  }
+  .ac-blockend {
+    border-bottom: 2px solid var(--accent-soft);
+    border-bottom-left-radius: 4px;
+  }
+  .ac-code {
+    background: none;
+    border: 0;
+    padding: 0 12px 0 6px;
+    font: inherit;
+    color: var(--text);
+  }
+  .ac-dot {
+    font: 600 11px var(--font-mono);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-radius: 9px;
+    padding: 1px 5px;
+    margin: 4px 10px 0 0;
+    align-self: start;
+  }
+  .ac-note {
+    display: none;
+    position: absolute;
+    left: 3.9rem;
+    top: 100%;
+    z-index: 5;
+    max-width: 46ch;
+    white-space: normal;
+    background: var(--bg-card);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 9px 12px;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .ac-noted:hover .ac-note,
+  .ac-noted:focus-visible .ac-note {
+    display: block;
+  }
+  .ac-lvl {
+    display: block;
+  }
+  .ac-lvl + .ac-lvl {
+    margin-top: 5px;
+  }
+  .ac-lvl b {
+    display: inline-block;
+    min-width: 3.4em;
+    color: var(--accent);
+    font: 600 11px var(--font-mono);
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    vertical-align: 1px;
+  }
+  .ac-blockhead {
+    display: grid;
+    grid-template-columns: 2.9rem 1fr;
+    margin-top: 7px;
+  }
+  .ac-gut {
+    grid-column: 1;
+  }
+  .ac-blocktext {
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    padding: 0 12px 2px 8px;
+    border-left: 2px solid var(--accent-soft);
+    border-top: 2px solid var(--accent-soft);
+    border-top-left-radius: 4px;
+    white-space: normal;
+  }
+  .ac-blocktext b {
+    color: var(--accent);
+    margin-right: 6px;
+  }
+</style>

@@ -1,0 +1,45 @@
+# @@ imports
+# nothing to import: matrices, @ and the reductions are built in
+
+# @@ a diagonally dominant system
+A = [[10.0, -1.0, 2.0, 0.0],
+     [-1.0, 11.0, -1.0, 3.0],
+     [2.0, -1.0, 10.0, -1.0],
+     [0.0, 3.0, -1.0, 8.0]]
+b = [6.0, 25.0, -11.0, 15.0]
+
+# @@ Jacobi iteration: x_new = D^-1 (b - R x)
+def jacobi(A, b, tol, max_iter) {
+    n = len(b)
+    d = zeros(n)
+    R = copy(A)
+    for i to n {
+        d[i] = A[i, i]
+        R[i, i] = 0.0
+    }
+    x = zeros(n)
+    for k to max_iter {
+        x_new = (b - R @ x) / d
+        if max(abs(x_new - x)) < tol {
+            return x_new, k + 1
+        }
+        x = x_new
+    }
+    return x, max_iter
+}
+
+# @@ solve and check the residual
+TOL = 1e-10
+MAX_ITER = 200
+x, iters = jacobi(A, b, TOL, MAX_ITER)
+print("iterations:", iters)
+print("x =", " ".join(f"{v:.8f}" for v in x))
+print(f"largest residual {max(abs(A @ x - b)):.1e}")
+
+# @@ checks
+test "solution" {
+    assert_allclose(x, [1.0, 2.0, -1.0, 1.0], 1e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

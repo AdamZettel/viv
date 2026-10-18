@@ -1,0 +1,138 @@
+###
+post: Philox4x32-10, the counter-based generator behind every randla sketch
+agent: claude
+
+A counter-based generator maps a counter and a key to random bits with no
+state in between: the bits for entry 7,000 of a sketch are computed directly
+from the number 7,000, without drawing the 6,999 before it. That is what lets
+randla build a sketching operator on the fly, one block of entries at a time,
+and give the same operator in the interpreter, in C and in wasm, and in any
+order of evaluation (Salmon, Moraes, Dror and Shaw, "Parallel random numbers:
+as easy as 1, 2, 3", SC11). RandBLAS makes the same choice.
+
+`philox4x32(c0, c1, c2, c3, k0, k1)` is Random123's philox4x32 with ten
+rounds; the known-answer vectors from Random123's kat_vectors are tested
+below. The words are 32-bit values held in Ints.
+
+randla's convention for the counter: `(c0, c1)` is a 64-bit block index (low
+word, high word), `c2` is the stream, and `c3` picks a sub-sequence when one
+index needs more than four words. The key is the 64-bit seed, split in two.
+
+Used with `from randla.philox import ...`.
+###
+
+TWO32: Int = 4294967296
+TWO32F = 4294967296.0
+# Weyl increments of the key and the two round multipliers (Random123)
+PHILOX_W0: Int = 2654435769
+PHILOX_W1: Int = 3144134277
+PHILOX_M0: Int = 3528531795
+PHILOX_M1: Int = 3449720151
+PHILOX_ROUNDS: Int = 10
+# 2^52 and 2^26, for 52-bit uniforms from two words (26 bits of each)
+TWO52F = 4503599627370496.0
+TWO26F = 67108864.0
+SHIFT_26: Int = 64
+TWO_PI = 6.283185307179586
+# a word at or above 2^31 has its top bit set
+TOP_BIT: Int = 2147483648
+
+#| Philox4x32-10: the four 32-bit words the counter (c0, c1, c2, c3) maps to
+#| under the key (k0, k1), as Random123's philox4x32 computes them.
+def philox4x32(c0: Int, c1: Int, c2: Int, c3: Int, k0: Int, k1: Int) {
+    x0 = c0
+    x1 = c1
+    x2 = c2
+    x3 = c3
+    ka = k0
+    kb = k1
+    for round to PHILOX_ROUNDS {
+        if round > 0 {
+            ka += PHILOX_W0
+            if ka >= TWO32 {
+                ka -= TWO32
+            }
+            kb += PHILOX_W1
+            if kb >= TWO32 {
+                kb -= TWO32
+            }
+        }
+        # the two 64-bit products M x, split into high and low words with
+        # no division: the high word is umulhi(M, x 2^32) = (M x) / 2^32
+        # rounded down, and the low word is what is left
+        h0 = umulhi(PHILOX_M0, wrap_mul(x0, TWO32))
+        l0 = wrap_sub(wrap_mul(PHILOX_M0, x0), wrap_mul(h0, TWO32))
+        h1 = umulhi(PHILOX_M1, wrap_mul(x2, TWO32))
+        l1 = wrap_sub(wrap_mul(PHILOX_M1, x2), wrap_mul(h1, TWO32))
+        y0 = int(bxor(bxor(float(h1), float(x1)), float(ka)))
+        y2 = int(bxor(bxor(float(h0), float(x3)), float(kb)))
+        x0 = y0
+        x1 = l1
+        x2 = y2
+        x3 = l0
+    }
+    return x0, x1, x2, x3
+}
+
+#| The four words of block `index` of stream `stream` under `seed`, with
+#| sub-sequence `sub`: randla's one entry point into Philox.
+def block(seed: Int, stream: Int, index: Int, sub: Int) {
+    return philox4x32(index % TWO32, index // TWO32, stream % TWO32, sub, seed % TWO32, seed // TWO32)
+}
+
+#| A uniform in (0, 1) from two words: the top 26 bits of each make a 52-bit
+#| integer k, and the result is (k + 1/2) / 2^52, which is exact in a double,
+#| so neither 0 nor 1 comes out. (With 53 bits, k + 1/2 rounds to 2^53 at
+#| the top and 1.0 would come out.)
+def unit_open(a: Int, b: Int) -> Num {
+    hi = float(a // SHIFT_26)
+    lo = float(b // SHIFT_26)
+    return (hi * TWO26F + lo + 0.5) / TWO52F
+}
+
+#| Two standard normals from one block, by Box-Muller.
+def normal_pair(w0: Int, w1: Int, w2: Int, w3: Int) {
+    u1 = unit_open(w0, w1)
+    u2 = unit_open(w2, w3)
+    rad = sqrt(-2.0 * log(u1))
+    return rad * cos(TWO_PI * u2), rad * sin(TWO_PI * u2)
+}
+
+#| A sign from one word: +1 when the top bit is clear, -1 when it is set.
+def sign_of(w: Int) -> Num {
+    if w >= TOP_BIT {
+        return -1.0
+    }
+    return 1.0
+}
+
+#| An integer drawn uniformly from 0 to n - 1 using two words: floor of a
+#| 52-bit uniform times n, whose bias is below n / 2^52.
+def below(a: Int, b: Int, n: Int) -> Int {
+    j: Int = int(floor(unit_open(a, b) * float(n)))
+    if j >= n {
+        j = n - 1
+    }
+    return j
+}
+
+test "Philox4x32-10's known-answer vectors (Random123, kat_vectors)" {
+    a0, a1, a2, a3 = philox4x32(0, 0, 0, 0, 0, 0)
+    assert_true(a0 == 1713891541 and a1 == 3781805453 and a2 == 3159862348 and a3 == 2600524760)
+    m: Int = 4294967295
+    b0, b1, b2, b3 = philox4x32(m, m, m, m, m, m)
+    assert_true(b0 == 1083123565 and b1 == 1103641358 and b2 == 2718681030 and b3 == 1834242557)
+    c0, c1, c2, c3 = philox4x32(608135816, 2242054355, 320440878, 57701188, 2752067618, 698298832)
+    assert_true(c0 == 3513581065 and c1 == 2499661035 and c2 == 1342301216 and c3 == 605187745)
+}
+
+test "a uniform from two words lies strictly inside (0, 1)" {
+    m: Int = 4294967295
+    z: Int = 0
+    assert_true(unit_open(z, z) > 0.0)
+    assert_true(unit_open(m, m) < 1.0)
+    assert_true(below(m, m, 7) == 6)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

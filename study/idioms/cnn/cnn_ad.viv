@@ -1,0 +1,392 @@
+###
+post: A convolutional network on the 8x8 digits, forward and backward
+agent: claude
+
+The network of pytorch/examples `mnist/main.py`, shrunk to fit sklearn's 8x8
+digits: conv 3x3 (1 to `C1` channels), ReLU, conv 3x3 (`C1` to `C2`), ReLU,
+2x2 max pool, dropout, flatten, linear to `HIDDEN`, ReLU, dropout, linear to 10,
+softmax cross-entropy, Adam with the step size cut by 0.7 each epoch.
+
+This copy takes its gradient from `value_and_grad`; `cnn.viv` has the same
+network with the backward pass written by hand.
+
+A feature map is a rank-4 array `X[b, c, i, j]`: image, channel, row, column,
+the layout torch uses. A convolution is done the way a fast one is done:
+`im2col` copies every 3x3 window into a row of a matrix, and the convolution
+is then one matrix product with the kernels laid out one per row.
+
+The data, the initial weights, the shuffle order and the reference numbers
+come from `ref.py` through `digits.viv`.
+###
+
+import nn_adjoints
+from nn import argmax_rows, cross_entropy
+from optim import adam, OPT_LR, optim_state, optim_step
+from params import param_declare, param_get, param_set, param_table, param_zeros
+from digits import (
+    BATCH, C1, C2, CLASSES, EPOCHS, GAMMA, HIDDEN, INIT_BIAS1, INIT_BIAS2, INIT_CONV1,
+    INIT_CONV2, INIT_FC1, INIT_FC1_BIAS, INIT_FC2, INIT_FC2_BIAS, LR, N_TEST, N_TRAIN, ORDER,
+    P1, P2, REF_FINAL, REF_LOSS, REF_TEST_CORRECT, REF_TEST_LOSS, SEED, X_TEST, X_TRAIN, Y_TEST,
+    Y_TRAIN,
+)
+from hand.backward import step
+
+# ---- convolution ----
+
+#| Every 3x3 window of `X` (`B` by `C` by `H` by `W`) as one row, `C * 9`
+#| long, ordered channel, kernel row, kernel column: the order of a torch
+#| kernel `(O, C, 3, 3)` flattened to `(O, C * 9)`. Row `(b * Ho + i) * Wo + j`
+#| is the window whose corner is `(i, j)` in image `b`.
+def im2col(X: Arr) {
+    B, C, H, W = shape(X)
+    Ho = H - 2
+    Wo = W - 2
+    cols = zeros(B * Ho * Wo, C * 9)
+    for b to B {
+        for i to Ho {
+            for j to Wo {
+                r = (b * Ho + i) * Wo + j
+                for c to C {
+                    for u to 3 {
+                        for v to 3 {
+                            cols[r, c * 9 + u * 3 + v] = X[b, c, i + u, j + v]
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return cols
+}
+
+#| A valid 3x3 convolution with stride 1. `K` is `O` by `C * 9`, `bias` is 1
+#| by `O`. The product `cols K^T` has one row per output pixel and one column
+#| per output channel; the loop moves it into `(B, O, Ho, Wo)`.
+def conv2d_fwd(X: Arr, K: Arr, bias: Arr) {
+    B = len(X)
+    O = len(K)
+    Ho = shape(X)[2] - 2
+    Wo = shape(X)[3] - 2
+    Z = im2col(X) @ transpose(K)
+    Y = zeros(B, O, Ho, Wo)
+    for b to B {
+        for o to O {
+            for i to Ho {
+                for j to Wo {
+                    Y[b, o, i, j] = Z[(b * Ho + i) * Wo + j, o] + bias[0, o]
+                }
+            }
+        }
+    }
+    return Y
+}
+
+# ---- the pointwise layers ----
+
+#| 2x2 max pooling with stride 2. `arg` (the output's shape) is filled with the
+#| flat row-major index in `X` of each window's maximum, the first one on a
+#| tie, which is torch's rule; the backward pass scatters through it.
+def maxpool_fwd(X: Arr, arg: Arr) {
+    B, C, H, W = shape(X)
+    Y = zeros(B, C, H / 2, W / 2)
+    for b to B {
+        for c to C {
+            for i to H / 2 {
+                for j to W / 2 {
+                    best = -1.0e300
+                    for u to 2 {
+                        for v to 2 {
+                            if X[b, c, 2 * i + u, 2 * j + v] > best {
+                                best = X[b, c, 2 * i + u, 2 * j + v]
+                                arg[b, c, i, j] = ((b * C + c) * H + 2 * i + u) * W + 2 * j + v
+                            }
+                        }
+                    }
+                    Y[b, c, i, j] = best
+                }
+            }
+        }
+    }
+    return Y
+}
+
+#| A row-major index array of the given shape: entry `k` of the flattened
+#| array holds `k`. `take(A, flat_index(r, c))` reads `A` as an `r` by `c`
+#| matrix whatever its rank, which is how this program reshapes.
+def flat_index2(rows, cols) {
+    idx = zeros(rows, cols)
+    for r to rows {
+        for c to cols {
+            idx[r, c] = r * cols + c
+        }
+    }
+    return idx
+}
+
+def flat_index4(d1, d2, d3, d4) {
+    idx = zeros(d1, d2, d3, d4)
+    for a to d1 {
+        for b to d2 {
+            for c to d3 {
+                for d to d4 {
+                    idx[a, b, c, d] = ((a * d2 + b) * d3 + c) * d4 + d
+                }
+            }
+        }
+    }
+    return idx
+}
+
+#| `X W^T + bias` for a torch-layout weight `W` (`out` by `in`) and a 1-row bias.
+def dense_fwd(X: Arr, W: Arr, bias: Arr) {
+    Y = X @ transpose(W)
+    for r to len(Y) {
+        for o to len(W) {
+            Y[r, o] += bias[0, o]
+        }
+    }
+    return Y
+}
+
+#| A dropout mask for `T` rows of `D` features, already scaled: each entry is
+#| `1 / (1 - p)` with probability `1 - p` and 0 otherwise.
+def dropout_mask(T, D, p) {
+    M = zeros(T, D)
+    for i to T {
+        for j to D {
+            if rand() >= p {
+                M[i, j] = 1.0 / (1.0 - p)
+            }
+        }
+    }
+    return M
+}
+
+# ---- the model ----
+
+model = param_table(8)
+FLAT = C2 * 2 * 2
+CONV1 = param_declare(model, C1, 9)
+CONV1_BIAS = param_declare(model, 1, C1)
+CONV2 = param_declare(model, C2, C1 * 9)
+CONV2_BIAS = param_declare(model, 1, C2)
+FC1 = param_declare(model, HIDDEN, FLAT)
+FC1_BIAS = param_declare(model, 1, HIDDEN)
+FC2 = param_declare(model, CLASSES, HIDDEN)
+FC2_BIAS = param_declare(model, 1, CLASSES)
+
+theta = param_zeros(model)
+param_set(theta, model, CONV1, INIT_CONV1)
+param_set(theta, model, CONV1_BIAS, INIT_BIAS1)
+param_set(theta, model, CONV2, INIT_CONV2)
+param_set(theta, model, CONV2_BIAS, INIT_BIAS2)
+param_set(theta, model, FC1, INIT_FC1)
+param_set(theta, model, FC1_BIAS, INIT_FC1_BIAS)
+param_set(theta, model, FC2, INIT_FC2)
+param_set(theta, model, FC2_BIAS, INIT_FC2_BIAS)
+
+#| Images `rows[k]` of the `n` by 64 matrix `data` as an `n` by 1 by 8 by 8 batch.
+def images(data: Arr, rows: Arr, n) {
+    X = zeros(n, 1, 8, 8)
+    for k to n {
+        for i to 8 {
+            for j to 8 {
+                X[k, 0, i, j] = data[round(rows[k]), i * 8 + j]
+            }
+        }
+    }
+    return X
+}
+
+#| The mean loss over the batch `X` with labels `y`, with the dropout masks
+#| `M1` and `M2` (all ones for no dropout). `logits` gets the scores.
+def batch_loss(theta: Arr, X: Arr, y: Arr, n, M1: Arr, M2: Arr, logits: Arr) {
+    K1 = param_get(theta, model, CONV1)
+    b1 = param_get(theta, model, CONV1_BIAS)
+    K2 = param_get(theta, model, CONV2)
+    b2 = param_get(theta, model, CONV2_BIAS)
+    W1 = param_get(theta, model, FC1)
+    c1 = param_get(theta, model, FC1_BIAS)
+    W2 = param_get(theta, model, FC2)
+    c2 = param_get(theta, model, FC2_BIAS)
+
+    A1 = max(conv2d_fwd(X, K1, b1), 0.0)
+    A2 = max(conv2d_fwd(A1, K2, b2), 0.0)
+    arg = zeros(n, C2, 2, 2)
+    P = maxpool_fwd(A2, arg)
+    F = take(P, flat_index2(n, FLAT))
+    D1 = F * M1
+    H = max(dense_fwd(D1, W1, c1), 0.0)
+    D2 = H * M2
+    L = dense_fwd(D2, W2, c2)
+    logits[:, :] = L
+    return cross_entropy(L, y)
+}
+
+# ---- checks on the pieces ----
+
+#| `sum(C * conv2d(X))` as a function of `X`, and of `K`, for the
+#| finite-difference check below.
+def probe_conv(X: Arr, K: Arr, bias: Arr, C: Arr) {
+    return sum(C * conv2d_fwd(X, K, bias))
+}
+
+def probe_kernel(K: Arr, X: Arr, bias: Arr, C: Arr) {
+    return probe_conv(X, K, bias, C)
+}
+
+test "the generated conv2d gradient matches central differences" {
+    srand(3.0)
+    X = zeros(2, 3, 5, 6)
+    C = zeros(2, 4, 3, 4)
+    for b to 2 {
+        for c to 3 {
+            for i to 5 {
+                for j to 6 {
+                    X[b, c, i, j] = rand() - 0.5
+                }
+            }
+        }
+        for o to 4 {
+            for i to 3 {
+                for j to 4 {
+                    C[b, o, i, j] = rand() - 0.5
+                }
+            }
+        }
+    }
+    K = zeros(4, 27)
+    bias = zeros(1, 4)
+    for o to 4 {
+        bias[0, o] = rand() - 0.5
+        for k to 27 {
+            K[o, k] = rand() - 0.5
+        }
+    }
+    dX = grad(probe_conv, X, K, bias, C)
+    dK = grad(probe_kernel, K, X, bias, C)
+    h = 1.0e-5
+    worst = 0.0
+    for o to 4 {
+        for k to 27 {
+            keep = K[o, k]
+            K[o, k] = keep + h
+            up = probe_conv(X, K, bias, C)
+            K[o, k] = keep - h
+            down = probe_conv(X, K, bias, C)
+            K[o, k] = keep
+            worst = max(worst, abs((up - down) / (2.0 * h) - dK[o, k]))
+        }
+    }
+    for c to 3 {
+        for i to 5 {
+            for j to 6 {
+                keep = X[1, c, i, j]
+                X[1, c, i, j] = keep + h
+                up = probe_conv(X, K, bias, C)
+                X[1, c, i, j] = keep - h
+                down = probe_conv(X, K, bias, C)
+                X[1, c, i, j] = keep
+                worst = max(worst, abs((up - down) / (2.0 * h) - dX[1, c, i, j]))
+            }
+        }
+    }
+    show worst
+    assert_lt(worst, 1.0e-9)
+}
+
+# ---- training ----
+
+opt = adam(LR, 0.9, 0.999)
+state = optim_state(model)
+srand(SEED)
+steps = N_TRAIN / BATCH
+logits = zeros(BATCH, CLASSES)
+test_logits = zeros(N_TEST, CLASSES)
+all_test = linspace(0.0, N_TEST - 1.0, N_TEST)
+no_drop1 = zeros(N_TEST, FLAT) + 1.0
+no_drop2 = zeros(N_TEST, HIDDEN) + 1.0
+worst_loss = 0.0
+worst_test = 0.0
+correct = zeros(EPOCHS)
+for epoch to EPOCHS {
+    for s to steps {
+        rows = ORDER[epoch, s * BATCH:(s + 1) * BATCH]
+        y = take(Y_TRAIN, round(rows))
+        M1 = dropout_mask(BATCH, FLAT, P1)
+        M2 = dropout_mask(BATCH, HIDDEN, P2)
+        loss, grad = value_and_grad(batch_loss, theta, images(X_TRAIN, rows, BATCH), y, BATCH, M1, M2, logits)
+        optim_step(opt, theta, grad, state, model)
+        worst_loss = max(worst_loss, abs(loss - REF_LOSS[epoch * steps + s]))
+        print(loss)
+    }
+    opt[OPT_LR] *= GAMMA
+    test_loss = batch_loss(theta, images(X_TEST, all_test, N_TEST), Y_TEST, N_TEST, no_drop1, no_drop2, test_logits)
+    guess = argmax_rows(test_logits)
+    for k to N_TEST {
+        if guess[k] == Y_TEST[k] {
+            correct[epoch] += 1.0
+        }
+    }
+    worst_test = max(worst_test, abs(test_loss - REF_TEST_LOSS[epoch]))
+    show test_loss
+    show correct[epoch]
+}
+
+show worst_loss
+show worst_test
+worst_theta = max(abs(theta - REF_FINAL))
+show worst_theta
+
+test "every training loss matches torch" {
+    assert_lt(worst_loss, 1.0e-11)
+}
+
+test "test loss and accuracy match torch every epoch" {
+    assert_lt(worst_test, 1.0e-11)
+    assert_allclose(correct, REF_TEST_CORRECT, 0.0)
+}
+
+test "final parameters match torch" {
+    assert_lt(worst_theta, 1.0e-11)
+}
+
+# ---- the generated gradient against the hand-written one ----
+
+#| The first training batch, at the initial parameters, both ways. The
+#| masks are drawn from one seed for each; the hand-written `step` draws them
+#| itself. The generated code sums some terms in another order, so the check
+#| is 1e-12 of the gradient's largest entry.
+test "value_and_grad matches the hand-written backward pass to 1e-12" {
+    first = zeros(BATCH)
+    labels = zeros(BATCH)
+    for k to BATCH {
+        first[k] = ORDER[0, k]
+        labels[k] = Y_TRAIN[round(first[k])]
+    }
+    Xb = images(X_TRAIN, first, BATCH)
+    theta0 = param_zeros(model)
+    param_set(theta0, model, CONV1, INIT_CONV1)
+    param_set(theta0, model, CONV1_BIAS, INIT_BIAS1)
+    param_set(theta0, model, CONV2, INIT_CONV2)
+    param_set(theta0, model, CONV2_BIAS, INIT_BIAS2)
+    param_set(theta0, model, FC1, INIT_FC1)
+    param_set(theta0, model, FC1_BIAS, INIT_FC1_BIAS)
+    param_set(theta0, model, FC2, INIT_FC2)
+    param_set(theta0, model, FC2_BIAS, INIT_FC2_BIAS)
+    scores = zeros(BATCH, CLASSES)
+    srand(SEED)
+    hand_grad = param_zeros(model)
+    hand_loss = step(theta0, hand_grad, Xb, labels, BATCH, true, scores)
+    srand(SEED)
+    D1 = dropout_mask(BATCH, FLAT, P1)
+    D2 = dropout_mask(BATCH, HIDDEN, P2)
+    ad_loss, ad_grad = value_and_grad(batch_loss, theta0, Xb, labels, BATCH, D1, D2, scores)
+    assert_near(ad_loss, hand_loss, 0.0)
+    grad_miss = max(abs(ad_grad - hand_grad)) / max(abs(hand_grad))
+    show grad_miss
+    assert_lt(grad_miss, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

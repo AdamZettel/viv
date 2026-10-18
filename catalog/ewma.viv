@@ -1,0 +1,110 @@
+# Gap-aware EWMA: an exponentially weighted mean that decays with elapsed time.
+#
+# Input: one row per event, sorted by (user, ts); ts in int64 nanoseconds.
+# Each user carries a weighted sum S and a weight W. Before the rows at an
+# instant t are scored, both decay by
+#
+#     f = exp(-ln 2 * (t - t_prev) / half_life)
+#
+# where t_prev is the user's previous instant, so a value loses half its
+# weight every half_life of real time, however many events fall in between.
+# The rows at t are scored on that state:
+#
+#   ewma        S / W, NaN when the user has no value since the start or the
+#               last reset
+#   ewm_weight  W: the decayed count of values behind the mean
+#
+# Then the instant's rows update it: if any of them has reset = 1 the state is
+# cleared first, and then every value at t is added with weight 1. A row never
+# sees its own value or its own reset.
+
+from rows import group_end, instant_end
+
+LN2: Num = 0.6931471805599453
+
+record Ewma {
+    ewma: Arr
+    ewm_weight: Arr
+}
+
+#| A time-decayed mean of each user's earlier values, with resets, for events
+#| sorted by (user, ts).
+#|| The state decays from the previous instant to this one, the instant's rows
+#|| read it, and then the instant's values (after any reset) join it.
+#||| Decaying by elapsed time instead of by row count makes a burst of events
+#||| and a quiet month weigh what they span, not how many rows they hold.
+#: user  the entity key, sorted ascending
+#: ts  event time, int64 nanoseconds, ascending within a user
+#: value  the measurement each event carries
+#: reset  1 on an event that starts the user's mean over, else 0
+#: half_life  the time, in nanoseconds, over which a value loses half its weight
+#@ a112ac3b
+def ewma(user: [Int], ts: [Int], value: Arr, reset: [Int], half_life: Int) -> Ewma {
+    n = len(ts)
+    mean = zeros(n)
+    weight = zeros(n)
+    g: Int = 0
+    while g < n {
+        stop_at = group_end(user, ts, g, "ewma")
+        s = 0.0
+        w = 0.0
+        t_prev: Int = ts[g]
+        i: Int = g
+        while i < stop_at {
+            t = ts[i]
+            same = instant_end(ts, i, stop_at)
+            step decay "the state decays from the previous instant to this one" {
+                f = exp(-LN2 * float(t - t_prev) / float(half_life))
+                s = s * f
+                w = w * f
+                t_prev = t
+            }
+            step read "the instant's rows read the state before their own values" {
+                m = 0.0 / 0.0
+                if w > 0.0 {
+                    m = s / w
+                }
+                for k from i to same {
+                    mean[k] = m
+                    weight[k] = w
+                }
+            }
+            step update "a reset clears the state, then the instant's values join it" {
+                cleared = false
+                for k from i to same {
+                    if reset[k] != 0 {
+                        cleared = true
+                    }
+                }
+                if cleared {
+                    s = 0.0
+                    w = 0.0
+                }
+                for k from i to same {
+                    s += value[k]
+                    w += 1.0
+                }
+            }
+            i = same
+        }
+        g = stop_at
+    }
+    return Ewma { ewma: mean, ewm_weight: weight }
+}
+
+test "one half-life halves the weight; a reset starts over" {
+    user: [Int] = [1, 1, 1, 1]
+    ts: [Int] = [0, 10, 10, 20]
+    value = [4.0, 8.0, 100.0, 0.0]
+    reset: [Int] = [0, 0, 1, 0]
+    e = ewma(user, ts, value, reset, 10)
+    assert_true(e.ewma[0] != e.ewma[0])
+    assert_near(e.ewma[1], 4.0, 0.0)
+    assert_near(e.ewm_weight[1], 0.5, 1.0e-15)
+    assert_near(e.ewma[2], 4.0, 0.0)
+    assert_near(e.ewma[3], 54.0, 1.0e-12)
+    assert_near(e.ewm_weight[3], 1.0, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,134 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// Every asset of the repository, from inventory.json, which `npm run stage`
+// writes (tools/inventory.mjs; not committed). Before a stage the page says
+// how to make it. `node tools/inventory.mjs ls` prints the same list.
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import Base from '../layouts/Base.astro';
+const file = join(process.cwd(), '..', 'inventory.json');   // astro runs in www/
+const inv: any = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { kinds: [], items: [], total: 0 };
+import { repoLink } from '../lib/repo.js';
+import katex from 'katex';
+import { renderProse } from '../lib/richText.js';
+import 'katex/dist/katex.min.css';
+import '../styles/inventory.css';
+
+const kinds = inv.kinds.filter((k: any) => k.count > 0);
+const byKind = Object.fromEntries(kinds.map((k: any) => [k.kind, inv.items.filter((a: any) => a.kind === k.kind)]));
+const searchText = (a: any) => [a.id, a.title, a.status, a.checked, ...a.source].filter(Boolean).join(' ').toLowerCase();
+---
+
+<Base
+  title="Inventory · Viv"
+  description="Every page, program, claim, function, package, port, command, feature, document and test in the Viv repository, in one list."
+  eyebrow="Inventory"
+  heading="Everything in the repository">
+  <p class="lede">
+    {inv.total} assets: the pages of this site, the programs, the claims, the vipyr functions and
+    distributions, the ports, the commands, the language features, the test suites and the gate's
+    checks. In a checkout, <code>node tools/inventory.mjs ls</code> prints the
+    same list from the files as they are.
+  </p>
+  {inv.total === 0 && (
+    <p>The list is written by <code>npm run stage</code> (it runs <code>tools/inventory.mjs</code>), which this build skipped.</p>
+  )}
+
+  <nav class="inv-kinds" aria-label="Kinds">
+    {kinds.map((k: any) => (
+      <a href={`#${k.kind}`} data-kind={k.kind}><span>{k.kind}</span> <b>{k.count}</b></a>
+    ))}
+  </nav>
+
+  <form class="inv-filters" id="inv-filters" role="search">
+    <label>Kind
+      <select name="kind">
+        <option value="">all</option>
+        {kinds.map((k: any) => <option value={k.kind}>{k.kind} ({k.count})</option>)}
+      </select>
+    </label>
+    <label class="inv-grow">Words
+      <input name="q" type="search" placeholder="a path, a name, a reference" autocomplete="off" />
+    </label>
+    <output id="inv-count" aria-live="polite">{inv.total} of {inv.total}</output>
+  </form>
+  <p class="inv-empty" id="inv-empty" hidden>Nothing matches.</p>
+
+  {kinds.map((k: any) => (
+    <section class="inv-kind" id={k.kind} data-kind={k.kind}>
+      <h2>{k.kind} <span class="inv-n">{k.count}</span></h2>
+      <p class="inv-what">{k.what}.</p>
+      <ul class="inv-rows">
+        {byKind[k.kind].map((a: any) => (
+          <li data-q={searchText(a)}>
+            <div class="inv-id">
+              {a.url ? <a href={a.url}><code>{a.id}</code></a> : <code>{a.id}</code>}
+            </div>
+            <div class="inv-body">
+              {a.title !== a.id && <p class="inv-title" set:html={renderProse(a.title, katex)} />}
+              <p class="inv-meta">
+                {a.source.slice(0, 4).map((s: string) => {
+                  const href = repoLink(s.replace(/\/$/, ''), s.endsWith('/') ? 'tree' : 'blob');
+                  return href ? <a class="inv-src" href={href}>{s}</a> : <span class="inv-src">{s}</span>;
+                })}
+                {a.source.length > 4 && <span class="inv-src">and {a.source.length - 4} more</span>}
+                {a.status && <span class="inv-status">{a.status}</span>}
+              </p>
+              {a.checked && <p class="inv-checked"><span class="inv-k">Check</span> <span set:html={renderProse(a.checked, katex)} /></p>}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  ))}
+
+  <script>
+    // Filter by kind and by words, in place. The choices ride in the address.
+    const form = document.getElementById('inv-filters') as HTMLFormElement;
+    if (form) {
+      const sections = [...document.querySelectorAll<HTMLElement>('.inv-kind')];
+      const rows = [...document.querySelectorAll<HTMLLIElement>('.inv-rows > li')];
+      const count = document.getElementById('inv-count') as HTMLOutputElement;
+      const empty = document.getElementById('inv-empty') as HTMLElement;
+      const params = new URLSearchParams(location.search);
+      for (const k of ['kind', 'q']) {
+        const el = form.elements.namedItem(k) as HTMLInputElement | HTMLSelectElement | null;
+        const v = params.get(k);
+        if (el && v) el.value = v;
+      }
+      const apply = () => {
+        const f = new FormData(form);
+        const kind = String(f.get('kind') || '');
+        const words = String(f.get('q') || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+        let shown = 0;
+        for (const s of sections) {
+          const on = !kind || s.dataset.kind === kind;
+          let n = 0;
+          for (const r of s.querySelectorAll<HTMLLIElement>('.inv-rows > li')) {
+            const ok = on && words.every((w) => (r.dataset.q || '').includes(w));
+            r.hidden = !ok;
+            if (ok) n++;
+          }
+          s.hidden = n === 0;
+          shown += n;
+        }
+        count.textContent = `${shown} of ${rows.length}`;
+        empty.hidden = shown > 0;
+        const out = new URLSearchParams();
+        if (kind) out.set('kind', kind);
+        if (words.length) out.set('q', words.join(' '));
+        history.replaceState(null, '', `${location.pathname}${out.toString() ? `?${out}` : ''}${location.hash}`);
+      };
+      form.addEventListener('input', apply);
+      form.addEventListener('submit', (e) => e.preventDefault());
+      for (const a of document.querySelectorAll<HTMLAnchorElement>('.inv-kinds a')) {
+        a.addEventListener('click', () => {
+          const sel = form.elements.namedItem('kind') as HTMLSelectElement;
+          if (sel.value && sel.value !== a.dataset.kind) { sel.value = ''; apply(); }
+        });
+      }
+      apply();
+    }
+  </script>
+</Base>

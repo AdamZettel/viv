@@ -1,0 +1,173 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Code from '../components/Code.astro';
+import Base from '../layouts/Base.astro';
+import VivCell from '../components/VivCell.jsx';
+import { cells } from '../data/vivTourCells.mjs';
+---
+
+<Base
+  title="Language tour · Viv"
+  description="A tour of Viv with an example you can run for each feature: numbers, control flow, functions, arrays, plots, linear algebra, lambdas, tests, narration, parallel loops, records."
+  eyebrow="Language tour"
+  heading="Hello Viv!">
+  <p class="lede">
+    Every example below runs in your browser through the same wasm compiler the
+    <a href="/workbench">workbench</a> uses. Running a cell runs it together with every cell
+    above it, starting fresh each time. An edit to one cell changes the results of every cell below
+    it, and nothing is left over from an earlier run.
+  </p>
+
+  <h2 id="numbers">Numbers</h2>
+  <p>
+    A number is a 64-bit float: <code>10</code> means <code>10.0</code>, and division never
+    truncates. For counters and indices there is <code>Int</code>, a 64-bit integer declared
+    with <code>n: Int</code>. <code>print</code> gives the
+    bare value; <code>show</code> labels a variable with its name and prints any other
+    expression bare:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={0} src={cells[0]} /></div>
+
+  <h2 id="control-flow">Control flow</h2>
+  <p>
+    Three forms: <code>if/else</code>, <code>while</code>, and the counted loop
+    <code>for i to n</code>, which runs <code>i</code> from 0 to n−1. <code>break</code> and
+    <code>continue</code> work as in C. Statements end at the newline (no semicolons), and a line
+    continues automatically inside parentheses or brackets:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={1} src={cells[1]} /></div>
+
+  <h2 id="functions">Functions</h2>
+  <p>
+    <code>def</code> defines a function, <code>return</code> returns, and a function can call itself. A bare string as
+    the first statement is a docstring. Parameter and return types (<code>Num</code>,
+    <code>Arr</code>) are optional annotations, checked when the program compiles.
+  </p>
+  <p>
+    A 64-bit float (a double)
+    holds every integer up to 2<sup>53</sup> exactly, so counting down from <code>10.0</code> by
+    <code>1.0</code> lands <em>on</em> <code>1.0</code>, not near it: <code>n &lt;= 1.0</code> is an
+    exact test. <code>fact(20.0)</code> is exact as well: 20! is past 2<sup>53</sup>, but it has eighteen
+    factors of 2, so what is left fits in a double's 53 bits. What a double cannot hold is
+    a fraction like <code>0.1</code>. That is where <code>==</code> fails and a tolerance belongs:
+    <code>0.1 + 0.2</code> misses <code>0.3</code> by 5.6 × 10<sup>−17</sup>, and
+    <code>assert_near</code> is how a Viv program says “equal, to within rounding.”
+  </p>
+  <p>
+    After you run this cell, look under its output. The interpreter records every user-function call, so
+    each cell carries a collapsible <strong>call graph</strong> — open here so you can see it.
+    <code>fact</code> calling itself is the self-loop with its count, and <em>replay</em> animates
+    the recorded call sequence. In later cells the graph stays folded behind the "call graph" line
+    until you want it:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={2} src={cells[2]} graphOpen={true} /></div>
+
+  <h2 id="arrays">Arrays</h2>
+  <p>
+    Arrays hold floats. Literals nest into matrices, indexing takes
+    comma-separated subscripts (<code>M[i, j]</code>, up to rank 4), <code>zeros</code> allocates,
+    <code>len</code> reads the leading dimension. Arithmetic is elementwise — <code>*</code>
+    between arrays is the Hadamard product, and an array times a scalar scales. A
+    <code>show</code> on a matrix indents its rows under the first one, so it reads as a matrix
+    rather than as a label with a ragged list beneath it:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={3} src={cells[3]} /></div>
+
+  <h2 id="plots">Plots</h2>
+  <p>
+    A figure is declared in the program. <code>figure(title, xlabel, ylabel)</code> says what the
+    chart is, and <code>plot(x, y, "label")</code> adds a series to it. Both are emitted as
+    structured records; whatever runs the program (this page, the workbench, a terminal) draws
+    them, and the C backend prints the same records as text. Nothing outside the program adds to a figure: the title and
+    axis labels you see below are the three strings in the cell, and a program that calls
+    <code>plot</code> without declaring its figure first does not compile. Consecutive
+    <code>plot</code> calls sharing the same x land in one chart as separate labeled series:
+  </p>
+  <div class="cellhost">
+    <VivCell client:load idx={4} src={cells[4]} />
+  </div>
+
+  <h2 id="linear-algebra">Linear algebra</h2>
+  <p>
+    <code>@</code> is always the matrix product, never elementwise. Alongside it are
+    <code>transpose</code> and <code>eig_sym</code>, a Jacobi eigensolver for symmetric matrices
+    that fills a values vector (ascending) and a vectors matrix (eigenvectors in columns). The
+    cell checks that the trace equals the sum of the eigenvalues:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={5} src={cells[5]} /></div>
+
+  <h2 id="lambdas">Lambdas, quadrature and exact derivatives</h2>
+  <p>
+    <code>fn(x) -&gt; expr</code> is a value: assign it, pass it. The higher-order builtins take
+    one — <code>simpson</code> and <code>trapezoid</code> integrate, and <code>deriv</code>
+    differentiates <em>exactly</em>, by forward-mode autodiff at compile time rather than by
+    finite differences. Its vocabulary is arithmetic plus
+    <code>exp</code>/<code>sqrt</code>/<code>pow</code>/<code>sin</code>/<code>cos</code>/<code
+      >log</code
+    >/<code>tan</code>; ask it to differentiate through a <code>def</code> you wrote and it stops with an error that says so:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={6} src={cells[6]} /></div>
+
+  <h2 id="tests">Tests</h2>
+  <p>
+    A <code>test</code> block names a claim and asserts it with <code>assert_near</code> — and
+    what it prints is <strong>the name you wrote</strong>: one line per test, however many
+    assertions are inside. A failure names the test and carries the failing assertion's detail,
+    and makes the whole run exit nonzero, so a build script can fail on it:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={7} src={cells[7]} /></div>
+
+  <h2 id="narration">Progress lines</h2>
+  <p>
+    <code>narrate "text"</code> prints a progress line, kept separate from data output. A program can
+    print "building hamiltonian" or "calculating ERIs" as it reaches each step. Every backend prints it: the interpreter styles the lines, and compiled C prints the
+    same <code>narrate:</code> text.
+  </p>
+  <p>
+    Two other kinds of text print nothing. Comments (<code>#</code>) are dropped by the lexer, and
+    annotation markers (<code>#|</code> what, <code>#||</code> how, <code>#|||</code> why) are
+    comments the compiler ignores but <code>viv doc</code> extracts for code browsers:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={8} src={cells[8]} /></div>
+
+  <h2 id="parallel">Parallel loops</h2>
+  <p>
+    <code>parallel for</code> declares a loop parallelizable. The interpreter runs it
+    sequentially; the C backend emits an OpenMP pragma, so the compiled program spreads it across
+    cores. On a 12-core laptop the Hartree–Fock calculation on a chain of 20 hydrogen atoms
+    (<code>hchain_sto3g.viv</code>) goes from 2.67 s on one thread to 0.35 s on twelve:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={9} src={cells[9]} /></div>
+
+  <h2 id="records">Records</h2>
+  <p>
+    A <code>record</code> is a named bundle of numbers, arrays and other records. It is built with
+    every field named, read with a dot, and passed to and returned from a def like any value.
+    Copying a record copies its numbers, while an array field still refers to the original array,
+    so bundling a mesh into one value copies no array data. The fields themselves are fixed once
+    the record is built: to change one, build a new record. A def that returns several values,
+    <code>return a, b</code>, hands back a record the compiler makes for it, and the caller
+    unpacks it with <code>lo, hi = extent(v)</code>.
+  </p>
+  <div class="cellhost"><VivCell client:load idx={10} src={cells[10]} /></div>
+
+  <h2 id="capstone">One Gaussian for the hydrogen atom</h2>
+  <p>
+    A <code>def</code> with a docstring, <code>deriv</code> and a <code>test</code>, used together
+    for the first step of a Hartree–Fock calculation: the best single-Gaussian approximation to the
+    hydrogen atom. The energy comes out −0.4244 hartree, and <code>deriv</code> returns zero at the
+    analytic optimum, which confirms it is a stationary point of the energy:
+  </p>
+  <div class="cellhost"><VivCell client:load idx={11} src={cells[11]} /></div>
+
+  <div class="nextprev">
+    <span><a href="/docs">Docs by example →</a></span>
+    <span><a href="/compare">Python and Viv, side by side →</a></span>
+    <span><a href="/reference">The reference tables →</a></span>
+  </div>
+  <p>
+    Or open the <a href="/workbench">workbench</a> and write something of your own — the full
+    Hartree–Fock, the neutron star and the FEM solver are all in its examples menu.
+  </p>
+</Base>

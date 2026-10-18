@@ -1,0 +1,144 @@
+###
+post: A cart-pole held upright by LQR
+equation: \dot z = A z + B u, \quad u = -K z, \quad K = R^{-1}B^\top P, \quad A^\top P + PA - PBR^{-1}B^\top P + Q = 0
+summary: The pole starts 25 degrees from upright. The gains come from the algebraic Riccati equation, solved by the Schur method of `lib/are`, and match SciPy's `solve_continuous_are` to eight digits. The nonlinear cart-pole, flown under those gains, ends upright.
+
+A pole hinged on a cart falls over unless the cart moves under it. The
+state is four numbers $z = (x, \dot x, \theta, \dot\theta)$: where the cart
+is, how fast it moves, the pole's angle from upright, and how fast that
+angle changes. The only control is a horizontal push $u$ on the cart.
+
+Near upright the dynamics are close to linear, $\dot z \approx Az + Bu$,
+with $A$ and $B$ taken here by central differences of the full nonlinear
+model in `lib/cartpole`. Linear quadratic regulation picks the push that
+minimizes $\int (z^\top Q z + R u^2)\,dt$, a weighted cost of state errors
+and effort. The answer is a fixed gain vector, $u = -Kz$, with
+$K = R^{-1}B^\top P$, where $P$ solves the algebraic Riccati equation above.
+The weights put 20 times more cost on the angle than on the other three.
+
+`lib/are` solves that equation the way SLICOT's SB02MD does (Laub 1979): it
+builds the Hamiltonian matrix, takes its Schur form, moves the stable
+eigenvalues first and reads $P$ off the stable subspace. The gains are
+checked against SciPy 1.12's `scipy.linalg.solve_continuous_are` on the same
+$A$, $B$, $Q$ and $R$. Then the nonlinear model is flown from 25 degrees
+under $u = -Kz$ and drawn.
+###
+
+from cartpole import cartpole_draw, cartpole_rate, cartpole_step
+from are import are_residual, are_solve
+
+DT = 0.01
+T_END = 8.0
+FRAME_EVERY = 3
+START_DEG = 25.0
+DIFF_STEP = 1.0e-5
+R_COST = 0.05
+ANGLE_WEIGHT = 20.0
+# the state: cart position, cart velocity, pole angle, pole angular rate
+NSTATE = 4
+ANGLE = 2
+
+# SciPy 1.12, scipy.linalg.solve_continuous_are on this program's A, B, Q, R,
+# then K = R^-1 B^T P (show/refs/cartpole_lqr.py prints these)
+SCIPY_K = [-4.472135954999586, -8.22385382815669, -63.03311494455749, -16.016302328205054]
+# the gains must agree to this fraction of their size
+GAIN_TOL = 1.0e-8
+# after the run the pole is within this many radians of upright
+UPRIGHT_TOL = 1.0e-3
+
+#| $A = \partial f/\partial z$ at the upright equilibrium, by central differences
+#| of the nonlinear dynamics.
+def linear_A(eps) {
+    a = zeros(NSTATE, NSTATE)
+    for j to NSTATE {
+        zp = zeros(NSTATE)
+        zm = zeros(NSTATE)
+        zp[j] = eps
+        zm[j] = -eps
+        fp = cartpole_rate(zp, 0.0)
+        fm = cartpole_rate(zm, 0.0)
+        for i to NSTATE {
+            a[i, j] = (fp[i] - fm[i]) / (2.0 * eps)
+        }
+    }
+    return a
+}
+
+#| $B = \partial f/\partial u$ at the same point, the same way.
+def linear_B(eps) {
+    b = zeros(NSTATE, 1)
+    z = zeros(NSTATE)
+    fp = cartpole_rate(z, eps)
+    fm = cartpole_rate(z, -eps)
+    for i to NSTATE {
+        b[i, 0] = (fp[i] - fm[i]) / (2.0 * eps)
+    }
+    return b
+}
+
+#| The state weights: the angle costs 20 times the others.
+def weights_Q() {
+    q = eye(NSTATE)
+    q[ANGLE, ANGLE] = ANGLE_WEIGHT
+    return q
+}
+
+A = linear_A(DIFF_STEP)
+B = linear_B(DIFF_STEP)
+Q = weights_Q()
+R = R_COST * eye(1)
+P = zeros(NSTATE, NSTATE)
+stable_dim = are_solve(A, B, R, Q, P)
+residual = are_residual(A, B, R, Q, P)
+K = zeros(NSTATE)
+for i to NSTATE {
+    K[i] = (transpose(B) @ P)[0, i] / R_COST
+}
+show K
+show residual
+gain_gap = amax(abs(K - SCIPY_K)) / amax(abs(SCIPY_K))
+show gain_gap
+
+#| Fly the nonlinear cart-pole under $u = -Kz$ from `theta0`, drawing every few
+#| steps. Returns the final state.
+def fly(gains, theta0) {
+    s = zeros(NSTATE)
+    s[ANGLE] = theta0
+    steps = round(T_END / DT)
+    # frame k shows the state at t = k * FRAME_EVERY * DT, the time the player
+    # gives it: the release first, then every FRAME_EVERY steps after it
+    cartpole_draw(s)
+    frame(DT * FRAME_EVERY)
+    for step to steps {
+        u = -dot(gains, s)
+        s = cartpole_step(s, u, DT)
+        if mod(step + 1.0, FRAME_EVERY) == 0.0 {
+            cartpole_draw(s)
+            frame(DT * FRAME_EVERY)
+        }
+    }
+    return s
+}
+
+theta0 = START_DEG * pi / 180.0
+stage("Cart-pole under LQR, released at 25 degrees", -1.5, 1.5, -0.2, 1.4)
+hline("track", 0.0)
+final = fly(K, theta0)
+final_angle = abs(final[ANGLE])
+show final_angle
+
+test "the Schur method finds a stable subspace of full dimension 4" {
+    assert_near(stable_dim, NSTATE, 0.0)
+}
+test "P solves the Riccati equation: the residual is under 1e-9" {
+    assert_lt(residual, 1.0e-9)
+}
+test "the gains are SciPy's solve_continuous_are gains to 1e-8 of their size" {
+    assert_lt(gain_gap, GAIN_TOL)
+}
+test "from 25 degrees the nonlinear pole ends upright, within a thousandth of a radian" {
+    assert_lt(final_angle, UPRIGHT_TOL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

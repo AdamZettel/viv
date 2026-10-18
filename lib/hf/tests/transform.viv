@@ -1,0 +1,200 @@
+# The tests of lib/hf/transform that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/transform does not load the references.
+from hf.transform import (
+    tr2_back_blocks, tr2_back_dense, tr2_blocks, tr2_dense, tr4_block_sym_defect, tr4_blocks,
+    tr4_dense, TR4_FUZZ_NSEED, tr4_quarter, TR4_RAND_NCART_MAX, TR4_RAND_NL, TR4_RAND_NSH_MIN,
+    TR4_RAND_NSH_SPREAD,
+)
+from hf.basis import (
+    bas_nao_cart, bas_nao_sph, bas_ncart, SH_CART0, SH_L, SH_NCART, SH_NSPH, SH_SPH0,
+)
+from hf.eri_store import es_checksums, es_len8, es_pack8, es_rng, es_sym_defect, es_sym_tensor
+from hf.cart2sph import c2s_basis
+from hf.tests.cart2sph import c2s_shells_of
+from hf.sweep import sw_check3_arr, sw_rep_new, sweep3_arr
+from hfref.water_631gs_cart import (
+    water631gs_cart_eri8_cart, WATER631GS_CART_NAO_CART, water631gs_cart_s_unit,
+    water631gs_cart_shells, water631gs_cart_t_unit, water631gs_cart_v_unit,
+)
+from hfref.water_631gs_sph import (
+    water631gs_sph_eri8_sph, WATER631GS_SPH_ERI8_SPH_SUMSQ, WATER631GS_SPH_ERI8_SPH_WSUM,
+    water631gs_sph_m, WATER631GS_SPH_NAO_SPH, water631gs_sph_rhf_d, water631gs_sph_s_sph,
+    WATER631GS_SPH_SEED_WSUM, water631gs_sph_t_sph, water631gs_sph_v_sph,
+)
+from hfref.water_ccpvdz import (
+    waterccpvdz_m, waterccpvdz_s_sph, waterccpvdz_s_unit, waterccpvdz_shells, waterccpvdz_t_sph,
+    waterccpvdz_t_unit, waterccpvdz_v_sph, waterccpvdz_v_unit,
+)
+from hfref.water_svp import (
+    watersvp_m, watersvp_s_sph, watersvp_s_unit, watersvp_shells, watersvp_t_sph,
+    watersvp_t_unit, watersvp_v_sph, watersvp_v_unit,
+)
+
+#| The largest gap between the two forward forms and a reference, for one
+#| matrix of one basis. Also runs the pair through `sweep3_arr`, which
+#| asserts they agree to 1e-13 relative.
+def tr2_ref_gap(X: Arr, M: Arr, shells: Arr, ref: Arr) {
+    ns = bas_nao_sph(shells)
+    rep = sw_rep_new()
+    Y = sweep3_arr([tr2_dense, tr2_blocks], X, M, shells, ns * ns, ns * ns, 1.0e-13, rep)
+    w = max(abs(Y - ref))
+    w = max(w, max(abs(tr2_dense(X, M, shells) - ref)))
+    return max(w, max(abs(tr2_blocks(X, M, shells) - ref)))
+}
+
+#| One fuzz seed: a random shells pack, a random 8-fold-symmetric Cartesian
+#| tensor, and both ERI transforms. Returns the sweep verdict at 1e-13 (`1`
+#| when the forms agree), the symmetry defect of the dense result and of the
+#| per-quartet blocks, and the gap between the forms.
+def tr4_fuzz_seed(seed) {
+    shells = tr4_rand_shells(seed)
+    nc = bas_nao_cart(shells)
+    ns = bas_nao_sph(shells)
+    M = c2s_basis(shells)
+    G = es_sym_tensor(nc, seed)
+    Gp = es_pack8(G, nc)
+    rep = sw_rep_new()
+    out = zeros(es_len8(ns))
+    agree = sw_check3_arr([tr4_quarter, tr4_blocks], Gp, M, shells, es_len8(ns), es_len8(ns), 1.0e-13, rep, out)
+    gap = max(abs(tr4_quarter(Gp, M, shells) - tr4_blocks(Gp, M, shells)))
+    return agree, es_sym_defect(tr4_dense(G, M, nc, ns), ns), tr4_block_sym_defect(Gp, M, shells), gap
+}
+
+#| A random shells pack from `seed`: 3 to 5 shells, the first a d or an f
+#| so every seed has a shell with more Cartesian than spherical functions,
+#| the rest s to f. A shell that would take the count past 15 Cartesian
+#| functions becomes an s, so there are at most 16 and the dense transform
+#| stays quick in the interpreter.
+def tr4_rand_shells(seed) -> Arr {
+    st = zeros(1)
+    st[0] = seed
+    nsh = TR4_RAND_NSH_MIN + floor(TR4_RAND_NSH_SPREAD * es_rng(st))
+    ls = zeros(nsh)
+    nc = 0
+    for s to nsh {
+        l = floor(TR4_RAND_NL * es_rng(st))
+        if s == 0 {
+            l = 2 + mod(seed, 2.0)
+        }
+        if nc + bas_ncart(l) > TR4_RAND_NCART_MAX {
+            l = 0
+        }
+        ls[s] = l
+        nc = nc + bas_ncart(l)
+    }
+    return c2s_shells_of(ls)
+}
+
+test "M for water 6-31G*, cc-pVDZ and def2-SVP matches PySCF's within 1e-15" {
+    tr2_tsh = water631gs_cart_shells()
+    tr2_tm = c2s_basis(tr2_tsh)
+    assert_lt(max(abs(tr2_tm - water631gs_sph_m())), 1.0e-15)
+    tr2_tsh = waterccpvdz_shells()
+    assert_lt(max(abs(c2s_basis(tr2_tsh) - waterccpvdz_m())), 1.0e-15)
+    tr2_tsh = watersvp_shells()
+    assert_lt(max(abs(c2s_basis(tr2_tsh) - watersvp_m())), 1.0e-15)
+}
+
+test "tr2_dense and tr2_blocks map water 6-31G* S, T and V onto PySCF's spherical ones within 1e-13" {
+    tr2_tsh = water631gs_cart_shells()
+    tr2_tm = c2s_basis(tr2_tsh)
+    assert_near(bas_nao_cart(tr2_tsh), WATER631GS_CART_NAO_CART, 0.0)
+    assert_near(bas_nao_sph(tr2_tsh), WATER631GS_SPH_NAO_SPH, 0.0)
+    assert_lt(tr2_ref_gap(water631gs_cart_s_unit(), tr2_tm, tr2_tsh, water631gs_sph_s_sph()), 1.0e-13)
+    assert_lt(tr2_ref_gap(water631gs_cart_t_unit(), tr2_tm, tr2_tsh, water631gs_sph_t_sph()), 1.0e-13)
+    assert_lt(tr2_ref_gap(water631gs_cart_v_unit(), tr2_tm, tr2_tsh, water631gs_sph_v_sph()), 1.0e-13)
+}
+
+test "tr2_dense and tr2_blocks map water cc-pVDZ and def2-SVP S, T and V within 1e-13" {
+    tr2_tsh = waterccpvdz_shells()
+    tr2_tm = c2s_basis(tr2_tsh)
+    assert_lt(tr2_ref_gap(waterccpvdz_s_unit(), tr2_tm, tr2_tsh, waterccpvdz_s_sph()), 1.0e-13)
+    assert_lt(tr2_ref_gap(waterccpvdz_t_unit(), tr2_tm, tr2_tsh, waterccpvdz_t_sph()), 1.0e-13)
+    assert_lt(tr2_ref_gap(waterccpvdz_v_unit(), tr2_tm, tr2_tsh, waterccpvdz_v_sph()), 1.0e-13)
+    tr2_tsh = watersvp_shells()
+    tr2_tm = c2s_basis(tr2_tsh)
+    assert_lt(tr2_ref_gap(watersvp_s_unit(), tr2_tm, tr2_tsh, watersvp_s_sph()), 1.0e-13)
+    assert_lt(tr2_ref_gap(watersvp_t_unit(), tr2_tm, tr2_tsh, watersvp_t_sph()), 1.0e-13)
+    assert_lt(tr2_ref_gap(watersvp_v_unit(), tr2_tm, tr2_tsh, watersvp_v_sph()), 1.0e-13)
+}
+
+test "the back transform keeps Tr(D S) = 10 and Tr(D T) for the 6-31G* density" {
+    tr2_tsh = water631gs_cart_shells()
+    tr2_tm = c2s_basis(tr2_tsh)
+    tr2_td = water631gs_sph_rhf_d()
+    tr2_tdc = tr2_back_dense(tr2_td, tr2_tm, tr2_tsh)
+    assert_lt(max(abs(tr2_tdc - tr2_back_blocks(tr2_td, tr2_tm, tr2_tsh))), 1.0e-14)
+    assert_near(sum(tr2_td * water631gs_sph_s_sph()), 10.0, 1.0e-12)
+    assert_near(sum(tr2_tdc * water631gs_cart_s_unit()), 10.0, 1.0e-12)
+    assert_near(sum(tr2_tdc * water631gs_cart_t_unit()), sum(tr2_td * water631gs_sph_t_sph()), 1.0e-12)
+}
+
+test "tr4_quarter and tr4_blocks map the water 6-31G* Cartesian ERIs onto PySCF's spherical ones within 1e-13" {
+    tr4_tsh = water631gs_cart_shells()
+    tr4_tm = c2s_basis(tr4_tsh)
+    tr4_tg = water631gs_cart_eri8_cart()
+    assert_near(len(tr4_tg), 18145, 0.0)
+    tr4_tref = water631gs_sph_eri8_sph()
+    assert_near(len(tr4_tref), 14706, 0.0)
+    tr4_tq = tr4_quarter(tr4_tg, tr4_tm, tr4_tsh)
+    tr4_tb = tr4_blocks(tr4_tg, tr4_tm, tr4_tsh)
+    assert_near(len(tr4_tq), 14706, 0.0)
+    assert_lt(max(abs(tr4_tq - tr4_tref)), 1.0e-13)
+    assert_lt(max(abs(tr4_tb - tr4_tref)), 1.0e-13)
+    # and the result reproduces the reference module's own checksums
+    tr4_tc = es_checksums(tr4_tb, WATER631GS_SPH_SEED_WSUM)
+    assert_near(tr4_tc[0], WATER631GS_SPH_ERI8_SPH_SUMSQ, 1.0e-11)
+    assert_near(tr4_tc[1], WATER631GS_SPH_ERI8_SPH_WSUM, 1.0e-11)
+}
+
+test "on random 8-fold-symmetric tensors, seeds 1 to 8, the two ERI forms agree within 1e-13 and stay symmetric" {
+    for tr4_ts to TR4_FUZZ_NSEED {
+        tr4_tseed = tr4_ts + 1
+        tr4_tok, tr4_tdsym, tr4_tbsym, tr4_tgap = tr4_fuzz_seed(tr4_tseed)
+        tr4_tbad = 0
+        if tr4_tok < 0.5 or tr4_tdsym >= 1.0e-13 or tr4_tbsym >= 1.0e-13 or tr4_tgap >= 1.0e-13 {
+            tr4_tbad = 1
+        }
+        if tr4_tbad == 1 {
+            show(tr4_tseed)
+        }
+        assert_near(tr4_tbad, 0.0, 0.0)
+    }
+}
+
+#| The largest gap between the identity and the block of the
+#| Cartesian-to-spherical matrix of each shell up to p in `shells`.
+#@ 41111350
+def tr4_low_l_gap(shells: Arr) {
+    M = c2s_basis(shells)
+    w = 0.0
+    for sh to len(shells) {
+        if shells[sh, SH_L] < 2 {
+            w = max(w, abs(shells[sh, SH_NCART] - shells[sh, SH_NSPH]))
+            c0 = shells[sh, SH_CART0]
+            s0 = shells[sh, SH_SPH0]
+            for a to shells[sh, SH_NCART] {
+                for b to shells[sh, SH_NSPH] {
+                    want = 0.0
+                    if a == b {
+                        want = 1.0
+                    }
+                    w = max(w, abs(M[c0 + a, s0 + b] - want))
+                }
+            }
+        }
+    }
+    return w
+}
+
+test "a shell up to p is the same in both sets" {
+    # tr4_quartet skips the pass of a shell with l < 2, so its block of the
+    # Cartesian-to-spherical matrix must be the identity, exactly
+    assert_near(tr4_low_l_gap(water631gs_cart_shells()), 0.0, 0.0)
+    assert_near(tr4_low_l_gap(waterccpvdz_shells()), 0.0, 0.0)
+    assert_near(tr4_low_l_gap(watersvp_shells()), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

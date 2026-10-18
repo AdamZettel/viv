@@ -1,0 +1,594 @@
+###
+post: Hermite tables for McMurchie-Davidson integrals, built bottom-up
+agent: claude
+
+Every integral in Hartree-Fock over Gaussians goes through the same move. The
+product of two Cartesian Gaussians on centers A and B, exponents `a` and `b`,
+is a Gaussian on the point `P = (aA + bB)/p` with exponent `p = a + b`, times
+a polynomial. McMurchie and Davidson write that polynomial as a sum of Hermite
+Gaussians, which are derivatives of the plain Gaussian with respect to `P`:
+
+    x_A^i x_B^j exp(-a x_A^2 - b x_B^2) = sum_t E(i, j, t) d^t/dP_x^t exp(-p x_P^2)
+
+one axis at a time. `E(i, j, t)` is nonzero only for `t <= i + j`.
+
+Why bother: a derivative with respect to `P` passes straight through an
+integral over `r`. So the overlap keeps only the `t = 0` term,
+`E(i, j, 0) sqrt(pi/p)`, and the Coulomb integrals become derivatives of one
+function of `P`. For `1/|r - C|` that function is `(2 pi / p) F_0(p |P - C|^2)`,
+and its derivatives are
+
+    R(t, u, v) = d^t/dX^t d^u/dY^u d^v/dZ^v  F_0(alpha (X^2 + Y^2 + Z^2))
+
+evaluated at `(X, Y, Z) = P - C`, with `alpha = p` for a nucleus and
+`alpha = pq/(p + q)` for a pair of pairs.
+
+**E, bottom-up.** Start from `E(0, 0, 0) = exp(-mu X_AB^2)`, where
+`mu = ab/p` and `X_AB = A_x - B_x`; that is the Gaussian product prefactor
+for one axis, so the product over x, y and z is `K_AB`. Then raise `i` and
+`j` one step at a time:
+
+    E(i+1, j, t) = E(i, j, t-1) / (2p) + X_PA E(i, j, t) + (t+1) E(i, j, t+1)
+    E(i, j+1, t) = E(i, j, t-1) / (2p) + X_PB E(i, j, t) + (t+1) E(i, j, t+1)
+
+with `X_PA = -b X_AB / p` and `X_PB = a X_AB / p`. Every entry is computed
+once. The legacy code in lib/gto_md recursed downward for each entry it
+wanted, which recomputed the same values about 3^(i+j) times; at (dd|dd)
+that was most of its time.
+
+**R, bottom-up.** The derivatives come from an auxiliary index `n`:
+
+    R(n; 0, 0, 0)   = (-2 alpha)^n F_n(alpha R^2)
+    R(n; t+1, u, v) = t R(n+1; t-1, u, v) + X R(n+1; t, u, v)
+
+and the same with `u, Y` and `v, Z`. The answer is `R(0; t, u, v)`. Level `n`
+needs only level `n + 1`, so two cubes of side `L + 1` hold everything,
+alternating by the parity of `n`, and one Boys evaluation at the top order
+`L` serves every entry.
+
+Used with `import hf.hermite`.
+###
+
+from hf.basis import BAS_NDIM, bas_odfact
+from hf.boys import (
+    BOYS_GRID_HDR, boys_grid_new, boys_series_one, boys_switch, BOYS_TAYLOR_K, boys_values,
+)
+
+HERM_PI = 3.141592653589793
+# the top of the Boys grid an integral build makes: past every order's switch
+# (34.4 at most, lib/hf/boys), so the grid spans all of the series side
+HERM_GRID_XMAX = 40.0
+
+#| Hermite functions with `t + u + v <= L`.
+def herm_nh(L) {
+    return (L + 1) * (L + 2) * (L + 3) / 6
+}
+
+#| The Hermite index list for total order `L`, `[nh, 3]`: `t` counts up, then
+#| `u`, then `v`. Every table in this family uses this order.
+def herm_tuv(L) {
+    H = zeros(herm_nh(L), BAS_NDIM)
+    h = 0
+    for t to L + 1 {
+        for u to L - t + 1 {
+            for v to L - t - u + 1 {
+                H[h, 0] = t
+                H[h, 1] = u
+                H[h, 2] = v
+                h = h + 1
+            }
+        }
+    }
+    return H
+}
+
+#| Entries of a flat E table for one axis with powers up to `la` and `lb`.
+def herm_esize(la, lb) {
+    return (la + 1) * (lb + 1) * (la + lb + 1)
+}
+
+#| Fill the flat 1-D table `E(i, j, t)`, `i <= la`, `j <= lb`, `t <= i + j`,
+#| into `E` from entry `e0` on, at `e0 + (i (lb + 1) + j) (la + lb + 1) + t`.
+#| `X` is `A - B` on this axis. The table is overwritten, so a caller can
+#| reuse one buffer for every primitive pair.
+def herm_efill(E: Arr, e0, la, lb, a, b, X) {
+    #: the table starts from E(0, 0, 0) = exp(-ab/p X^2)
+    nt = la + lb + 1
+    ld = lb + 1
+    for k to herm_esize(la, lb) {
+        E[e0 + k] = 0.0
+    }
+    p = a + b
+    o2p = 0.5 / p
+    xpa = -b * X / p
+    xpb = a * X / p
+    E[e0] = exp(-a * b / p * X * X)
+    # raise i along j = 0
+    for i to la {
+        src = e0 + (i * ld) * nt
+        dst = e0 + ((i + 1) * ld) * nt
+        for t to i + 2 {
+            v = 0.0
+            if t > 0 {
+                v = o2p * E[src + t - 1]
+            }
+            if t <= i {
+                v = v + xpa * E[src + t]
+            }
+            if t + 1 <= i {
+                v = v + (t + 1) * E[src + t + 1]
+            }
+            E[dst + t] = v
+        }
+    }
+    # then raise j for every i
+    for j to lb {
+        for i to la + 1 {
+            src = e0 + (i * ld + j) * nt
+            dst = e0 + (i * ld + j + 1) * nt
+            for t to i + j + 2 {
+                v = 0.0
+                if t > 0 {
+                    v = o2p * E[src + t - 1]
+                }
+                if t <= i + j {
+                    v = v + xpb * E[src + t]
+                }
+                if t + 1 <= i + j {
+                    v = v + (t + 1) * E[src + t + 1]
+                }
+                E[dst + t] = v
+            }
+        }
+    }
+    return 0
+}
+
+#| The frozen form: `E[la+1, lb+1, la+lb+1]` for exponents `a`, `b` and
+#| `XAB = A - B` on one axis.
+def herm_etab(la, lb, a, b, XAB) {
+    F = zeros(herm_esize(la, lb))
+    herm_efill(F, 0, la, lb, a, b, XAB)
+    nt = la + lb + 1
+    E = zeros(la + 1, lb + 1, nt)
+    for i to la + 1 {
+        for j to lb + 1 {
+            for t to nt {
+                E[i, j, t] = F[(i * (lb + 1) + j) * nt + t]
+            }
+        }
+    }
+    return E
+}
+
+#| Fill `S[0 .. (L+1)^3)` with `pref * R(0; t, u, v)` at offset
+#| `(t (L+1) + u) (L+1) + v`, for `t + u + v <= L`. `S` needs `2 (L+1)^3`
+#| entries: the upper half is the scratch cube for odd `n`. `F` holds
+#| `F_0 .. F_L` at `alpha (X^2 + Y^2 + Z^2)`. Entries with `t + u + v > L` are
+#| left as they were, and nothing reads them.
+def herm_rfill(S: Arr, L, alpha, X, Y, Z, F: Arr, pref) {
+    if L == 0 {
+        S[0] = pref * F[0]
+        return 0
+    }
+    D = L + 1
+    D2 = D * D
+    D3 = D2 * D
+    m2a = -2.0 * alpha
+    pw = pref
+    for i to L {
+        pw = pw * m2a
+    }
+    # level n lives in the half at (n mod 2) D^3 and reads level n + 1 in the
+    # other half; the top level is the single entry (-2 alpha)^L F_L
+    cur = D3 * (L - 2 * floor(L / 2))
+    S[cur] = pw * F[L]
+    #: levels L - 1 down to 0, each from the one above
+    for k to L {
+        n = L - 1 - k
+        m = k + 1
+        prv = cur
+        cur = D3 - prv
+        pw = pref
+        for i to n {
+            pw = pw * m2a
+        }
+        S[cur] = pw * F[n]
+        # t >= 1: R(n; t, u, v) = X R(n+1; t-1, u, v) + (t-1) R(n+1; t-2, u, v)
+        for u to m {
+            for v to m - u {
+                S[cur + D2 + u * D + v] = X * S[prv + u * D + v]
+            }
+        }
+        for t to m - 1 {
+            tt = t + 2
+            for u to m - tt + 1 {
+                for v to m - tt - u + 1 {
+                    o = (tt * D + u) * D + v
+                    S[cur + o] = X * S[prv + o - D2] + (tt - 1) * S[prv + o - D2 - D2]
+                }
+            }
+        }
+        # t = 0, u >= 1
+        for v to m {
+            S[cur + D + v] = Y * S[prv + v]
+        }
+        for u to m - 1 {
+            uu = u + 2
+            for v to m - uu + 1 {
+                o = uu * D + v
+                S[cur + o] = Y * S[prv + o - D] + (uu - 1) * S[prv + o - D - D]
+            }
+        }
+        # t = u = 0, v >= 1
+        S[cur + 1] = Z * S[prv]
+        for v to m - 1 {
+            vv = v + 2
+            S[cur + vv] = Z * S[prv + vv - 1] + (vv - 1) * S[prv + vv - 2]
+        }
+    }
+    return 0
+}
+
+#| `pref * R(0; t, u, v)` for `t <= Tx`, `u <= Ty`, `v <= Tz` only, into
+#| `S` at `s0 + (t (Ty+1) + u) (Tz+1) + v`, using `2 (Tx+1)(Ty+1)(Tz+1)`
+#| entries from `s0` on. `F` holds `F_0 .. F_(Tx+Ty+Tz)`. This is what one
+#| integral needs: `(xx, xx | xx, xx)` has `Ty = Tz = 0`, so it builds one
+#| line of entries per level, where the full cube of the same order builds
+#| every entry with `t + u + v <= L`.
+def herm_rfill_box(S: Arr, s0, Tx, Ty, Tz, alpha, X, Y, Z, F: Arr, pref) {
+    L = Tx + Ty + Tz
+    DV = Tz + 1
+    DU = (Ty + 1) * DV
+    C = (Tx + 1) * DU
+    m2a = -2.0 * alpha
+    #: each level from the one above, only inside the box
+    for k to L + 1 {
+        n = L - k
+        cur = s0 + C * (n - 2 * floor(n / 2))
+        prv = s0 + s0 + C - cur
+        pw = pref
+        for i to n {
+            pw = pw * m2a
+        }
+        S[cur] = pw * F[n]
+        for t to min(Tx, k) + 1 {
+            for u to min(Ty, k - t) + 1 {
+                for v to min(Tz, k - t - u) + 1 {
+                    o = t * DU + u * DV + v
+                    if t > 0 {
+                        w = X * S[prv + o - DU]
+                        if t > 1 {
+                            w = w + (t - 1) * S[prv + o - DU - DU]
+                        }
+                        S[cur + o] = w
+                    }
+                    if t == 0 and u > 0 {
+                        w = Y * S[prv + o - DV]
+                        if u > 1 {
+                            w = w + (u - 1) * S[prv + o - DV - DV]
+                        }
+                        S[cur + o] = w
+                    }
+                    if t == 0 and u == 0 and v > 0 {
+                        w = Z * S[prv + o - 1]
+                        if v > 1 {
+                            w = w + (v - 1) * S[prv + o - 2]
+                        }
+                        S[cur + o] = w
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+#| The frozen form: `R[L+1, L+1, L+1]` with `R[t, u, v] = R(0; t, u, v)` for
+#| exponent `p`, `PC = P - C` and Boys values `F[0 .. L]` at `p |PC|^2`.
+#| Entries with `t + u + v > L` are zero.
+def herm_rtab(L, p, PC: Arr, F: Arr) {
+    D = L + 1
+    S = zeros(2 * D * D * D)
+    herm_rfill(S, L, p, PC[0], PC[1], PC[2], F, 1.0)
+    R = zeros(D, D, D)
+    for t to D {
+        for u to D - t {
+            for v to D - t - u {
+                R[t, u, v] = S[(t * D + u) * D + v]
+            }
+        }
+    }
+    return R
+}
+
+#| A Boys grid for `herm_boys_fill`: `boys_grid_new(nmax, xmax)` with the
+#| switch of every order `n <= nmax` copied into its header row at column
+#| `BOYS_GRID_HDR + n` (the row is at least `nmax + 9` wide and
+#| `boys_grid_eval` reads only its first `BOYS_GRID_HDR` columns).
+#| `boys_switch` builds its list on every call, and an integral loop calls
+#| the fill once per primitive quartet.
+def herm_grid(nmax, xmax) {
+    G = boys_grid_new(nmax, xmax)
+    for n to nmax + 1 {
+        G[0, BOYS_GRID_HDR + n] = boys_switch(n)
+
+    }
+    return G
+}
+
+#| `F_0 .. F_nmax` at `x` into `F`, from a grid `G` built once by the caller
+#| with `herm_grid`. It is `boys_grid_eval` without the allocations: an
+#| integral loop calls it once per primitive quartet, and a fresh array each
+#| time would cost more than the Taylor step. Above the switch it is the
+#| asymptotic form with upward recursion, and an `x` or order the grid does not
+#| cover falls back to the series, exactly as in `lib/hf/boys`.
+def herm_boys_fill(G: Arr, nmax, x, F: Arr) {
+    #: this order's switch: from the grid header, or computed
+    ex = exp(-x)
+    xs = 0.0
+    if nmax <= G[0, 3] {
+        xs = G[0, BOYS_GRID_HDR + nmax]
+
+    }
+    if nmax > G[0, 3] {
+        xs = boys_switch(nmax)
+    }
+    #: above the switch: asymptotic F_0, recur up
+    if x >= xs {
+        F[0] = 0.5 * sqrt(HERM_PI / x)
+        for n to nmax {
+            F[n + 1] = ((2.0 * n + 1.0) * F[n] - ex) / (2.0 * x)
+        }
+        return 0
+    }
+    #: below it: Taylor step (or series) for F_nmax, recur down
+    i = round(x / G[0, 0])
+    r = i - G[0, 1] + 1
+    top = 0.0
+    if r < 1 or r > G[0, 2] or nmax > G[0, 3] {
+        top = boys_series_one(nmax, x)
+    }
+    if r >= 1 and r <= G[0, 2] and nmax <= G[0, 3] {
+        # the 9-term Taylor step of boys_grid_eval (BOYS_TAYLOR_K = 8, checked
+        # by a test below), in Horner form with the 1/k as constants
+        md = i * G[0, 0] - x
+        c = G[r, nmax]
+        top = G[r, nmax + 8] * md * 0.125
+        top = (G[r, nmax + 7] + top) * md * 0.14285714285714285
+        top = (G[r, nmax + 6] + top) * md * 0.16666666666666666
+        top = (G[r, nmax + 5] + top) * md * 0.2
+        top = (G[r, nmax + 4] + top) * md * 0.25
+        top = (G[r, nmax + 3] + top) * md * 0.3333333333333333
+        top = (G[r, nmax + 2] + top) * md * 0.5
+        top = (G[r, nmax + 1] + top) * md
+        top = c + top
+    }
+    F[nmax] = top
+    for k to nmax {
+        n = nmax - k
+        F[n - 1] = (2.0 * x * F[n] + ex) / (2.0 * n - 1.0)
+    }
+    return 0
+}
+
+#| Test helper: the Hermite Gaussian `d^t/dP^t exp(-p (x - P)^2)` at `x`,
+#| from the Hermite polynomial recursion. It shares no code with `herm_efill`.
+def herm_lambda(t, p, xp) {
+    s = sqrt(p)
+    z = s * xp
+    h0 = 1.0
+    h1 = 2.0 * z
+    h = h0
+    if t > 0 {
+        h = h1
+    }
+    for k to t - 1 {
+        h = 2.0 * z * h1 - 2.0 * (k + 1) * h0
+        h0 = h1
+        h1 = h
+    }
+    return pow(s, t) * h * exp(-p * xp * xp)
+}
+
+#| Test helper: the 1-D overlap `int x_A^i x_B^j exp(-a x_A^2 - b x_B^2) dx`
+#| from the binomial expansion about `P` and the Gaussian moments. Another
+#| route to `E(i, j, 0) sqrt(pi/p)`.
+def herm_overlap_1d(i, j, a, b, X) {
+    p = a + b
+    xpa = -b * X / p
+    xpb = a * X / p
+    #: binomial expansion about P; odd powers integrate to zero
+    tot = 0.0
+    for r to i + 1 {
+        cr = 1.0
+        for k to r {
+            cr = cr * (i - k) / (k + 1.0)
+        }
+        for s to j + 1 {
+            cs = 1.0
+            for k to s {
+                cs = cs * (j - k) / (k + 1.0)
+            }
+            m = r + s
+            if mod(m, 2) == 0 {
+                mom = bas_odfact(m / 2) / pow(2.0 * p, m / 2) * sqrt(HERM_PI / p)
+                tot = tot + cr * cs * pow(xpa, i - r) * pow(xpb, j - s) * mom
+            }
+        }
+    }
+    return exp(-a * b / p * X * X) * tot
+}
+
+test "E reproduces the Gaussian product pointwise for i, j <= 3" {
+    herm_worst = 0.0
+    herm_a = 0.7
+    herm_b = 1.9
+    herm_A = 0.3
+    herm_B = -0.45
+    herm_p = herm_a + herm_b
+    herm_P = (herm_a * herm_A + herm_b * herm_B) / herm_p
+    # powers up to f on both centers, at 9 points 0.3 apart across [-1.2, 1.2]
+    herm_l = 3
+    herm_nx = 9
+    herm_E = herm_etab(herm_l, herm_l, herm_a, herm_b, herm_A - herm_B)
+    for herm_k to herm_nx {
+        herm_x = -1.2 + 0.3 * herm_k
+        for herm_i to herm_l + 1 {
+            for herm_j to herm_l + 1 {
+                herm_lhs = pow(herm_x - herm_A, herm_i) * pow(herm_x - herm_B, herm_j) * exp(-herm_a * (herm_x - herm_A) * (herm_x - herm_A) - herm_b * (herm_x - herm_B) * (herm_x - herm_B))
+                herm_rhs = 0.0
+                for herm_t to herm_i + herm_j + 1 {
+                    herm_rhs = herm_rhs + herm_E[herm_i, herm_j, herm_t] * herm_lambda(herm_t, herm_p, herm_x - herm_P)
+                }
+                herm_worst = max(herm_worst, abs(herm_lhs - herm_rhs))
+            }
+        }
+    }
+    assert_lt(herm_worst, 1.0e-14)
+}
+
+test "E(i, j, 0) sqrt(pi/p) is the 1-D overlap from Gaussian moments, up to f with two powers of kinetic headroom" {
+    herm_worst = 0.0
+    herm_ex = [0.11, 0.9, 4.2, 37.0]
+    # la up to f; lb two higher, the headroom the kinetic integral needs
+    herm_la = 3
+    herm_lb = 5
+    for herm_ia to len(herm_ex) {
+        for herm_ib to len(herm_ex) {
+            herm_a = herm_ex[herm_ia]
+            herm_b = herm_ex[herm_ib]
+            herm_X = 0.37 * (herm_ia - herm_ib) + 0.21
+            herm_E = herm_etab(herm_la, herm_lb, herm_a, herm_b, herm_X)
+            for herm_i to herm_la + 1 {
+                for herm_j to herm_lb + 1 {
+                    herm_s1 = herm_E[herm_i, herm_j, 0] * sqrt(HERM_PI / (herm_a + herm_b))
+                    herm_s2 = herm_overlap_1d(herm_i, herm_j, herm_a, herm_b, herm_X)
+                    herm_worst = max(herm_worst, abs(herm_s1 - herm_s2) / (1.0e-300 + abs(herm_s2) + 1.0e-12 * abs(herm_E[0, 0, 0])))
+                }
+            }
+        }
+    }
+    assert_lt(herm_worst, 1.0e-12)
+}
+
+test "E vanishes above t = i + j, and E(0, 0, 0) is the product prefactor" {
+    herm_la = 2
+    herm_lb = 3
+    herm_E = herm_etab(herm_la, herm_lb, 0.8, 1.3, 0.5)
+    herm_bad = 0
+    for herm_i to herm_la + 1 {
+        for herm_j to herm_lb + 1 {
+            for herm_t to herm_la + herm_lb + 1 {
+                if herm_t > herm_i + herm_j and herm_E[herm_i, herm_j, herm_t] != 0.0 {
+                    herm_bad = herm_bad + 1
+                }
+            }
+        }
+    }
+    assert_near(herm_bad, 0, 0.0)
+    assert_near(herm_E[0, 0, 0], exp(-0.8 * 1.3 / 2.1 * 0.25), 1.0e-16)
+}
+
+test "R(0; 0, 0, 0) is F_0, the first derivatives are -2p X F_1, and R obeys its axis symmetry" {
+    herm_L = 8
+    herm_F = boys_values(herm_L, 0.9 * 1.7)
+    herm_PC = [0.4, -0.7, 1.1]
+    herm_R = herm_rtab(herm_L, 0.9, herm_PC, herm_F)
+    assert_near(herm_R[0, 0, 0], herm_F[0], 1.0e-16)
+    assert_near(herm_R[1, 0, 0], -1.8 * 0.4 * herm_F[1], 1.0e-16)
+    assert_near(herm_R[0, 0, 1], -1.8 * 1.1 * herm_F[1], 1.0e-16)
+    # swapping X and Y swaps t and u
+    herm_PC2 = [-0.7, 0.4, 1.1]
+    herm_R2 = herm_rtab(herm_L, 0.9, herm_PC2, herm_F)
+    herm_worst = 0.0
+    for herm_t to herm_L + 1 {
+        for herm_u to herm_L + 1 - herm_t {
+            for herm_v to herm_L + 1 - herm_t - herm_u {
+                herm_worst = max(herm_worst, abs(herm_R[herm_t, herm_u, herm_v] - herm_R2[herm_u, herm_t, herm_v]) / (1.0 + abs(herm_R[herm_t, herm_u, herm_v])))
+            }
+        }
+    }
+    assert_lt(herm_worst, 1.0e-13)
+}
+
+test "R(2, 0, 0) and R(1, 1, 0) match the chain rule on F_0" {
+    # d^2/dX^2 F_0(p r^2) = -2p F_1 + 4 p^2 X^2 F_2; d^2/dXdY = 4 p^2 X Y F_2
+    herm_p = 1.3
+    herm_PC = [0.25, 0.6, -0.35]
+    herm_r2 = 0.25 * 0.25 + 0.6 * 0.6 + 0.35 * 0.35
+    herm_L = 4
+    herm_F = boys_values(herm_L, herm_p * herm_r2)
+    herm_R = herm_rtab(herm_L, herm_p, herm_PC, herm_F)
+    assert_near(herm_R[2, 0, 0], -2.0 * herm_p * herm_F[1] + 4.0 * herm_p * herm_p * 0.0625 * herm_F[2], 1.0e-15)
+    assert_near(herm_R[1, 1, 0], 4.0 * herm_p * herm_p * 0.25 * 0.6 * herm_F[2], 1.0e-15)
+}
+
+test "the in-place Boys fill equals boys_values to 1e-14 across the grid, the switch and the tail" {
+    # orders up to 16 on a grid to x = 60; 131 points 0.4618 apart run past its end
+    herm_nmax = 16
+    herm_xmax = 60.0
+    herm_nx = 131
+    herm_G = herm_grid(herm_nmax, herm_xmax)
+    herm_F = zeros(herm_nmax + 1)
+    herm_worst = 0.0
+    for herm_k to herm_nx {
+        herm_x = 0.4618 * herm_k
+        for herm_n to herm_nmax + 1 {
+            herm_ref = boys_values(herm_n, herm_x)
+            herm_boys_fill(herm_G, herm_n, herm_x, herm_F)
+            for herm_m to herm_n + 1 {
+                herm_worst = max(herm_worst, abs(herm_F[herm_m] - herm_ref[herm_m]) / herm_ref[herm_m])
+            }
+        }
+    }
+    assert_lt(herm_worst, 1.0e-13)
+}
+
+test "an order above the grid falls back to the series and still matches" {
+    # a grid to order 4, asked for order 8, at 40 points 0.9 apart
+    herm_gmax = 4
+    herm_n = 8
+    herm_nx = 40
+    herm_G = herm_grid(herm_gmax, 60.0)
+    herm_F = zeros(herm_n + 1)
+    herm_worst = 0.0
+    for herm_k to herm_nx {
+        herm_x = 0.9 * herm_k
+        herm_boys_fill(herm_G, herm_n, herm_x, herm_F)
+        herm_ref = boys_values(herm_n, herm_x)
+        for herm_m to herm_n + 1 {
+            herm_worst = max(herm_worst, abs(herm_F[herm_m] - herm_ref[herm_m]) / herm_ref[herm_m])
+        }
+    }
+    assert_lt(herm_worst, 1.0e-13)
+}
+
+test "the Taylor step in herm_boys_fill has the grid's 8 extra orders" {
+    assert_near(BOYS_TAYLOR_K, 8, 0.0)
+}
+
+test "the box R equals the full cube wherever both are defined" {
+    # the box t <= 4, u <= 2, v <= 3 inside the full cube of order 4 + 2 + 3
+    herm_tx = 4
+    herm_ty = 2
+    herm_tz = 3
+    herm_L = herm_tx + herm_ty + herm_tz
+    herm_F = boys_values(herm_L, 0.7 * 2.9)
+    herm_PC = [0.9, -1.1, 0.8]
+    herm_R = herm_rtab(herm_L, 0.7, herm_PC, herm_F)
+    herm_S = zeros(2 * (herm_tx + 1) * (herm_ty + 1) * (herm_tz + 1))
+    herm_rfill_box(herm_S, 0, herm_tx, herm_ty, herm_tz, 0.7, 0.9, -1.1, 0.8, herm_F, 1.0)
+    herm_worst = 0.0
+    for herm_t to herm_tx + 1 {
+        for herm_u to herm_ty + 1 {
+            for herm_v to herm_tz + 1 {
+                herm_worst = max(herm_worst, abs(herm_S[(herm_t * (herm_ty + 1) + herm_u) * (herm_tz + 1) + herm_v] - herm_R[herm_t, herm_u, herm_v]))
+            }
+        }
+    }
+    assert_lt(herm_worst, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

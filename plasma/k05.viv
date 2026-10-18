@@ -1,0 +1,49 @@
+# The Canosa point, k lambda_D = 0.5: the Landau benchmark of Cheng and Knorr
+# (J. Comput. Phys. 22, 330, 1976) and of Gkeyll's regression test
+# vlasov/creg/rt_vlasov_landau_damping_1x1v_p2. Exact root: omega = 1.41566 - 0.15336 i
+# (posts/refs/landau_root.py; the program computes it itself with lib/zfunc).
+#
+#     viv run --use plasma/k05.viv --use plasma/landau.viv plasma/landau_check.viv
+#
+# Choices, measured through the exported library (plasma/vlasov.export.toml):
+# the fitted rates' relative errors against the exact root, and the change of
+# kinetic plus field energy in units of the initial field energy W0.
+#
+#   DT       gamma error   omega error   energy drift / W0   native
+#   0.2      3.9e-3        8.7e-4        7.6e-3              0.13 s
+#   0.1      9.4e-4        2.3e-4        1.9e-3              0.27 s
+#   0.05     2.4e-4        5.5e-5        4.4e-4              0.53 s   <- this deck
+#   0.025    5.9e-5        1.4e-5        7.3e-5              1.05 s
+#   0.0125   1.5e-5        3.4e-6        -4.8e-5             2.11 s
+#
+# The errors fall by four per halving of DT: they are the split step's second
+# order in time. The grid does not show at DT = 0.05: NX = 8, 16 and 32 give
+# the same gamma to seven digits (the linear wave has one mode in x), and
+# NV = 128 and 512 move it by 7e-6 and under 1e-6 relative (NV = 64: 1.3e-4).
+# VMAX = 5 lets the Maxwellian's tail wrap around the periodic v grid and
+# scatters the fitted peaks (rms 3.5e-4 against 1.2e-5); VMAX = 8 agrees with 6.
+# Measured on an Apple M2 Pro at load 6.
+
+#: NX  grid points in x over one wavelength
+NX = 16.0
+#: NV  grid points in v on [-VMAX, VMAX), periodic
+NV = 256.0
+#: VMAX  the velocity grid's edge, in units of the plasma frequency times the Debye length; 6 VT or more
+VMAX = 6.0
+#: VT  the electrons' thermal speed; the Debye length is VT in these units
+VT = 1.0
+#: K0  the perturbation's wavenumber; the box is one wavelength, 2 pi / K0
+K0 = 0.5
+#: ALPHA  the relative amplitude of the density perturbation, 1 + ALPHA cos(K0 x); small, so the wave stays linear
+ALPHA = 1.0e-4
+#: DT  the time step, in units of the inverse plasma frequency
+DT = 0.05
+#: T_END  the run's length, in units of the inverse plasma frequency
+T_END = 40.0
+#: T_FIT0  the fit window's start: the next root down, 1.790 - 1.144 i, damps faster by 0.99, so by t = 10 its share of the field has fallen by e^-9.9 = 5e-5 relative to the Landau mode's
+T_FIT0 = 10.0
+#: T_FIT1  the fit window's end
+T_FIT1 = 40.0
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

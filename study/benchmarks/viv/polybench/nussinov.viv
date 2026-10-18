@@ -1,0 +1,54 @@
+#! timing
+# PolyBench/C 4.2.1 nussinov: Nussinov's dynamic program for the largest
+# number of base pairs an RNA sequence can fold into.
+# Reference: upstream/polybench-c-4.2.1/medley/nussinov/nussinov.c
+# The C's int table is held as Nums here (exact: every entry is a small integer).
+# The sizes are the MINI dataset; the harness gives the others with --set.
+N = 60
+DUMP = 1
+
+from polybench import dump
+
+# Bases are 0..3 (A, G, C, T in PolyBench's comment); b1 and b2 pair when
+# they add up to PAIR_SUM.
+BASES = 4
+PAIR_SUM = 3
+
+def matches(b1, b2) {
+    return 1.0 if b1 + b2 == PAIR_SUM else 0.0
+}
+
+def init() {
+    return [(i + 1) % BASES for i to N]
+}
+
+# table[i, j] is the best folding of seq[i..j]. Inside the loops j - 1 >= 0
+# and i + 1 < N always hold, so the C's guards on them are dropped.
+def kernel(seq) {
+    table = zeros(N, N)
+    for i to N reversed {
+        for j from i + 1 to N {
+            best = max(table[i, j], table[i, j - 1])
+            best = max(best, table[i + 1, j])
+            pair = matches(seq[i], seq[j]) if i < j - 1 else 0.0
+            best = max(best, table[i + 1, j - 1] + pair)
+            if j > i + 1 {
+                best = max(best, max(table[i, k] + table[k + 1, j] for k from i + 1 to j))
+            }
+            table[i, j] = best
+        }
+    }
+    return table
+}
+
+seq = init()
+t0 = clock()
+table = kernel(seq)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("table", table)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

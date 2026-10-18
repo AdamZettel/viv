@@ -1,0 +1,84 @@
+###
+post: randla's entry points for Python (vipyr)
+agent: claude
+
+Typed wrappers over lib/randla, one def per driver, so that `vipyr.load`
+exports each as a Python function taking and returning NumPy arrays. The
+sketch kind is in the name (`sap_srht`, `sap_saso`, `sap_gaussian`) because
+an exported def takes numbers and arrays only. lib/randla/check_ref.py
+holds these against NumPy, SciPy and scikit-learn.
+
+Used from Python: `vipyr.load("lib/randla/api.viv")`.
+###
+
+from randla.sketch import gaussian, rademacher, saso_dense, srht_apply
+from randla.lowrank import rsvd, nystrom, rpcholesky, range_finder
+from randla.lstsq import sap_lstsq
+from randla.trace import hutchinson, hutchpp
+
+#| The rank-k randomized SVD: U, s, Vt.
+def randomized_svd(A: Arr, k: Int, oversample: Int, power: Int, seed: Int) {
+    return rsvd(A, k, oversample=oversample, power=power, seed=seed)
+}
+
+#| The orthonormal range basis with l columns after `power` iterations.
+def range_basis(A: Arr, l: Int, power: Int, seed: Int) -> Arr {
+    return range_finder(A, l, power, seed, 0)
+}
+
+#| Nystrom approximation of a positive semidefinite matrix: U and lam.
+def nystrom_psd(A: Arr, l: Int, seed: Int) {
+    return nystrom(A, l, seed, 1)
+}
+
+#| Randomly pivoted Cholesky: F with A ~ F F^T.
+def rp_cholesky(A: Arr, k: Int, seed: Int) -> Arr {
+    F, piv = rpcholesky(A, k, seed, 0)
+    return F
+}
+
+#| Sketch-and-precondition least squares with a subsampled randomized
+#| Hadamard sketch: x and the iterations.
+def sap_srht(A: Arr, b: Arr, seed: Int) {
+    return sap_lstsq(A, b, kind="srht", seed=seed)
+}
+
+#| Sketch-and-precondition least squares with a sparse sign sketch.
+def sap_saso(A: Arr, b: Arr, seed: Int) {
+    return sap_lstsq(A, b, kind="saso", seed=seed)
+}
+
+#| Sketch-and-precondition least squares with a Gaussian sketch.
+def sap_gaussian(A: Arr, b: Arr, seed: Int) {
+    return sap_lstsq(A, b, kind="gaussian", seed=seed)
+}
+
+#| Hutchinson's trace estimate from m products.
+def trace_hutchinson(A: Arr, m: Int, seed: Int) -> Num {
+    return hutchinson(A, m, seed, 0)
+}
+
+#| Hutch++'s trace estimate from m products.
+def trace_hutchpp(A: Arr, m: Int, seed: Int) -> Num {
+    return hutchpp(A, m, seed, 0)
+}
+
+#| The Gaussian operator, for checking the generator from Python.
+def gaussian_op(rows: Int, cols: Int, seed: Int, stream: Int) -> Arr {
+    return gaussian(rows, cols, seed, stream)
+}
+
+#| The Rademacher operator, for checking the generator from Python.
+def rademacher_op(rows: Int, cols: Int, seed: Int, stream: Int) -> Arr {
+    return rademacher(rows, cols, seed, stream)
+}
+
+test "the wrappers run" {
+    A = gaussian(30, 20, 1, 0)
+    U, s, Vt = randomized_svd(A, 5, 5, 1, 0)
+    assert_true(len(s) == 5)
+    assert_lt(abs(trace_hutchpp(transpose(A) @ A, 18, 2) - trace(transpose(A) @ A)) / trace(transpose(A) @ A), 0.5)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

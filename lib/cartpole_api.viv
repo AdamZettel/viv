@@ -1,0 +1,72 @@
+###
+post: the cart-pole's entry points for Python (vipyr)
+agent: claude
+
+Typed wrappers over lib/cartpole.viv, so that `vipyr.load` exports them as
+Python functions taking and returning NumPy arrays: the model linearized about
+the upright, and a closed-loop run of the nonlinear model under a gain K.
+vp.control.cartpole_model and vp.control.simulate are these two defs.
+###
+
+from cartpole import cartpole_rate, cartpole_step
+
+# the state: cart position, cart velocity, pole angle, pole angular rate
+NSTATE = 4
+# the columns of a simulated trajectory: time, the four states, the force
+NCOLS = 6
+
+#| The cart-pole linearized about the upright: A = df/ds (4 by 4) and B = df/du
+#| (4 by 1), by central differences of step h on the nonlinear dynamics, so the
+#| linear model is the one the simulation runs.
+def cartpole_model(h: Num) {
+    a = zeros(NSTATE, NSTATE)
+    for j to NSTATE {
+        sp = zeros(NSTATE)
+        sm = zeros(NSTATE)
+        sp[j] = h
+        sm[j] = -h
+        fp = cartpole_rate(sp, 0.0)
+        fm = cartpole_rate(sm, 0.0)
+        for i to NSTATE {
+            a[i, j] = (fp[i] - fm[i]) / (2.0 * h)
+        }
+    }
+    b = zeros(NSTATE, 1)
+    s0 = zeros(NSTATE)
+    fp = cartpole_rate(s0, h)
+    fm = cartpole_rate(s0, -h)
+    for i to NSTATE {
+        b[i, 0] = (fp[i] - fm[i]) / (2.0 * h)
+    }
+    return a, b
+}
+
+#| The nonlinear cart-pole under the state feedback u = -K s, from the state s0
+#| for `steps` steps of dt (fourth-order Runge-Kutta, the force held over each
+#| step). One row per time: t, x, xdot, theta, thetadot, u.
+def cartpole_simulate(K: Arr, s0: Arr, dt: Num, steps: Int) -> Arr {
+    out = zeros(steps + 1, NCOLS)
+    s = s0
+    for n to steps + 1 {
+        u = -dot(K, s)
+        out[n, 0] = n * dt
+        for i to NSTATE {
+            out[n, i + 1] = s[i]
+        }
+        out[n, NCOLS - 1] = u
+        if n < steps {
+            s = cartpole_step(s, u, dt)
+        }
+    }
+    return out
+}
+
+test "near upright the nonlinear rate equals A s, to 1e-10" {
+    a, b = cartpole_model(1.0e-5)
+    s = [0.0, 0.0, 1.0e-4, 0.0]
+    f = cartpole_rate(s, 0.0)
+    assert_near(f[3], a[3, 2] * 1.0e-4, 1.0e-10)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,167 @@
+###
+post: The linear-quadratic regulator, for a system with one input
+agent: claude
+
+Given a linear system `zdot = A z + B u` and a price on being away from zero and
+on pushing, `W` and `r`, the gains that minimize the total bill are
+`K = B^T P / r`, where `P` solves the algebraic Riccati equation
+
+    A^T P + P A - P B B^T P / r + W = 0.
+
+This is a small front end on `lib/are` for the common case of one input, where
+the weight on the input is a single number. The equation
+itself is solved there, by the Schur method.
+
+There is a second solver here, `lqr_riccati_integrated`, and it is the one to
+reach for never. It integrates `Pdot = -(A^T P + P A - P B B^T P / r + W)`
+backwards from zero for eighty seconds of simulated time and returns wherever it
+happens to have got to. On well-behaved problems it agrees with the real solver
+to twelve digits, which is what makes it dangerous. Hand it a system whose
+closed loop has a time constant of seven hundred seconds and it returns 73.783
+where the answer is 414.214 -- wrong by four fifths, with nothing in its output
+to say so. It is kept here because that failure is worth being able to run, and
+the last test below runs it.
+
+Used with `import lqr`.
+###
+
+from are import are_solve
+
+LQR_DT = 0.002
+LQR_STEPS = 40000
+
+#| Solve the Riccati equation for a single-input system: `B` is `n` by 1 and `r`
+#| is the scalar price of pushing. The work happens in `lib/are`.
+def lqr_riccati(A: Arr, B: Arr, W: Arr, r) {
+    n = len(A)
+    R = zeros(1, 1)
+    R[0, 0] = r
+    P = zeros(n, n)
+    cut = are_solve(A, B, R, W, P)
+    return P
+}
+
+#| One backward step of the differential Riccati equation.
+def lqr_riccati_step(p: Arr, a: Arr, b: Arr, q: Arr, r, dt) {
+    bt = transpose(b)
+    pb = p @ b
+    quad = (1.0 / r) * (pb @ (bt @ p))
+    dp = transpose(a) @ p + p @ a - quad + q
+    return p + dt * dp
+}
+
+#| The differential equation integrated backwards until it stops moving, or
+#| until eighty seconds of simulated time run out, whichever comes first -- and
+#| it cannot tell you which. See the note at the top.
+def lqr_riccati_integrated(A: Arr, B: Arr, W: Arr, r) {
+    n = len(A)
+    p = zeros(n, n)
+    for k to LQR_STEPS {
+        p = lqr_riccati_step(p, A, B, W, r, LQR_DT)
+    }
+    return p
+}
+
+#| How far `P` is from solving the equation: the largest entry of the residual.
+def lqr_residual(P: Arr, A: Arr, B: Arr, W: Arr, r) {
+    n = len(A)
+    bt = transpose(B)
+    pb = P @ B
+    res = transpose(A) @ P + P @ A - (1.0 / r) * (pb @ (bt @ P)) + W
+    worst = 0.0
+    for i to n {
+        for j to n {
+            worst = max(worst, abs(res[i, j]))
+        }
+    }
+    return worst
+}
+
+#| The gains `K = B^T P / r`, as a vector: the input that goes with them is
+#| `u = -K z`.
+def lqr_gains(P: Arr, B: Arr, r) {
+    n = len(P)
+    row = (1.0 / r) * (transpose(B) @ P)
+    out = zeros(n)
+    for i to n {
+        out[i] = row[0, i]
+    }
+    return out
+}
+
+#| The closed loop `A - B K`, whose eigenvalues say whether the equilibrium the
+#| gains were computed for is stable.
+def lqr_closed_loop(A: Arr, B: Arr, gains: Arr) {
+    n = len(A)
+    m = zeros(n, n)
+    for i to n {
+        for j to n {
+            m[i, j] = A[i, j] - B[i, 0] * gains[j]
+        }
+    }
+    return m
+}
+
+#| The slowest closed-loop mode: the largest real part. Negative means stable,
+#| and how negative says how fast the error dies.
+def lqr_slowest(cl: Arr) {
+    n = len(cl)
+    re = zeros(n)
+    im = zeros(n)
+    eig_general(cl, re, im)
+    worst = -1.0e30
+    for i to n {
+        worst = max(worst, re[i])
+    }
+    return worst
+}
+
+test "the scalar equation comes out where the quadratic formula says" {
+    A = [[0.7]]
+    B = [[1.3]]
+    W = [[2.5]]
+    r = 0.4
+    P = lqr_riccati(A, B, W, r)
+    # (b^2/r) P^2 - 2 a P - q = 0, so P = (a + sqrt(a^2 + b^2 q / r)) r / b^2
+    expected = (0.7 + sqrt(0.7 * 0.7 + 1.3 * 1.3 * 2.5 / 0.4)) * 0.4 / (1.3 * 1.3)
+    assert_near(P[0, 0], expected, 1.0e-13)
+    assert_lt(lqr_residual(P, A, B, W, r), 1.0e-13)
+}
+
+test "a double integrator with unit weights wants gains of 1 and root 3" {
+    A = [[0.0, 1.0], [0.0, 0.0]]
+    B = [[0.0], [1.0]]
+    W = [[1.0, 0.0], [0.0, 1.0]]
+    P = lqr_riccati(A, B, W, 1.0)
+    gains = lqr_gains(P, B, 1.0)
+    assert_near(gains[0], 1.0, 1.0e-13)
+    assert_near(gains[1], sqrt(3.0), 1.0e-13)
+}
+
+test "those gains leave both closed-loop modes decaying" {
+    A = [[0.0, 1.0], [0.0, 0.0]]
+    B = [[0.0], [1.0]]
+    W = [[1.0, 0.0], [0.0, 1.0]]
+    P = lqr_riccati(A, B, W, 1.0)
+    gains = lqr_gains(P, B, 1.0)
+    assert_lt(lqr_slowest(lqr_closed_loop(A, B, gains)), -1.0e-6)
+}
+
+test "on a slow system the real solver is exact and the integrated one is 82 percent wrong" {
+    # closed-loop time constant near seven hundred seconds; the integration runs
+    # for eighty and stops wherever it is
+    A = [[-0.001]]
+    B = [[0.001]]
+    W = [[1.0]]
+    r = 1.0
+    exact = (-0.001 + sqrt(0.001 * 0.001 + 0.001 * 0.001)) / (0.001 * 0.001)
+    assert_near(exact, 414.2135623730951, 1.0e-9)
+    P = lqr_riccati(A, B, W, r)
+    assert_lt(abs(P[0, 0] - exact) / exact, 1.0e-14)
+    Q = lqr_riccati_integrated(A, B, W, r)
+    assert_near(Q[0, 0], 73.783, 1.0e-3)
+    assert_lt(0.8, abs(Q[0, 0] - exact) / exact)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

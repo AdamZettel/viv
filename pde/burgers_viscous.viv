@@ -1,0 +1,110 @@
+#! pde Burgers' equation, viscous
+#! equation u_t + u\,u_x = \nu\,u_{xx}
+#! kind nonlinear parabolic
+#! method conservative centered differences in space, fourth-order Runge-Kutta in time
+#! checks the exact travelling-wave solution, its speed, and the measured order
+#! | The smallest equation with both of a fluid's habits in it: $u\,u_x$ steepens a wave, and
+#! | $\nu\,u_{xx}$ smooths it. Where they balance the wave stops changing shape and simply travels:
+#! | $u = c - a\tanh\!\left(\frac{a\,(x - ct - x_0)}{2\nu}\right)$, a smoothed step from $c + a$ down to
+#! | $c - a$, of width about $4\nu/a$, moving at the *mean* of the two states.
+#! |
+#! | That speed is the Rankine-Hugoniot condition, and it survives the limit $\nu \to 0$: it is
+#! | the speed of the shock the inviscid equation forms.
+#! |
+#! | The nonlinear term is differenced in conservation form, $\partial_x(u^2/2)$, not as $u\,u_x$.
+#! | The two agree for smooth $u$, but only the first makes the scheme conserve $\int u\,dx$, and a
+#! | scheme that does not conserve gets the wave speed wrong.
+
+NU = 0.02
+UL = 1.0
+UR = 0.0
+CSPEED = 0.5 * (UL + UR)
+AMP = 0.5 * (UL - UR)
+X0 = 0.7
+XMAX = 3.0
+
+#| The exact travelling wave at time t.
+def exact_wave(x, t) {
+    return CSPEED - AMP * tanh(AMP * (x - CSPEED * t - X0) / (2.0 * NU))
+}
+
+#| du/dt on the grid. The two end points are held (their rate is zeroed by `hold`).
+def rate(u, h, hold) {
+    right = roll(u, -1.0)
+    left = roll(u, 1.0)
+    flux = 0.5 * (0.5 * right * right - 0.5 * left * left) / h
+    diffusion = NU * (right - 2.0 * u + left) / (h * h)
+    return (diffusion - flux) * hold
+}
+
+#| March to t_end with RK4 on n points; returns the solution.
+def march(n, t_end) {
+    h = XMAX / (n - 1.0)
+    x = linspace(0.0, XMAX, n)
+    u = exact_wave(x, 0.0)
+    hold = zeros(n) + 1.0
+    hold[0] = 0.0
+    hold[n - 1.0] = 0.0
+    steps = round(t_end / (0.2 * h * h / NU))
+    dt = t_end / steps
+    for s to steps {
+        k1 = rate(u, h, hold)
+        k2 = rate(u + 0.5 * dt * k1, h, hold)
+        k3 = rate(u + 0.5 * dt * k2, h, hold)
+        k4 = rate(u + dt * k3, h, hold)
+        u = u + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    }
+    return u
+}
+
+#| L2 error against the exact wave.
+def wave_error(n, t_end) {
+    h = XMAX / (n - 1.0)
+    x = linspace(0.0, XMAX, n)
+    d = march(n, t_end) - exact_wave(x, t_end)
+    return sqrt(sum(d * d) * h)
+}
+
+#| Where u crosses the mid-value, by linear interpolation: the front's position.
+def front_position(u, n) {
+    h = XMAX / (n - 1.0)
+    pos = 0.0
+    for i to n - 1.0 {
+        if u[i] >= CSPEED and u[i + 1.0] < CSPEED {
+            pos = (i + (u[i] - CSPEED) / (u[i] - u[i + 1.0])) * h
+        }
+    }
+    return pos
+}
+
+T_END = 2.0
+e1 = wave_error(151.0, T_END)
+e2 = wave_error(301.0, T_END)
+order = log(e1 / e2) / log(2.0)
+N = 301
+U = march(N, T_END)
+speed = (front_position(U, N) - X0) / T_END
+show e1
+show e2
+show order
+show speed
+
+X = linspace(0.0, XMAX, N)
+figure("A viscous shock, travelling at the mean of its two states", "x", "u")
+plot(X, exact_wave(X, 0.0), "t = 0")
+plot(X, U, "t = 2, computed")
+plot(X, exact_wave(X, T_END), "t = 2, exact")
+style("t = 2, exact", "dash")
+
+test "the computed wave matches the exact tanh profile" {
+    assert_lt(e2, 1.0e-3)
+}
+test "the front moves at (u_left + u_right) / 2, the Rankine-Hugoniot speed" {
+    assert_near(speed, CSPEED, 1.0e-3)
+}
+test "the scheme is second order in space" {
+    assert_near(order, 2.0, 0.15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

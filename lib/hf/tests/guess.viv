@@ -1,0 +1,115 @@
+# The tests of lib/hf/guess that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/guess does not load the references.
+from hf.guess import GS_AVG, GS_CORE, GS_GWH, GS_IMPORT, gs_methods, gs_of, GS_ZERO
+from hf.opts import opt_array, scf_defaults, ScfOptions
+from hf.eigen import eig_methods, EIG_QL
+from hf.orthogonalize import ORTH_CANON, orth_methods
+from hf.density import den_fnorm, den_gap, den_idempotency, den_stack1, den_stack2, den_trace
+from hfref.h4_diffuse import (
+    h4_diffuse_eri8_cart, H4_DIFFUSE_RHF_NALPHA, H4_DIFFUSE_RHF_NBETA, h4_diffuse_s_unit,
+    h4_diffuse_t_unit, h4_diffuse_v_unit,
+)
+from hfref.oh_631g import (
+    oh_631g_eri8_cart, oh_631g_s_unit, oh_631g_t_unit, oh_631g_uhf_da, oh_631g_uhf_db,
+    OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA, oh_631g_v_unit,
+)
+from hfref.pyscf_tests import PST_H2O_255, PST_H2O_265
+from hfref.water_631g import (
+    water631g_eri8_cart, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, water631g_s_unit,
+    water631g_t_unit, water631g_v_unit,
+)
+
+#| The guess member `k` on reference integrals, with the default
+#| orthogonalizer and eigensolver.
+def gs_t_run(H: Arr, S: Arr, Gp: Arr, k, na, nb) -> Arr {
+    n = len(H)
+    return gs_of(H, S, Gp, zeros(2, n, n), gs_t_opts(k, ORTH_CANON, EIG_QL, na, nb))
+}
+
+#| The options array of a test run: guess `k`, orthogonalizer `orth`,
+#| eigensolver `eig`, `na` and `nb` electrons.
+def gs_t_opts(k, orth, eig, na, nb) {
+    return opt_array(ScfOptions { guess: k, orthogonalizer: orth, eigensolver: eig, ..scf_defaults() }, na, nb, 0.0)
+}
+
+test "the core guess on water 6-31G has PySCF's norm under every orthogonalizer and eigensolver" {
+    gs_H = water631g_t_unit() + water631g_v_unit()
+    gs_S = water631g_s_unit()
+    gs_G = water631g_eri8_cart()
+    gs_n = len(gs_H)
+    gs_worst = 0.0
+    for gs_orth to len(orth_methods()) {
+        for gs_solver to len(eig_methods()) {
+            gs_o = gs_t_opts(GS_CORE, gs_orth, gs_solver, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA)
+            gs_D2 = gs_of(gs_H, gs_S, gs_G, zeros(2, gs_n, gs_n), gs_o)
+            gs_T = den_stack1(slab(gs_D2, 0) + slab(gs_D2, 1))
+            # test_h2o.py:255 asserts |D_1e| = 5.3700828975288122
+            gs_worst = max(gs_worst, abs(den_fnorm(gs_T, 0) - PST_H2O_255))
+            # and :265 the norm of the (alpha, beta) pair, 5.37.../sqrt(2)
+            gs_pair = sqrt(den_fnorm(gs_D2, 0) * den_fnorm(gs_D2, 0) + den_fnorm(gs_D2, 1) * den_fnorm(gs_D2, 1))
+            gs_worst = max(gs_worst, abs(gs_pair - PST_H2O_265))
+        }
+    }
+    assert_lt(gs_worst, 1.0e-9)
+}
+
+test "every guess that occupies orbitals holds the right electron counts" {
+    gs_H = oh_631g_t_unit() + oh_631g_v_unit()
+    gs_S = oh_631g_s_unit()
+    gs_G = oh_631g_eri8_cart()
+    gs_na = OH_631G_UHF_NALPHA
+    gs_nb = OH_631G_UHF_NBETA
+    # the guesses that occupy orbitals
+    gs_occ = [GS_AVG, GS_CORE, GS_GWH]
+    for gs_k to len(gs_occ) {
+        gs_D2 = gs_t_run(gs_H, gs_S, gs_G, gs_occ[gs_k], gs_na, gs_nb)
+        assert_lt(abs(den_trace(gs_D2, 0, gs_S) - 5.0), 1.0e-12)
+        assert_lt(abs(den_trace(gs_D2, 1, gs_S) - 4.0), 1.0e-12)
+        assert_lt(den_idempotency(gs_D2, 0, gs_S, 1.0), 1.0e-12)
+        assert_lt(den_idempotency(gs_D2, 1, gs_S, 1.0), 1.0e-12)
+    }
+    gs_D2 = gs_t_run(gs_H, gs_S, gs_G, GS_ZERO, gs_na, gs_nb)
+    assert_near(den_fnorm(gs_D2, 0) + den_fnorm(gs_D2, 1), 0.0, 0.0)
+    # import hands back exactly what it was given
+    gs_D0 = den_stack2(oh_631g_uhf_da(), oh_631g_uhf_db())
+    gs_D2 = gs_of(gs_H, gs_S, gs_G, gs_D0, gs_t_opts(GS_IMPORT, ORTH_CANON, EIG_QL, gs_na, gs_nb))
+    assert_near(den_gap(gs_D2, 1, gs_D0, 1), 0.0, 0.0)
+}
+
+test "the core and GWH guesses differ, and every guess works on a basis with a dropped vector" {
+    gs_H = water631g_t_unit() + water631g_v_unit()
+    gs_S = water631g_s_unit()
+    gs_G = water631g_eri8_cart()
+    gs_Dc = gs_t_run(gs_H, gs_S, gs_G, GS_CORE, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA)
+    gs_Dg = gs_t_run(gs_H, gs_S, gs_G, GS_GWH, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA)
+    assert_gt(den_gap(gs_Dc, 0, gs_Dg, 0), 1.0e-3)
+    gs_H = h4_diffuse_t_unit() + h4_diffuse_v_unit()
+    gs_S = h4_diffuse_s_unit()
+    gs_G = h4_diffuse_eri8_cart()
+    gs_occ = [GS_AVG, GS_CORE, GS_GWH]
+    for gs_k to len(gs_occ) {
+        gs_D2 = gs_t_run(gs_H, gs_S, gs_G, gs_occ[gs_k], H4_DIFFUSE_RHF_NALPHA, H4_DIFFUSE_RHF_NBETA)
+
+        assert_lt(abs(den_trace(gs_D2, 0, gs_S) - 2.0), 1.0e-9)
+        assert_lt(abs(den_trace(gs_D2, 1, gs_S) - 2.0), 1.0e-9)
+    }
+}
+
+test "gs_of runs the member the registry holds at each option value" {
+    gs_H = water631g_t_unit() + water631g_v_unit()
+    gs_S = water631g_s_unit()
+    gs_G = water631g_eri8_cart()
+    gs_n = len(gs_H)
+    gs_D0 = zeros(2, gs_n, gs_n)
+    gs_ms = gs_methods()
+    for gs_k to len(gs_ms) {
+        gs_o = gs_t_opts(gs_k, ORTH_CANON, EIG_QL, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA)
+        gs_a = gs_of(gs_H, gs_S, gs_G, gs_D0, gs_o)
+        gs_b = apply(gs_ms[gs_k], gs_H, gs_S, gs_G, gs_D0, gs_o)
+        assert_near(max(abs(gs_a - gs_b)), 0.0, 0.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

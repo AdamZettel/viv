@@ -1,0 +1,135 @@
+###
+The sweep behind `print` and `fmt`: COUNT doubles from
+index START of one fixed sequence, one line each, every number written in
+every format. tools/print-fmt-sweep/run.sh runs it through the interpreter,
+C and wasm and requires the same bytes, then hands the lines to check.py,
+which holds each field to CPython's `repr` and `format`.
+
+The sequence mixes ten kinds of double, by index mod 10: random bit patterns
+over the whole exponent range (three of ten, subnormals included), subnormals
+built exactly, powers of two and their neighbors, exact binary fractions whose
+decimal expansions end in 5 (the halfway cases of decimal rounding),
+decimal-looking quotients k / 10^m, whole numbers up to 2^70, powers of ten
+and their neighbors (where `repr` switches layout), and uniform draws. The
+first twelve are the special values: zeros of both signs, infinities, a nan,
+the extremes.
+###
+
+START = 0
+COUNT = 100000
+LAST = START + COUNT
+
+# 2^(k - 1074), exactly, for k = 0 .. 2097
+P = zeros(2098)
+P[1074] = 1.0
+for k to 1023 {
+    P[1075 + k] = P[1074 + k] * 2.0
+}
+for k to 1074 {
+    P[1073 - k] = P[1074 - k] * 0.5
+}
+
+def pow2(e) {
+    return P[e + 1074]
+}
+
+# a random integer in [0, 2^b), b <= 53
+def bits(b) {
+    hi = floor(rand() * 67108864.0)
+    lo = floor(rand() * 134217728.0)
+    return floor((hi * 134217728.0 + lo) * pow2(b - 53))
+}
+
+def sign(x) {
+    if rand() < 0.5 {
+        return -x
+    }
+    return x
+}
+
+def value(i) {
+    if i < 12 {
+        specials = [0.0, 1.0, 0.5, 2.0, 1.0e16, 1.0e-4, 1.0e-5, 9007199254740993.0, 4.9e-324, 2.2250738585072014e-308, 1.7976931348623157e308, 0.1]
+        if i == 0 {
+            return -0.0
+        }
+        if i == 1 {
+            return 1.0 / 0.0
+        }
+        if i == 2 {
+            return -1.0 / 0.0
+        }
+        if i == 3 {
+            return 0.0 / 0.0
+        }
+        return specials[i]
+    }
+    kind = i % 10
+    if kind <= 2 {
+        # a 53-bit significand, times 2^E for E anywhere in [-1074, 1023]
+        m = 4503599627370496.0 + bits(52)
+        e = floor(rand() * 2098.0) - 1074
+        return sign((m * pow2(-52)) * pow2(e))
+    }
+    if kind == 3 {
+        return sign(bits(1 + floor(rand() * 52.0)) * pow2(-1074))
+    }
+    if kind == 4 {
+        e = floor(rand() * 2098.0) - 1074
+        r = rand()
+        x = pow2(e)
+        if r < 0.33 {
+            return x
+        }
+        if r < 0.66 {
+            return x * (1.0 + pow2(-52))
+        }
+        return x * (1.0 - pow2(-53))
+    }
+    if kind == 5 {
+        # an odd integer over 2^j: the last decimal digit is 5
+        k = 2.0 * bits(1 + floor(rand() * 30.0)) + 1.0
+        return sign(k * pow2(-1 - floor(rand() * 24.0)))
+    }
+    if kind == 6 {
+        d = 1 + floor(rand() * 17.0)
+        k = floor(rand() * pow(10.0, d))
+        return sign(k / pow(10.0, floor(rand() * 21.0)))
+    }
+    if kind == 7 {
+        b = 1 + floor(rand() * 53.0)
+        return sign(bits(b) * pow2(floor(rand() * 18.0)))
+    }
+    if kind == 8 {
+        t = 1.0
+        n = floor(rand() * 61.0) - 30
+        for s to fabs(n) {
+            if n < 0 {
+                t = t / 10.0
+            }
+            else {
+                t = t * 10.0
+            }
+        }
+        r = rand()
+        if r < 0.33 {
+            return t
+        }
+        if r < 0.66 {
+            return t * (1.0 + pow2(-52))
+        }
+        return t * (1.0 - pow2(-53))
+    }
+    return rand() * pow(10.0, floor(rand() * 40.0) - 20)
+}
+
+srand(20260927)
+for i to LAST {
+    x = value(i)
+    if i >= START {
+        print(fmt(x, 17), fmt(x), x, fmt(x, 1), fmt(x, 2), fmt(x, 3), fmt(x, 4), fmt(x, 5), fmt(x, 6), fmt(x, 7), fmt(x, 8), fmt(x, 9), fmt(x, 10), fmt(x, 11), fmt(x, 12), fmt(x, 13), fmt(x, 14), fmt(x, 15), fmt(x, 16), fmt(x, ".0e"), fmt(x, ".3e"), fmt(x, ".16e"), fmt(x, ".2f"), fmt(x, ".6f"), fmt(x, "d"), fmt(x, "12.4g"))
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

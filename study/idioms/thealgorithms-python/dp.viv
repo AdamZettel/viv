@@ -1,0 +1,250 @@
+###
+Dynamic programming, ported from TheAlgorithms/Python:
+dynamic_programming/knapsack.py, dynamic_programming/longest_common_subsequence.py,
+dynamic_programming/edit_distance.py. A string is an array of character codes:
+`chars("text")` makes one and `text(a)` prints one.
+###
+import seq as seq_module
+
+# ---------------------------------------------------------------- 0/1 knapsack
+#| knapsack.py knapsack: dp[i, w] is the best value using the first i items within
+#| capacity w. Python returns (dp[n][w], dp); here the table, and the caller reads dp[n, w].
+def knapsack(w, wt: Arr, val: Arr, n) -> Arr {
+    dp = zeros(n + 1.0, w + 1.0)
+    for i0 to n {
+        i = i0 + 1.0
+        for w0 to w {
+            c = w0 + 1.0
+            if wt[i - 1.0] <= c {
+                dp[i, c] = max(val[i - 1.0] + dp[i - 1.0, c - wt[i - 1.0]], dp[i - 1.0, c])
+            }
+            else {
+                dp[i, c] = dp[i - 1.0, c]
+            }
+        }
+    }
+    return dp
+}
+
+#| knapsack.py mf_knapsack, the memoized top-down version. Python keeps the memo in a
+#| global `f` (-1 = not computed); here it is passed in.
+def mf_knapsack(f: Arr, i, wt: Arr, val: Arr, j) {
+    if f[i, j] < 0.0 {
+        best = 0.0
+        if j < wt[i - 1.0] {
+            best = mf_knapsack(f, i - 1.0, wt, val, j)
+        }
+        else {
+            best = max(mf_knapsack(f, i - 1.0, wt, val, j), mf_knapsack(f, i - 1.0, wt, val, j - wt[i - 1.0]) + val[i - 1.0])
+        }
+        f[i, j] = best
+    }
+    return f[i, j]
+}
+
+#| knapsack.py _construct_solution: walk the table back from (i, j), marking the
+#| items (1-based) that were taken. The Python set is a 0/1 mask over item numbers.
+def construct_solution(dp: Arr, wt: Arr, i, j, chosen: Arr) {
+    if i > 0.0 and j > 0.0 {
+        if dp[i - 1.0, j] == dp[i, j] {
+            construct_solution(dp, wt, i - 1.0, j, chosen)
+        }
+        else {
+            chosen[i] = 1.0
+            construct_solution(dp, wt, i - 1.0, j - wt[i - 1.0], chosen)
+        }
+    }
+}
+
+#| knapsack.py knapsack_with_example_solution: the chosen item numbers, ascending.
+#| Python returns (optimal_value, the set); the value is dp[n, w] of the same table.
+def knapsack_items(w, wt: Arr, val: Arr) -> Arr {
+    n = len(wt)
+    dp = knapsack(w, wt, val, n)
+    chosen = zeros(n + 1.0)
+    construct_solution(dp, wt, n, w, chosen)
+    items = zeros(sum(chosen))
+    k = 0.0
+    for i to n + 1.0 {
+        if chosen[i] == 1.0 {
+            items[k] = i
+            k += 1.0
+        }
+    }
+    return items
+}
+
+# ---------------------------------------------------------------- LCS
+#| longest_common_subsequence.py: fill the table, then walk back from (m, n) collecting
+#| matched characters. Python returns (length, subsequence); the length is len() of it.
+def longest_common_subsequence(x: Arr, y: Arr) -> Arr {
+    m = len(x)
+    n = len(y)
+    dp = zeros(m + 1.0, n + 1.0)
+    for i0 to m {
+        for j0 to n {
+            i = i0 + 1.0
+            j = j0 + 1.0
+            match = 0.0
+            if x[i - 1.0] == y[j - 1.0] {
+                match = 1.0
+            }
+            dp[i, j] = max(max(dp[i - 1.0, j], dp[i, j - 1.0]), dp[i - 1.0, j - 1.0] + match)
+        }
+    }
+    seq = zeros(dp[m, n])
+    k = dp[m, n]
+    i = m
+    j = n
+    while i > 0.0 and j > 0.0 {
+        match = 0.0
+        if x[i - 1.0] == y[j - 1.0] {
+            match = 1.0
+        }
+        if dp[i, j] == dp[i - 1.0, j - 1.0] + match {
+            if match == 1.0 {
+                k -= 1.0
+                seq[k] = x[i - 1.0]
+            }
+            i -= 1.0
+            j -= 1.0
+        }
+        else if dp[i, j] == dp[i - 1.0, j] {
+            i -= 1.0
+        }
+        else {
+            j -= 1.0
+        }
+    }
+    return seq
+}
+
+# ---------------------------------------------------------------- edit distance
+#| edit_distance.py EditDistance.__min_dist_top_down_dp: the distance between
+#| word1[0..m] and word2[0..n], memoized in dp (-1 = not computed).
+def min_dist_top_down_dp(word1: Arr, word2: Arr, dp: Arr, m, n) {
+    if m == -1.0 {
+        return n + 1.0
+    }
+    if n == -1.0 {
+        return m + 1.0
+    }
+    if dp[m, n] > -1.0 {
+        return dp[m, n]
+    }
+    if word1[m] == word2[n] {
+        dp[m, n] = min_dist_top_down_dp(word1, word2, dp, m - 1.0, n - 1.0)
+    }
+    else {
+        insert = min_dist_top_down_dp(word1, word2, dp, m, n - 1.0)
+        delete = min_dist_top_down_dp(word1, word2, dp, m - 1.0, n)
+        replace = min_dist_top_down_dp(word1, word2, dp, m - 1.0, n - 1.0)
+        dp[m, n] = 1.0 + min(insert, min(delete, replace))
+    }
+    return dp[m, n]
+}
+
+def min_dist_top_down(word1: Arr, word2: Arr) {
+    dp =zeros(len(word1), len(word2)) - 1.0
+    return min_dist_top_down_dp(word1, word2, dp, len(word1) - 1.0, len(word2) - 1.0)
+}
+
+#| edit_distance.py EditDistance.min_dist_bottom_up.
+def min_dist_bottom_up(word1: Arr, word2: Arr) {
+    m = len(word1)
+    n = len(word2)
+    dp = zeros(m + 1.0, n + 1.0)
+    for i to m + 1.0 {
+        for j to n + 1.0 {
+            if i == 0.0 {
+                dp[i, j] = j
+            }
+            else if j == 0.0 {
+                dp[i, j] = i
+            }
+            else if word1[i - 1.0] == word2[j - 1.0] {
+                dp[i, j] = dp[i - 1.0, j - 1.0]
+            }
+            else {
+                dp[i, j] = 1.0 + min(dp[i, j - 1.0], min(dp[i - 1.0, j], dp[i - 1.0, j - 1.0]))
+            }
+        }
+    }
+    return dp[m, n]
+}
+
+# ---------------------------------------------------------------- runs
+# knapsack.py __main__
+val = [3.0, 2.0, 4.0, 4.0]
+wt = [4.0, 3.0, 2.0, 3.0]
+table = knapsack(6.0, wt, val, 4.0)
+knapsack_value = table[4, 6]
+memo = zeros(5, 7) - 1.0
+for j to 7 {
+    memo[0, j] = 0.0
+}
+for i to 5 {
+    memo[i, 0] = 0.0
+}
+mf_knapsack_value = mf_knapsack(memo, 4.0, wt, val, 6.0)
+knapsack_items_6 = knapsack_items(6.0, wt, val)
+knapsack_items_10 = knapsack_items(10.0, [1.0, 3.0, 5.0, 2.0], [10.0, 20.0, 100.0, 22.0])
+knapsack_value_10 = knapsack(10.0, [1.0, 3.0, 5.0, 2.0], [10.0, 20.0, 100.0, 22.0], 4.0)[4, 10]
+show knapsack_value
+show mf_knapsack_value
+show knapsack_items_6
+show knapsack_value_10
+show knapsack_items_10
+
+# longest_common_subsequence.py
+lcs = longest_common_subsequence(chars("AGGTAB"), chars("GXTXAYB"))
+lcs_len = len(lcs)
+show lcs_len
+text(lcs)
+lcs_programming = longest_common_subsequence(chars("programming"), chars("gaming"))
+text(lcs_programming)
+lcs_physics = longest_common_subsequence(chars("physics"), chars("smartphone"))
+text(lcs_physics)
+lcs_abcd = longest_common_subsequence(chars("ABCD"), chars("ACBD"))
+text(lcs_abcd)
+
+# edit_distance.py
+edit_top_down = min_dist_top_down(chars("intention"), chars("execution"))
+edit_bottom_up = min_dist_bottom_up(chars("intention"), chars("execution"))
+edit_kitten = min_dist_bottom_up(chars("kitten"), chars("sitting"))
+show edit_top_down
+show edit_bottom_up
+show edit_kitten
+
+test "knapsack doctests: 8 {3, 4} and 142 {2, 3, 4}" {
+    assert_near(knapsack_value, 8.0, 0.0)
+    assert_near(mf_knapsack_value, 8.0, 0.0)
+    assert_true(all(knapsack_items_6 == [3.0, 4.0]))
+    assert_near(knapsack_value_10, 142.0, 0.0)
+    assert_true(all(knapsack_items_10 == [2.0, 3.0, 4.0]))
+}
+
+test "lcs doctests" {
+    assert_true(all(lcs == chars("GTAB")))
+    assert_true(all(lcs_programming == chars("gaming")))
+    assert_true(all(lcs_physics == chars("ph")))
+    assert_true(all(longest_common_subsequence(chars("computer"), chars("food")) == chars("o")))
+    assert_true(all(longest_common_subsequence(zeros(0.0), chars("abc")) == zeros(0.0)))
+    assert_true(all(longest_common_subsequence(zeros(0.0), zeros(0.0)) == zeros(0.0)))
+    assert_true(all(longest_common_subsequence(chars("abc"), chars("def")) == zeros(0.0)))
+    assert_true(all(longest_common_subsequence(chars("abcdef"), chars("ace")) == chars("ace")))
+    assert_true(all(lcs_abcd == chars("ABD")))
+}
+
+test "edit distance doctests" {
+    assert_near(edit_top_down, 5.0, 0.0)
+    assert_near(edit_bottom_up, 5.0, 0.0)
+    assert_near(min_dist_top_down(chars("intention"), zeros(0.0)), 9.0, 0.0)
+    assert_near(min_dist_bottom_up(chars("intention"), zeros(0.0)), 9.0, 0.0)
+    assert_near(min_dist_top_down(zeros(0.0), zeros(0.0)), 0.0, 0.0)
+    assert_near(min_dist_bottom_up(zeros(0.0), zeros(0.0)), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2016-2022 TheAlgorithms and contributors (TheAlgorithms/Python)
+# SPDX-FileCopyrightText: 2026 The Viv authors

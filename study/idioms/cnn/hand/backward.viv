@@ -1,0 +1,136 @@
+###
+The cnn port's hand-written backward pass, kept verbatim from `cnn.viv`
+(`col2im`, `conv2d_bwd`, `dense_bwd` and `step`, which runs the forward and
+backward passes together) so that `cnn_ad.viv` can check its generated
+gradient against it.
+
+Used with `import hand.backward`.
+###
+
+#| The adjoint of `im2col`: every window's gradient added back into the pixels
+#| it was copied from. A pixel that sits in several windows collects from all.
+#| `s` is the shape of the image batch the windows came from.
+def col2im(dcols: Arr, s: Arr) {
+    B, C, H, W = s
+    Ho = H - 2
+    Wo = W - 2
+    dX = zeros(B, C, H, W)
+    for b to B {
+        for i to Ho {
+            for j to Wo {
+                r = (b * Ho + i) * Wo + j
+                for c to C {
+                    for u to 3 {
+                        for v to 3 {
+                            dX[b, c, i + u, j + v] += dcols[r, c * 9 + u * 3 + v]
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return dX
+}
+
+#| An output gradient `dY` (`B` by `O` by `Ho` by `Wo`) in the matrix form
+#| `conv2d_fwd` computes in: one row per output pixel, one column per channel.
+def pixel_rows(dY: Arr) {
+    B, O, Ho, Wo = shape(dY)
+    dZ = zeros(B * Ho * Wo, O)
+    for b to B {
+        for o to O {
+            for i to Ho {
+                for j to Wo {
+                    dZ[(b * Ho + i) * Wo + j, o] = dY[b, o, i, j]
+                }
+            }
+        }
+    }
+    return dZ
+}
+
+#| The sum of each column of `A`, as a 1-row matrix: a bias's gradient.
+def col_sums(A: Arr) {
+    R, C = shape(A)
+    s = zeros(1, C)
+    for c to C {
+        s[0, c] = sum(A[:, c])
+    }
+    return s
+}
+
+#| Its adjoint. With `dZ` the output gradient back in matrix form, the input's
+#| gradient is `col2im(dZ K)`, `dK = dZ^T cols`, and `dbias` is the column sums
+#| of `dZ`. Returns `dX, dK, dbias`.
+def conv2d_bwd(X: Arr, K: Arr, dY: Arr) {
+    dZ = pixel_rows(dY)
+    return col2im(dZ @ K, shape(X)), transpose(dZ) @ im2col(X), col_sums(dZ)
+}
+
+#| Its adjoint: `dX = dY W`, `dW = dY^T X` and `dbias` the column sums of `dY`.
+def dense_bwd(X: Arr, W: Arr, dY: Arr) {
+    return dY @ W, transpose(dY) @ X, col_sums(dY)
+}
+
+#| One forward and backward pass over the batch `X` with labels `y`. The
+#| gradient is added into `grad` and the mean loss is returned. With `train`
+#| false there is no dropout and no backward pass, and `logits` gets the scores.
+def step(theta: Arr, grad: Arr, X: Arr, y: Arr, n, train: Bool, logits: Arr) {
+    K1 = param_get(theta, model, CONV1)
+    b1 = param_get(theta, model, CONV1_BIAS)
+    K2 = param_get(theta, model, CONV2)
+    b2 = param_get(theta, model, CONV2_BIAS)
+    W1 = param_get(theta, model, FC1)
+    c1 = param_get(theta, model, FC1_BIAS)
+    W2 = param_get(theta, model, FC2)
+    c2 = param_get(theta, model, FC2_BIAS)
+
+    A1 = max(conv2d_fwd(X, K1, b1), 0.0)
+    A2 = max(conv2d_fwd(A1, K2, b2), 0.0)
+    arg = zeros(n, C2, 2, 2)
+    P = maxpool_fwd(A2, arg)
+    F = take(P, flat_index2(n, FLAT))
+    M1 = zeros(n, FLAT) + 1.0
+    M2 = zeros(n, HIDDEN) + 1.0
+    if train {
+        M1 = dropout_mask(n, FLAT, P1)
+        M2 = dropout_mask(n, HIDDEN, P2)
+    }
+    D1 = F * M1
+    H = max(dense_fwd(D1, W1, c1), 0.0)
+    D2 = H * M2
+    L = dense_fwd(D2, W2, c2)
+    for r to n {
+        for k to CLASSES {
+            logits[r, k] = L[r, k]
+        }
+    }
+    loss = cross_entropy(L, y)
+    if not train {
+        return loss
+    }
+
+    dL = cross_entropy_bwd(L, y)
+    dD2, dW2, dc2 = dense_bwd(D2, W2, dL)
+    # ReLU's adjoint, any rank: the gradient passes where the output is positive
+    dH = dD2 * M2 * (H > 0.0)
+    dD1, dW1, dc1 = dense_bwd(D1, W1, dH)
+    dP = take(dD1 * M1, flat_index4(n, C2, 2, 2))
+    dA2 = zeros(n, C2, 4, 4)
+    put(dA2, arg, dP)
+    dA1, dK2, db2 = conv2d_bwd(A1, K2, dA2 * (A2 > 0.0))
+    dX, dK1, db1 = conv2d_bwd(X, K1, dA1 * (A1 > 0.0))
+
+    param_add(grad, model, CONV1, dK1)
+    param_add(grad, model, CONV1_BIAS, db1)
+    param_add(grad, model, CONV2, dK2)
+    param_add(grad, model, CONV2_BIAS, db2)
+    param_add(grad, model, FC1, dW1)
+    param_add(grad, model, FC1_BIAS, dc1)
+    param_add(grad, model, FC2, dW2)
+    param_add(grad, model, FC2_BIAS, dc2)
+    return loss
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,36 @@
+# One Hartree-Fock run to read as a story: water in 6-31G, from the
+# molecule to the energy, with the SCF's steps and watches recorded.
+#
+#     viv story scf/story_water.viv
+#
+# tells the run in the words of lib/hf/*.intent, one line per SCF iteration
+# with the energy, its change, the commutator norm and the DIIS history size
+# (the watches in lib/hf/scf_loop.debug). It starts from the core-Hamiltonian
+# guess. The default guess (gs_avg) runs an SCF of its own on the
+# spin-averaged density, which for closed-shell water is already the
+# answer, so the main loop would have almost nothing to show. The program
+# itself prints only the energy and the iteration count, and the tests hold
+# both.
+import basis.pople631g
+from hf.mole import molecule
+from hf.scf import scf_with
+from hf.opts import scf_defaults, ScfOptions
+from hf.guess import GS_CORE
+
+stw_mol = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")
+stw_r = scf_with(stw_mol, ScfOptions { guess: GS_CORE, ..scf_defaults() })
+print(stw_r.energy)
+print(stw_r.iterations)
+
+test "water 6-31G gives PySCF's RHF energy, -75.98394849810573" {
+    assert_near(stw_r.converged, 1.0, 0.0)
+    assert_lt(abs(stw_r.energy - (-75.98394849810573)), 1.0e-9)
+}
+
+test "from the core guess, DIIS converges water 6-31G in 6 to 19 iterations" {
+    assert_gt(stw_r.iterations, 5)
+    assert_lt(stw_r.iterations, 20)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

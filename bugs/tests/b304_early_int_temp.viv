@@ -1,0 +1,22 @@
+# B308 (bugs/ledger.jsonl): `m: Int = int(g(x)) - (k if c else k)` was
+# refused ("`m` is an Int but is assigned a number"). The operand left of the
+# if-expression is computed first into a hidden variable, to keep Python's
+# order, and that variable was a number. It is now an Int when what it holds
+# is one, as `n = int(...)` is.
+def g(a: Num) -> Num {
+    return a
+}
+
+x = 2.5
+k: Int = 3
+m: Int = int(g(x)) - (k if x > 1.0 else k)
+n: Int = int(g(-x)) * (k if x < 1.0 else 2)
+print(m, n)
+
+test "an Int hoisted before an if-expression" {
+    assert_true(m == -1)
+    assert_true(n == -4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

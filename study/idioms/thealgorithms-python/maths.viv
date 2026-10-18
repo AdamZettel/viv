@@ -1,0 +1,168 @@
+###
+Number theory, ported from TheAlgorithms/Python: maths/prime_sieve_eratosthenes.py,
+maths/greatest_common_divisor.py, maths/binary_exponentiation.py.
+###
+import seq
+
+#| prime_sieve_eratosthenes.py: cross off the multiples of each prime from p*p up,
+#| then list what is left.
+def prime_sieve_eratosthenes(num) -> Arr {
+    primes = zeros(num + 1.0) + 1.0
+    p = 2.0
+    while p * p <= num {
+        if primes[p] == 1.0 {
+            for i from p * p to num + 1.0 by p {
+                primes[i] = 0.0
+            }
+        }
+        p += 1.0
+    }
+    out = []
+    for q to num - 1.0 {
+        if primes[q + 2.0] == 1.0 {
+            out = append(out, q + 2.0)
+        }
+    }
+    return out
+}
+
+#| greatest_common_divisor.py: gcd(a, b) = |b| if a == 0 else gcd(b % a, a).
+#| `%` takes the sign of the divisor, as Python's does, which the doctests with negatives rely on.
+def greatest_common_divisor(a, b) {
+    if a == 0.0 {
+        return abs(b)
+    }
+    return greatest_common_divisor(b % a, a)
+}
+
+def gcd_by_iterative(x0, y0) {
+    x = x0
+    y = y0
+    while y != 0.0 {
+        r = x % y
+        x = y
+        y = r
+    }
+    return abs(x)
+}
+
+#| binary_exponentiation.py, the four variants.
+def binary_exp_recursive(base, exponent) {
+    if exponent == 0.0 {
+        return 1.0
+    }
+    if exponent % 2.0 == 1.0 {
+        return binary_exp_recursive(base, exponent - 1.0) * base
+    }
+    b = binary_exp_recursive(base, exponent // 2.0)
+    return b * b
+}
+
+def binary_exp_iterative(base0, exponent0) {
+    base = base0
+    exponent = exponent0
+    res = 1.0
+    while exponent > 0.0 {
+        if exponent % 2.0 == 1.0 {
+            res *= base
+        }
+        base *= base
+        exponent = exponent // 2.0
+    }
+    return res
+}
+
+def binary_exp_mod_recursive(base, exponent, modulus) {
+    if exponent == 0.0 {
+        return 1.0
+    }
+    if exponent % 2.0 == 1.0 {
+        return binary_exp_mod_recursive(base, exponent - 1.0, modulus) * base % modulus
+    }
+    r = binary_exp_mod_recursive(base, exponent // 2.0, modulus)
+    return r * r % modulus
+}
+
+#| As in the original, `base` is squared without being reduced: exact in Python's
+#| integers, but in a double it overflows after about ten squarings of a large base.
+def binary_exp_mod_iterative(base0, exponent0, modulus) {
+    base = base0
+    exponent = exponent0
+    res = 1.0
+    while exponent > 0.0 {
+        if exponent % 2.0 == 1.0 {
+            res = res % modulus * (base % modulus) % modulus
+        }
+        base *= base
+        exponent = exponent // 2.0
+    }
+    return res
+}
+
+primes_10 = prime_sieve_eratosthenes(10.0)
+primes_100 = prime_sieve_eratosthenes(100.0)
+primes_1 = prime_sieve_eratosthenes(1.0)
+show primes_10
+show primes_100
+show primes_1
+
+gcd_pairs = [[24.0, 40.0], [1.0, 1.0], [1.0, 800.0], [11.0, 37.0], [3.0, 5.0], [16.0, 4.0], [-3.0, 9.0], [9.0, -3.0], [3.0, -9.0], [-3.0, -9.0], [0.0, 0.0], [1.0, -800.0]]
+gcd_recursive = zeros(12)
+gcd_iterative = zeros(12)
+for k to 12 {
+    gcd_recursive[k] = greatest_common_divisor(gcd_pairs[k, 0], gcd_pairs[k, 1])
+    gcd_iterative[k] = gcd_by_iterative(gcd_pairs[k, 0], gcd_pairs[k, 1])
+}
+show gcd_recursive
+show gcd_iterative
+
+exp_cases = [[3.0, 5.0], [11.0, 13.0], [-1.0, 3.0], [0.0, 5.0], [3.0, 1.0], [3.0, 0.0], [1.5, 4.0]]
+exp_recursive = zeros(7)
+exp_iterative = zeros(7)
+for k to 7 {
+    exp_recursive[k] = binary_exp_recursive(exp_cases[k, 0], exp_cases[k, 1])
+    exp_iterative[k] = binary_exp_iterative(exp_cases[k, 0], exp_cases[k, 1])
+}
+show exp_recursive
+show exp_iterative
+mod_cases = [[3.0, 4.0, 5.0], [11.0, 13.0, 7.0], [1.5, 4.0, 3.0], [7.0, 13.0, 10.0]]
+exp_mod_recursive = zeros(4)
+exp_mod_iterative = zeros(4)
+for k to 4 {
+    exp_mod_recursive[k] = binary_exp_mod_recursive(mod_cases[k, 0], mod_cases[k, 1], mod_cases[k, 2])
+    exp_mod_iterative[k] = binary_exp_mod_iterative(mod_cases[k, 0], mod_cases[k, 1], mod_cases[k, 2])
+}
+show exp_mod_recursive
+show exp_mod_iterative
+
+# the __main__ benchmark inputs: a = 1269380576, b = 374, c = 34
+bench_mod_recursive = binary_exp_mod_recursive(1269380576.0, 374.0, 34.0)
+bench_mod_iterative = binary_exp_mod_iterative(1269380576.0, 374.0, 34.0)
+bench_iterative = binary_exp_iterative(1269380576.0, 374.0)
+show bench_mod_recursive
+show bench_mod_iterative
+show bench_iterative
+
+test "sieve doctests" {
+    assert_true(all(primes_10 == [2.0, 3.0, 5.0, 7.0]))
+    assert_true(all(prime_sieve_eratosthenes(20.0) == [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0]))
+    assert_true(all(prime_sieve_eratosthenes(2.0) == [2.0]))
+    assert_near(len(primes_1), 0.0, 0.0)
+    assert_near(len(primes_100), 25.0, 0.0)
+}
+
+test "gcd doctests" {
+    assert_true(all(gcd_recursive == [8.0, 1.0, 1.0, 1.0, 1.0, 4.0, 3.0, 3.0, 3.0, 3.0, 0.0, 1.0]))
+    assert_true(all(gcd_iterative == gcd_recursive))
+}
+
+test "binary exponentiation doctests" {
+    assert_true(all(exp_recursive == [243.0, 34522712143931.0, -1.0, 0.0, 3.0, 1.0, 5.0625]))
+    assert_true(all(exp_iterative == exp_recursive))
+    assert_true(all(exp_mod_recursive[:3] == [1.0, 4.0, 2.0625]))
+    assert_true(all(exp_mod_iterative == exp_mod_recursive))
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2016-2022 TheAlgorithms and contributors (TheAlgorithms/Python)
+# SPDX-FileCopyrightText: 2026 The Viv authors

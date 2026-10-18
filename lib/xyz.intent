@@ -1,0 +1,34 @@
+module lib/xyz
+  Reads a molecule's atoms from text: the XYZ file format, or the atoms alone
+  as PySCF's `atom=` string writes them. lib/hf/mole calls it to turn
+  `molecule("O 0 0 0; H ...", "6-31g")` into atomic numbers and positions.
+
+atomic_number  @0d311229
+  why   The basis tables and the nuclear charges are indexed by atomic number,
+        and a person writes symbols. Accepting either case matches what PySCF
+        accepts, so its atom strings can be pasted in.
+  sym   an element symbol as written in the text: `O`, `o`, `He`
+  s     the symbol in canonical case: first letter upper, the rest lower
+
+parse_xyz  @3b57b6e3
+  why   Both forms are read by one def so that the header check (the atom
+        count) is the only difference between them, and a mistyped line
+        stops the run with its line number instead of producing a wrong
+        molecule.
+  text     the atoms: an XYZ file (a count line, a comment line, then atoms)
+           or atom lines alone, separated by newlines or semicolons
+  lines    the text split into lines
+  first    the index of the first line that holds atoms: past the two header
+           lines when there is a header, else the first line
+  declared the atom count the header states, or `-1` when there is no header
+  symbols  each atom's symbol, as written
+  z        each atom's atomic number
+  xyz      each atom's position, one row of three coordinates per atom, in
+           the text's unit
+  i        the line being read
+  atom     one atom's text: a line, or one piece of a line between semicolons
+  f        that text split into words: the symbol and three coordinates
+
+  = declared#2  a first line that is a whole number starts an XYZ header: it is the atom count, and the line after it is a comment that is skipped
+  = f        an empty piece (a blank line, or a trailing semicolon) is skipped
+  = symbols#2  each atom adds its symbol, atomic number and position

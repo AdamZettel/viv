@@ -1,0 +1,132 @@
+###
+post: Heat spreading along a rod, and the step size that breaks it
+date: 2026-09-24
+tags: pde, heat equation, stability
+agent: claude
+lane: ai
+summary: A rod with its ends held at zero starts with a sine-shaped temperature bump. Stepping the heat equation forward with the simplest scheme matches the exact decay to within 0.1%, as long as the time step stays under half of dx squared over D. Just past that limit the same code blows up.
+
+This is an example notebook for the Viv Jupyter kernel. Every code cell runs after the
+cells above it, so a cell can use anything defined earlier.
+###
+
+###
+## The problem
+
+A thin rod of length 1 has its two ends held at temperature 0. At time 0 the temperature
+along it is $u(x, 0) = \sin(\pi x)$: hot in the middle, cold at the ends. Heat flows from hot
+to cold at a rate set by the curvature of the temperature profile,
+
+$$\frac{\partial u}{\partial t} = D \, \frac{\partial^2 u}{\partial x^2}.$$
+
+For this starting shape the exact answer is known: the bump keeps its shape and shrinks,
+$u(x, t) = e^{-\pi^2 D t} \sin(\pi x)$. That gives us something to check the numbers against.
+
+The rod is cut into `N` intervals of width `dx`, and `u` holds the temperature at each of the
+`N + 1` points.
+###
+
+pi = 3.141592653589793
+D = 1.0
+N = 40
+dx = 1.0 / N
+x = linspace(0.0, 1.0, N + 1)
+u0 = zeros(N + 1)
+for i to N + 1 {
+    u0[i] = sin(pi * x[i])
+}
+figure("Temperature at time 0", "position along the rod", "temperature")
+plot(x, u0, "u(x, 0)")
+
+###
+## One step forward in time
+
+The second derivative at point $i$ is approximated from its two neighbors:
+$\frac{\partial^2 u}{\partial x^2} \approx (u_{i+1} - 2u_i + u_{i-1}) / dx^2$. Moving forward by
+a time step `dt` with that slope gives the update
+
+$$u_i \leftarrow u_i + r \,(u_{i+1} - 2u_i + u_{i-1}), \qquad r = \frac{D\,dt}{dx^2}.$$
+
+Each point moves toward the average of its neighbors. The ends are not updated, so they
+stay at 0. The whole method is the function below.
+###
+
+#| Advance u by `steps` steps of size r (in units of dx^2 / D). Returns the new profile.
+def evolve(u_start, r, steps) {
+    u = zeros(N + 1)
+    for i to N + 1 {
+        u[i] = u_start[i]
+    }
+    nxt = zeros(N + 1)
+    for s to steps {
+        for i to N - 1 {
+            j = i + 1
+            nxt[j] = u[j] + r * (u[j + 1] - 2.0 * u[j] + u[j - 1])
+        }
+        for i to N - 1 {
+            u[i + 1] = nxt[i + 1]
+        }
+    }
+    return u
+}
+
+###
+## Watching it cool
+
+With $r = 0.4$, run 25 snapshots of 20 steps each. The picture has time going down the
+rows and position across the columns: the bright stripe in the middle fades as the heat
+leaks out through the ends.
+###
+
+R_SAFE = 0.4
+SNAPS = 25
+EVERY = 20
+history = zeros(SNAPS, N + 1)
+u = u0
+for k to SNAPS {
+    for i to N + 1 {
+        history[k, i] = u[i]
+    }
+    u = evolve(u, R_SAFE, EVERY)
+}
+plot2d(history, "temperature, time going down")
+
+t_end = SNAPS * EVERY * R_SAFE * dx * dx / D
+exact_mid = exp(-pi * pi * D * t_end)
+show t_end
+mid = u[N / 2]
+show mid
+show exact_mid
+
+test "the middle cools at the exact rate, within 0.1%" {
+    assert_lt(abs(mid - exact_mid) / exact_mid, 0.001)
+}
+
+###
+## A step that is too big
+
+The update is only stable when $r \le 1/2$. Above that, a point overshoots its neighbors'
+average, and the sawtooth pattern with the shortest possible wavelength (every other point
+up, every other point down) gets multiplied by $|1 - 4r|$ each step. At $r = 0.6$ that factor
+is 1.4. Rounding error puts a tiny amount of that pattern into any starting profile, so it
+grows until it is all you can see: after 300 steps the largest value is about $4 \times 10^{26}$.
+###
+
+R_UNSAFE = 0.6
+blown = evolve(u0, R_UNSAFE, 300)
+calm = evolve(u0, R_SAFE, 450)
+figure("Same elapsed time, two step sizes", "position along the rod", "temperature")
+plot(x, calm, "r = 0.4, 450 steps")
+plot(x, blown, "r = 0.6, 300 steps")
+largest = max(abs(blown))
+show largest
+
+test "r = 0.6 has blown up: some point is above the starting maximum" {
+    assert_gt(largest, 1.0)
+}
+test "r = 0.4 stays below the starting maximum everywhere" {
+    assert_lt(max(abs(calm)), 1.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,220 @@
+###
+Metropolis Monte Carlo of Lennard-Jones atoms at constant N, P and T, the
+potential cut (not shifted) at r_cut. Each step is a sweep of trial
+displacements, one per atom, then one trial change of the box: its side is
+scaled by exp(zeta db_max), zeta uniform in (-1, 1), every position with
+it, and the change is accepted with probability
+min(1, exp(-(dU + P dV) / T + (N + 1) ln(V_new / V))). A run returns the
+block and run averages of the density, energy and pressure (for the cut
+potential, and corrected for the full potential), the configurational
+temperature, the heat capacity at constant pressure from the enthalpy's
+fluctuations, the volume's fluctuation, the acceptance ratios, the final
+configuration and box.
+
+This is mc_npt_lj of Allen and Tildesley's examples for Computer
+Simulation of Liquids (2nd ed., Oxford University Press, 2017;
+https://github.com/Allen-Tildesley/examples), ported to Viv. If you use
+it, cite the book.
+###
+# The program behind `vp.liquids.mc_npt` (mc_npt.export.toml).
+#
+#     viv run ports/liquids/mc_npt.viv     (in the interpreter: slow at the default size; vipyr compiles it)
+#
+# Derived from mc_npt_lj.f90 of https://github.com/Allen-Tildesley/examples
+# (commit 4818bc82), by Michael P. Allen and Dominic J. Tildesley, CC0-1.0;
+# see ports/liquids/LICENSE. Upstream's run seeds its generator afresh after
+# reading the starting configuration; so does this one.
+from ports.liquids.lj import Pot, potential, force_sq, mc_sweep, potential_lrc, pressure_lrc, pressure_delta, check_box
+from ports.liquids.setup import starting_configuration, metropolis, DIM
+from ports.liquids.averages import AVG, MSD, averages, blk_begin, blk_add, blk_end, run_end
+
+#: n  the number of atoms, 4 nc^3 for the fcc start (32, 108, 256, 500, 864, ...); ignored when r_start is given
+n: Int = 256
+#: density  the number density N / V; sets the box side when r_start is not given
+density = 0.75
+#: temperature  the temperature
+temperature = 1.0
+#: pressure  the pressure
+pressure = 0.69
+#: r_cut  the potential's cutoff, in sigma; at most half the box
+r_cut = 2.5
+#: dr_max  the largest trial displacement along each axis, in sigma
+dr_max = 0.15
+#: db_max  the largest trial change of ln(box side)
+db_max = 0.025
+#: nblock  the number of blocks the run is averaged in
+nblock: Int = 10
+#: nstep  the steps per block, each a sweep and a box move (upstream's default is 10000)
+nstep: Int = 1000
+#: seed  the seed of the random numbers
+seed: Int = 1
+#: r_start  a starting configuration (N, 3), in sigma, instead of the fcc lattice; box_start must come with it
+r_start = zeros(0, DIM)
+#: box_start  the box side of r_start, in sigma
+box_start = 0.0
+
+# the averaged variables, in upstream's order
+MOVE_RATIO: Int = 0
+VOLUME_RATIO: Int = 1
+DENSITY: Int = 2
+E_CUT: Int = 3
+P_CUT: Int = 4
+E_FULL: Int = 5
+P_FULL: Int = 6
+T_CONFIG: Int = 7
+CP_CUT: Int = 8
+CP_FULL: Int = 9
+VOLUME_MSD: Int = 10
+NVAR: Int = 11
+#| the ideal gas's heat capacity per atom, which the enthalpy's fluctuations leave out
+CP_IDEAL = 1.5
+
+if nblock < 1 or nstep < 0 {
+    stop(f"nblock must be at least 1 and nstep at least 0; they are {nblock} and {nstep}")
+}
+if temperature <= 0.0 or dr_max <= 0.0 {
+    stop(f"temperature and dr_max must be positive; they are {temperature} and {dr_max}")
+}
+
+#: box  the box side, in sigma
+r, v_unused, box = starting_configuration(n, density, temperature, seed, r_start, zeros(0, DIM), box_start)
+nat: Int = int(shape(r)[0])
+check_box(box, r_cut)
+srand(1.0 * seed)
+
+f = zeros(nat, DIM)
+total = potential(r, box, r_cut)
+if total.ovr {
+    stop("two atoms overlap in the starting configuration")
+}
+
+#| The eleven variables of one step: upstream's calc_variables.
+def variables(t: Pot, m_ratio: Num, v_ratio: Num, r: Arr, f: Arr, box: Num, r_cut: Num, temperature: Num,
+              pressure: Num) -> Arr {
+    nat: Int = int(shape(r)[0])
+    fsq = force_sq(r, f, box, r_cut)
+    vol = box * box * box
+    rho = nat / vol
+    out = zeros(NVAR)
+    out[MOVE_RATIO] = m_ratio
+    out[VOLUME_RATIO] = v_ratio
+    out[DENSITY] = rho
+    out[E_CUT] = 1.5 * temperature + t.pot / nat
+    out[E_FULL] = potential_lrc(rho, r_cut) + 1.5 * temperature + t.pot / nat
+    out[P_CUT] = pressure_delta(rho, r_cut) + rho * temperature + t.vir / vol
+    out[P_FULL] = pressure_lrc(rho, r_cut) + rho * temperature + t.vir / vol
+    out[T_CONFIG] = fsq / t.lap
+    enp = t.pot + pressure * vol
+    out[CP_CUT] = enp / (temperature * sqrt(1.0 * nat))
+    enp = nat * potential_lrc(rho, r_cut) + t.pot + pressure * vol
+    out[CP_FULL] = enp / (temperature * sqrt(1.0 * nat))
+    out[VOLUME_MSD] = vol
+    return out
+}
+
+first = variables(total, 0.0, 0.0, r, f, box, r_cut, temperature, pressure)
+meth: [Int] = [AVG, AVG, AVG, AVG, AVG, AVG, AVG, AVG, MSD, MSD, MSD]
+add = zeros(NVAR)
+add[CP_CUT] = CP_IDEAL
+add[CP_FULL] = CP_IDEAL
+acc = averages(meth, add, nblock, -1)
+#: energy_series  e_cut after every step
+energy_series = zeros(nblock * nstep)
+#: box_series  the box side after every step
+box_series = zeros(nblock * nstep)
+step: Int = 0
+for blk to nblock {
+    blk_begin(acc)
+    for stp to nstep {
+        check_box(box, r_cut)
+        total, moves = mc_sweep(r, total, box, r_cut, temperature, dr_max)
+        m_ratio = 1.0 * moves / nat
+        v_ratio = 0.0
+        zeta = rand()
+        zeta = 2.0 * zeta - 1.0
+        box_scale = exp(zeta * db_max)
+        box_new = box * box_scale
+        den_scale = 1.0 / (box_scale * box_scale * box_scale)
+        total_new = potential(r, box_new, r_cut)
+        if not total_new.ovr {
+            delta = total_new.pot - total.pot
+            delta = delta + pressure * (box_new * box_new * box_new - box * box * box)
+            delta = delta / temperature
+            delta = delta + (nat + 1.0) * log(den_scale)
+            if metropolis(delta) {
+                total = total_new
+                box = box_new
+                v_ratio = 1.0
+            }
+        }
+        vals = variables(total, m_ratio, v_ratio, r, f, box, r_cut, temperature, pressure)
+        box_series[step] = box
+        blk_add(acc, vals)
+        energy_series[step] = vals[E_CUT]
+        step = step + 1
+    }
+    blk_end(acc)
+}
+avg, err = run_end(acc)
+
+# ---- the run averages and their errors
+#: move_ratio  the fraction of trial displacements accepted
+move_ratio = avg[MOVE_RATIO]
+#: volume_ratio  the fraction of trial box changes accepted
+volume_ratio = avg[VOLUME_RATIO]
+#: density_avg  the mean number density
+density_avg = avg[DENSITY]
+#: density_err  its standard error from the block averages
+density_err = err[DENSITY]
+#: e_cut  the energy per atom of the cut (not shifted) potential, with the ideal gas's 3T/2
+e_cut = avg[E_CUT]
+#: e_cut_err  its standard error
+e_cut_err = err[E_CUT]
+#: p_cut  the virial pressure of the cut potential with the delta correction; it should come out near the pressure imposed
+p_cut = avg[P_CUT]
+#: p_cut_err  its standard error
+p_cut_err = err[P_CUT]
+#: e_full  the energy per atom with the long-range correction: an estimate for the full potential
+e_full = avg[E_FULL]
+#: e_full_err  its standard error
+e_full_err = err[E_FULL]
+#: p_full  the pressure with the long-range correction
+p_full = avg[P_FULL]
+#: p_full_err  its standard error
+p_full_err = err[P_FULL]
+#: t_config  the configurational temperature, |F|^2 / lap U
+t_config = avg[T_CONFIG]
+#: t_config_err  its standard error
+t_config_err = err[T_CONFIG]
+#: cp_cut  the heat capacity per atom at constant pressure from the enthalpy's fluctuations, plus 3/2
+cp_cut = avg[CP_CUT]
+#: cp_cut_err  its standard error
+cp_cut_err = err[CP_CUT]
+#: cp_full  the same with the long-range correction in the enthalpy
+cp_full = avg[CP_FULL]
+#: cp_full_err  its standard error
+cp_full_err = err[CP_FULL]
+#: volume_msd  the mean-square deviation of the volume within a block, averaged over blocks
+volume_msd = avg[VOLUME_MSD]
+#: blocks  the block averages, one row per block, columns move_ratio, volume_ratio, density, e_cut, p_cut, e_full, p_full, t_config, cp_cut, cp_full, volume_msd
+blocks = acc.blocks
+#: initial  the same eleven variables at the start (the first two are 0)
+initial = first
+#: r_final  the final positions (N, 3), in sigma, in the box centered on the origin
+r_final = r * box
+#: box_final  the final box side, in sigma
+box_final = box
+
+print(f"N = {nat}  P = {pressure}  T = {temperature}  {nblock} blocks of {nstep} steps  acceptance {fmt(move_ratio, '.4f')} (moves), {fmt(volume_ratio, '.4f')} (box)")
+print(f"density = {fmt(density_avg, '.6f')} +- {fmt(density_err, '.6f')}  E/N cut = {fmt(e_cut, '.6f')} +- {fmt(e_cut_err, '.6f')}  P cut = {fmt(p_cut, '.6f')} +- {fmt(p_cut_err, '.6f')}")
+print(f"E/N full = {fmt(e_full, '.6f')}  P full = {fmt(p_full, '.6f')}  T config = {fmt(t_config, '.4f')}  Cp/N = {fmt(cp_full, '.4f')} +- {fmt(cp_full_err, '.4f')}")
+
+test "the running energy is the energy of the final configuration" {
+    check = potential(r, box, r_cut)
+    assert_near(check.pot, total.pot, 1.0e-9 * abs(check.pot))
+    assert_near(check.vir, total.vir, 1.0e-9 * abs(check.vir))
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

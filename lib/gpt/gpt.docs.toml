@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference prose of vp.gpt.train, vp.gpt.generate and vp.gpt.loss
+# (python -m vipyr.docs reads it into vipyr/spec.json and the /vipyr pages).
+# The parameters and results are listed in vipyr/_registry.py; the model is
+# lib/gpt/gpt.viv, its entry points lib/gpt/api.viv.
+
+[train]
+summary = "Train a small GPT on a text, character by character, and get the model back as named arrays."
+description = """
+`vp.gpt.train` draws a model from `seed` and trains it on the text for
+`steps` steps. The model is the one of `lib/gpt/gpt.viv`: nanoGPT's layout
+cut down to a size a CPU trains in seconds, with the modded-nanogpt
+speedrun's choices (RMSNorm without weights, ReLU-squared in the MLP, the
+output map starting at zero). Each token is one character; the vocabulary
+is the sorted set of the text's characters, kept on the model as
+`model.vocab`. Token ids work too: pass an integer array and give
+`GptConfig(vocab=...)` if some ids never appear.
+
+A step takes `batch` windows of `context` characters (window `b` of step
+`t` starts at `(t * batch + b) mod (len(text) - context)`), computes the
+mean cross-entropy of each next character and its gradient with respect to
+every matrix, and updates the model: Muon (momentum, then the nearest
+orthogonal matrix by Newton-Schulz) on the matrices inside the blocks, Adam
+on the two embeddings and the output map. The step size of both falls in a
+straight line from its start to a tenth of it. Nothing of this runs in
+Python: the whole loop is compiled Viv, and the gradient is the backward
+pass the compiler writes from `sequence_loss` (`value_and_grad` over the
+`Gpt` record).
+
+The model comes back as Python objects holding NumPy arrays, named as the
+Viv records are:
+
+```python
+m = r.model
+m.tok, m.pos, m.unembed            # (vocab, width), (context, width), (width, vocab)
+m.blocks[0].attn.heads[1].Wq       # (width, width / heads)
+m.blocks[0].attn.Wo                # (width, width)
+m.blocks[0].mlp.up, m.blocks[0].mlp.down
+for name, w in m.parameters(): ...
+```
+
+`vp.gpt.generate` and `vp.gpt.loss` read these arrays again on every call,
+so a matrix changed in Python is the one they use.
+"""
+notes = """
+Sizes (`vp.gpt.GptConfig`, the `GptConfig` record of `lib/gpt/gpt.viv`):
+`context` 8, `width` 16, `heads` 2, `layers` 2, `hidden` 64, `batch` 4 by
+default. A block is
+
+$$X \\leftarrow X + \\left[\\, \\mathrm{softmax}_{\\text{causal}}\\!\\left(\\frac{\\hat X W_q^h (\\hat X W_k^h)^T}{\\sqrt{d}}\\right) \\hat X W_v^h \\,\\right]_{h} W_o, \\qquad X \\leftarrow X + \\mathrm{relu}(\\hat X U)^2 D$$
+
+with $\\hat X$ the RMS-normalized stream, $[\\cdot]_h$ the heads side by
+side, and $d$ = width / heads. Muon
+updates a matrix $W$ of shape $r \\times c$ by
+$W \\leftarrow W - \\eta \\sqrt{\\max(1, r/c)}\\, \\mathrm{NS}_5(M)$, $M$ the
+momentum (0.95) of the gradient and $\\mathrm{NS}_5$ five Newton-Schulz
+steps with the speedrun's coefficients (3.4445, -4.7750, 2.0315); Adam uses
+betas 0.9 and 0.99. Both start at a step size of 0.05.
+"""
+references = [
+  { text = "Andrej Karpathy, nanoGPT (2022)", url = "https://github.com/karpathy/nanoGPT" },
+  { text = "Keller Jordan et al., modded-nanogpt: the NanoGPT speedrun (2024)", url = "https://github.com/KellerJordan/modded-nanogpt" },
+  { text = "Keller Jordan, Muon: an optimizer for hidden layers of neural networks (2024)", url = "https://kellerjordan.github.io/posts/muon/" },
+]
+see_also = ["gpt.generate", "gpt.loss"]
+
+[generate]
+summary = "Continue a prompt with a trained GPT, one sampled token at a time."
+description = """
+Each new token is drawn from the softmax of the last position's logits
+divided by `temperature`, with the model seeing at most its last `context`
+tokens. `temperature=1` samples the model as trained, lower values favor
+the likelier tokens, and `temperature=0` takes the most likely token every
+time. The draws use Viv's `rand()` seeded by `seed`, so the same seed gives
+the same text.
+"""
+see_also = ["gpt.train", "gpt.loss"]
+
+[attention]
+summary = "The attention weights of every head of a GPT for one prompt."
+description = """
+For each block and each head, the T by T matrix of softmax weights the
+attention takes its average with: row i says how much position i draws
+from positions 0 to i (the causal mask keeps every later position at
+zero). The weights are computed on the stream as it enters each block, by
+the same operations the forward pass runs, so they are the ones that
+produced the model's predictions.
+"""
+see_also = ["gpt.train", "gpt.generate"]
+
+[loss]
+summary = "The mean next-token cross-entropy of a GPT on a text."
+description = """
+The loss is the mean, over every window of `context` tokens of the text
+(the windows training draws its batches from) and every position in the
+window, of minus the log probability the model gives the token that comes
+next, in nats. A model that knows nothing scores log(vocab).
+"""
+see_also = ["gpt.train", "gpt.generate"]

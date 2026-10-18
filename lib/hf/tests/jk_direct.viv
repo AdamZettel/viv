@@ -1,0 +1,93 @@
+# The tests of lib/hf/jk_direct that compare the direct J/K member with the
+# in-core ones on PySCF's integrals (lib/hfref). They live here so that a
+# program that uses lib/hf/jk_direct does not load the references.
+from hf.jk_direct import int_basis_blob, INT_JK_DIRECT, int_jk_direct
+from hf.opts import opt_array, opt_new, scf_defaults, ScfOptions
+from hf.md_direct import mdjk_rand_dens
+from hf.integrals import int_jk
+from hf.sweep import sw_rep_new, SW_REP_NSTRAT, SW_REP_WORST
+from hf.cart2sph import c2s_basis
+from hf.jk import jk_build_methods, jk_of, jk_rebuild, jk_update
+import basis.pople631gs
+from hf.mole import molecule
+from hf.scf import scf_with
+from hf.guess import GS_CORE
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_eri8_cart, WATER631GS_CART_NAO_CART,
+    water631gs_cart_prims, water631gs_cart_shells,
+)
+from hfref.water_631gs_sph import water631gs_sph_eri8_sph, WATER631GS_SPH_NAO_SPH
+
+test "direct J/K agrees with the in-core members, Cartesian and spherical" {
+    int_at = water631gs_cart_atoms()
+    int_sh = water631gs_cart_shells()
+    int_pr = water631gs_cart_prims()
+    int_o = opt_new()
+    int_rep = sw_rep_new()
+    # Cartesian, two seeded densities
+    int_Gc = water631gs_cart_eri8_cart()
+    int_bc = int_basis_blob(int_at, int_sh, int_pr, int_Gc, 0)
+    int_D = mdjk_rand_dens(2, WATER631GS_CART_NAO_CART, 31)
+    int_JK = int_jk(int_Gc, int_bc, int_D, int_o, 0, int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 5, 0.0)
+    assert_lt(int_rep[SW_REP_WORST], 1.0e-13)
+    # spherical: the blob carries M
+    int_M = c2s_basis(int_sh)
+    int_Gs = water631gs_sph_eri8_sph()
+    int_bs = int_basis_blob(int_at, int_sh, int_pr, int_M, 1)
+    int_Ds = mdjk_rand_dens(1, WATER631GS_SPH_NAO_SPH, 7)
+    int_JKs = int_jk(int_Gs, int_bs, int_Ds, int_o, 0, int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 5, 0.0)
+    assert_lt(int_rep[SW_REP_WORST], 1.0e-13)
+}
+
+test "jk_of runs the direct member at INT_JK_DIRECT, from the basis blob" {
+    int_at = water631gs_cart_atoms()
+    int_sh = water631gs_cart_shells()
+    int_pr = water631gs_cart_prims()
+    int_b = int_basis_blob(int_at, int_sh, int_pr, zeros(1, 1), 0)
+    int_D = mdjk_rand_dens(1, WATER631GS_CART_NAO_CART, 5)
+    int_o = opt_array(ScfOptions { jk: INT_JK_DIRECT, ..scf_defaults() }, 0, 0, 0.0)
+    int_a = jk_of(int_b, int_D, int_o)
+    int_c = int_jk_direct(int_b, int_b, int_b, int_D, int_o)
+    assert_near(max(abs(int_a - int_c)), 0.0, 0.0)
+}
+
+test "the incremental Fock build lands on the full build's energy, direct and spherical" {
+    # water 6-31G*, five d functions: the direct run builds J and K from the
+    # change of density (fock_rebuild 8, the default), from the whole
+    # density every iteration (fock_rebuild 0), and in core
+    int_m = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g*")
+    int_ri = scf_with(int_m, ScfOptions { guess: GS_CORE, ..scf_defaults() })
+    int_rd = scf_with(int_m, ScfOptions { guess: GS_CORE, jk: INT_JK_DIRECT, ..scf_defaults() })
+    int_rf = scf_with(int_m, ScfOptions { guess: GS_CORE, jk: INT_JK_DIRECT, fock_rebuild: 0, ..scf_defaults() })
+    assert_near(int_rd.converged + int_rf.converged + int_ri.converged, 3.0, 0.0)
+    assert_lt(abs(int_rd.energy - int_ri.energy), 1.0e-11)
+    assert_lt(abs(int_rf.energy - int_ri.energy), 1.0e-11)
+    assert_lt(max(abs(int_rd.mo_energy - int_ri.mo_energy)), 1.0e-9)
+    # the incremental run ends with a build from the whole density
+    assert_lt(abs(int_rd.energy_check - int_rd.energy), 1.0e-11)
+}
+
+test "J and K from a change of density, added to the last ones, are the whole build's" {
+    int_at = water631gs_cart_atoms()
+    int_sh = water631gs_cart_shells()
+    int_pr = water631gs_cart_prims()
+    int_b = int_basis_blob(int_at, int_sh, int_pr, zeros(1, 1), 0)
+    int_n = WATER631GS_CART_NAO_CART
+    int_D0 = mdjk_rand_dens(1, int_n, 77)
+    # a small step from D0, as late SCF iterations take
+    int_D1 = int_D0 + 1.0e-5 * mdjk_rand_dens(1, int_n, 78)
+    int_o = opt_array(ScfOptions { jk: INT_JK_DIRECT, ..scf_defaults() }, 0, 0, 0.0)
+    int_J0 = jk_of(int_b, int_D0, int_o)
+    assert_near(len(jk_build_methods()), 2, 0.0)
+    # by name: an `apply` through jk_build_methods() here is typed as a
+    # number by the compiler's inference (FRICTION pyscf-018)
+    int_jkn = jk_update(int_b, int_D1, int_D0, int_J0, int_o)
+    int_jkw = jk_rebuild(int_b, int_D1, int_D0, int_J0, int_o)
+    assert_lt(max(abs(int_jkn - int_jkw)), 1.0e-12 * max(abs(int_jkw)))
+    assert_lt(1.0, max(abs(int_jkw)))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

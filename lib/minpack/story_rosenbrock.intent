@@ -1,0 +1,56 @@
+module lib/minpack/story_rosenbrock  documents every variable
+  Rosenbrock's function, the standard first test of a minimizer, written as two
+  residuals: $f_1(x) = 10\,(x_2 - x_1^2)$ and $f_2(x) = 1 - x_1$. The sum of
+  their squares is zero only at $x = (1, 1)$. Its level curves form a long,
+  narrow, curved valley along $x_2 = x_1^2$: the bottom of the valley is easy to
+  reach and hard to follow, because a straight step along the linear model
+  leaves the curve.
+
+<main>  @34da1dc8
+  what         Solve Rosenbrock's problem with lmder1 from MINPACK's standard start
+               $(-1.2, 1)$, print how it stopped and where, and draw the two
+               figures of its core path. The fit ends at $(1, 1)$ exactly, after
+               the same number of evaluations as the Fortran
+               [test "lmder1 reaches (1, 1) with info 4 after 21 evaluations of f and 16 of J, as the Fortran does"].
+  SR_NPROB     Rosenbrock's number in MINPACK's test set
+  SR_M         $m$  the number of residuals
+  SR_N         $n$  the number of parameters
+  sr_x0        $x_0$  the standard starting point, kept for the figures
+  sr_x         $x$  the starting point, which lmder1 overwrites with the answer
+  sr_counts    how many times lmder evaluated f and J
+  sr_hist      one row per trial step, in lmder's hist columns
+  sr_info      why lmder stopped (4: the gradient test; see lmder)
+  sr_trials    how many trial steps were taken: every evaluation of f after the
+               first is one
+  sr_accepted  how many trial steps were accepted, as the path figure counts them
+  sr_tried     how many values of $\lambda$ lmpar tried on the second trial
+
+  $$ \min_x \; f_1(x)^2 + f_2(x)^2 = 100\,(x_2 - x_1^2)^2 + (1 - x_1)^2 $$  [test "lmder1 reaches (1, 1) with info 4 after 21 evaluations of f and 16 of J, as the Fortran does"]
+
+path core  Levenberg-Marquardt on Rosenbrock's function
+  lmder                The problem, and the model lmder trusts near x
+    > lmder minimizes a sum of squares by replacing $f$ with its linear model at the current point, $f(x + p) \approx f(x) + J p$, and minimizing the model instead. The model is right near $x$ and wrong far from it, so the step is kept inside a region where the model is trusted. Everything below is that idea made precise.
+  lmder/jacobian       Each pass starts from a new linear model
+    > A pass is one Jacobian. Every trial step of the pass is computed from this one model, so a rejected trial costs one evaluation of $f$ and no new Jacobian.
+  lmder/scale          The scaling $D$: each variable measured by how much it moves $f$
+    > The trust region is a ball in the scaled variables $D p$. On this problem the first variable moves $f$ about two and a half times as much as the second, so the region is an ellipse in $x$, narrow along $x_1$.
+  lmder/first_radius   A generous first radius
+  lmder/lm_parameter   Trust region against Gauss-Newton
+    > The Gauss-Newton step minimizes the model with no limit on its length. The trust region adds the limit $\lVert D p \rVert \le \Delta$. When the Gauss-Newton step fits, it is the answer; when it does not, the limit acts like a penalty $\lambda \lVert D p \rVert^2$ added to the model's sum of squares, and lmpar finds the $\lambda$ that makes the step exactly as long as the region allows.
+  lmder/trial          The first trial is the Gauss-Newton step
+    > The radius was far larger than the step, so lmpar returned $\lambda = 0$: the first trial is the full Gauss-Newton step. On the first pass lmder also cuts the radius down to the step's own length, so what happens next is judged against the step lmpar proposed.
+  lmder/actual         Did the step work?
+    > The only way to know whether the linear model was right is to evaluate $f$ at the trial point. The Gauss-Newton step aims at the point where the linear model is zero: (1, -3.84), marked in the figure at stop ten [test "the rejected first trial drawn is the Fortran's: |D p| 71.66, and |f| 48.4 there"]. Rosenbrock's valley is curved, and that point is well below the valley floor $x_2 = x_1^2$.
+  lmder/predicted      What the model promised
+  lmder/quotient       The ratio $\rho$ that decides everything after
+  lmder/radius         Shrink or expand the region
+    > In the figure, the dashed line is the rejected first trial and each ellipse is the region an accepted step was taken in. The regions stay small where the valley bends and grow where it runs straight.
+    figure Rosenbrock: lmder's path and its trust regions
+  lmder/accept         Accept or reject the step
+  lmpar/gn_length      The second trial: the Gauss-Newton step no longer fits
+    > Nothing about the model changed: the same Jacobian, the same Gauss-Newton step. Only the radius shrank, and now the step is far too long for it. lmpar must find $\lambda > 0$. Set the pass selector to the second trial to see this call's values.
+  lmpar/lower          The secular equation, bracketed and solved loosely
+    > $\phi(\lambda) = \lVert D p(\lambda) \rVert - \Delta$ falls as $\lambda$ grows, from $\phi(0)$ (the Gauss-Newton step's excess length) through zero. lmpar brackets its root between a lower bound (one Newton step from $\lambda = 0$) and an upper bound, and stops as soon as $|\phi| \le \Delta / 10$: the radius is only an estimate, so a step within a tenth of it is as good as exact. In the figure, the lower bound already lands inside that band, so lmpar tries one value of $\lambda$ and returns it.
+    figure lmpar on the first pass: phi(lambda) = |D p| - delta
+  lmder/converged      When to stop
+    > After the second trial is accepted, lmder moves on to the next pass: a new Jacobian at the new point, and the same cycle. The run ends at $(1, 1)$, where the residuals are exactly zero and the gradient test stops it.

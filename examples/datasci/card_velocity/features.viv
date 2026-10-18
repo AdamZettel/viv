@@ -1,0 +1,118 @@
+# Card velocity features, as of each transaction.
+#
+# Input: one row per transaction, sorted by (card, ts); ts in int64 nanoseconds.
+# A feature at a row reads only rows of the same card with an EARLIER timestamp:
+# rows at the same instant, the row itself included, are not yet known.
+#
+#   n_prev_1h   transactions of the card with  ts - 1 hour <= ts_j < ts
+#   status      the card's state just before the transaction:
+#                 0 ok, 1 watch (3 or more declines in the last 24 hours),
+#                 2 locked (a chargeback; it clears after 7 days with no
+#                 decline and no chargeback)
+
+NS_PER_S: Int = 1000000000
+HOUR: Int = 3600 * NS_PER_S
+DAY: Int = 24 * HOUR
+CLEAN: Int = 7 * DAY
+WATCH_DECLINES: Int = 3
+
+OK: Int = 0
+WATCH: Int = 1
+LOCKED: Int = 2
+
+record Features {
+    n_prev_1h: [Int]
+    status: [Int]
+}
+
+def card_features(card: [Int], ts: [Int], declined: [Int], chargeback: [Int]) -> Features {
+    n = len(ts)
+    n_prev = int_zeros(n)
+    status = int_zeros(n)
+    start: Int = 0
+    while start < n {
+        #: one card: rows start .. stop-1
+        stop_at: Int = start + 1
+        while stop_at < n and card[stop_at] == card[start] {
+            if ts[stop_at] < ts[stop_at - 1] {
+                stop(f"card_features: rows must be sorted by (card, ts); row {stop_at} goes back in time")
+            }
+            stop_at += 1
+        }
+        if stop_at < n and card[stop_at] < card[start] {
+            stop(f"card_features: rows must be sorted by (card, ts); card falls at row {stop_at}")
+        }
+        left_1h: Int = start
+        left_24h: Int = start
+        declines_before_left: Int = 0
+        declines_seen: Int = 0
+        locked = false
+        last_bad: Int = 0
+        i: Int = start
+        while i < stop_at {
+            #: the rows at one instant see the same past
+            t = ts[i]
+            same: Int = i
+            while same < stop_at and ts[same] == t {
+                same += 1
+            }
+            while ts[left_1h] < t - HOUR {
+                left_1h += 1
+            }
+            while ts[left_24h] < t - DAY {
+                declines_before_left += declined[left_24h]
+                left_24h += 1
+            }
+            if locked and t - last_bad >= CLEAN {
+                locked = false
+            }
+            state: Int = OK
+            if locked {
+                state = LOCKED
+            }
+            else if declines_seen - declines_before_left >= WATCH_DECLINES {
+                state = WATCH
+            }
+            for k from i to same {
+                n_prev[k] = i - left_1h
+                status[k] = state
+            }
+            #: then the instant's own outcomes become the past
+            for k from i to same {
+                declines_seen += declined[k]
+                if chargeback[k] != 0 {
+                    locked = true
+                    last_bad = t
+                }
+                else if declined[k] != 0 and locked {
+                    last_bad = t
+                }
+            }
+            i = same
+        }
+        start = stop_at
+    }
+    return Features { n_prev_1h: n_prev, status: status }
+}
+
+test "velocity excludes the current row and same-instant rows" {
+    card: [Int] = [1, 1, 1, 1, 2]
+    ts: [Int] = [0, 10, 10, HOUR + 10, 5]
+    zero: [Int] = [0, 0, 0, 0, 0]
+    f = card_features(card, ts, zero, zero)
+    assert_true(f.n_prev_1h[0] == 0 and f.n_prev_1h[1] == 1 and f.n_prev_1h[2] == 1)
+    assert_true(f.n_prev_1h[3] == 2 and f.n_prev_1h[4] == 0)
+}
+
+test "ok, watch, locked, ok again" {
+    card: [Int] = [7, 7, 7, 7, 7, 7, 7]
+    ts: [Int] = [0, HOUR, 2 * HOUR, 3 * HOUR, 4 * HOUR, 5 * HOUR, 5 * HOUR + CLEAN]
+    declined: [Int] = [1, 1, 1, 0, 0, 0, 0]
+    chargeback: [Int] = [0, 0, 0, 0, 1, 0, 0]
+    f = card_features(card, ts, declined, chargeback)
+    assert_true(f.status[2] == OK and f.status[3] == WATCH and f.status[4] == WATCH)
+    assert_true(f.status[5] == LOCKED and f.status[6] == OK)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

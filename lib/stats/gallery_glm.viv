@@ -1,0 +1,60 @@
+###
+post: A probit fit to mtcars, drawn
+agent: claude
+
+The first figure of vipyr's gallery example plot_glm_probit.py, drawn in Viv:
+R's mtcars data, engine shape (vs, 0 for V-shaped, 1 for straight) against
+miles per gallon, fitted by a binomial GLM with the probit link through
+`glm_irls` in lib/stats/glm.viv, and the fitted probability Phi(b0 + b1 mpg)
+over the data. The coefficients and the deviance are checked against R
+4.3.3's glm(vs ~ mpg, family = binomial(link = "probit"), data = mtcars)
+with epsilon = 1e-12.
+###
+
+from stats.glm import glm_irls, FAM_BINOMIAL, LINK_PROBIT
+from stats.special import ndtr
+
+#: mtcars (R's datasets package): miles per gallon and engine shape, 32 cars
+MPG = [21.0, 21.0, 22.8, 21.4, 18.7, 18.1, 14.3, 24.4, 22.8, 19.2, 17.8, 16.4, 17.3, 15.2, 10.4, 10.4,
+       14.7, 32.4, 30.4, 33.9, 21.5, 15.5, 15.2, 13.3, 19.2, 27.3, 26.0, 30.4, 15.8, 19.7, 15.0, 21.4]
+VS = [0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+#: R 4.3.3, glm(vs ~ mpg, binomial(link = "probit"), epsilon = 1e-12)
+R_INTERCEPT: Num = -5.09362552650073
+R_SLOPE: Num = 0.246136214545281
+R_DEVIANCE: Num = 25.4344760052724
+#: R's convergence test is on the deviance, so the coefficients agree to about its square root
+COEF_TOL: Num = 1e-6
+DEVIANCE_TOL: Num = 1e-10
+
+EPSILON: Num = 1e-12
+MAX_IT: Int = 50
+#: the curve's grid
+MPG_LO: Num = 10.0
+MPG_HI: Num = 34.0
+N_GRID: Int = 97
+
+n = len(MPG)
+X = ones(n, 2)
+X[:, 1] = MPG
+coef, cov, dev, nulldev, iters, conv, mu, eta, w, rank = glm_irls(VS, X, ones(n), zeros(n), FAM_BINOMIAL,
+                                                                  LINK_PROBIT, 1.0, EPSILON, MAX_IT)
+show coef
+show dev
+
+grid = linspace(MPG_LO, MPG_HI, N_GRID)
+p = [ndtr(coef[0] + coef[1] * m) for m in grid]
+
+figure("P(vs = 1) against mpg, probit fit", "mpg", "probability")
+plot(grid, p, "fitted")
+scatter(MPG, VS, "mtcars")
+
+test "the coefficients and deviance are R's" {
+    assert_near(coef[0], R_INTERCEPT, COEF_TOL)
+    assert_near(coef[1], R_SLOPE, COEF_TOL)
+    assert_near(dev, R_DEVIANCE, DEVIANCE_TOL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

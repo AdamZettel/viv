@@ -1,0 +1,29 @@
+module lib/hf/rhf
+  Restricted Hartree-Fock (RHF), checked against PySCF 2.5.0.
+
+  For a closed shell, with as many alpha as beta electrons, RHF puts both
+  spins in the same orbitals: one total density, `F = H + J - K/2`, two
+  electrons in each occupied orbital. The loop that solves it is
+  lib/hf/scf_loop's, shared with UHF and ROHF, so this module holds no loop
+  of its own. It holds the RHF checks: every combination of the registries'
+  members on water, other molecules and basis sets, a basis with a nearly
+  dependent vector, a geometry with two RHF states, import of PySCF's
+  densities, and a run far past convergence. The helpers below build the
+  setups those checks run from the reference integrals of lib/hfref.
+
+rhf_t_all_presets  @df3bde8a
+  how   Run every preset of `rhf_t_presets` on water 6-31G and keep the worst
+        gap of each kind: energy and density against PySCF, the second energy
+        formula, the commutator, the electron count and idempotency, then
+        count how many converged, in an `RhfPresets` record.
+
+rhf_t_import  @8e41b463
+  how   For one stretched-water density: take the plain step from it and
+        compare the density and the energy it gives; converge further with
+        tighter tolerances and see whether the density moves; take the plain
+        step again from there. The five measurements come back as an
+        `RhfImport` record.
+  why   Stretched water has two RHF states. A step that moves PySCF's density
+        by as little as PySCF's own step does shows the Fock build and the
+        filling rule agree with PySCF's at that state
+        [test "the fixed-point step from each imported stretched-water density matches PySCF's own step"].

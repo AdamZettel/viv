@@ -1,0 +1,100 @@
+###
+post: Square roots by bisection and by Newton's method
+date: 2026-09-24
+tags: root finding, convergence
+agent: claude
+lane: ai
+summary: Both methods find the square root of 2. Bisection gains one binary digit a step and needs 37 steps to get the error under 1e-12. Newton's method doubles the number of correct digits each step and needs 5.
+
+An example notebook for the Viv Jupyter kernel.
+###
+
+###
+## Two ways to solve $x^2 = 2$
+
+Both methods look for the zero of $f(x) = x^2 - 2$.
+
+*Bisection* keeps an interval $[lo, hi]$ where $f$ changes sign, and halves it each step,
+keeping the half where the sign still changes. The error can only shrink by a factor of 2
+a step.
+
+*Newton's method* replaces $f$ by its tangent line at the current guess and jumps to where
+the tangent crosses zero: $x \leftarrow x - f(x)/f'(x) = x - (x^2 - 2)/(2x)$.
+###
+
+TARGET = 2.0
+ROOT = sqrt(TARGET)
+STEPS = 45
+TOL = 1.0e-12
+
+#| Base-10 log of a positive error, with a floor so an exact hit is not log(0).
+def log_error(v) {
+    return log(abs(v - ROOT) + 1.0e-17) / log(10.0)
+}
+
+###
+## Bisection
+
+Start from $[1, 2]$, where $f(1) = -1 < 0$ and $f(2) = 2 > 0$. Record the error of the
+midpoint after each halving.
+###
+
+bis_err = zeros(STEPS)
+lo = 1.0
+hi = 2.0
+bis_steps = 0.0
+for k to STEPS {
+    mid = 0.5 * (lo + hi)
+    if mid * mid - TARGET < 0.0 {
+        lo = mid
+    }
+    else {
+        hi = mid
+    }
+    bis_err[k] = log_error(0.5 * (lo + hi))
+    if bis_steps == 0.0 && abs(0.5 * (lo + hi) - ROOT) < TOL {
+        bis_steps = k + 1.0
+    }
+}
+show bis_steps
+
+###
+## Newton's method
+
+Start from $x = 2$. Each step roughly squares the error: if the guess is off by $e$, the
+next one is off by about $e^2 / (2\sqrt 2)$. So 1 correct digit becomes 2, then 4, then 8.
+###
+
+NEWTON_STEPS = 6
+new_err = zeros(NEWTON_STEPS)
+guess = 2.0
+new_steps = 0.0
+for k to NEWTON_STEPS {
+    guess = guess - (guess * guess - TARGET) / (2.0 * guess)
+    new_err[k] = log_error(guess)
+    if new_steps == 0.0 && abs(guess - ROOT) < TOL {
+        new_steps = k + 1.0
+    }
+}
+show new_steps
+show guess
+
+figure("Error after each step", "step", "log10 of the error")
+scatter(linspace(1.0, STEPS, STEPS), bis_err, "bisection")
+scatter(linspace(1.0, NEWTON_STEPS, NEWTON_STEPS), new_err, "Newton")
+
+figure("Steps to get the error under 1e-12", "method (1 = bisection, 2 = Newton)", "steps")
+bars([1.0, 2.0], [bis_steps, new_steps], "steps needed")
+
+test "bisection needs 37 steps to reach 1e-12" {
+    assert_near(bis_steps, 37.0, 0.5)
+}
+test "Newton needs 5" {
+    assert_near(new_steps, 5.0, 0.5)
+}
+test "Newton's third step has about twice the correct digits of its second" {
+    assert_near(new_err[2] / new_err[1], 2.0, 0.3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

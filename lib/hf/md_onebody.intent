@@ -1,0 +1,163 @@
+module lib/hf/md_onebody
+  The one-electron integrals of Hartree-Fock, by the McMurchie-Davidson
+  method: the overlap matrix S (how much two basis functions share), the
+  kinetic energy T, and the attraction V between an electron and the nuclei.
+  `H = T + V` is the part of the Fock matrix that does not depend on the
+  other electrons, and S is what the SCF orthogonalizes against.
+
+  McMurchie-Davidson writes the product of two Gaussians as a sum of Hermite
+  Gaussians centered between them; the expansion coefficients (the E tables
+  of lib/hf/hermite) depend only on the two exponents and the distance
+  between the centers. So the tables are built once per pair of primitives
+  and serve every component pair of the two shells. This is one of the
+  integral families the integrals stage can pick; the water story runs it.
+
+md1_grid  @a739afa5
+  why   The Boys function values the nuclear attraction needs are read from
+        a table built once per run; building it once here keeps it out of
+        the loop over primitive pairs.
+  shells  the shell pack
+  lmax    the highest angular momentum of any shell
+  s       the shell being read
+
+md1_pair  @ec2d247f
+  why   Everything the three integrals of a shell pair share (the E tables,
+        the component factors, the pair's center P) is computed once per
+        primitive pair and used for S, T and V together.
+  how   For each pair of primitives: fill the E tables of the three axes,
+        then for each component pair add the overlap (a product of three
+        one-axis overlaps) and the kinetic energy (the right-hand Gaussian's
+        second derivative, which is three overlaps with its power shifted by
+        $-2, 0, +2$); then for each charged atom fill the Hermite integrals
+        R at $P - C$ and add $\sum_{tuv} E_x(t) E_y(u) E_z(v) R(t, u, v)$ to V.
+  atoms   the atoms pack: charge and position of each atom
+  shells  the shell pack
+  prims   the primitive pack: exponent and coefficient of each Gaussian
+  cn      each primitive's contraction coefficient, scaled so the shell is
+          normalized (from bas_contract)
+  G       the Boys grid from md1_grid
+  sa      the first shell of the pair (the rows of the block)
+  sb      the second shell of the pair (the columns)
+  la      $l_a$  the first shell's angular momentum
+  lb      $l_b$  the second shell's angular momentum
+  na      how many Cartesian components the first shell has
+  nb      how many Cartesian components the second shell has
+  PA      the powers $(i, j, k)$ of $x^i y^j z^k$ of each component of the first shell, `[na, 3]`
+  PB      the same for the second shell, `[nb, 3]`
+  ca      the atom the first shell sits on
+  cb      the atom the second shell sits on
+  NA      the normalization factor of each component of the first shell
+  NB      the same for the second shell
+  L       $l_a + l_b$, the highest Hermite order V needs
+  lb2     $l_b + 2$: the E tables go two powers past $l_b$, because the
+          kinetic energy shifts the right-hand power by 2
+  ld      the stride of the right-hand power in a flat E table
+  nt      the stride of the left-hand power, the number of Hermite orders kept
+  EX      the E table along x for the current primitive pair, flat
+  EY      the E table along y
+  EZ      the E table along z
+  D       $L + 1$, the side of the cube of Hermite integrals R
+  RS      the Hermite integrals $R(t, u, v)$ for the current atom, already
+          multiplied by $-Z (2 \pi / p)$, with scratch space after them
+  F       the Boys function values $F_0 \ldots F_L$ at the current atom
+  out     the block `[MD1_NMAT, na * nb]`: S, T and V for each component pair
+  pa0     the first primitive row of the first shell
+  pb0     the first primitive row of the second shell
+  a       $a$  the exponent of the first primitive
+  b       $b$  the exponent of the second primitive
+  p       $p = a + b$, the exponent of their product
+  c       the product of the two primitives' contraction coefficients
+  sq      $\sqrt{\pi / p}$, which turns $E(i, j, 0)$ into a one-axis overlap
+  Px      $P_x$  the center of the product Gaussian, x; `Py` and `Pz` likewise
+  sx      the one-axis overlap along x for the current component pair
+  tx      the one-axis kinetic energy integral along x
+  w       the weight of the current component pair: contraction and
+          normalization factors
+  k       the column of the block that holds the current component pair
+  Zc      the charge of the atom whose attraction is being added
+  X       $P_x - C_x$, the pair center's offset from that atom along x
+  acc     the sum over Hermite orders for one component pair and one atom
+  Ax      the x coordinate of the first shell's atom
+  Ay      the y coordinate of the first shell's atom
+  Az      the z coordinate of the first shell's atom
+  Bx      the x coordinate of the second shell's atom
+  By      the y coordinate of the second shell's atom
+  Bz      the z coordinate of the second shell's atom
+  i       the component of the first shell
+  j       the component of the second shell
+  ip      the primitive of the first shell
+  jp      the primitive of the second shell
+
+  = c      a new primitive pair: its E tables along x, y and z are filled right after, and serve every component pair below
+  = sq     the one-axis overlap of two s functions: $\sqrt{\pi / p}$ times $E(0, 0, 0)$
+  = tx     the kinetic energy along x: the second derivative of the right-hand Gaussian, as overlaps with its power raised by 2 and kept
+  = tx#2   and the term with its power lowered by 2, which exists only when that power is at least 2
+  = X      the attraction to one atom starts from the pair center's offset from it: the Boys values at $p \lvert P - C \rvert^2$ and the Hermite integrals at $P - C$ follow, with the charge and $2 \pi / p$ folded in
+  = acc#2  one term of $\sum_{tuv} E_x(t) E_y(u) E_z(v) R(t, u, v)$
+
+md1_all  @db6533ae
+  why   Computing each pair once, for `sa >= sb`, and writing it at both
+        places halves the work and makes every matrix symmetric by
+        construction.
+  atoms   the atoms pack
+  shells  the shell pack
+  prims   the primitive pack
+  n       the number of Cartesian basis functions
+  cn      the normalized contraction coefficients
+  G       the Boys grid
+  M       the three matrices, `[MD1_NMAT, n, n]`: S, T and V
+  sa      the first shell of the pair
+  sb      the second shell, never after `sa`
+
+md1_scatter  @f8cf17df
+  M       the three matrices being filled
+  B       one pair block from md1_pair
+  shells  the shell pack
+  sa      the pair's first shell
+  sb      the pair's second shell
+  na      the first shell's number of components
+  nb      the second shell's number of components
+  a0      the index of the first shell's first basis function
+  b0      the index of the second shell's first basis function
+  k       the matrix being filled: S, T or V
+  i       the component of the first shell
+  j       the component of the second shell
+
+md1_pick  @5fbda183
+  why   The integrals stage takes one matrix per member call; this builds
+        all three and keeps the one asked for.
+  atoms   the atoms pack
+  shells  the shell pack
+  prims   the primitive pack
+  which   which matrix: `MD1_S`, `MD1_T` or `MD1_V`
+
+md1_s  @c6b038f9
+  why   The overlap member of the integrals stage's registry.
+  atoms   the atoms pack
+  shells  the shell pack
+  prims   the primitive pack
+
+md1_t  @55347cf9
+  what  The kinetic energy matrix T over Cartesian basis functions, as a member of the integrals stage.
+  atoms   the atoms pack
+  shells  the shell pack
+  prims   the primitive pack
+
+md1_v  @d61aeb74
+  what  The nuclear attraction matrix V over Cartesian basis functions, as a member of the integrals stage.
+  atoms   the atoms pack
+  shells  the shell pack
+  prims   the primitive pack
+
+md1_h  @e2d9d447
+  why   Used by this module's test that checks the members against each
+        other; the SCF builds H itself from the T and V members.
+  atoms   the atoms pack
+  shells  the shell pack
+  prims   the primitive pack
+  M       all three matrices
+
+md1_gap  @2ca3fa31
+  M   the three matrices
+  k   which one to compare
+  R   the reference matrix

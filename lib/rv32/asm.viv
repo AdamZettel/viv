@@ -1,0 +1,759 @@
+# An RV32IM assembler: assembly text in, the bytes of a memory image out.
+#
+# Two passes over the statements. The first gives every statement its
+# section and offset, which fixes the address of every label; the second
+# encodes each instruction now that every label it names has an address.
+#
+# The text is GNU-assembler style: `label:`, `op arg, arg`, `#` comments,
+# `;` between statements on a line, numeric local labels (`1:` named as
+# `1b` backward or `1f` forward), `.text` and `.data`, data directives and
+# the pseudo-instructions li, la, mv, j, call, ret and a few more. The
+# encodings are those of the RISC-V unprivileged manual (version
+# 20191213), figure 2.3 and chapter 24.
+
+from rv32.bits import WORD, pow2, wrap, signed, bits, sext, fits_signed
+from rv32.sim import INSTR_BYTES, OPC_LOAD, OPC_MISC_MEM, OPC_OP_IMM, OPC_AUIPC, OPC_STORE, OPC_OP, OPC_LUI, OPC_BRANCH, OPC_JALR, OPC_JAL, OPC_SYSTEM, F7_ALT, F7_MULDIV
+
+IMM_BITS: Int = 12              # an I or S immediate: -2048 .. 2047
+BRANCH_BITS: Int = 13           # a branch offset: -4096 .. 4094, even
+JUMP_BITS: Int = 21             # a jal offset: -1 MiB .. 1 MiB - 2, even
+UPPER_SHIFT: Int = 12           # lui and auipc fill bits 31..12
+DATA_ALIGN: Int = 4096          # the data section starts at the next multiple of this after the code
+SECTION_TEXT: Int = 0
+SECTION_DATA: Int = 1
+
+#| How an instruction's operands are written and encoded.
+enum Fmt {
+    R           # op rd, rs1, rs2
+    I           # op rd, rs1, imm
+    Shift       # op rd, rs1, shamt (funct7 in the immediate's top bits)
+    Load        # op rd, imm(rs1)
+    Store       # op rs2, imm(rs1)
+    Branch      # op rs1, rs2, label
+    U           # op rd, imm20
+    J           # jal rd, label
+    Jalr        # jalr rd, rs1, imm  or  jalr rd, imm(rs1)
+    Sys         # ecall, ebreak: funct12 in the immediate
+    Fence       # fence: no operands that matter here
+}
+
+#| One machine instruction's encoding fields.
+record Spec {
+    name: Str
+    fmt: Fmt
+    opcode: Int
+    f3: Int
+    f7: Int
+}
+
+#| One statement of the source: its labels, its operation and its arguments.
+record Stmt {
+    labels: [Str]
+    op: Str
+    args: [Str]
+    text: Str
+    line: Int
+}
+
+#| The assembled program: the memory image (code from address 0, then the
+#| data), the address of every label, and for each code word the statement
+#| it came from.
+record Program {
+    image: [Int]
+    text_bytes: Int
+    data_base: Int
+    labels: [Str]
+    addrs: [Int]
+    source: [Str]
+}
+
+# ---- the instruction set
+
+#| One row of the instruction table.
+def spec(name: Str, fmt: Fmt, opcode: Int, f3: Int, f7: Int) -> Spec {
+    return Spec { name: name, fmt: fmt, opcode: opcode, f3: f3, f7: f7 }
+}
+
+#| Every RV32IM instruction with its format, opcode, funct3 and funct7
+#| (manual, chapter 24, tables 24.2 and 24.3).
+def instruction_set() -> [Spec] {
+    s = [spec("lui", Fmt.U, OPC_LUI, 0, 0)]
+    s = append(s, spec("auipc", Fmt.U, OPC_AUIPC, 0, 0))
+    s = append(s, spec("jal", Fmt.J, OPC_JAL, 0, 0))
+    s = append(s, spec("jalr", Fmt.Jalr, OPC_JALR, 0, 0))
+    s = append(s, spec("beq", Fmt.Branch, OPC_BRANCH, 0, 0))
+    s = append(s, spec("bne", Fmt.Branch, OPC_BRANCH, 1, 0))
+    s = append(s, spec("blt", Fmt.Branch, OPC_BRANCH, 4, 0))
+    s = append(s, spec("bge", Fmt.Branch, OPC_BRANCH, 5, 0))
+    s = append(s, spec("bltu", Fmt.Branch, OPC_BRANCH, 6, 0))
+    s = append(s, spec("bgeu", Fmt.Branch, OPC_BRANCH, 7, 0))
+    s = append(s, spec("lb", Fmt.Load, OPC_LOAD, 0, 0))
+    s = append(s, spec("lh", Fmt.Load, OPC_LOAD, 1, 0))
+    s = append(s, spec("lw", Fmt.Load, OPC_LOAD, 2, 0))
+    s = append(s, spec("lbu", Fmt.Load, OPC_LOAD, 4, 0))
+    s = append(s, spec("lhu", Fmt.Load, OPC_LOAD, 5, 0))
+    s = append(s, spec("sb", Fmt.Store, OPC_STORE, 0, 0))
+    s = append(s, spec("sh", Fmt.Store, OPC_STORE, 1, 0))
+    s = append(s, spec("sw", Fmt.Store, OPC_STORE, 2, 0))
+    s = append(s, spec("addi", Fmt.I, OPC_OP_IMM, 0, 0))
+    s = append(s, spec("slti", Fmt.I, OPC_OP_IMM, 2, 0))
+    s = append(s, spec("sltiu", Fmt.I, OPC_OP_IMM, 3, 0))
+    s = append(s, spec("xori", Fmt.I, OPC_OP_IMM, 4, 0))
+    s = append(s, spec("ori", Fmt.I, OPC_OP_IMM, 6, 0))
+    s = append(s, spec("andi", Fmt.I, OPC_OP_IMM, 7, 0))
+    s = append(s, spec("slli", Fmt.Shift, OPC_OP_IMM, 1, 0))
+    s = append(s, spec("srli", Fmt.Shift, OPC_OP_IMM, 5, 0))
+    s = append(s, spec("srai", Fmt.Shift, OPC_OP_IMM, 5, F7_ALT))
+    s = append(s, spec("add", Fmt.R, OPC_OP, 0, 0))
+    s = append(s, spec("sub", Fmt.R, OPC_OP, 0, F7_ALT))
+    s = append(s, spec("sll", Fmt.R, OPC_OP, 1, 0))
+    s = append(s, spec("slt", Fmt.R, OPC_OP, 2, 0))
+    s = append(s, spec("sltu", Fmt.R, OPC_OP, 3, 0))
+    s = append(s, spec("xor", Fmt.R, OPC_OP, 4, 0))
+    s = append(s, spec("srl", Fmt.R, OPC_OP, 5, 0))
+    s = append(s, spec("sra", Fmt.R, OPC_OP, 5, F7_ALT))
+    s = append(s, spec("or", Fmt.R, OPC_OP, 6, 0))
+    s = append(s, spec("and", Fmt.R, OPC_OP, 7, 0))
+    s = append(s, spec("mul", Fmt.R, OPC_OP, 0, F7_MULDIV))
+    s = append(s, spec("mulh", Fmt.R, OPC_OP, 1, F7_MULDIV))
+    s = append(s, spec("mulhsu", Fmt.R, OPC_OP, 2, F7_MULDIV))
+    s = append(s, spec("mulhu", Fmt.R, OPC_OP, 3, F7_MULDIV))
+    s = append(s, spec("div", Fmt.R, OPC_OP, 4, F7_MULDIV))
+    s = append(s, spec("divu", Fmt.R, OPC_OP, 5, F7_MULDIV))
+    s = append(s, spec("rem", Fmt.R, OPC_OP, 6, F7_MULDIV))
+    s = append(s, spec("remu", Fmt.R, OPC_OP, 7, F7_MULDIV))
+    s = append(s, spec("fence", Fmt.Fence, OPC_MISC_MEM, 0, 0))
+    s = append(s, spec("ecall", Fmt.Sys, OPC_SYSTEM, 0, 0))
+    s = append(s, spec("ebreak", Fmt.Sys, OPC_SYSTEM, 0, 1))
+    return s
+}
+
+#| The index of the instruction called `name` in the table, or -1.
+def find_spec(specs: [Spec], name: Str) -> Int {
+    for k to len(specs) {
+        if specs[k].name == name {
+            return int(k)
+        }
+    }
+    return -1
+}
+
+# ---- registers and numbers
+
+ABI_NAMES = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"]
+REG_FP: Int = 8                 # fp is another name for s0
+NUM_REGS: Int = 32
+
+#| The register number of `x5`, `t0` or `fp`.
+def reg(name: Str, st: Stmt) -> Int {
+    if name == "fp" {
+        return REG_FP
+    }
+    for k to NUM_REGS {
+        if ABI_NAMES[k] == name or "x" + str(k) == name {
+            return k
+        }
+    }
+    fail(st, f"`{name}` is not a register")
+    return 0
+}
+
+#| Stop assembling with an error that names the source line.
+def fail(st: Stmt, why: Str) {
+    stop(f"asm: line {st.line + 1}: `{st.text}`: {why}")
+}
+
+#| Is s an integer literal: decimal or 0x hex, with an optional minus sign?
+def is_number(s: Str) -> Bool {
+    t = s
+    if startswith(t, "-") or startswith(t, "+") {
+        t = t[1:]
+    }
+    if len(t) == 0 {
+        return false
+    }
+    if startswith(t, "0x") or startswith(t, "0X") {
+        return len(t) > 2 and all(c in "0123456789abcdefABCDEF" for c in t[2:])
+    }
+    return all(c in "0123456789" for c in t)
+}
+
+#| The value of an integer literal. A hex literal wider than 32 bits keeps
+#| its low 32 bits, as an RV32 assembler's `li` does.
+def number(s: Str) -> Int {
+    neg = startswith(s, "-")
+    t = s
+    if neg or startswith(s, "+") {
+        t = s[1:]
+    }
+    v: Int = 0
+    if startswith(t, "0x") or startswith(t, "0X") {
+        for c in lower(t[2:]) {
+            v = wrap(v * 16 + int(find("0123456789abcdef", c)))
+        }
+    }
+    else {
+        for c in t {
+            v = v * 10 + int(find("0123456789", c))
+        }
+    }
+    if neg {
+        return -v
+    }
+    return v
+}
+
+# ---- reading the text into statements
+
+#| Is s a label name: letters, digits, `_`, `.` and `$`?
+def is_symbol(s: Str) -> Bool {
+    if len(s) == 0 {
+        return false
+    }
+    return all(isalnum(c) or c in "_.$" for c in s)
+}
+
+#| The arguments of a statement, split at commas.
+def split_args(rest: Str) -> [Str] {
+    if len(strip(rest)) == 0 {
+        return ["x"][:0]
+    }
+    return [strip(a) for a in split(rest, ",")]
+}
+
+#| Every statement of the text: comments dropped, `;` separating statements,
+#| labels taken off the front.
+def parse_statements(text: Str) -> [Stmt] {
+    stmts: [Stmt] = []
+    lines = split(text, "\n")
+    for n to len(lines) {
+        line = lines[n]
+        hash = find(line, "#")
+        if hash >= 0 {
+            line = line[:hash]
+        }
+        for piece in split(line, ";") {
+            s = strip(piece)
+            labels = ["x"][:0]
+            head = split(s, ":", 1)
+            while len(head) == 2 and is_symbol(strip(head[0])) {
+                labels = append(labels, strip(head[0]))
+                s = strip(head[1])
+                head = split(s, ":", 1)
+            }
+            op = s
+            rest = ""
+            space = find(s, " ")
+            tab = find(s, "\t")
+            if tab >= 0 and (space < 0 or tab < space) {
+                space = tab
+            }
+            if space >= 0 {
+                op = s[:space]
+                rest = s[space + 1:]
+            }
+            if len(labels) > 0 or len(op) > 0 {
+                stmts = append(stmts, Stmt { labels: labels, op: lower(op), args: split_args(rest), text: s, line: int(n) })
+            }
+        }
+    }
+    return stmts
+}
+
+# ---- pass 1: where everything goes
+
+#| Does `li` of this value need two instructions (lui + addi)?
+def li_words(v: Int) -> Int {
+    if fits_signed(signed(wrap(v)), IMM_BITS) {
+        return 1
+    }
+    return 2
+}
+
+#| How many bytes a statement adds to its section, at offset `at`.
+def stmt_size(st: Stmt, at: Int) -> Int {
+    n: Int = len(st.args)
+    if st.op == "" or st.op == ".text" or st.op == ".data" {
+        return 0
+    }
+    if st.op == ".word" {
+        return 4 * n
+    }
+    if st.op == ".half" {
+        return 2 * n
+    }
+    if st.op == ".byte" {
+        return n
+    }
+    if st.op == ".dword" {
+        return 8 * n
+    }
+    if st.op == ".zero" or st.op == ".space" {
+        return number(st.args[0])
+    }
+    if st.op == ".align" or st.op == ".p2align" or st.op == ".balign" {
+        step: Int = number(st.args[0])
+        if st.op != ".balign" {
+            step = pow2(step)
+        }
+        return (step - at % step) % step
+    }
+    if startswith(st.op, ".") {
+        return 0
+    }
+    if st.op == "li" {
+        return INSTR_BYTES * li_words(number(st.args[1]))
+    }
+    if st.op == "la" or st.op == "lla" {
+        return 2 * INSTR_BYTES
+    }
+    return INSTR_BYTES
+}
+
+#| The section each statement is in and its offset there, and the size of
+#| each section; returns the offsets, the sections, and the two sizes.
+def layout(stmts: [Stmt]) {
+    offsets = int_zeros(len(stmts))
+    sections = int_zeros(len(stmts))
+    sizes = int_zeros(2)
+    section = SECTION_TEXT
+    for k to len(stmts) {
+        st = stmts[k]
+        if st.op == ".text" {
+            section = SECTION_TEXT
+        }
+        if st.op == ".data" {
+            section = SECTION_DATA
+        }
+        offsets[k] = sizes[section]
+        sections[k] = section
+        sizes[section] = sizes[section] + stmt_size(st, sizes[section])
+    }
+    return offsets, sections, sizes
+}
+
+#| Round n up to a multiple of `step`.
+def round_up(n: Int, step: Int) -> Int {
+    return (n + step - 1) // step * step
+}
+
+# ---- labels
+
+#| The address of label `name` as referenced from statement `at`: a plain
+#| name, or a numeric label `1b` (the closest one at or before) or `1f`
+#| (the closest one after).
+def resolve(stmts: [Stmt], addrs: [Int], name: Str, at: Int) -> Int {
+    local = len(name) > 1 and all(c in "0123456789" for c in name[:-1])
+    if local and name[-1] == "b" {
+        for k from at to -1 by -1 {
+            if name[:-1] in stmts[k].labels {
+                return addrs[k]
+            }
+        }
+    }
+    else if local and name[-1] == "f" {
+        for k from at + 1 to len(stmts) {
+            if name[:-1] in stmts[k].labels {
+                return addrs[k]
+            }
+        }
+    }
+    else {
+        for k to len(stmts) {
+            if name in stmts[k].labels {
+                return addrs[k]
+            }
+        }
+    }
+    fail(stmts[at], f"no label `{name}`")
+    return 0
+}
+
+#| A number, the address of a label, or a label plus or minus a number
+#| (`1f + 10000`).
+def value(stmts: [Stmt], addrs: [Int], s: Str, at: Int) -> Int {
+    if is_number(s) {
+        return number(s)
+    }
+    if find(s, "+") > 0 {
+        sum_parts = split(s, "+", 1)
+        return value(stmts, addrs, strip(sum_parts[0]), at) + number(strip(sum_parts[1]))
+    }
+    if find(s, "-") > 0 {
+        difference = split(s, "-", 1)
+        return value(stmts, addrs, strip(difference[0]), at) - number(strip(difference[1]))
+    }
+    return resolve(stmts, addrs, s, at)
+}
+
+# ---- encoding, one function per format (manual, figure 2.3)
+
+#| R-type word: register-register operations.
+def enc_r(sp: Spec, rd: Int, rs1: Int, rs2: Int) -> Int {
+    return sp.f7 * pow2(25) + rs2 * pow2(20) + rs1 * pow2(15) + sp.f3 * pow2(12) + rd * pow2(7) + sp.opcode
+}
+
+#| I-type word: immediates, loads and jalr.
+def enc_i(sp: Spec, rd: Int, rs1: Int, imm: Int) -> Int {
+    return bits(wrap(imm), 0, 12) * pow2(20) + rs1 * pow2(15) + sp.f3 * pow2(12) + rd * pow2(7) + sp.opcode
+}
+
+#| S-type word: stores, the immediate split around rs2.
+def enc_s(sp: Spec, rs1: Int, rs2: Int, imm: Int) -> Int {
+    u = wrap(imm)
+    return bits(u, 5, 7) * pow2(25) + rs2 * pow2(20) + rs1 * pow2(15) + sp.f3 * pow2(12) + bits(u, 0, 5) * pow2(7) + sp.opcode
+}
+
+#| B-type word: conditional branches to a pc-relative offset.
+def enc_b(sp: Spec, rs1: Int, rs2: Int, offset: Int) -> Int {
+    u = wrap(offset)
+    hi = bits(u, 12, 1) * pow2(31) + bits(u, 5, 6) * pow2(25)
+    lo = bits(u, 1, 4) * pow2(8) + bits(u, 11, 1) * pow2(7)
+    return hi + rs2 * pow2(20) + rs1 * pow2(15) + sp.f3 * pow2(12) + lo + sp.opcode
+}
+
+#| U-type word: lui and auipc with a 20-bit upper immediate.
+def enc_u(sp: Spec, rd: Int, imm20: Int) -> Int {
+    return bits(wrap(imm20), 0, 20) * pow2(12) + rd * pow2(7) + sp.opcode
+}
+
+#| J-type word: jal to a pc-relative offset.
+def enc_j(sp: Spec, rd: Int, offset: Int) -> Int {
+    u = wrap(offset)
+    imm = bits(u, 20, 1) * pow2(31) + bits(u, 1, 10) * pow2(21) + bits(u, 11, 1) * pow2(20) + bits(u, 12, 8) * pow2(12)
+    return imm + rd * pow2(7) + sp.opcode
+}
+
+#| `imm(reg)` split into the immediate and the register; `(reg)` has 0.
+def mem_operand(st: Stmt, s: Str) {
+    open = find(s, "(")
+    if open < 0 or not endswith(s, ")") {
+        fail(st, f"`{s}` is not imm(reg)")
+    }
+    imm: Int = 0
+    if open > 0 {
+        imm = number(strip(s[:open]))
+    }
+    return imm, reg(strip(s[open + 1:-1]), st)
+}
+
+#| Stop unless v fits the instruction's n-bit signed immediate.
+def check_fits(st: Stmt, v: Int, n: Int) {
+    if not fits_signed(v, n) {
+        fail(st, f"{v} does not fit in {n} signed bits")
+    }
+}
+
+#| Stop unless the statement has exactly n operands.
+def want_args(st: Stmt, n: Int) {
+    if len(st.args) != n {
+        fail(st, f"wants {n} operands, has {len(st.args)}")
+    }
+}
+
+#| Encode one real instruction at address pc; labels are looked up in the
+#| whole program (stmts and their addresses), as seen from statement k.
+def encode(specs: [Spec], st: Stmt, stmts: [Stmt], addrs: [Int], k: Int, pc: Int) -> Int {
+    i = find_spec(specs, st.op)
+    if i < 0 {
+        fail(st, f"unknown instruction `{st.op}`")
+    }
+    sp = specs[i]
+    a = st.args
+    match sp.fmt {
+        R => {
+            want_args(st, 3)
+            return enc_r(sp, reg(a[0], st), reg(a[1], st), reg(a[2], st))
+        }
+        I => {
+            want_args(st, 3)
+            imm = value(stmts, addrs, a[2], k)
+            check_fits(st, imm, IMM_BITS)
+            return enc_i(sp, reg(a[0], st), reg(a[1], st), imm)
+        }
+        Shift => {
+            want_args(st, 3)
+            shamt = number(a[2])
+            if shamt < 0 or shamt >= pow2(5) {
+                fail(st, "a shift amount is 0 .. 31")
+            }
+            return enc_i(sp, reg(a[0], st), reg(a[1], st), sp.f7 * pow2(5) + shamt)
+        }
+        Load => {
+            want_args(st, 2)
+            imm, base = mem_operand(st, a[1])
+            check_fits(st, imm, IMM_BITS)
+            return enc_i(sp, reg(a[0], st), base, imm)
+        }
+        Store => {
+            want_args(st, 2)
+            imm, base = mem_operand(st, a[1])
+            check_fits(st, imm, IMM_BITS)
+            return enc_s(sp, base, reg(a[0], st), imm)
+        }
+        Branch => {
+            want_args(st, 3)
+            offset = value(stmts, addrs, a[2], k) - pc
+            check_fits(st, offset, BRANCH_BITS)
+            return enc_b(sp, reg(a[0], st), reg(a[1], st), offset)
+        }
+        U => {
+            want_args(st, 2)
+            return enc_u(sp, reg(a[0], st), number(a[1]))
+        }
+        J => {
+            rd: Int = 1
+            target = a[0]
+            if len(a) == 2 {
+                rd = reg(a[0], st)
+                target = a[1]
+            }
+            offset = value(stmts, addrs, target, k) - pc
+            check_fits(st, offset, JUMP_BITS)
+            return enc_j(sp, rd, offset)
+        }
+        Jalr => {
+            #: jalr rs | jalr rd, imm(rs1) | jalr rd, rs1, imm
+            if len(a) == 1 {
+                return enc_i(sp, 1, reg(a[0], st), 0)
+            }
+            if len(a) == 2 {
+                imm, base = mem_operand(st, a[1])
+                return enc_i(sp, reg(a[0], st), base, imm)
+            }
+            return enc_i(sp, reg(a[0], st), reg(a[1], st), number(a[2]))
+        }
+        Sys => { return enc_i(sp, 0, 0, sp.f7) }
+        Fence => { return enc_i(sp, 0, 0, 0) }
+    }
+    return 0
+}
+
+# ---- pseudo-instructions: each becomes one or two real ones
+
+#| A statement with another operation and arguments, same place and labels.
+def rewrite(st: Stmt, op: Str, args: [Str]) -> Stmt {
+    return Stmt { labels: st.labels, op: op, args: args, text: st.text, line: st.line }
+}
+
+#| The real instructions a statement stands for: itself, or the expansion of
+#| a pseudo-instruction (manual, chapter 25, tables 25.2 and 25.3).
+def expand(st: Stmt, stmts: [Stmt], addrs: [Int], k: Int, pc: Int) -> [Stmt] {
+    a = st.args
+    op = st.op
+    if op == "nop" {
+        return [rewrite(st, "addi", ["x0", "x0", "0"])]
+    }
+    if op == "mv" {
+        return [rewrite(st, "addi", [a[0], a[1], "0"])]
+    }
+    if op == "not" {
+        return [rewrite(st, "xori", [a[0], a[1], "-1"])]
+    }
+    if op == "neg" {
+        return [rewrite(st, "sub", [a[0], "x0", a[1]])]
+    }
+    if op == "seqz" {
+        return [rewrite(st, "sltiu", [a[0], a[1], "1"])]
+    }
+    if op == "snez" {
+        return [rewrite(st, "sltu", [a[0], "x0", a[1]])]
+    }
+    if op == "beqz" {
+        return [rewrite(st, "beq", [a[0], "x0", a[1]])]
+    }
+    if op == "bnez" {
+        return [rewrite(st, "bne", [a[0], "x0", a[1]])]
+    }
+    if op == "j" {
+        return [rewrite(st, "jal", ["x0", a[0]])]
+    }
+    if op == "call" {
+        return [rewrite(st, "jal", ["ra", a[0]])]
+    }
+    if op == "ret" {
+        return [rewrite(st, "jalr", ["x0", "ra", "0"])]
+    }
+    if op == "jr" {
+        jump_offset = "0"
+        if len(a) == 2 {
+            jump_offset = a[1]
+        }
+        return [rewrite(st, "jalr", ["x0", a[0], jump_offset])]
+    }
+    if op in ["add", "and", "or", "xor", "slt", "sltu", "sll", "srl", "sra"] and len(a) == 3 and is_number(a[2]) {
+        #: `sra x1, x1, 1` with a number for rs2 means the immediate form, as GNU as reads it
+        return [rewrite(st, op + "i", a)]
+    }
+    if op == "li" {
+        #: a 12-bit value is one addi; otherwise lui sets bits 31..12 and addi adds the low 12,
+        #: sign-extended, so the upper part is rounded to make up for a negative low part
+        v = signed(wrap(number(a[1])))
+        if li_words(v) == 1 {
+            return [rewrite(st, "addi", [a[0], "x0", str(v)])]
+        }
+        lo = sext(bits(wrap(v), 0, IMM_BITS), IMM_BITS)
+        hi = bits(wrap(v - lo), UPPER_SHIFT, 20)
+        return [rewrite(st, "lui", [a[0], str(hi)]), rewrite(st, "addi", [a[0], a[0], str(lo)])]
+    }
+    if op == "la" or op == "lla" {
+        #: pc-relative: auipc adds the upper part of the distance to pc, addi the low part
+        offset = value(stmts, addrs, a[1], k) - pc
+        lo = sext(bits(wrap(offset), 0, IMM_BITS), IMM_BITS)
+        hi = bits(wrap(offset - lo), UPPER_SHIFT, 20)
+        return [rewrite(st, "auipc", [a[0], str(hi)]), rewrite(st, "addi", [a[0], a[0], str(lo)])]
+    }
+    return [st]
+}
+
+# ---- pass 2: the bytes
+
+#| The low `size` bytes of v, the lowest first (RISC-V is little-endian).
+def le_bytes(v: Int, size: Int) -> [Int] {
+    u = wrap(v)
+    out: [Int] = [bits(u, 8 * k, 8) for k to size]
+    return out
+}
+
+#| The bytes of a data directive.
+def data_bytes(st: Stmt, stmts: [Stmt], addrs: [Int], k: Int, at: Int) -> [Int] {
+    size: Int = 0
+    if st.op == ".word" {
+        size = 4
+    }
+    if st.op == ".half" {
+        size = 2
+    }
+    if st.op == ".byte" {
+        size = 1
+    }
+    if size > 0 {
+        #: byte i of the directive is byte i % size of value i // size, the lowest byte first
+        vals: [Int] = [wrap(value(stmts, addrs, x, k)) for x in st.args]
+        out: [Int] = [bits(vals[i // size], 8 * (i % size), 8) for i to size * len(vals)]
+        return out
+    }
+    if st.op == ".dword" {
+        #: two words, low first: the value, then its sign (only values that fit 32 bits)
+        vals: [Int] = [value(stmts, addrs, x, k) for x in st.args]
+        word_count: Int = 2 * len(vals)
+        out: [Int] = [bits(dword_half(vals[i // 8], (i // 4) % 2), 8 * (i % 4), 8) for i to 4 * word_count]
+        return out
+    }
+    #: .zero, .space and the alignment directives: zero bytes
+    out: [Int] = [0 for j to stmt_size(st, at)]
+    return out
+}
+
+#| The low (half 0) or high (half 1) word of a value that fits 32 bits, as
+#| a 64-bit .dword holds it: the high word is all ones for a negative value.
+def dword_half(v: Int, half: Int) -> Int {
+    if half == 0 {
+        return wrap(v)
+    }
+    return wrap(flag_negative(v))
+}
+
+NOP_WORD: Int = 0x00000013       # addi x0, x0, 0
+
+#| Is op one of the directives that pad to an alignment boundary?
+def is_alignment(op: Str) -> Bool {
+    return op == ".align" or op == ".p2align" or op == ".balign"
+}
+
+#| The high word of a 64-bit value that fits 32 bits: all ones when negative.
+def flag_negative(v: Int) -> Int {
+    if v < 0 {
+        return -1
+    }
+    return 0
+}
+
+#| The byte at address a of a memory image made of the code from address 0
+#| and the data from data_base, with zeros between.
+def image_byte(code: [Int], data: [Int], data_base: Int, a: Int) -> Int {
+    if a < len(code) {
+        return code[a]
+    }
+    if a >= data_base {
+        return data[a - data_base]
+    }
+    return 0
+}
+
+#| Assemble the text into a program.
+def assemble(text: Str) -> Program {
+    specs = instruction_set()
+    stmts = parse_statements(text)
+    count: Int = len(stmts)
+
+    #: pass 1: every statement's address; data starts on the next DATA_ALIGN boundary after the code
+    offsets, sections, sizes = layout(stmts)
+    data_base = round_up(sizes[SECTION_TEXT], DATA_ALIGN)
+    addrs: [Int] = [offsets[k] + data_base * sections[k] for k to count]
+
+    #: pass 2: encode the code and lay out the data
+    code: [Int] = []
+    data: [Int] = []
+    source = ["x"][:0]
+    for k to count {
+        st = stmts[k]
+        if sections[k] == SECTION_DATA {
+            for byte in data_bytes(st, stmts, addrs, k, offsets[k]) {
+                data = append(data, byte)
+            }
+        }
+        else if is_alignment(st.op) {
+            #: alignment in code is filled with nops, so running into the padding is harmless
+            for pad to stmt_size(st, offsets[k]) // INSTR_BYTES {
+                for byte in le_bytes(NOP_WORD, INSTR_BYTES) {
+                    code = append(code, byte)
+                }
+            }
+        }
+        else if startswith(st.op, ".") {
+            for byte in data_bytes(st, stmts, addrs, k, offsets[k]) {
+                code = append(code, byte)
+            }
+        }
+        else if st.op != "" {
+            pc = addrs[k]
+            for real in expand(st, stmts, addrs, k, pc) {
+                for byte in le_bytes(encode(specs, real, stmts, addrs, k, pc), INSTR_BYTES) {
+                    code = append(code, byte)
+                }
+                pc = pc + INSTR_BYTES
+                source = append(source, st.text)
+            }
+        }
+    }
+
+    #: the image: the code, then (when there is data) zeros up to data_base and the data
+    size: Int = len(code)
+    if len(data) > 0 {
+        size = data_base + len(data)
+    }
+    image: [Int] = [image_byte(code, data, data_base, a) for a to size]
+    names = ["x"][:0]
+    label_addrs: [Int] = []
+    for k to count {
+        for name in stmts[k].labels {
+            names = append(names, name)
+            label_addrs = append(label_addrs, addrs[k])
+        }
+    }
+    return Program { image: image, text_bytes: len(code), data_base: data_base, labels: names, addrs: label_addrs, source: source }
+}
+
+test "one R-type instruction, byte by byte" {
+    # add a0, a0, a1 is 0x00b50533 (manual, figure 2.3), stored little-endian
+    p = assemble("add a0, a0, a1")
+    assert_true(p.text_bytes == INSTR_BYTES)
+    assert_true(p.image[0] == 0x33)
+    assert_true(p.image[1] == 0x05)
+    assert_true(p.image[2] == 0xb5)
+    assert_true(p.image[3] == 0x00)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

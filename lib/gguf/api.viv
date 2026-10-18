@@ -1,0 +1,94 @@
+###
+post: The entry points vipyr calls in lib/gguf
+agent: claude
+
+vipyr (python/vipyr/_gguf.py) reads a GGUF file's bytes with NumPy and
+hands them here: a def Python calls takes numbers and arrays, not strings
+or records. `file_index` reads the metadata and the tensor table from the
+file's first bytes and returns them flat, `dequant` turns one tensor's
+bytes into numbers.
+
+Used by vipyr; in Viv, use gguf.header, gguf.tensors and gguf.quants.
+###
+
+from gguf.header import reader_of, T_STRING, T_FLOAT32, T_FLOAT64
+from gguf.tensors import gguf_from, f32_values, f16_values, bf16_values, GGML_F32, GGML_F16, GGML_BF16
+from gguf.quants import dequantize
+
+#| `s` as Ints: its length, then its code points.
+def code_points(s: Str) -> [Int] {
+    n: [Int] = [len(s)]
+    cps: [Int] = [int(ord(c)) for c in s]
+    n = extend(n, cps)
+    return n
+}
+
+#| The metadata and the tensor table of a GGUF file whose first bytes are
+#| `b`, flat. The Ints: the key count, the tensor count, the alignment, the
+#| data offset; then per key its name (length, code points), its types
+#| (count, types) and its values (count, then per value an Int, an index
+#| into the numbers, or a string); then per tensor its name, its dims
+#| (count, dims), its ggml type, its offset in the file and its byte count.
+#| The numbers: every FLOAT32 and FLOAT64 value, in order. Stops when `b`
+#| ends before the tensor table does; the caller retries with more bytes.
+def file_index(b: [Int]) {
+    g = gguf_from(reader_of(b))
+    m = g.meta
+    out: [Int] = [m.header.n_kv, m.header.n_tensors, g.alignment, g.data]
+    nums = zeros(0)
+    for k to len(m.keys) {
+        v = m.values[k]
+        out = extend(out, code_points(m.keys[k]))
+        out = append(out, len(v.types))
+        out = extend(out, v.types)
+        leaf = v.types[len(v.types) - 1]
+        if leaf == T_STRING {
+            out = append(out, len(v.strs))
+            for s in v.strs {
+                out = extend(out, code_points(s))
+            }
+        }
+        else if leaf == T_FLOAT32 or leaf == T_FLOAT64 {
+            out = append(out, len(v.nums))
+            for x in v.nums {
+                out = append(out, len(nums))
+                nums = append(nums, x)
+            }
+        }
+        else {
+            out = append(out, len(v.ints))
+            out = extend(out, v.ints)
+        }
+    }
+    for t in g.tensors {
+        out = extend(out, code_points(t.name))
+        out = append(out, len(t.dims))
+        out = extend(out, t.dims)
+        out = append(out, t.ggml_type)
+        out = append(out, t.offset)
+        out = append(out, t.n_bytes)
+    }
+    return out, nums
+}
+
+#| The `n` numbers a tensor of ggml type `t` holds in the bytes `b`.
+def dequant(b: [Int], t: Int, n: Int) -> Arr {
+    if t == GGML_F32 {
+        return f32_values(b, n)
+    }
+    if t == GGML_F16 {
+        return f16_values(b, n)
+    }
+    if t == GGML_BF16 {
+        return bf16_values(b, n)
+    }
+    return dequantize(b, t, n)
+}
+
+test "a string as code points" {
+    cp = code_points("a▁")
+    assert_true(len(cp) == 3 and cp[0] == 2 and cp[1] == 97 and cp[2] == 9601)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

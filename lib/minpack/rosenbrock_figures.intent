@@ -1,0 +1,198 @@
+module lib/minpack/rosenbrock_figures  documents every variable
+  The two figures the reading of lmder's run on Rosenbrock's function puts
+  beside its core path: the path of the iterates through the curved valley,
+  with the trust region each accepted step was taken in, and the secular
+  function lmpar solves on the first pass that needs $\lambda > 0$. They are
+  drawn from lmder's hist and from Rosenbrock's residuals; the tests below the
+  code hold every number drawn to the gfortran oracle's record of the same run.
+
+rf_eval  @d2a3d96f
+  what  Rosenbrock's residuals at x into f, and its Jacobian into J, from
+        MINPACK's test function mgh_fcn.
+  x     $x$  the point
+  f     $f$  the two residuals, on return
+  J     $J$  the Jacobian, on return
+  data  what mgh_fcn needs to know which problem it evaluates
+
+rf_scaling  @4f3ecdb8
+  what  The scaling $D$ that lmder chooses by default: the norm of each column
+        of the Jacobian at x, computed with enorm as qrfac computes it.
+  x     $x$  the point, the start of the run
+  D     $D$  the column norms, on return
+  f     $f$  the residuals at x (evaluated along with $J$, not used)
+  J     $J$  the Jacobian at x
+  col   one column of $J$, for enorm
+  j     the column
+  i     the row
+
+rf_ellipse  @cff27962
+  what  The closed curve $(c_x + a_x \cos t,\ c_y + a_y \sin t)$ into xs and
+        ys: an ellipse with semi-axes $a_x$ and $a_y$. A trust region
+        $\lVert D p \rVert \le \Delta$ is this ellipse in $x$, with
+        $a_j = \Delta / D_j$.
+  cx    $c_x$  the center's first coordinate
+  cy    $c_y$  the center's second coordinate
+  ax    $a_x$  the semi-axis along the first coordinate
+  ay    $a_y$  the semi-axis along the second coordinate
+  xs    the curve's first coordinates, on return
+  ys    the curve's second coordinates, on return
+  npts  how many points the curve has
+  k     the point being placed
+  t     $t$  the angle, from 0 to $2\pi$
+
+rf_level  @461ff515
+  what  The level curve $f_1^2 + f_2^2 = c$ of Rosenbrock's function into xs
+        and ys. Setting $f_2 = 1 - x_1 = \sqrt{c} \cos t$ and
+        $f_1 = 10 (x_2 - x_1^2) = \sqrt{c} \sin t$ makes it one closed curve
+        in $t$.
+  c     $c$  the sum of squares on the curve
+  xs    the curve's $x_1$ values, on return
+  ys    the curve's $x_2$ values, on return
+  npts  how many points the curve has
+  k     the point being placed
+  t     $t$  the angle, from 0 to $2\pi$
+
+rf_gauss_newton  @3abcc72c
+  what  The Gauss-Newton step from x into p: the solution of $J p = -f$, which
+        for a square, invertible $J$ makes the linear model $f + J p$ exactly
+        zero.
+  x     $x$  the point
+  p     $p$  the step, on return
+  f     $f$  the residuals at x
+  J     $J$  the Jacobian at x
+
+rf_accepted  @69690bcb
+  what  The accepted trial steps of a hist: returns how many; start and after
+        get the point before and after each, delta the radius it was taken
+        in.
+  why   hist records each trial with the point after it; the point a step
+        started from is the point after the previous accepted one.
+  hist   lmder's record, one row per trial step
+  rows   how many rows hold trial steps
+  x0     $x_0$  the starting point
+  start  the point each accepted step started from, one row each, on return
+  after  the point each accepted step reached, on return
+  delta  $\Delta$  the radius lmpar was given for each accepted step, on return
+  nacc   how many accepted steps have been found
+  cur    the point the next step starts from
+  j      a coordinate
+  r      a row of hist
+
+rf_path_figure  @c1566055
+  what  Draw the first figure: Rosenbrock's level curves and valley floor,
+        the accepted iterates of lmder from x0, the trust region of each
+        accepted step as the ellipse it is in $x$, and the rejected first
+        trial with a dashed line from the start. Returns the number of
+        accepted steps.
+  hist     lmder's record, one row per trial step
+  rows     how many rows hold trial steps
+  x0       $x_0$  the starting point
+  D        $D$  the scaling: the first Jacobian's column norms, which is $D$ on
+           every pass of this run (a test checks it)
+  start    the point each accepted step started from
+  after    the point each accepted step reached
+  delta    $\Delta$  the radius of each accepted step
+  nacc     how many steps were accepted
+  cx       the first coordinates of the curve being drawn
+  cy       the second coordinates of the curve being drawn
+  k        a level, an accepted step, or a point of the path
+  floor_x  $x_1$ values across the window, for the valley floor
+  px       the path's first coordinates: the start, then each accepted point
+  py       the path's second coordinates
+  p        $p$  the Gauss-Newton step from the start: the first trial
+
+  collect   the scaling, and the accepted steps with the point each started from and its radius
+  levels    Rosenbrock's level curves, and the valley floor $x_2 = x_1^2$
+  regions   the trust region of each accepted step, around the point it started from
+  path      the accepted iterates, joined
+  rejected  the first trial, the Gauss-Newton step, marked where it landed
+
+rf_damped_step  @c2b43201
+  what  The step u of the damped normal equations
+        $(J^\top J + \lambda D^\top D)\, u = J^\top f$ at $\lambda$ = lam, and
+        its scaled length $\lVert D u \rVert$, which it returns.
+  why   lmpar solves the same system from the QR factorization, without
+        forming $J^\top J$. On this small, well-conditioned problem the normal
+        equations are accurate enough, and solving it the other way checks
+        lmpar independently.
+  J    $J$  the Jacobian
+  f    $f$  the residuals
+  D    $D$  the scaling
+  lam  $\lambda$  the damping
+  u    $u$  the step with its sign flipped, $u = -p$, on return
+  N    $J^\top J + \lambda D^\top D$  the damped normal matrix
+  j    a diagonal entry of N
+
+rf_q2  @311cb2ef
+  what  $\lVert q \rVert^2 = v^\top (J^\top J + \lambda D^\top D)^{-1} v$ with
+        $v = D^\top D u / \lVert D u \rVert$: the number lmpar divides by in its
+        Newton step for $\lambda$.
+  how   lmpar gets it by solving with its triangle, $q = S^{-\top} P^\top v$;
+        since $S^\top S = P^\top (J^\top J + \lambda D^\top D) P$, the two agree.
+  J    $J$  the Jacobian
+  D    $D$  the scaling
+  lam  $\lambda$  the damping
+  u    $u$  the step at lam
+  N    $J^\top J + \lambda D^\top D$  the damped normal matrix
+  j    a diagonal entry of N
+  v    $v$  the scaled direction $D^\top D u / \lVert D u \rVert$
+  w    $(J^\top J + \lambda D^\top D)^{-1} v$  the damped system solved for v
+
+rf_secular  @579d5e07
+  what  lmpar's search for $\lambda$ on a step that is too long, done again from
+        its formulas with the normal equations: returns how many values of
+        $\lambda$ it tries, with each value in lams, $\phi$ there in phis, and
+        the first bracket $[\lambda_\ell, \lambda_u]$ in bracket.
+  how   The same rules as lmpar: start from the caller's $\lambda$ clamped
+        into the bracket; stop when $|\phi| \le \Delta / 10$; otherwise shrink
+        the bracket by the sign of $\phi$ and take a Newton step for
+        $1 / \lVert D p \rVert = 1 / \Delta$, never below $\lambda_\ell$.
+  x        $x$  the point the step starts from
+  delta    $\Delta$  the trust radius
+  par0     the $\lambda$ lmder hands lmpar
+  lams     the values of $\lambda$ tried, on return
+  phis     $\phi$ at each, on return
+  bracket  the first lower and upper bounds, on return
+  f        $f$  the residuals at x
+  J        $J$  the Jacobian at x
+  D        $D$  the scaling
+  u        $u$  the step at the current $\lambda$
+  fp       $\phi$  $\lVert D u \rVert - \Delta$ at the current $\lambda$
+  parl     $\lambda_\ell$  the lower bound: one Newton step from $\lambda = 0$
+  paru     $\lambda_u$  the upper bound, $\lVert D^{-1} J^\top f \rVert / \Delta$
+  par      $\lambda$  the value being tried
+  ntried   how many values have been tried
+  done     whether lmpar's stopping test has passed
+  fprev    $\phi$ at the value tried before
+  parc     the Newton correction to $\lambda$
+
+  bounds    evaluate $J$, $f$ and $D$ at x; the lower bound from $\phi(0)$, the upper from the gradient; clamp the starting $\lambda$ into them
+  repeat until lmpar's stopping test passes
+    try       solve for the step at $\lambda$, measure $\phi$, record both, and apply the stopping test
+    if the test did not pass
+      next      shrink the bracket by the sign of $\phi$ and take the Newton step, never below $\lambda_\ell$
+
+rf_phi_figure  @572fa0de
+  what  Draw the second figure: $\phi(\lambda) = \lVert D p(\lambda) \rVert -
+        \Delta$ from x on a log axis of $\lambda$, the band
+        $|\phi| \le \Delta / 10$ where lmpar stops, the bracket, and the values
+        of $\lambda$ lmpar tries from par0. Returns how many it tries.
+  x        $x$  the point
+  delta    $\Delta$  the trust radius
+  par0     the $\lambda$ lmder hands lmpar
+  lams     the values of $\lambda$ tried
+  phis     $\phi$ at each
+  bracket  the first lower and upper bounds
+  ntried   how many values lmpar tries
+  f        $f$  the residuals at x
+  J        $J$  the Jacobian at x
+  D        $D$  the scaling
+  u        the step at each $\lambda$ of the curve
+  lam      the values of $\lambda$ the curve is drawn at
+  phi      $\phi$ at each
+  k        a point of the curve, or a value tried
+  tried_l  the values tried, without the unused space
+  tried_p  $\phi$ at each value tried
+
+  curve     $\phi$ at log-spaced values of $\lambda$ up to the upper bound
+  marks     the values lmpar tries, and the bracket

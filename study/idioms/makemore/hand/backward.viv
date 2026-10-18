@@ -1,0 +1,40 @@
+###
+makemore's hand-written backward pass, kept verbatim from `makemore.viv` so
+that `makemore_ad.viv` can check its generated gradient against it.
+
+Used with `import hand.backward`.
+###
+
+#| The loss on the sequences `ids`, with its gradient added into `grad`.
+def loss_and_grad(theta: Arr, ids: Arr, grad: Arr) {
+    n = count_positions(ids)
+    target = zeros(n)
+    ctx = contexts(ids, target)
+    X = embed(theta, ctx)
+    H = hidden(theta, X)
+    logits = output(theta, H)
+    loss = cross_entropy(logits, target)
+
+    dlogits = cross_entropy_bwd(logits, target)
+    ones = ones_column(n)
+    param_add(grad, model, W2, transpose(H) @ dlogits)
+    param_add(grad, model, B2, transpose(ones) @ dlogits)
+    dpre = (dlogits @ transpose(param_get(theta, model, W2))) * (1.0 - H * H)
+    param_add(grad, model, W1, transpose(X) @ dpre)
+    param_add(grad, model, B1, transpose(ones) @ dpre)
+    dX = dpre @ transpose(param_get(theta, model, W1))
+    base = param_offset(model, WTE)
+    for r to n {
+        for k to BLOCK {
+            row = base + ctx[r, k] * N_EMBD
+            for j to N_EMBD {
+                grad[row + j] = grad[row + j] + dX[r, k * N_EMBD + j]
+            }
+        }
+    }
+    return loss
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2022 Andrej Karpathy (karpathy/makemore)
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,31 @@
+# B303 (bugs/ledger.jsonl), found by vivsmith (tools/fuzz, seeds 100815, 101225
+# and 101689): an index that calls a def which writes into the array being
+# indexed, `v[f(v)]`, panicked the interpreter ("already borrowed:
+# BorrowMutError"); native and wasm read the element after the call's write.
+def put(a: Arr) -> Int {
+    a[0] = 2.0
+    return 0
+}
+def sorts(a: Arr) -> Int {
+    sort(a)
+    return 0
+}
+def corner(m: Arr) -> Int {
+    m[1, 1] = 9.0
+    return 1
+}
+v = zeros(2)
+x = v[put(v)]
+u = [3.0, 1.0]
+y = u[sorts(u)]
+w = [[1.0, 2.0], [3.0, 4.0]]
+z = w[corner(w), 1]
+print(fmt(x), fmt(y), fmt(z))
+
+test "an index may call a def that writes into the array" {
+    assert_near(x, 2.0, 0.0)
+    assert_near(y, 1.0, 0.0)
+    assert_near(z, 9.0, 0.0)
+}
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

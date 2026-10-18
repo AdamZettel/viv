@@ -1,0 +1,117 @@
+# Poisson's equation, solved spectrally:  -u'' = f  on a periodic domain.
+#
+# In Fourier space the second derivative is multiplication by -k^2, so the
+# whole solve is one transform, one division, and one transform back:
+#
+#     u_hat(k) = f_hat(k) / k^2 ,     u_hat(0) = 0   (the mean is a free constant)
+#
+# This is not a toy. It is, line for line, how a plane-wave DFT code gets the
+# Hartree potential from the electron density -- V_H(G) = 4 pi n(G) / |G|^2 --
+# which is why it is the first program written against Viv's fft.
+#
+# Validation: f is a sum of two Fourier modes, so the exact solution is known in
+# closed form, and a spectral method must reproduce it to ROUNDING ERROR -- not
+# to O(h^2) like a finite-difference stencil. The second test runs at N = 60,
+# which is not a power of two, so it goes through Bluestein's algorithm rather
+# than radix-2: no grid size is a special case the caller has to route around.
+
+PI = 3.141592653589793
+
+#| The right-hand side: two Fourier modes, so the answer is known exactly.
+def rhs(x) {
+    return sin(3.0 * x) + 0.5 * cos(5.0 * x)
+}
+
+#| The exact solution of -u'' = rhs with zero mean: divide each mode by k^2.
+def exact(x) {
+    return sin(3.0 * x) / 9.0 + 0.5 * cos(5.0 * x) / 25.0
+}
+
+#| Solve on an N-point periodic grid; return the largest error against `exact`.
+#|| fft, divide by k^2, ifft. Wavenumbers above N/2 alias to negative ones.
+#: n    grid points on [0, 2 pi)
+#: u    the complex work array: f going in, the solution coming out
+#: kk   the signed integer wavenumber of bin j
+def solve_and_measure(n) {
+    u = czeros(n)
+    for j to n {
+        u[j] = rhs(2.0 * PI * j / n)
+    }
+    fft(u)
+    u[0] = 0.0
+    for j to n {
+        if j > 0.0 {
+            kk = j
+            if j > n / 2.0 { kk = j - n }
+            u[j] = u[j] / (kk * kk)
+        }
+    }
+    ifft(u)
+    worst = 0.0
+    for j to n {
+        e = abs(re(u[j]) - exact(2.0 * PI * j / n))
+        if e > worst { worst = e }
+    }
+    return worst
+}
+
+err64 = solve_and_measure(64)
+err60 = solve_and_measure(60)
+show err64
+show err60
+
+test "spectral Poisson is exact to rounding (N = 64, radix-2)" {
+    assert_lt(err64, 1.0e-14)
+}
+test "and at N = 60, which goes through Bluestein" {
+    assert_lt(err60, 1.0e-14)
+}
+
+# --- the same solve, drawn -------------------------------------------------
+N = 64
+xs = linspace(0.0, 2.0 * PI * (N - 1.0) / N, N)
+w = czeros(N)
+for j to N {
+    w[j] = rhs(xs[j])
+}
+fft(w)
+spectrum = abs(w)
+w[0] = 0.0
+for j to N {
+    if j > 0.0 {
+        kk = j
+        if j > N / 2.0 { kk = j - N }
+        w[j] = w[j] / (kk * kk)
+    }
+}
+ifft(w)
+sol = re(w)
+want = zeros(N)
+for j to N {
+    want[j] = exact(xs[j])
+}
+
+# the imaginary part of a real problem's solution must vanish
+leftover = im(w)
+imax = 0.0
+for j to N {
+    if abs(leftover[j]) > imax { imax = abs(leftover[j]) }
+}
+show imax
+test "a real right-hand side gives a real solution" {
+    assert_lt(imax, 1.0e-15)
+}
+
+# The spectrum is two spikes: bins 3 and 5, and their mirror images.
+test "the right-hand side lives in exactly the modes it was built from" {
+    assert_near(spectrum[3], 32.0, 1.0e-10)
+    assert_near(spectrum[5], 16.0, 1.0e-10)
+    assert_lt(spectrum[4], 1.0e-10)
+}
+
+figure("Poisson on a periodic interval, solved in Fourier space", "x", "u(x)")
+plot(xs, sol, "spectral solution")
+plot(xs, want, "exact")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

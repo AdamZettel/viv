@@ -1,0 +1,73 @@
+# Forward-mode automatic differentiation via dual numbers.
+#
+# A `Dual` carries (value, derivative). Every operation propagates the derivative
+# (e.g. d(a*b) = a*db + b*da). Seeding the variable of interest with derivative 1
+# (others 0) and evaluating in dual arithmetic yields the exact derivative w.r.t.
+# that variable. The gradient of an n-input function is n such passes.
+#
+# Exact, no finite-difference error. Records make it a plain library (no compiler
+# change).
+
+record Dual { v: Num, d: Num }
+
+def dconst(x) -> Dual {
+    return Dual { v: x, d: 0.0 }
+}
+def dvar(x) -> Dual {
+    return Dual { v: x, d: 1.0 }
+}           # the seeded input
+def dadd(a: Dual, b: Dual) -> Dual {
+    return Dual { v: a.v + b.v, d: a.d + b.d }
+}
+def dsub(a: Dual, b: Dual) -> Dual {
+    return Dual { v: a.v - b.v, d: a.d - b.d }
+}
+def dmul(a: Dual, b: Dual) -> Dual {
+    return Dual { v: a.v * b.v, d: a.v * b.d + a.d * b.v }
+}
+def ddiv(a: Dual, b: Dual) -> Dual {
+    return Dual { v: a.v / b.v, d: (a.d * b.v - a.v * b.d) / (b.v * b.v) }
+}
+def dexp(a: Dual) -> Dual {
+    e = exp(a.v); return Dual { v: e, d: e * a.d }
+}
+def dsqrt(a: Dual) -> Dual {
+    r = sqrt(a.v); return Dual { v: r, d: a.d / (2.0 * r) }
+}
+
+# A scalar function:  f(x) = x^3 - 2x + exp(-x^2)
+def f(x: Dual) -> Dual {
+    x2 = dmul(x, x)
+    x3 = dmul(x2, x)
+    lin = dmul(dconst(2.0), x)
+    negx2 = dmul(dconst(-1.0), x2)
+    return dadd(dsub(x3, lin), dexp(negx2))
+}
+
+# Evaluate f and f' at x = 2 in a single pass.  f(2) = 4.018316, f'(2) = 9.926737.
+rf = f(dvar(2.0))
+f_value = rf.v
+f_deriv = rf.d
+show f_value
+show f_deriv
+
+# A two-variable function:  g(x, y) = x^2 * y + exp(x * y).
+def g(x: Dual, y: Dual) -> Dual {
+    x2 = dmul(x, x)
+    t1 = dmul(x2, y)
+    t2 = dexp(dmul(x, y))
+    return dadd(t1, t2)
+}
+
+# Gradient at (1.5, 0.5): one forward pass per component (seed x, then seed y).
+gx = g(dvar(1.5), dconst(0.5))
+gy = g(dconst(1.5), dvar(0.5))
+g_value = gx.v
+dg_dx = gx.d              # 2xy + y e^{xy} = 2.558467
+dg_dy = gy.d              # x^2 + x e^{xy} = 5.425401
+show g_value
+show dg_dx
+show dg_dy
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

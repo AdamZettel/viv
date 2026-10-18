@@ -1,0 +1,378 @@
+###
+post: Reading a GGUF file, part 1, the header
+agent: claude
+
+GGUF is the file format of ggml and llama.cpp: one file holds a model's
+metadata (architecture, hyperparameters, tokenizer) and its tensors, each
+in one of ggml's number formats. This module reads the part before the
+tensor data. It is a rewrite, from the specification, of the reader in
+ggml's `src/gguf.cpp` and of gguf-py's `gguf/gguf_reader.py`: ggml
+(github.com/ggml-org/ggml, MIT, The ggml authors), specification
+`docs/gguf.md` at commit 3612c0af93f2. The tests compare it with gguf-py
+0.19.0 (tools/gguf/check.sh).
+
+The file starts with four fields, little-endian:
+
+    offset  0  u32  magic: the bytes "GGUF"
+    offset  4  u32  version (3 since August 2023)
+    offset  8  u64  the number of tensors
+    offset 16  u64  the number of metadata key-value pairs
+
+Then the key-value pairs, one after another with no padding:
+
+    key    a string: u64 length, then that many bytes of UTF-8
+    type   u32: one of the thirteen value types below
+    value  1, 2, 4 or 8 bytes for a number or a bool; a string as above;
+           an ARRAY is u32 element type, u64 count, then the elements
+
+A file is read in windows of `WINDOW` bytes (a `Reader`), so the header of
+a model, whose tokenizer alone is 700 KB for a 32000-token vocabulary,
+never needs more than one window in memory.
+
+Used with `from gguf.header import read_meta` (and the other names here).
+###
+
+# "GGUF" read as a little-endian u32: 0x46554747
+GGUF_MAGIC: Int = 1179993927
+# the version this reader knows; 1 and 2 had 32-bit counts
+GGUF_VERSION: Int = 3
+# the four fields: magic, version, tensor count, key-value count
+OFF_VERSION: Int = 4
+OFF_N_TENSORS: Int = 8
+OFF_N_KV: Int = 16
+HEADER_BYTES: Int = 24
+
+# the value types (docs/gguf.md, enum gguf_metadata_value_type)
+T_UINT8: Int = 0
+T_INT8: Int = 1
+T_UINT16: Int = 2
+T_INT16: Int = 3
+T_UINT32: Int = 4
+T_INT32: Int = 5
+T_FLOAT32: Int = 6
+T_BOOL: Int = 7
+T_STRING: Int = 8
+T_ARRAY: Int = 9
+T_UINT64: Int = 10
+T_INT64: Int = 11
+T_FLOAT64: Int = 12
+TYPE_NAMES: [Str] = ["UINT8", "INT8", "UINT16", "INT16", "UINT32", "INT32", "FLOAT32", "BOOL", "STRING", "ARRAY", "UINT64", "INT64", "FLOAT64"]
+# bytes a value of each type takes; 0 for the two that carry their length
+TYPE_BYTES: [Int] = [1, 1, 2, 2, 4, 4, 4, 1, 0, 0, 8, 8, 8]
+# bytes read from the file at a time
+WINDOW: Int = 65536
+
+record Header {
+    version: Int
+    n_tensors: Int
+    n_kv: Int
+}
+
+#| A position in a file and a window of its bytes: `b` holds the bytes from
+#| offset `base`, and `pos` is the offset of the next byte to read. A reader
+#| with no path reads only `b`, the start of a file a caller already holds.
+record Reader {
+    path: Str
+    b: [Int]
+    base: Int
+    pos: Int
+}
+
+#| One metadata value. `types` is the value's type, then for an ARRAY its
+#| element type, and so on down (gguf-py's `ReaderField.types`); the values
+#| themselves, an array's flattened, are in `ints` (the integer types and
+#| BOOL, as 0 or 1), `nums` (FLOAT32 and FLOAT64) or `strs` (STRING).
+record Value {
+    types: [Int]
+    ints: [Int]
+    nums: Arr
+    strs: [Str]
+}
+
+#| A file's header and metadata: `keys[k]` holds `values[k]`, in file
+#| order, and `end` is the offset just past the last value.
+record Meta {
+    header: Header
+    keys: [Str]
+    values: [Value]
+    end: Int
+}
+
+#| The four fields at the start of a GGUF file, from its first bytes `b`.
+def header_of(b: [Int]) -> Header {
+    if len(b) < HEADER_BYTES {
+        stop(f"GGUF: {len(b):d} bytes is shorter than a header")
+    }
+    if le_u32(b, 0) != GGUF_MAGIC {
+        stop("GGUF: the file does not start with the bytes GGUF")
+    }
+    version = le_u32(b, OFF_VERSION)
+    if version != GGUF_VERSION {
+        stop(f"GGUF: version {version}; this reader knows version 3")
+    }
+    return Header { version: version, n_tensors: le_u64(b, OFF_N_TENSORS), n_kv: le_u64(b, OFF_N_KV) }
+}
+
+#| The header of the GGUF file at `path`.
+def read_header(path: Str) -> Header {
+    return header_of(read_bytes(path, 0, HEADER_BYTES))
+}
+
+#| A reader at offset `pos` of the file at `path`, its window not read yet.
+def reader_at(path: Str, pos: Int) -> Reader {
+    none: [Int] = []
+    return Reader { path: path, b: none, base: pos, pos: pos }
+}
+
+#| A reader of the bytes `b`, the first bytes of a file, with no file behind them.
+def reader_of(b: [Int]) -> Reader {
+    return Reader { path: "", b: b, base: 0, pos: 0 }
+}
+
+#| `r` with at least `k` bytes from its position in its window: the same
+#| reader when they are there, else a new window that starts at the position.
+def need(r: Reader, k: Int) -> Reader {
+    if r.pos >= r.base and r.pos + k <= r.base + len(r.b) {
+        return r
+    }
+    if r.path == "" {
+        stop(f"GGUF: the bytes given end at offset {len(r.b)}, inside a value that needs {k} bytes from {r.pos}")
+    }
+    w = r
+    w.b = read_bytes(r.path, r.pos, max(k, WINDOW))
+    w.base = r.pos
+    if len(w.b) < k {
+        stop(f"GGUF: {r.path} ends at offset {r.pos + len(w.b)}, inside a value that needs {k} bytes from {r.pos}")
+    }
+    return w
+}
+
+#| `r` moved `k` bytes on.
+def skip(r: Reader, k: Int) -> Reader {
+    q = r
+    q.pos = r.pos + k
+    return q
+}
+
+#| The bytes `b[at:at+n]` as UTF-8 text.
+def utf8(b: [Int], at: Int, n: Int) -> Str {
+    out: [Str] = []
+    i = at
+    while i < at + n {
+        c = b[i]
+        # the length of the sequence from its first byte: 0xxxxxxx, 110xxxxx,
+        # 1110xxxx, 11110xxx; a continuation byte is 10xxxxxx
+        k: Int = 1
+        cp = c
+        if c >= 240 {
+            k = 4
+            cp = band(c, 7)
+        }
+        else if c >= 224 {
+            k = 3
+            cp = band(c, 15)
+        }
+        else if c >= 192 {
+            k = 2
+            cp = band(c, 31)
+        }
+        else if c >= 128 {
+            stop(f"GGUF: byte {c} at offset {i} does not start a UTF-8 character")
+        }
+        if i + k > at + n {
+            stop("GGUF: a string ends inside a UTF-8 character")
+        }
+        for j from 1 to k {
+            cp = bor(shl(cp, 6), band(b[i + j], 63))
+        }
+        out = append(out, chr(cp))
+        i = i + k
+    }
+    return join("", out)
+}
+
+#| A GGUF string at the reader: u64 length, then the bytes.
+def take_str(r: Reader) {
+    q = need(r, TYPE_BYTES[T_UINT64])
+    n = le_u64(q.b, q.pos - q.base)
+    q = skip(q, TYPE_BYTES[T_UINT64])
+    q = need(q, n)
+    s = utf8(q.b, q.pos - q.base, n)
+    return skip(q, n), s
+}
+
+#| A u32 at the reader (a type code).
+def take_u32(r: Reader) {
+    q = need(r, TYPE_BYTES[T_UINT32])
+    return skip(q, TYPE_BYTES[T_UINT32]), le_u32(q.b, q.pos - q.base)
+}
+
+#| A u64 at the reader (a count).
+def take_u64(r: Reader) {
+    q = need(r, TYPE_BYTES[T_UINT64])
+    return skip(q, TYPE_BYTES[T_UINT64]), le_u64(q.b, q.pos - q.base)
+}
+
+#| One value of type `t` at the reader, added to `v`: a number, a bool or a
+#| string, or for an ARRAY its element type, its count and its elements.
+#| `depth` counts the arrays this value is inside; an element type is noted
+#| in `v.types` once per level.
+def take_value(r: Reader, t: Int, v: Value, depth: Int) {
+    q = r
+    w = v
+    if t == T_STRING {
+        q, s = take_str(q)
+        w.strs = append(w.strs, s)
+    }
+    else if t == T_ARRAY {
+        q, et = take_u32(q)
+        q, n = take_u64(q)
+        if len(w.types) == depth + 1 {
+            w.types = append(w.types, et)
+        }
+        for k to n {
+            q, w = take_value(q, et, w, depth + 1)
+        }
+    }
+    else if t >= 0 and t < len(TYPE_BYTES) {
+        k = TYPE_BYTES[t]
+        q = need(q, k)
+        at = q.pos - q.base
+        if t == T_FLOAT32 {
+            w.nums = append(w.nums, le_f32(q.b, at))
+        }
+        else if t == T_FLOAT64 {
+            w.nums = append(w.nums, le_f64(q.b, at))
+        }
+        else if t == T_UINT8 or t == T_BOOL {
+            w.ints = append(w.ints, le_u8(q.b, at))
+        }
+        else if t == T_INT8 {
+            w.ints = append(w.ints, le_i8(q.b, at))
+        }
+        else if t == T_UINT16 {
+            w.ints = append(w.ints, le_u16(q.b, at))
+        }
+        else if t == T_INT16 {
+            w.ints = append(w.ints, le_i16(q.b, at))
+        }
+        else if t == T_UINT32 {
+            w.ints = append(w.ints, le_u32(q.b, at))
+        }
+        else if t == T_INT32 {
+            w.ints = append(w.ints, le_i32(q.b, at))
+        }
+        else if t == T_UINT64 {
+            # a UINT64 above 2^63 - 1 is kept as its bit pattern, a negative Int
+            w.ints = append(w.ints, le_i64(q.b, at))
+        }
+        else {
+            w.ints = append(w.ints, le_i64(q.b, at))
+        }
+        q = skip(q, k)
+    }
+    else {
+        stop(f"GGUF: value type {t} at offset {r.pos} is not one of the thirteen")
+    }
+    return q, w
+}
+
+#| The header and every key-value pair of the GGUF file at `path`.
+def read_meta(path: Str) -> Meta {
+    return meta_from(reader_at(path, 0))
+}
+
+#| The header and every key-value pair, read by `r`, a reader at offset 0.
+def meta_from(r0: Reader) -> Meta {
+    r = need(r0, HEADER_BYTES)
+    h = header_of(r.b[:HEADER_BYTES])
+    r = skip(r, HEADER_BYTES)
+    keys: [Str] = []
+    values: [Value] = []
+    for k to h.n_kv {
+        r, key = take_str(r)
+        r, t = take_u32(r)
+        ts: [Int] = [t]
+        v = Value { types: ts, ints: int_zeros(0), nums: [], strs: [] }
+        r, v = take_value(r, t, v, 0)
+        keys = append(keys, key)
+        values = append(values, v)
+    }
+    return Meta { header: h, keys: keys, values: values, end: r.pos }
+}
+
+#| The position of `key` among the metadata's keys, or -1.
+def find_key(m: Meta, key: Str) -> Int {
+    for k to len(m.keys) {
+        if m.keys[k] == key {
+            return int(k)
+        }
+    }
+    return -1
+}
+
+#| The integer value of `key` (an integer type or BOOL); `fallback` when the
+#| file has no such key.
+def meta_int(m: Meta, key: Str, fallback: Int) -> Int {
+    k = find_key(m, key)
+    if k < 0 {
+        return fallback
+    }
+    if len(m.values[k].ints) != 1 {
+        stop(f"GGUF: {key} is not one integer")
+    }
+    return m.values[k].ints[0]
+}
+
+#| The string value of `key`; `fallback` when the file has no such key.
+def meta_str(m: Meta, key: Str, fallback: Str) -> Str {
+    k = find_key(m, key)
+    if k < 0 {
+        return fallback
+    }
+    if len(m.values[k].strs) != 1 or m.values[k].types[0] != T_STRING {
+        stop(f"GGUF: {key} is not a string")
+    }
+    return m.values[k].strs[0]
+}
+
+#| One line per key, `key TYPES count`, then one line per element, in the
+#| form tools/gguf/ref.py prints gguf-py's fields (strings as Python's repr,
+#| numbers to 17 digits), so the two can be compared line for line.
+def print_meta(m: Meta) {
+    print(f"version {m.header.version} tensors {m.header.n_tensors} keys {m.header.n_kv}")
+    for k to len(m.keys) {
+        v = m.values[k]
+        names = join(",", [TYPE_NAMES[t] for t in v.types])
+        n = len(v.ints) + len(v.nums) + len(v.strs)
+        print(f"{m.keys[k]} {names} {n:d}")
+        for i in v.ints {
+            print(f"  {i}")
+        }
+        for x in v.nums {
+            print(f"  {x:.17g}")
+        }
+        for s in v.strs {
+            print(f"  {repr(s)}")
+        }
+    }
+}
+
+test "the four fields of a header" {
+    # "GGUF", version 3, 2 tensors, 5 keys
+    b: [Int] = [71, 71, 85, 70, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]
+    h = header_of(b)
+    assert_true(h.version == 3)
+    assert_true(h.n_tensors == 2)
+    assert_true(h.n_kv == 5)
+}
+
+test "UTF-8 text from bytes" {
+    # "aé▁" : 61, C3 A9, E2 96 81
+    b: [Int] = [97, 195, 169, 226, 150, 129]
+    assert_true(utf8(b, 0, len(b)) == "aé▁")
+    assert_true(utf8(b, 1, 2) == "é")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

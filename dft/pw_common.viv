@@ -1,0 +1,431 @@
+# pw_common: what the dense and the iterative plane-wave engines share.
+#
+#     dft/run.sh si  |  dft/run.sh si it     (this file is a prelude to both engines)
+#
+# Kohn-Sham DFT in a plane-wave basis with separable norm-conserving
+# pseudopotentials (Goedecker-Teter-Hutter / Hartwigsen-Goedecker-Hutter), the
+# local-density approximation (the Teter-93 Pade fit -- the functional those
+# pseudopotentials were generated with), and dense diagonalization of H(k) at
+# every k-point. Self-consistent field by density mixing, then a band structure
+# along a path. Hartree atomic units throughout.
+#
+# The input deck (dft/si.viv) is ordinary Viv that sets the globals read here.
+# This file is everything that does not depend on HOW the Kohn-Sham equations
+# are solved: geometry, the pseudopotential in reciprocal space, plane-wave
+# bookkeeping, the FFT grid, exchange-correlation, occupations, and the density
+# mixer. dft/pwdft.viv (dense) and dft/pwdft_it.viv (iterative) come after it.
+#
+# EVERY formula below is checked against something that does not share its
+# derivation: dft/ref/verify_formulas.py tests the GTH closed forms against
+# radial quadrature of their real-space definitions and the LDA against libxc,
+# and dft/ref/pwdft_ref.py is an independent numpy implementation that this
+# program must agree with iteration by iteration.
+
+PI = 3.141592653589793
+HA_EV = 27.211386245988
+
+# ============================================================== 1. geometry
+
+#: NDIM  the dimension of space: A has one row per lattice vector
+NDIM = len(A)
+
+#: OMEGA  the cell volume; OMEGA_S keeps the sign of the triple product
+OMEGA_S = A[0, 0] * (A[1, 1] * A[2, 2] - A[1, 2] * A[2, 1]) - A[0, 1] * (A[1, 0] * A[2, 2] - A[1, 2] * A[2, 0]) + A[0, 2] * (A[1, 0] * A[2, 1] - A[1, 1] * A[2, 0])
+OMEGA = abs(OMEGA_S)
+
+# Reciprocal vectors, one per row: b_i . a_j = 2 pi delta_ij.
+B = zeros(NDIM, NDIM)
+for i to NDIM {
+    j = mod(i + 1.0, 3.0)
+    k = mod(i + 2.0, 3.0)
+    B[i, 0] = 2.0 * PI * (A[j, 1] * A[k, 2] - A[j, 2] * A[k, 1]) / OMEGA_S
+    B[i, 1] = 2.0 * PI * (A[j, 2] * A[k, 0] - A[j, 0] * A[k, 2]) / OMEGA_S
+    B[i, 2] = 2.0 * PI * (A[j, 0] * A[k, 1] - A[j, 1] * A[k, 0]) / OMEGA_S
+}
+
+# Atom positions in cartesian bohr, and the electron count.
+TAU = ATFRAC @ A
+NELEC = sum(take(ZION, ATSPEC))
+
+# ====================================================== 2. projector channels
+#
+# A channel is one radial projector: (species, l, i). CH0[s, l] is the first
+# channel of that (s, l) block; NPRJ[s, l] says how many follow it.
+NCH = 0.0
+CH0 = zeros(NSPEC, GTH_NL)
+for s to NSPEC {
+    for l to GTH_NL {
+        CH0[s, l] = NCH
+        NCH = NCH + NPRJ[s, l]
+    }
+}
+CHS = zeros(NCH)
+CHL = zeros(NCH)
+CHI = zeros(NCH)
+for s to NSPEC {
+    for l to GTH_NL {
+        for i to NPRJ[s, l] {
+            CHS[CH0[s, l] + i] = s
+            CHL[CH0[s, l] + i] = l
+            CHI[CH0[s, l] + i] = i
+        }
+    }
+}
+
+# ============================================= 3. the GTH pseudopotential, in G
+
+PI54 = pow(PI, 1.25)
+
+# The radial projector p_i^l(K), including 1/sqrt(OMEGA).
+# Closed forms from HGH (1998); i is zero-based here. Defined so that
+# <K|V_nl|K'> = sum_l (2l+1)/(4 pi) P_l(cos) sum_ij p_i(K) h_ij p_j(K').
+# Each is verified against radial quadrature of r^2 p(r) j_l(K r) in
+# dft/ref/verify_formulas.py -- a closed form can be wrong and still run.
+#: l  angular momentum, 0..3
+#: i  which projector of that l, 0..2
+#: r  the projector radius r_l
+#: k  |k + G|
+def gth_proj(l, i, r, k) {
+    x2 = k * k * r * r
+    e = exp(-0.5 * x2) * PI54 / sqrt(OMEGA)
+    if l == 0.0 {
+        if i == 0.0 { return 4.0 * sqrt(2.0 * r * r * r) * e }
+        if i == 1.0 { return 8.0 * sqrt(2.0 * r * r * r / 15.0) * (3.0 - x2) * e }
+        return 16.0 * sqrt(2.0 * r * r * r / 105.0) * (15.0 - 10.0 * x2 + x2 * x2) * e / 3.0
+    }
+    if l == 1.0 {
+        r5 = pow(r, 5.0)
+        if i == 0.0 { return 8.0 * sqrt(r5 / 3.0) * k * e }
+        if i == 1.0 { return 16.0 * sqrt(r5 / 105.0) * k * (5.0 - x2) * e }
+        return 32.0 * sqrt(r5 / 1155.0) * k * (35.0 - 14.0 * x2 + x2 * x2) * e / 3.0
+    }
+    if l == 2.0 {
+        r7 = pow(r, 7.0)
+        if i == 0.0 { return 8.0 * sqrt(2.0 * r7 / 15.0) * k * k * e }
+        return 16.0 * sqrt(2.0 * r7 / 105.0) * k * k * (7.0 - x2) * e / 3.0
+    }
+    return 16.0 * sqrt(pow(r, 9.0) / 105.0) * k * k * k * e
+}
+
+# The local pseudopotential of ONE atom of species s at |G| = g, with 1/OMEGA.
+# At g = 0 this is the finite part: the divergent -4 pi Z/(OMEGA g^2) cancels
+# against the Hartree and ion-ion terms of a neutral cell.
+def gth_vloc(s, g) {
+    rl = RLOC[s]
+    x2 = g * g * rl * rl
+    poly = CLOC[s, 0] + CLOC[s, 1] * (3.0 - x2) + CLOC[s, 2] * (15.0 - 10.0 * x2 + x2 * x2) + CLOC[s, 3] * (105.0 - 105.0 * x2 + 21.0 * x2 * x2 - x2 * x2 * x2)
+    gauss = sqrt(8.0 * PI * PI * PI) * rl * rl * rl
+    if g < 1.0e-12 {
+        return (2.0 * PI * ZION[s] * rl * rl + gauss * poly) / OMEGA
+    }
+    e = exp(-0.5 * x2)
+    return (0.0 - 4.0 * PI * ZION[s] * e / (g * g) + gauss * e * poly) / OMEGA
+}
+
+def legendre(l, c) {
+    if l == 0.0 { return 1.0 }
+    if l == 1.0 { return c }
+    if l == 2.0 { return 1.5 * c * c - 0.5 }
+    return 2.5 * c * c * c - 1.5 * c
+}
+
+# ===================================================== 4. plane-wave bookkeeping
+
+# A rigorous bound on |m_i|: m_i = G . a_i / 2 pi, and |G| <= sqrt(2 ECUT) + |k|.
+AMAX = 0.0
+BMAX = 0.0
+for i to NDIM {
+    AMAX = max(AMAX, sqrt(sum(A[i, :] * A[i, :])))
+    BMAX = max(BMAX, sqrt(sum(B[i, :] * B[i, :])))
+}
+MM = floor((sqrt(2.0 * ECUT) + BMAX) * AMAX / (2.0 * PI)) + 1.0
+NM = 2.0 * MM + 1.0
+
+# At fractional k: how many plane waves satisfy |k + G|^2 / 2 <= ECUT, and
+# the largest |m_i| among them (it sizes the FFT grid).
+def pw_extent(k1, k2, k3) {
+    n = 0.0
+    big = 0.0
+    for i1 to NM {
+        for i2 to NM {
+            for i3 to NM {
+                m1 = i1 - MM
+                m2 = i2 - MM
+                m3 = i3 - MM
+                f1 = m1 + k1
+                f2 = m2 + k2
+                f3 = m3 + k3
+                gx = f1 * B[0, 0] + f2 * B[1, 0] + f3 * B[2, 0]
+                gy = f1 * B[0, 1] + f2 * B[1, 1] + f3 * B[2, 1]
+                gz = f1 * B[0, 2] + f2 * B[1, 2] + f3 * B[2, 2]
+                if 0.5 * (gx * gx + gy * gy + gz * gz) <= ECUT {
+                    n = n + 1.0
+                    if abs(m1) > big { big = abs(m1) }
+                    if abs(m2) > big { big = abs(m2) }
+                    if abs(m3) > big { big = abs(m3) }
+                }
+            }
+        }
+    }
+    return n, big
+}
+
+# --- the k-points: the SCF set, then every point of the band path -----------
+NPTS = (NCORNER - 1.0) * NSEG + 1.0
+PATHK = zeros(NPTS, NDIM)
+PATHX = zeros(NPTS)
+for c to NCORNER - 1.0 {
+    for t to NSEG {
+        PATHK[c * NSEG + t, :] = CORNER[c, :] + (CORNER[c + 1.0, :] - CORNER[c, :]) * t / NSEG
+    }
+}
+PATHK[NPTS - 1.0, :] = CORNER[NCORNER - 1.0, :]
+#: PATHX  the distance along the path to each point, in 1/bohr: the plot's x axis
+for p from 1 to NPTS {
+    dk = (PATHK[p, :] - PATHK[p - 1.0, :]) @ B
+    PATHX[p] = PATHX[p - 1.0] + sqrt(sum(dk * dk))
+}
+
+#: NPWMAX  the most plane waves any k-point needs: the size of every H
+#: MBASIS  the largest |m_i| that appears in any basis: it sizes the FFT grid
+NPWMAX = 0.0
+MBASIS = 0.0
+ALLK = vcat(KFRAC, PATHK)
+for q to len(ALLK) {
+    n, big = pw_extent(ALLK[q, 0], ALLK[q, 1], ALLK[q, 2])
+    NPWMAX = max(NPWMAX, n)
+    MBASIS = max(MBASIS, big)
+}
+
+# ============================================================ 5. the FFT grid
+#
+# H needs V(G - G') for every pair of basis vectors, so the grid must hold
+# |m| up to 2 MBASIS without aliasing; the density needs exactly the same.
+#
+# Any side that large is CORRECT. The FFT is fastest when the side factors
+# into 2s, 3s and 5s (each has its own butterfly); a factor of 7 goes through
+# the generic one, several times slower, and anything larger through Bluestein's
+# detour, slower again. 4 MBASIS + 2 is twice an odd number, so it is usually a
+# bad side. Round up to the next good one: 34 -> 36, not 35.
+
+SMALL_PRIMES = [2.0, 3.0, 5.0]
+
+# The smallest integer >= n with no prime factor above 5.
+def fft_nice(n) {
+    m = n
+    found = false
+    while not found {
+        rest = m
+        for i to len(SMALL_PRIMES) {
+            while mod(rest, SMALL_PRIMES[i]) == 0.0 {
+                rest = rest / SMALL_PRIMES[i]
+            }
+        }
+        if rest == 1.0 { found = true } else { m = m + 1.0 }
+    }
+    return m
+}
+
+NG = fft_nice(4.0 * MBASIS + 2.0)
+NGRID = NG * NG * NG
+DV = OMEGA / NGRID
+
+def wrap(m) {
+    return m - NG * floor(m / NG)
+}
+
+#: G2  |G|^2 on the grid;  VPS  the ionic local potential, with structure factors
+G2 = zeros(NG, NG, NG)
+VPS = czeros(NG, NG, NG)
+for i1 to NG {
+    for i2 to NG {
+        for i3 to NG {
+            m1 = i1
+            m2 = i2
+            m3 = i3
+            if m1 >= NG / 2.0 { m1 = m1 - NG }
+            if m2 >= NG / 2.0 { m2 = m2 - NG }
+            if m3 >= NG / 2.0 { m3 = m3 - NG }
+            gx = m1 * B[0, 0] + m2 * B[1, 0] + m3 * B[2, 0]
+            gy = m1 * B[0, 1] + m2 * B[1, 1] + m3 * B[2, 1]
+            gz = m1 * B[0, 2] + m2 * B[1, 2] + m3 * B[2, 2]
+            g2 = gx * gx + gy * gy + gz * gz
+            G2[i1, i2, i3] = g2
+            v = complex(0.0, 0.0)
+            for a to NAT {
+                ph = gx * TAU[a, 0] + gy * TAU[a, 1] + gz * TAU[a, 2]
+                v = v + gth_vloc(ATSPEC[a], sqrt(g2)) * complex(cos(ph), 0.0 - sin(ph))
+            }
+            VPS[i1, i2, i3] = v
+        }
+    }
+}
+
+# ===================================================== 6. exchange-correlation
+#
+# The Teter-93 Pade fit to the LDA -- one rational function of r_s for exchange
+# AND correlation. It is what the GTH-PADE pseudopotentials were generated
+# with, so using anything else would be inconsistent with them. Checked against
+# libxc's LDA_XC_TETER93 to 1e-10 in dft/ref/verify_formulas.py.
+XA0 = 0.4581652932831429
+XA1 = 2.217058676663745
+XA2 = 0.7405551735357053
+XA3 = 0.01968227878617998
+XB1 = 1.0
+XB2 = 4.504130959426697
+XB3 = 1.110667363742916
+XB4 = 0.02359291751427506
+RS0 = pow(3.0 / (4.0 * PI), 1.0 / 3.0)
+#: RHO_FLOOR  the density is floored here before r_s = (3 / 4 pi rho)^(1/3) is taken.
+#:            A MIXED density is an extrapolation and can dip below zero where the
+#:            true one is small; log of that is NaN, and the NaN reaches every
+#:            eigenvalue one SCF step later. (Copper did exactly this.)
+RHO_FLOOR = 1.0e-30
+
+# The LDA on the real-space grid, whole arrays at a time: eps_xc(r), hartree
+# per electron, and v_xc(r) = d(rho eps_xc) / d rho.
+def lda_xc(rho) {
+    rs = exp(log(max(rho, RHO_FLOOR)) * (0.0 - 1.0 / 3.0)) * RS0
+    num = XA0 + rs * (XA1 + rs * (XA2 + rs * XA3))
+    den = rs * (XB1 + rs * (XB2 + rs * (XB3 + rs * XB4)))
+    dnum = XA1 + rs * (2.0 * XA2 + rs * 3.0 * XA3)
+    dden = XB1 + rs * (2.0 * XB2 + rs * (3.0 * XB3 + rs * 4.0 * XB4))
+    exc = 0.0 - num / den
+    return exc, exc + rs * (dnum * den - num * dden) / (den * den) / 3.0
+}
+
+ZERO3 = zeros(NG, NG, NG)
+
+# ============================================================ 6b. occupations
+
+# The electron count at chemical potential mu, Fermi-Dirac of width SMEAR.
+def electrons_at(mu) {
+    n = 0.0
+    for k to NKPT {
+        for b to NBANDS {
+            x = (EIG[k, b] - mu) / SMEAR
+            if x > 200.0 { x = 200.0 }
+            if x < -200.0 { x = -200.0 }
+            n = n + KWT[k] * 2.0 / (1.0 + exp(x))
+        }
+    }
+    return n
+}
+
+#: FERMI_BISECTIONS  how many times fermi_level halves its bracket
+FERMI_BISECTIONS = 200
+
+# The Fermi level: bisect on the electron count. 200 halvings of a ~10 Ha
+# bracket is far past double precision, so this matches any other bisection.
+def fermi_level() {
+    lo = min(EIG[0:NKPT, 0:NBANDS]) - 1.0
+    hi = max(EIG[0:NKPT, 0:NBANDS]) + 1.0
+    mu = 0.0
+    for it to FERMI_BISECTIONS {
+        mu = 0.5 * (lo + hi)
+        if electrons_at(mu) > NELEC {
+            hi = mu
+        } else {
+            lo = mu
+        }
+    }
+    return mu
+}
+
+# Fill FOCC. An insulator (SMEAR = 0) fills the lowest NELEC/2 bands; a metal
+# gets Fermi-Dirac occupations. Returns the electronic entropy S (so that the
+# free energy is E - SMEAR * S), zero for an insulator.
+def fill_occupations(mu) {
+    ent = 0.0
+    for k to NKPT {
+        for b to NBANDS {
+            if SMEAR > 0.0 {
+                x = (EIG[k, b] - mu) / SMEAR
+                if x > 200.0 { x = 200.0 }
+                if x < -200.0 { x = -200.0 }
+                f = 2.0 / (1.0 + exp(x))
+                FOCC[k, b] = f
+                h = 0.5 * f
+                if h > 1.0e-300 and h < 1.0 - 1.0e-16 {
+                    ent = ent - 2.0 * KWT[k] * (h * log(h) + (1.0 - h) * log(1.0 - h))
+                }
+            } else {
+                FOCC[k, b] = 0.0
+                if b < NELEC / 2.0 { FOCC[k, b] = 2.0 }
+            }
+        }
+    }
+    return ent
+}
+
+
+# ======================================================== 7. density mixing
+#
+# Anderson acceleration over the last three iterates. With F = rho_out - rho_in
+# the residual, find the combination of recent iterates whose residual is
+# smallest (a 3x3 least-squares problem), then take a damped step from it.
+# Linear mixing -- rho += MIX * F -- is what this does on its first step, and
+# all it would ever do with no history; it is enough for silicon and hopeless
+# for copper, whose d-electrons respond so strongly that a plain damped step
+# either crawls or oscillates. The fixed point is the same either way.
+#
+# History lives in named variables because an array of arrays is not a Viv
+# value; whole-array arithmetic keeps every line at native speed.
+AND_R1 = ZERO3
+AND_R2 = ZERO3
+AND_R3 = ZERO3
+AND_F1 = ZERO3
+AND_F2 = ZERO3
+AND_F3 = ZERO3
+
+# The next input density, from the current one, its residual, and the history.
+#: nh  how many earlier iterates are stored, 0..3
+def anderson_step(rho, f, nh) {
+    if nh == 0.0 {
+        return rho + MIX * f
+    }
+    a = zeros(nh, nh)
+    bv = zeros(nh)
+    th = zeros(nh)
+    df1 = f - AND_F1
+    df2 = f - AND_F2
+    df3 = f - AND_F3
+    a[0, 0] = sum(df1 * df1)
+    bv[0] = sum(df1 * f)
+    if nh >= 2.0 {
+        a[0, 1] = sum(df1 * df2)
+        a[1, 0] = a[0, 1]
+        a[1, 1] = sum(df2 * df2)
+        bv[1] = sum(df2 * f)
+    }
+    if nh >= 3.0 {
+        a[0, 2] = sum(df1 * df3)
+        a[2, 0] = a[0, 2]
+        a[1, 2] = sum(df2 * df3)
+        a[2, 1] = a[1, 2]
+        a[2, 2] = sum(df3 * df3)
+        bv[2] = sum(df3 * f)
+    }
+    tr = 0.0
+    for i to nh {
+        tr = tr + a[i, i]
+    }
+    for i to nh {
+        a[i, i] = a[i, i] + 1.0e-14 * tr
+    }
+    lin_solve(a, bv, th)
+    rbar = rho - th[0] * (rho - AND_R1)
+    fbar = f - th[0] * df1
+    if nh >= 2.0 {
+        rbar = rbar - th[1] * (rho - AND_R2)
+        fbar = fbar - th[1] * df2
+    }
+    if nh >= 3.0 {
+        rbar = rbar - th[2] * (rho - AND_R3)
+        fbar = fbar - th[2] * df3
+    }
+    return rbar + MIX * fbar
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

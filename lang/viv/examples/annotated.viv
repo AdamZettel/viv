@@ -1,0 +1,58 @@
+# The worked example for the native-annotation syntax: the Boys function and
+# the primitive Gaussian overlap from the SCF programs, annotated at all three
+# levels, with two labeled regions and a variable glossary.
+#
+# The annotations are ordinary comments to the compiler, so this file compiles
+# and runs exactly as the stripped version would. `viv doc annotated.viv`
+# extracts them; `viv src annotated.viv boys_F0` prints the stripped source.
+#
+# Validation: a normalized Gaussian overlapping itself is exactly 1.
+
+pi = 3.141592653589793
+
+#[ The one special function: everything with a 1/r in it funnels through F0
+#| Series branch: the closed form has a 0/0 at T = 0, so small arguments switch to Taylor
+#|| Three terms reach 1e-8 accuracy below the branch cutoff
+#: T  the squared distance times the reduced exponent; the only argument F0 has
+def boys_F0(T) {
+    if T < 1.0e-8 {
+        return 1.0 - T / 3.0 + T * T / 10.0
+    }
+    #| The definition, integrated as written: F0(T) = integral of exp(-T t^2) over [0,1]
+    #|| Simpson quadrature, 60 panels -- slow per call, transparently correct
+    #||| Production codes use tables and rational fits; this program optimizes for legibility
+    return simpson(fn(t) -> exp(-T * t * t), 0.0, 1.0, 60)
+}
+#]
+
+#[ Overlap of two normalized s-Gaussians
+#| The Gaussian product theorem does all the work: two centers collapse to one
+#~ integrals, gaussian
+#: a   exponent of the bra primitive
+#: b   exponent of the ket primitive
+#: r2  squared distance between the two centers
+#: p   the combined exponent a + b, the center of the product Gaussian
+def prim_overlap(a, b, r2) {
+    p = a + b
+    #| K carries the distance penalty between the two centers
+    #: K  the Gaussian-product prefactor exp(-ab/p * r2)
+    K = exp(-a * b / p * r2)
+    #|| The (2a/pi)^(3/4) factors normalize each primitive on the fly
+    #||| Baking these into contraction coefficients is the usual optimization; explicit keeps every formula matching the textbook
+    #: Na  normalization of the bra s-primitive
+    #: Nb  normalization of the ket s-primitive
+    Na = pow(2.0 * a / pi, 0.75)
+    Nb = pow(2.0 * b / pi, 0.75)
+    return Na * Nb * pow(pi / p, 1.5) * K
+}
+#]
+
+#| A normalized Gaussian overlapping itself must give exactly 1
+show prim_overlap(0.9, 0.9, 0.0)
+
+test "self-overlap of a normalized primitive is 1" {
+    assert_near(prim_overlap(0.9, 0.9, 0.0), 1.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

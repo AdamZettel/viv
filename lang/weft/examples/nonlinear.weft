@@ -1,0 +1,17 @@
+# Nonlinear (semilinear) reaction-diffusion:  -laplacian(u) + lam*u^3 = f,
+# u = 0 on the boundary of the unit square, linear (P1) triangles.
+#
+# Manufactured solution u = x(1-x) y(1-y), so f = 2[x(1-x)+y(1-y)] + lam*u^3.
+# weft differentiates the residual symbolically (d/du of lam*u^3 = 3*lam*u^2) to
+# form the Newton Jacobian, then emits a Newton loop. Validation: Newton converges
+# (residual -> 0), and u_h -> the exact solution at O(h^2).
+#
+#   cargo run -p weft -- lang/weft/examples/nonlinear.weft -o /tmp/nl.c
+#   cc -std=c99 -O2 -Wno-unknown-pragmas /tmp/nl.c -lm -o /tmp/nl && /tmp/nl
+
+mesh: unit_square(16)
+coefficient f = 2.0 * (x * (1.0 - x) + y * (1.0 - y)) + 1000.0 * (x * (1.0 - x) * y * (1.0 - y)) * (x * (1.0 - x) * y * (1.0 - y)) * (x * (1.0 - x) * y * (1.0 - y))
+residual: dot(grad(u), grad(v)) + 1000.0 * u * u * u * v - f * v
+dirichlet: 0.0
+exact: x * (1.0 - x) * y * (1.0 - y)
+newton: 25

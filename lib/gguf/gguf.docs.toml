@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference prose of vp.gguf.read and vp.gguf.tensor (python -m
+# vipyr.docs reads it into vipyr/spec.json and the /vipyr pages). The
+# parameters and results are listed in vipyr/_registry.py; the reader is
+# lib/gguf (header.viv, tensors.viv, quants.viv), its entry points
+# lib/gguf/api.viv, and python/vipyr/_gguf.py builds the Python values.
+
+[read]
+summary = "Read a GGUF file's metadata and tensor table."
+description = """
+`vp.gguf.read` reads the head of the file (the first megabyte, doubled
+until the tensor table fits) and hands the bytes to `file_index` of
+`lib/gguf/api.viv`, which parses the header, the metadata and the tensor
+table as docs/gguf.md lays them out and returns them as flat numbers; Python
+turns those into a dict and a list. The tensor data is not read.
+
+```python
+f = vp.gguf.read("stories15M-q8_0.gguf")
+f.metadata["llama.embedding_length"]      # 288
+f.metadata["tokenizer.ggml.tokens"][:3]   # ['<unk>', '<s>', '</s>']
+f.tensors[0]                              # TensorInfo(name='token_embd.weight', shape=(32000, 288), ...)
+f.tensor_info("blk.0.attn_q.weight")      # its row of the table, by name
+```
+
+The result goes to `vp.gguf.tensor(path, name, file=f)` so that each
+tensor does not read the table again.
+"""
+notes = """
+A GGUF file is a header (the bytes `GGUF`, version 3, the number of
+tensors and of metadata pairs), the metadata (typed key-value pairs: eight
+integer types, two float types, bool, UTF-8 strings, and arrays of any of
+them, arrays included), the tensor table (name, dimensions, ggml type,
+offset into the data section), padding to `general.alignment` (32 when
+the file does not set it), and the data. A float32 value comes back as the
+Python float equal to it; integers of every width as Python ints.
+"""
+see_also = ["gguf.tensor"]
+
+[[read.references]]
+text = "The GGUF file format specification, ggml's docs/gguf.md, at commit 3612c0af93f2cfc8f048295300a61187723b12ae (lib/gguf/UPSTREAM.md)."
+url = "https://github.com/ggml-org/ggml/blob/master/docs/gguf.md"
+
+[tensor]
+summary = "One tensor of a GGUF file, dequantized to float32."
+description = """
+`vp.gguf.tensor` finds the tensor in the table, reads its bytes, and
+dequantizes them with `dequant` of `lib/gguf/api.viv`
+(`lib/gguf/quants.viv`): the result is a float32 array in NumPy's order
+(GGUF lists dimensions fastest first; the shape here is the reverse).
+
+The quantized types store blocks of weights with a scale per block:
+
+| type | weights per block | bytes per block | a weight is |
+|---|---|---|---|
+| Q8_0 | 32 | 34 | a signed byte times the block's half-precision scale |
+| Q4_0 | 32 | 18 | (a 4-bit q minus 8) times the scale |
+| Q4_1 | 32 | 20 | a 4-bit q times the scale plus the block's minimum |
+| Q4_K | 256 | 144 | 4 bits with 6-bit scales and minimums for each 32 |
+| Q6_K | 256 | 210 | 6 bits (4 low, 2 high) with a signed 8-bit scale for each 16 |
+
+F32, F16 and BF16 are converted exactly. ggml computes Q4_1's sum in
+single precision, and so does lib/gguf (`fround`), so the values are
+gguf-py's bit for bit.
+"""
+see_also = ["gguf.read"]
+
+[[tensor.references]]
+text = "ggml's dequantize_row_* functions, src/ggml-quants.c, at commit 3612c0af93f2cfc8f048295300a61187723b12ae; gguf-py 0.19.0's gguf/quants.py, the reference the values are checked against."
+url = "https://github.com/ggml-org/ggml/blob/master/src/ggml-quants.c"

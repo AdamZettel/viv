@@ -1,0 +1,87 @@
+module dft/pwdft
+  The dense engine: at every k-point, build the Kohn-Sham Hamiltonian H(k)
+  as a matrix in the plane-wave basis and diagonalize it.
+
+  This is the direct way to solve the problem, and the reason it exists is
+  to be the check on the iterative engine (dft/pwdft_it.viv): the two share
+  dft/pw_common.viv and nothing else of the solver. It runs silicon and
+  aluminum; the other materials have too many plane waves for it.
+
+  H(k) in the plane-wave basis has three parts:
+  - kinetic energy, diagonal: `|k + G|^2 / 2`;
+  - the local potential, which depends only on the difference of the two
+    plane waves: `V_tot(G - G')`, read off the FFT grid;
+  - the nonlocal pseudopotential `V_nl(G, G')`, built once per k-point.
+
+  The file runs after the deck, dft/kmesh.viv and dft/pw_common.viv. Each
+  SCF k-point gets a slot in the arrays below, and one more slot is scratch
+  space for the points of the band path. The top level then runs the steps
+  listed under `<main>` when you view this lens: bases, the SCF loop, the
+  bands along the path, and their zero of energy. The loop starts from a
+  uniform density and stops when both the density change and the energy
+  change fall below SCF_TOL. For silicon it needs the same number of
+  iterations as the numpy reference, which does the same arithmetic in a
+  different language [test "SCF converged, in the same number of iterations as the reference"].
+
+setup_slot  @f220a1d7
+  what  Fill one slot for a k-point given in fractional coordinates: the
+        integer triple m of every plane wave that passes the cutoff, its
+        `k + G` in Cartesian coordinates and its length, every radial
+        projector at that length, and the structure-factor phase of every
+        atom. Returns the largest `|m_i|` used.
+  why   Everything here depends on k alone, so it is computed once per
+        k-point and reused at every SCF iteration.
+
+  for each i1
+    for each i2
+      for each i3
+        if the plane wave passes the cutoff
+          keep        record m, `k + G` and `|k + G|`, and track the largest `|m_i|`
+          projectors  evaluate each radial projector `p_i^l(|k + G|)`
+          phases      the structure factor `exp(-i G.tau)` of each atom, from G alone, not `k + G`
+
+vnl_element  @604fc4d7
+  what  One element `V_nl(G_i, G_j)` of the nonlocal pseudopotential of a
+        slot: the pair of plane waves i and j.
+  how   The cosine of the angle between `k + G_i` and `k + G_j`; then for
+        each species, the pair's structure factor (the sum over that
+        species' atoms of `exp(-i (G_i - G_j).tau)`) times the radial part
+        `sum_l (2l+1)/(4 pi) P_l(cos) sum_ab p_a h_ab p_b`, with the
+        projectors p evaluated at `|k + G_i|` and `|k + G_j|`.
+  why   The Legendre form needs no spherical harmonics. The iterative
+        engine uses the equivalent separable form instead. Both engines are
+        compared with the same numpy reference, so their agreement with it
+        checks each form
+        [test "total energy agrees with the numpy reference"].
+
+build_vnl  @fd08fcb1
+  what  The nonlocal pseudopotential of one slot as a matrix in its
+        plane-wave basis, one vnl_element per pair.
+  why   The matrix is Hermitian, so only the lower triangle is computed and
+        each element's conjugate is written into the upper one.
+
+build_vtot  @0fd3e8ea
+  what  The total local potential `V_tot(G) = V_ps + V_H + V_xc` on the FFT
+        grid, from the density and the exchange-correlation potential in G
+        space. Returns the Hartree energy.
+  how   Poisson's equation is algebraic in G space:
+        `V_H(G) = 4 pi rho(G) / |G|^2`, with `G = 0` left out (see gth_vloc
+        in dft/pw_common.intent). The Hartree energy is
+        `(OMEGA / 2) sum_G 4 pi |rho(G)|^2 / |G|^2`.
+
+build_h  @10494150
+  what  The Hamiltonian H(k) of one slot as an `NPWMAX x NPWMAX` matrix:
+        `V_tot(G - G') + V_nl(G, G')` everywhere, plus the kinetic energy on
+        the diagonal.
+  why   Every k-point has its own number of plane waves, but the eigensolver
+        is handed one fixed-size matrix. Rows past the slot's own count are
+        padding: they are decoupled from the rest and given diagonal values
+        far above the physical spectrum, so they are never among the
+        occupied bands.
+
+add_density  @06c816a7
+  what  Add the density of one k-point's occupied bands to acc and return
+        the sum.
+  how   For each band with nonzero occupation, place its coefficients on the
+        FFT grid, inverse FFT to get `psi(r)`, and add
+        `weight * occupation * |psi(r)|^2`, normalized by the cell volume.

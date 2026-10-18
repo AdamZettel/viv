@@ -1,0 +1,73 @@
+# Gaussian elimination with partial pivoting, written out, against lin_solve,
+# on a 4x4 system whose answer is [1, 2, 3, 4].
+
+def gauss_solve(A, b) {
+    n = len(b)
+    M = zeros(n, n)
+    r = zeros(n)
+    for i to n {
+        r[i] = b[i]
+        for j to n {
+            M[i, j] = A[i, j]
+        }
+    }
+    for c to n {
+        p = c
+        for i to n {
+            if i > c and abs(M[i, c]) > abs(M[p, c]) {
+                p = i
+            }
+        }
+        for j to n {
+            t = M[c, j]
+            M[c, j] = M[p, j]
+            M[p, j] = t
+        }
+        t = r[c]
+        r[c] = r[p]
+        r[p] = t
+        for i to n {
+            if i > c {
+                f = M[i, c] / M[c, c]
+                for j to n {
+                    M[i, j] = M[i, j] - f * M[c, j]
+                }
+                r[i] = r[i] - f * r[c]
+            }
+        }
+    }
+    x = zeros(n)
+    for k to n {
+        i = n - 1 - k
+        s = r[i]
+        for j to n {
+            if j > i {
+                s = s - M[i, j] * x[j]
+            }
+        }
+        x[i] = s / M[i, i]
+    }
+    return x
+}
+
+A = [[2.0, 1.0, 0.0, 3.0], [4.0, -1.0, 2.0, 0.0], [0.0, 5.0, 1.0, 1.0], [1.0, 0.0, 6.0, 2.0]]
+want = [1.0, 2.0, 3.0, 4.0]
+b = A @ want
+x = gauss_solve(A, b)
+y = zeros(4)
+lin_solve(A, b, y)
+show x
+show y
+err = max(abs(x - want))
+diff = max(abs(x - y))
+show err
+
+test "elimination recovers 1, 2, 3, 4" {
+    assert_lt(err, 1.0e-13)
+}
+test "it agrees with lin_solve" {
+    assert_lt(diff, 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

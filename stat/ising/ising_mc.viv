@@ -1,0 +1,149 @@
+###
+The two-dimensional Ising model on an L by L square lattice with periodic
+edges, sampled by Metropolis (checkerboard order) or Wolff clusters at
+temperature T, coupling J and field h. A run returns the energy per site,
+|m|, the susceptibility, the specific heat and Binder's cumulant with error
+bars from binning, the autocorrelation times, the time series and the final
+spins, beside the exact results it can be checked against: Onsager's T_c and
+infinite-lattice energy, Yang's spontaneous magnetization, and Kaufman's
+energy and specific heat of the same finite lattice. Every random number is
+a Philox4x32-10 word of a counter, so a run is bit-identical in every engine.
+###
+# The program behind `viv export stat/ising/ising_mc.export.toml`: the
+# settings at the top level, one call of lib/ising's simulate, and its
+# measurements copied into the globals below. A parameter left out of a run
+# keeps the value here.
+#
+#     viv run stat/ising/ising_mc.viv
+#
+# The energy of an arrangement is E = -J sum_<ij> s_i s_j - h sum_i s_i and
+# its weight exp(-E / T), with Boltzmann's constant 1.
+from ising import critical_temperature, simulate, kaufman_energy_heat, onsager_energy, yang_magnetization
+
+#: size  L, the lattice's side: N = L * L spins, periodic edges; even, so the checkerboard's two colors alternate around the wrap
+size: Int = 16
+#: temperature  T, in units of J / k_B when J = 1; beta = 1 / T
+temperature = 2.0
+#: coupling  J, between neighbors: positive is ferromagnetic (Wolff needs J > 0)
+coupling = 1.0
+#: field  h, the external field
+field = 0.0
+#: algorithm  "metropolis": single-spin flips in checkerboard order; "wolff": cluster flips
+algorithm = "metropolis"
+#: start  "cold": every spin up; "hot": each spin up or down at random
+start = "cold"
+#: sweeps  the measured sweeps; a Wolff sweep is as many clusters as add up to N spins or more
+sweeps: Int = 2000
+#: thermalization  the sweeps run and discarded before measuring
+thermalization: Int = 500
+#: seed  the Philox key: runs with the same seed and settings give the same bits
+seed: Int = 1
+#: bins  the number of bins for the error bars; each holds sweeps / bins sweeps, which should be many autocorrelation times
+bins: Int = 20
+
+if size % 2 != 0 {
+    stop(f"size must be even for the checkerboard; it is {size}")
+}
+if temperature <= 0.0 {
+    stop(f"temperature must be positive; it is {temperature}")
+}
+if bins < 2 or bins > sweeps {
+    stop(f"bins must be between 2 and sweeps ({sweeps}); it is {bins}")
+}
+if algorithm == "wolff" and coupling <= 0.0 {
+    stop(f"Wolff clusters need a ferromagnetic coupling > 0; it is {coupling}")
+}
+
+beta = 1.0 / temperature
+run = simulate(size, beta, coupling, field, algorithm == "wolff", sweeps, thermalization, seed, start == "hot", bins)
+
+# ---- what the run measured
+#: energy  the energy per site, <E> / N
+energy = run.stats.energy
+#: energy_err  its standard error, from the scatter of the bin means
+energy_err = run.stats.energy_err
+#: mag_abs  <|m|>, m = sum_i s_i / N
+mag_abs = run.stats.mag_abs
+#: mag_abs_err  its standard error, from the bins
+mag_abs_err = run.stats.mag_abs_err
+#: mag  <m>, which is near 0 at h = 0 on a finite lattice once the run flips between up and down
+mag = run.stats.mag
+#: mag_err  its standard error, from the bins
+mag_err = run.stats.mag_err
+#: heat  the specific heat per site, beta^2 N (<e^2> - <e>^2), e = E / N
+heat = run.stats.heat
+#: heat_err  its jackknife error over the bins
+heat_err = run.stats.heat_err
+#: chi  the susceptibility per site, beta N (<m^2> - <|m|>^2)
+chi = run.stats.chi
+#: chi_err  its jackknife error over the bins
+chi_err = run.stats.chi_err
+#: binder  Binder's cumulant 1 - <m^4> / (3 <m^2>^2): 2/3 when ordered, 0 for a Gaussian m
+binder = run.stats.binder
+#: binder_err  its jackknife error over the bins
+binder_err = run.stats.binder_err
+#: tau_energy  the integrated autocorrelation time of the energy, in sweeps
+tau_energy = run.stats.tau_energy
+#: tau_mag  the integrated autocorrelation time of |m|, in sweeps
+tau_mag = run.stats.tau_mag
+#: accept  Metropolis: the fraction of proposed flips accepted; Wolff: the mean cluster size over N
+accept = run.accept
+#: energy_series  the energy per site after each measured sweep
+energy_series = run.es
+#: mag_series  m after each measured sweep
+mag_series = run.ms
+#: spins  the final arrangement, L by L, each +1 or -1
+spins = run.spins
+
+# ---- the exact results to hold the run to
+#: t_critical  Onsager's critical temperature 2 J / ln(1 + sqrt 2) (for J > 0)
+t_critical = critical_temperature(abs(coupling))
+#: exact_known  whether exact_energy, exact_heat and energy_infinite apply: field 0, coupling positive and temperature not T_c
+exact_known = field == 0.0 and coupling > 0.0 and temperature != t_critical
+#: exact_energy  Kaufman's exact energy per site of this L by L lattice (0 unless exact_known)
+exact_energy = 0.0
+#: exact_heat  Kaufman's exact specific heat per site of this L by L lattice (0 unless exact_known)
+exact_heat = 0.0
+#: energy_infinite  Onsager's energy per site of the infinite lattice (0 unless exact_known)
+energy_infinite = 0.0
+#: mag_infinite  Yang's spontaneous magnetization of the infinite lattice at h = 0: 0 at and above T_c
+mag_infinite = yang_magnetization(beta, abs(coupling))
+if exact_known {
+    exact_energy, exact_heat = kaufman_energy_heat(size, beta, coupling)
+    energy_infinite = onsager_energy(beta, coupling)
+}
+
+show energy, energy_err, exact_energy
+show mag_abs, mag_abs_err, mag_infinite
+show heat, heat_err, exact_heat
+show chi, chi_err, binder, binder_err
+show tau_energy, tau_mag, accept
+
+# ---- what holds for every run, whatever the settings (the statistical
+# checks against the exact results are in stat/ising/test_ising.py, which
+# chooses runs long enough for them)
+test "every spin is +1 or -1, and the series have one entry per measured sweep" {
+    for i to size {
+        for j to size {
+            assert_near(abs(spins[i, j]), 1.0, 0.0)
+        }
+    }
+    assert_near(len(energy_series), sweeps, 0.0)
+    assert_near(len(mag_series), sweeps, 0.0)
+}
+test "the energy per site lies in [-2 |J| - |h|, 2 |J| + |h|] and |m| in [0, 1]" {
+    bound = 2.0 * abs(coupling) + abs(field)
+    assert_true(energy >= -bound and energy <= bound)
+    assert_true(mag_abs >= 0.0 and mag_abs <= 1.0)
+    assert_true(abs(mag) <= mag_abs)
+}
+test "the variances are not negative, Binder's cumulant is at most 2/3, and tau is at least 1/2" {
+    # <m^4> >= <m^2>^2 makes U <= 2/3; tau = 1/2 + a sum that the window stops while positive
+    assert_true(heat >= 0.0 and chi >= 0.0)
+    assert_true(binder <= 2.0 / 3.0 + 1.0e-12)
+    assert_true(energy_err >= 0.0 and mag_abs_err >= 0.0 and heat_err >= 0.0 and chi_err >= 0.0 and binder_err >= 0.0)
+    assert_true(accept >= 0.0 and accept <= 1.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

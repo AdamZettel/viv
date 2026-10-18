@@ -1,0 +1,255 @@
+###
+post: Five initial densities for the SCF
+agent: claude
+
+The SCF is a fixed-point iteration, and like any fixed-point iteration it
+needs a starting point. When a molecule has more than one SCF solution, the
+start decides which one it lands on, so the guess is a strategy with its own
+registry, not a detail. Open shells make this concrete: from the core guess,
+UHF on OH converges to the excited 2Sigma+ state (0.155 Eh above the 2Pi
+ground state PySCF reports), and UHF on triplet water lands 0.082 Eh above
+PySCF's state. Both are genuine SCF solutions, with the unpaired electron in
+the wrong orbital.
+
+Every member returns spin densities `[2, n, n]`, `Da` and `Db`, each built
+from orbitals occupied once. A closed-shell driver adds them.
+
+- `gs_avg` (member 0, production): an SCF on the spin-averaged density
+  first. All `N = Na + Nb` electrons go into one set of orbitals, two per
+  orbital, and the electrons left at the top are shared equally by the
+  orbitals of the highest level that is only partly filled (a pi pair
+  holding 3 electrons gets 1.5 in each orbital). Averaging keeps degenerate
+  orbitals equivalent, so the iteration does not commit to one of them
+  early. It starts from the GWH
+  matrix below; when it converges (or after `GS_AVG_MAXIT` steps), the lowest
+  `Na` of its orbitals give `Da` and the lowest `Nb` give `Db`. Measured with
+  CDIIS: from this guess UHF lands on PySCF's state for OH 6-31G, O2 STO-3G
+  and triplet water 6-31G. Started from the core Hamiltonian instead, the
+  averaged SCF sends OH and O2 to the same higher states the core guess
+  reaches. It builds J
+  and K with `jk_packed`, so it needs the packed integrals.
+- `gs_core`: drop the electron-electron repulsion and diagonalize the core
+  Hamiltonian `H = T + V`, then occupy the lowest orbitals. PySCF calls this
+  the `1e` guess. It ignores the electrons' repulsion entirely, but it is
+  cheap and needs only `H` and `S`.
+- `gs_gwh`: the generalized Wolfsberg-Helmholz guess, an extended-Huckel
+  style matrix `F_ij = K S_ij (H_ii + H_jj) / 2` off the diagonal (with
+  `K = 1.75`) and `F_ii = H_ii`.
+- `gs_zero`: zero densities. The first Fock matrix is then `H`, so the first
+  iteration reproduces `gs_core` one step later.
+- `gs_import`: the densities the caller passes in `D0`, unchanged. This is how
+  a PySCF density enters an SCF run (import mode).
+
+Member signature: `(H, S, Gp, D0, opts) -> [2, n, n]`, five arrays like the
+J/K stage. `D0` is `[2, n, n]` and only `gs_import`
+reads it; `Gp` is the packed ERI vector and only `gs_avg` reads it. Electron
+counts, the orthogonalizer (`opts[OPT_ORTH]`) and the eigensolver
+(`opts[OPT_EIGEN]`) come from opts. The guesses PySCF uses by default
+(minao, atom, huckel) need atomic data this library does not carry yet.
+
+Used with `import hf.guess`.
+###
+
+from hf.opts import OPT_ACCEL, OPT_EIGEN, OPT_GUESS, OPT_NALPHA, OPT_NBETA, OPT_SHIFT
+from hf.eigen import eig_of, eig_values, eig_vectors
+from hf.orthogonalize import orth_of, orth_rank
+from hf.density import (
+    den_commutator_sym, den_fock, den_from_vectors, den_maxabs, den_orth, den_orth_density_sx,
+    den_stack1, den_stack2,
+)
+from hf.jk import jk_packed
+from hf.accelerate import ACCEL_CDIIS, accel_extrapolate, accel_new, accel_push
+
+GS_GWH_K = 1.75
+GS_AVG_MAXIT = 60
+GS_AVG_GTOL = 1.0e-7
+# orbitals closer than this (in Eh) to the partly filled level share it
+GS_AVG_DEGEN = 1.0e-5
+
+GS_AVG = 0
+GS_CORE = 1
+GS_GWH = 2
+GS_ZERO = 3
+GS_IMPORT = 4
+
+#| The eigen-decomposition of `X^T A X` (m columns of X kept) by eigensolver
+#| `opts[OPT_EIGEN]`: a member result, `[m + 1, m]` (lib/hf/eigen).
+def gs_eig(A: Arr, X: Arr, m, opts: Arr) -> Arr {
+    return eig_of(den_orth(X, A, m), opts[OPT_EIGEN])
+}
+
+#| Spin densities `[2, n, n]` from the lowest `na` and `nb` eigenvectors in V.
+def gs_spins(X: Arr, V: Arr, m, na, nb) {
+    return den_stack2(den_from_vectors(X, V, m, 0, na, 1.0), den_from_vectors(X, V, m, 0, nb, 1.0))
+}
+
+#| Occupy the lowest `na` and `nb` eigenvectors of `X^T A X` as spin
+#| densities.
+def gs_occupy(A: Arr, S: Arr, opts: Arr) -> Arr {
+    X = orth_of(S, opts)
+    m = orth_rank(X)
+    R = gs_eig(A, X, m, opts)
+    return gs_spins(X, eig_vectors(R), m, opts[OPT_NALPHA], opts[OPT_NBETA])
+}
+
+#| Occupation numbers for `N` electrons over the ascending levels `vals`:
+#| two per orbital from the bottom, and the electrons left for the partly
+#| filled level shared equally by every orbital within GS_AVG_DEGEN of it.
+#| Returns them and the number of orbitals with `f > 0`.
+def gs_fractional(vals: Arr, N) {
+    m = len(vals)
+    f = zeros(m)
+    if N <= 0.0 {
+        return f, 0
+    }
+    #: the top doubly occupied level, widened over near-degenerate orbitals
+    top = floor((N - 1) / 2)
+    lo = top
+    while lo > 0 and abs(vals[lo - 1] - vals[top]) < GS_AVG_DEGEN {
+        lo = lo - 1
+    }
+    hi = top
+    while hi < m - 1 and abs(vals[hi + 1] - vals[top]) < GS_AVG_DEGEN {
+        hi = hi + 1
+    }
+    #: fill below it doubly; share the rest over the degenerate ones
+    f[0:lo] = 2.0
+    f[lo:hi + 1] = (N - 2.0 * lo) / (hi - lo + 1)
+    return f, hi + 1
+}
+
+#| The total density `sum f_k c_k c_k^T` over the first `nocc` orbitals.
+def gs_frac_density(X: Arr, V: Arr, m, f: Arr, nocc) {
+    if nocc < 1 {
+        return zeros(len(X), len(X))
+    }
+    C = X[:, 0:m] @ V[0:m, 0:nocc]
+    Cf = copy(C)
+    for k to nocc {
+        Cf[:, k] = f[k] * C[:, k]
+    }
+    return Cf @ transpose(C)
+}
+
+#| Member `GS_AVG`, the production one: the spin-averaged SCF, then aufbau per spin.
+def gs_avg(H: Arr, S: Arr, Gp: Arr, D0: Arr, opts: Arr) -> Arr {
+    X = orth_of(S, opts)
+    m = orth_rank(X)
+    N = opts[OPT_NALPHA] + opts[OPT_NBETA]
+    # DIIS and no level shift, whatever the run asks for
+    o = copy(opts)
+    o[OPT_ACCEL] = ACCEL_CDIIS
+    o[OPT_SHIFT] = 0.0
+    diis = accel_new(1, m, o)
+    #: start: GWH orbitals, filled fractionally
+    U = S @ X[:, 0:m]
+    R = gs_eig(gs_gwh_matrix(H, S), X, m, o)
+    V = eig_vectors(R)
+    f, nocc = gs_fractional(eig_values(R), N)
+    D = gs_frac_density(X, V, m, f, nocc)
+    #: spin-averaged SCF with DIIS
+    it = 0
+    err = 1.0
+    while it < GS_AVG_MAXIT and err > GS_AVG_GTOL {
+        it = it + 1
+        JK = jk_packed(Gp, Gp, Gp, den_stack1(D), o)
+        F = den_fock(H, JK, 1)
+        Fp = den_orth(X, slab(F, 0), m)
+        E = den_commutator_sym(Fp, den_orth_density_sx(U, D))
+        err = den_maxabs(E)
+        accel_push(diis, den_stack1(Fp), den_stack1(E))
+        Fx = accel_extrapolate(diis, o)
+        R = eig_of(slab(Fx, 0), o[OPT_EIGEN])
+        V = eig_vectors(R)
+        f, nocc = gs_fractional(eig_values(R), N)
+        D = gs_frac_density(X, V, m, f, nocc)
+    }
+    return gs_spins(X, V, m, opts[OPT_NALPHA], opts[OPT_NBETA])
+}
+
+#| Member `GS_CORE`: diagonalize the core Hamiltonian.
+def gs_core(H: Arr, S: Arr, Gp: Arr, D0: Arr, opts: Arr) -> Arr {
+    return gs_occupy(H, S, opts)
+}
+
+#| The generalized Wolfsberg-Helmholz matrix.
+def gs_gwh_matrix(H: Arr, S: Arr) -> Arr {
+    n = len(H)
+    A = zeros(n, n)
+    for i to n {
+        for j to n {
+            if i == j {
+                A[i, j] = H[i, i]
+            }
+            else {
+                A[i, j] = 0.5 * GS_GWH_K * S[i, j] * (H[i, i] + H[j, j])
+            }
+        }
+    }
+    return A
+}
+
+#| Member `GS_GWH`: generalized Wolfsberg-Helmholz.
+def gs_gwh(H: Arr, S: Arr, Gp: Arr, D0: Arr, opts: Arr) -> Arr {
+    return gs_occupy(gs_gwh_matrix(H, S), S, opts)
+}
+
+#| Member `GS_ZERO`: nothing.
+def gs_zero(H: Arr, S: Arr, Gp: Arr, D0: Arr, opts: Arr) -> Arr {
+    n = len(H)
+    return zeros(2, n, n)
+}
+
+#| Member `GS_IMPORT`: the caller's densities.
+def gs_import(H: Arr, S: Arr, Gp: Arr, D0: Arr, opts: Arr) -> Arr {
+    return D0 + 0.0
+}
+
+#| The guess registry, production member first.
+def gs_methods() {
+    return [gs_avg, gs_core, gs_gwh, gs_zero, gs_import]
+}
+
+#| The starting spin densities `[2, n, n]` of the guess `opts[OPT_GUESS]`
+#| names. `D0` is what `gs_import` hands back. Each member is called by name,
+#| `gs_avg` (the production one) when the option is left at its default.
+def gs_of(H: Arr, S: Arr, Gp: Arr, D0: Arr, opts: Arr) -> Arr {
+    k = round(opts[OPT_GUESS])
+    if k == GS_CORE {
+        return gs_core(H, S, Gp, D0, opts)
+    }
+    if k == GS_GWH {
+        return gs_gwh(H, S, Gp, D0, opts)
+    }
+    if k == GS_ZERO {
+        return gs_zero(H, S, Gp, D0, opts)
+    }
+    if k == GS_IMPORT {
+        return gs_import(H, S, Gp, D0, opts)
+    }
+    return gs_avg(H, S, Gp, D0, opts)
+}
+
+test "fractional occupations share the partly filled level equally" {
+    # O2-like: 8 electrons, a doubly degenerate level at the top gets 1 each
+    gs_v = [-2.0, -1.5, -1.0, -0.5, -0.5, 0.3]
+    gs_f, gs_nf = gs_fractional(gs_v, 8)
+    assert_near(gs_nf, 5, 0.0)
+    assert_near(gs_f[2], 2.0, 0.0)
+    assert_near(gs_f[3], 1.0, 0.0)
+    assert_near(gs_f[4], 1.0, 0.0)
+    # OH-like: 9 electrons, the pair takes 3
+    gs_f, gs_nf = gs_fractional(gs_v, 9)
+    assert_near(gs_nf, 5, 0.0)
+    assert_near(gs_f[3], 1.5, 0.0)
+    # a closed shell fills whole orbitals
+    gs_f, gs_nf = gs_fractional(gs_v, 4)
+    assert_near(gs_nf, 2, 0.0)
+    assert_near(gs_f[1], 2.0, 0.0)
+    assert_near(gs_f[2], 0.0, 0.0)
+    gs_f, gs_nf = gs_fractional(gs_v, 0)
+    assert_near(gs_nf, 0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

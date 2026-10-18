@@ -1,0 +1,244 @@
+###
+post: The test problems of lib/ode, with exact Jacobians by grad
+agent: claude
+
+Each problem is `name(t, y, p)` in the form lib/ode/solve.viv takes, and
+`name_jac(t, y, p)`, its Jacobian, one reverse-mode `grad` per row of a
+def that returns one component (`name_row`). The stiff ones are from the
+test set of Hairer and Wanner (Solving ODEs II, section IV.10) and the IVP
+test set of Mazzia and Magherini (Bari); their reference solutions are in
+lib/ode/stiff_reference.viv.
+
+Used with `from ode.problems import robertson, robertson_jac, ...`.
+###
+
+# ------------------------------------------------------------------ Robertson
+#| Robertson's chemical kinetics, three species, rate constants p = (k1, k2, k3)
+#| = (0.04, 1e4, 3e7): stiff because the rates span nine orders of magnitude.
+def robertson(t: Num, y: Arr, p: Arr) -> Arr {
+    r1 = p[0] * y[0]
+    r2 = p[1] * y[1] * y[2]
+    r3 = p[2] * y[1] * y[1]
+    return [-r1 + r2, r1 - r2 - r3, r3]
+}
+def robertson_row(y: Arr, t: Num, p: Arr, i) -> Num {
+    return robertson(t, y, p)[i]
+}
+def robertson_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for i to n {
+        J[i, :] = grad(robertson_row, y, t, p, i)
+    }
+    return J
+}
+
+# ----------------------------------------------------------------- Van der Pol
+#| Van der Pol's oscillator in Hairer's scaled form, p = (eps):
+#| y1' = y2, y2' = ((1 - y1^2) y2 - y1) / eps. eps = 1/mu^2, so eps = 1e-6 is
+#| mu = 1000 and eps = 1e-12 is mu = 1e6, with time in units of mu.
+def vdpol(t: Num, y: Arr, p: Arr) -> Arr {
+    return [y[1], ((1.0 - y[0] * y[0]) * y[1] - y[0]) / p[0]]
+}
+def vdpol_row(y: Arr, t: Num, p: Arr, i) -> Num {
+    return vdpol(t, y, p)[i]
+}
+def vdpol_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for i to n {
+        J[i, :] = grad(vdpol_row, y, t, p, i)
+    }
+    return J
+}
+
+# ----------------------------------------------------------------------- HIRES
+#| HIRES: the "High Irradiance RESponse" of photomorphogenesis (Schaefer 1975),
+#| eight species; the parameters are fixed and p is unused.
+def hires(t: Num, y: Arr, p: Arr) -> Arr {
+    k = 280.0 * y[5] * y[7]
+    return [
+        -1.71 * y[0] + 0.43 * y[1] + 8.32 * y[2] + 0.0007,
+        1.71 * y[0] - 8.75 * y[1],
+        -10.03 * y[2] + 0.43 * y[3] + 0.035 * y[4],
+        8.32 * y[1] + 1.71 * y[2] - 1.12 * y[3],
+        -1.745 * y[4] + 0.43 * y[5] + 0.43 * y[6],
+        -k + 0.69 * y[3] + 1.71 * y[4] - 0.43 * y[5] + 0.69 * y[6],
+        k - 1.81 * y[6],
+        -k + 1.81 * y[6],
+    ]
+}
+def hires_row(y: Arr, t: Num, p: Arr, i) -> Num {
+    return hires(t, y, p)[i]
+}
+def hires_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for i to n {
+        J[i, :] = grad(hires_row, y, t, p, i)
+    }
+    return J
+}
+
+# ------------------------------------------------------------------ Oregonator
+#| The Oregonator: Field and Noyes' model of the Belousov-Zhabotinsky
+#| reaction, a stiff relaxation oscillator.
+def oregonator(t: Num, y: Arr, p: Arr) -> Arr {
+    return [
+        77.27 * (y[1] + y[0] * (1.0 - 8.375e-6 * y[0] - y[1])),
+        (y[2] - (1.0 + y[0]) * y[1]) / 77.27,
+        0.161 * (y[0] - y[2]),
+    ]
+}
+def oregonator_row(y: Arr, t: Num, p: Arr, i) -> Num {
+    return oregonator(t, y, p)[i]
+}
+def oregonator_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for i to n {
+        J[i, :] = grad(oregonator_row, y, t, p, i)
+    }
+    return J
+}
+
+# -------------------------------------------------------------------------- E5
+#| E5: a chemical pyrolysis model (Enright, Hull and Lindberg's set), solved
+#| to t = 1e13 with concentrations down to 1e-290.
+def e5(t: Num, y: Arr, p: Arr) -> Arr {
+    a = 7.89e-10
+    b = 1.1e7
+    cc = 1.13e3
+    m = 1.0e6
+    r1 = a * y[0]
+    r2 = b * y[0] * y[2]
+    r3 = m * cc * y[1] * y[2]
+    r4 = cc * y[3]
+    return [-r1 - r2, r1 - r3, r1 - r2 - r3 + r4, r2 - r4]
+}
+def e5_row(y: Arr, t: Num, p: Arr, i) -> Num {
+    return e5(t, y, p)[i]
+}
+def e5_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for i to n {
+        J[i, :] = grad(e5_row, y, t, p, i)
+    }
+    return J
+}
+
+# --------------------------------------------------------------------- Kepler
+#| The Kepler problem, y = (x, y, vx, vy), in units with GM = 1.
+def kepler(t: Num, y: Arr, p: Arr) -> Arr {
+    r2 = y[0] * y[0] + y[1] * y[1]
+    r3 = r2 * sqrt(r2)
+    return [y[2], y[3], -y[0] / r3, -y[1] / r3]
+}
+
+#| The Kepler orbit's energy, kinetic plus potential.
+def kepler_energy(y: Arr) -> Num {
+    return 0.5 * (y[2] * y[2] + y[3] * y[3]) - 1.0 / sqrt(y[0] * y[0] + y[1] * y[1])
+}
+
+# -------------------------------------------------------------- Lotka-Volterra
+#| Lotka-Volterra predator and prey, p = (a, b, c, d), SciPy's example:
+#| x' = a x - b x y, y' = -c y + d x y.
+def lotka(t: Num, y: Arr, p: Arr) -> Arr {
+    return [p[0] * y[0] - p[1] * y[0] * y[1], -p[2] * y[1] + p[3] * y[0] * y[1]]
+}
+
+# ------------------------------------------------------------- bouncing ball
+#| A ball falling under gravity p = (g): y = (height, velocity).
+def ball(t: Num, y: Arr, p: Arr) -> Arr {
+    return [y[1], -p[0]]
+}
+
+#| The ball's event: its height, which falls through zero when it lands.
+def ball_hits(t: Num, y: Arr, p: Arr) -> Arr {
+    return [y[0]]
+}
+
+# ------------------------------------------------------------------------ SIR
+#| The SIR epidemic, y = (S, I, R) as fractions, p = (beta, gamma).
+def sir(t: Num, y: Arr, p: Arr) -> Arr {
+    inf_rate = p[0] * y[0] * y[1]
+    rec_rate = p[1] * y[1]
+    return [-inf_rate, inf_rate - rec_rate, rec_rate]
+}
+def sir_row(y: Arr, t: Num, p: Arr, i) -> Num {
+    return sir(t, y, p)[i]
+}
+def sir_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for i to n {
+        J[i, :] = grad(sir_row, y, t, p, i)
+    }
+    return J
+}
+
+# ------------------------------------------------------------- pharmacokinetics
+#| A one-compartment model with first-order absorption, y = (amount in the
+#| gut, plasma concentration), p = (ka, ke, V): an oral dose absorbed at rate
+#| ka into a volume V and eliminated at rate ke.
+def pk(t: Num, y: Arr, p: Arr) -> Arr {
+    absorbed = p[0] * y[0]
+    return [-absorbed, absorbed / p[2] - p[1] * y[1]]
+}
+
+#| The Bateman solution of `pk` for a dose D given at t = 0 into an empty body.
+def pk_exact(t: Num, dose: Num, p: Arr) -> Num {
+    ka = p[0]
+    ke = p[1]
+    return dose * ka / (p[2] * (ka - ke)) * (exp(-ke * t) - exp(-ka * t))
+}
+
+# ------------------------------------------------------------------- checks
+#| The Jacobian by central differences, for checking the grad ones.
+def central_jacobian(f, t: Num, y: Arr, p: Arr, h: Num) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for j to n {
+        yp = copy(y)
+        ym = copy(y)
+        yp[j] += h
+        ym[j] -= h
+        J[:, j] = (f(t, yp, p) - f(t, ym, p)) / (2.0 * h)
+    }
+    return J
+}
+
+# a step small against every state below and large against rounding
+CHECK_STEP = 1.0e-7
+rob_y = [0.7, 2.0e-5, 0.3]
+rob_p = [0.04, 1.0e4, 3.0e7]
+vdp_y = [1.5, -0.4]
+hires_y = [0.5, 0.1, 0.05, 0.2, 0.1, 0.3, 0.2, 0.1]
+orego_y = [2.0, 1.5, 3.0]
+e5_y = [1.0e-3, 1.0e-10, 1.0e-10, 1.0e-6]
+sir_y = [0.9, 0.08, 0.02]
+
+#| The largest difference between a grad Jacobian and central differences,
+#| relative to the largest entry.
+def jac_gap(J: Arr, Jfd: Arr) -> Num {
+    return amax(abs(J - Jfd)) / amax(abs(J))
+}
+
+test "every grad Jacobian agrees with central differences" {
+    gaps = [
+        jac_gap(robertson_jac(0.0, rob_y, rob_p), central_jacobian(robertson, 0.0, rob_y, rob_p, CHECK_STEP)),
+        jac_gap(vdpol_jac(0.0, vdp_y, [1.0e-3]), central_jacobian(vdpol, 0.0, vdp_y, [1.0e-3], CHECK_STEP)),
+        jac_gap(hires_jac(0.0, hires_y, zeros(0)), central_jacobian(hires, 0.0, hires_y, zeros(0), CHECK_STEP)),
+        jac_gap(oregonator_jac(0.0, orego_y, zeros(0)), central_jacobian(oregonator, 0.0, orego_y, zeros(0), CHECK_STEP)),
+        jac_gap(e5_jac(0.0, e5_y, zeros(0)), central_jacobian(e5, 0.0, e5_y, zeros(0), 1.0e-12)),
+        jac_gap(sir_jac(0.0, sir_y, [0.3, 0.1]), central_jacobian(sir, 0.0, sir_y, [0.3, 0.1], CHECK_STEP)),
+    ]
+    assert_lt(amax(gaps), 1.0e-6)
+}
+test "a Kepler orbit's energy is -1/(2a)" {
+    assert_near(kepler_energy([0.5, 0.0, 0.0, sqrt(3.0)]), -0.5, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

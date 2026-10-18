@@ -1,0 +1,456 @@
+###
+post: Jacobi, SOR and conjugate gradients on the Poisson equation
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: linear-algebra, iterative methods, poisson, sor, conjugate gradient, notebook
+equation: \rho_{\mathrm{Jacobi}} = \cos \pi h, \qquad \rho_{\mathrm{SOR}} = \frac{1 - \sin \pi h}{1 + \sin \pi h}, \qquad \kappa = \cot^2 \frac{\pi h}{2}
+agent: claude
+lane: ai
+summary: The five-point Poisson equation on a 15 by 15 grid, solved to a relative residual of $10^{-8}$ four ways. Jacobi takes 948 sweeps, Gauss-Seidel 475, SOR with the optimal factor 60, and conjugate gradients 25 iterations. Each count follows from one number the theory predicts: Jacobi's error shrinks by $\cos \pi h$ per sweep once the smoothest mode dominates, Gauss-Seidel's by its square, and SOR and CG depend on $\sqrt{\kappa} \propto 1/h$. Halve $h$ and Jacobi takes four times as many sweeps; SOR and CG take twice as many.
+
+The problem is $-\nabla^2 u = f$ on the unit square with $u = 0$ on the edge,
+on an $n$ by $n$ grid of interior points with spacing $h = 1/(n + 1)$. The
+five-point stencil turns it into $n^2$ linear equations,
+
+$$4 u_{ij} - u_{i-1,j} - u_{i+1,j} - u_{i,j-1} - u_{i,j+1} = h^2 f_{ij},$$
+
+one per grid point, and $A u = b$ for short. Direct elimination is possible at
+this size, but the iterative methods here need only the stencil, so they are
+what gets used when the grid is large or three-dimensional.
+
+The forcing $f = 2[x(1 - x) + y(1 - y)]$ has the exact solution
+$u = x(1 - x)\,y(1 - y)$. The second difference of a quadratic is exact, so the
+grid solution equals $u$ at every grid point, and whatever error remains is the
+solver's.
+
+Every method starts from $u = 0$ and stops when $\|b - A u\|_2 / \|b\|_2 <
+10^{-8}$. The Python twin is `posts/refs/jacobi-sor-and-cg-on-the-poisson-equation.py`
+(output beside it).
+###
+
+pi = 4.0 * atan(1.0)
+#: TOL  the relative residual every method must reach
+TOL = 1.0e-8
+#: N_SMALL  interior points per side on the grid the first figure uses
+N_SMALL = 15
+#: CAP  more iterations than any method needs here
+CAP = 10000
+
+# A grid is stored with its boundary: (n + 2) by (n + 2), the outer ring zero.
+# `interior_mask` is 1 inside and 0 on that ring, so whole-array updates leave it zero.
+
+#| 1 on the n by n interior of an (n + 2) by (n + 2) array, 0 on its edge.
+def interior_mask(n) {
+    m = zeros(n + 2, n + 2)
+    for i from 1 to n + 1 {
+        for j from 1 to n + 1 {
+            m[i, j] = 1.0
+        }
+    }
+    return m
+}
+
+#| The right-hand side b = h²·f on the grid, with its edge zero.
+def rhs(n) {
+    h = 1.0 / (n + 1.0)
+    b = zeros(n + 2, n + 2)
+    for i from 1 to n + 1 {
+        for j from 1 to n + 1 {
+            x = i * h
+            y = j * h
+            b[i, j] = h * h * 2.0 * (x * (1.0 - x) + y * (1.0 - y))
+        }
+    }
+    return b
+}
+
+#| The sum of the four neighbors at every point: `roll` brings each neighbor
+#| to the point, and the zero edge supplies u = 0 on the boundary.
+def neighbors(u) {
+    return roll(u, 1, 0) + roll(u, -1, 0) + roll(u, 1, 1) + roll(u, -1, 1)
+}
+
+#| A·u, the five-point stencil, zero on the edge.
+def apply_A(u, mask) {
+    return (4.0 * u - neighbors(u)) * mask
+}
+
+#| ‖b − A·u‖₂ / ‖b‖₂.
+def rel_residual(u, b, mask) {
+    r = b - apply_A(u, mask)
+    return sqrt(sum(r * r) / sum(b * b))
+}
+
+#| The largest difference from the exact x(1 − x)·y(1 − y) over the grid.
+def max_error(u) {
+    n = len(u) - 2
+    h = 1.0 / (n + 1.0)
+    worst = 0.0
+    for i from 1 to n + 1 {
+        for j from 1 to n + 1 {
+            exact = i * h * (1.0 - i * h) * j * h * (1.0 - j * h)
+            worst = max(worst, abs(u[i, j] - exact))
+        }
+    }
+    return worst
+}
+
+###
+## Jacobi
+
+A Jacobi sweep solves each equation for its own unknown, using the neighbors'
+values from the previous sweep:
+$u_{ij} \leftarrow \tfrac14 (u_{i-1,j} + u_{i+1,j} + u_{i,j-1} + u_{i,j+1} + b_{ij})$.
+All points update at once, so it is a few whole-array operations.
+
+Its error obeys $e \leftarrow (I - A/4)\, e$. The eigenvectors of $A$ are the
+grid sine modes $\sin(j \pi x) \sin(k \pi y)$, with eigenvalues
+$4 - 2\cos j\pi h - 2 \cos k\pi h$, so a sweep multiplies each mode by
+$\tfrac12(\cos j \pi h + \cos k \pi h)$. The smoothest mode, $j = k = 1$, is
+multiplied by $\cos \pi h$, the largest factor, and after enough sweeps it is
+the only one left: the residual then shrinks by exactly $\cos \pi h$ per
+sweep, $0.98079$ at $h = 1/16$. Getting from 1 to $10^{-8}$ at that rate takes
+$\ln 10^{-8} / \ln \cos \pi h = 949$ sweeps.
+###
+
+#| Copy every entry of `src` into `dst`, which has the same shape.
+def copy_into(dst, src) {
+    for i to len(src) {
+        setslab(dst, i, slab(src, i))
+    }
+}
+
+#| Jacobi sweeps from zero until the relative residual is under `tol`.
+#| Records the residual after each sweep in `hist` (entry 0 is 1, the start)
+#| and the answer in `out`. Returns the number of sweeps.
+def jacobi(n, tol, hist, out) {
+    mask = interior_mask(n)
+    b = rhs(n)
+    u = zeros(n + 2, n + 2)
+    hist[0] = 1.0
+    for k from 1 to CAP {
+        u = 0.25 * (neighbors(u) + b) * mask
+        hist[k] = rel_residual(u, b, mask)
+        if hist[k] < tol {
+            copy_into(out, u)
+            return k
+        }
+    }
+    return CAP
+}
+
+H_SMALL = 1.0 / (N_SMALL + 1.0)
+JAC_HIST = zeros(CAP + 1)
+U_JAC = zeros(N_SMALL + 2, N_SMALL + 2)
+jac_sweeps = jacobi(N_SMALL, TOL, JAC_HIST, U_JAC)
+rho_jacobi = cos(pi * H_SMALL)
+predicted_jacobi = log(TOL) / log(rho_jacobi)
+# the last sweep's shrink factor: residual(k) / residual(k - 1)
+jac_last_ratio = JAC_HIST[jac_sweeps] / JAC_HIST[jac_sweeps - 1]
+show jac_sweeps
+show predicted_jacobi
+show jac_last_ratio
+show rho_jacobi
+show max_error(U_JAC)
+
+test "Jacobi takes 948 sweeps at n = 15, as the Python twin does" {
+    assert_near(jac_sweeps, 948, 0.0)
+}
+test "and its residual shrinks by cos(pi h) per sweep at the end, to 1e-7" {
+    assert_near(jac_last_ratio, rho_jacobi, 1.0e-7)
+}
+test "which predicts the count to within 2 sweeps" {
+    assert_near(jac_sweeps, predicted_jacobi, 2.0)
+}
+test "the answer is the exact solution to 1e-9" {
+    assert_lt(max_error(U_JAC), 1.0e-9)
+}
+
+###
+## Gauss-Seidel and SOR
+
+Gauss-Seidel does the same update point by point, in order, and uses each new
+value as soon as it has it. For this matrix its error factor per sweep is
+exactly the square of Jacobi's, $\cos^2 \pi h$, so it takes half the sweeps.
+
+SOR (successive over-relaxation) takes the Gauss-Seidel update and goes
+further in the same direction: $u_{ij} \leftarrow u_{ij} + \omega\,(u^{GS}_{ij}
+- u_{ij})$, with $1 < \omega < 2$. David Young worked out the best factor for
+this matrix in 1950: $\omega = 2/(1 + \sin \pi h)$, which makes the error
+factor $\omega - 1 = (1 - \sin \pi h)/(1 + \sin \pi h) \approx 1 - 2\pi h$.
+Jacobi's is $\cos \pi h \approx 1 - \pi^2 h^2 / 2$. The distance from 1 is what
+sets the number of sweeps, so Jacobi's count grows like $1/h^2$ and SOR's like
+$1/h$. At $h = 1/16$, $\omega = 1.6735$.
+
+At the optimal $\omega$ the eigenvalues of the SOR iteration matrix pair up
+and it cannot be diagonalized, so the residual is not a constant times
+$(\omega - 1)^k$: the multiple grows, to 111 at sweep 30 and 147 at sweep 60.
+That is why SOR takes 60 sweeps here, not the $\ln 10^{-8} / \ln(\omega - 1)
+= 47$ the factor alone would give.
+###
+
+#| SOR sweeps with factor `omega` (Gauss-Seidel at omega = 1) from zero until
+#| the relative residual is under `tol`. Records the residual after each
+#| sweep in `hist`. Returns the number of sweeps.
+def sor(n, omega, tol, hist, u) {
+    mask = interior_mask(n)
+    b = rhs(n)
+    hist[0] = 1.0
+    for k from 1 to CAP {
+        for i from 1 to n + 1 {
+            for j from 1 to n + 1 {
+                gs = 0.25 * (u[i - 1, j] + u[i + 1, j] + u[i, j - 1] + u[i, j + 1] + b[i, j])
+                u[i, j] += omega * (gs - u[i, j])
+            }
+        }
+        hist[k] = rel_residual(u, b, mask)
+        if hist[k] < tol {
+            return k
+        }
+    }
+    return CAP
+}
+
+GS_HIST = zeros(CAP + 1)
+U_GS = zeros(N_SMALL + 2, N_SMALL + 2)
+gs_sweeps = sor(N_SMALL, 1.0, TOL, GS_HIST, U_GS)
+gs_last_ratio = GS_HIST[gs_sweeps] / GS_HIST[gs_sweeps - 1]
+show gs_sweeps
+show gs_last_ratio
+
+#| Young's optimal factor for the five-point Laplacian with spacing h.
+def omega_opt(h) {
+    return 2.0 / (1.0 + sin(pi * h))
+}
+OMEGA = omega_opt(H_SMALL)
+SOR_HIST = zeros(CAP + 1)
+U_SOR = zeros(N_SMALL + 2, N_SMALL + 2)
+sor_sweeps = sor(N_SMALL, OMEGA, TOL, SOR_HIST, U_SOR)
+show OMEGA
+show sor_sweeps
+show log(TOL) / log(OMEGA - 1.0)
+show max_error(U_SOR)
+
+test "Gauss-Seidel takes 475 sweeps, half of Jacobi's 948 (the Python twin agrees)" {
+    assert_near(gs_sweeps, 475, 0.0)
+}
+test "its residual shrinks by cos^2(pi h) per sweep at the end, to 1e-7" {
+    assert_near(gs_last_ratio, rho_jacobi * rho_jacobi, 1.0e-7)
+}
+test "SOR at omega = 1.6735 takes 60 sweeps, where the factor alone predicts 47" {
+    assert_near(OMEGA, 1.673513677715992, 1.0e-15)
+    assert_near(sor_sweeps, 60, 0.0)
+    assert_near(log(TOL) / log(OMEGA - 1.0), 46.6, 0.1)
+}
+test "the SOR residual is 111 times (omega - 1)^k at k = 30, and 147 times at k = 60" {
+    assert_near(SOR_HIST[30] / pow(OMEGA - 1.0, 30.0), 111.0, 1.0)
+    assert_near(SOR_HIST[60] / pow(OMEGA - 1.0, 60.0), 147.0, 1.0)
+}
+test "SOR's answer is the exact solution to 1e-9" {
+    assert_lt(max_error(U_SOR), 1.0e-9)
+}
+
+###
+## Conjugate gradients
+
+CG treats $A u = b$ as minimizing $\tfrac12 u^T A u - b^T u$ and searches
+along directions that are conjugate, $p_i^T A p_j = 0$, so no step undoes
+an earlier one. It needs only products with $A$. Its error bound depends on the
+condition number $\kappa$, the ratio of the largest eigenvalue of $A$ to the
+smallest: after $k$ steps the error, measured in the norm
+$\|e\|_A = \sqrt{e^T A e}$, has shrunk by at least
+$2\left(\frac{\sqrt\kappa - 1}{\sqrt\kappa + 1}\right)^k$. For the five-point
+matrix $\kappa = \cot^2(\pi h / 2)$, which is 103 at $h = 1/16$. The bound
+promises $10^{-8}$ within $\tfrac12 \sqrt\kappa \ln(2/10^{-8}) = 97$
+iterations. It is a worst case over right-hand sides, and it bounds that
+error rather than the residual the stopping test measures, so it is a guide to
+the count, not a prediction of it. This right-hand side needs 25.
+
+Like SOR, CG's count grows like $\sqrt\kappa \propto 1/h$. Unlike SOR, it
+needs no parameter tuned to the matrix.
+###
+
+#| Conjugate gradients from zero until the relative residual is under `tol`.
+#| Records the residual after each iteration in `hist` and the answer in
+#| `out`. Returns the count.
+def cg(n, tol, hist, out) {
+    mask = interior_mask(n)
+    b = rhs(n)
+    u = zeros(n + 2, n + 2)
+    r = b
+    p = b
+    rs = sum(r * r)
+    bb = sum(b * b)
+    hist[0] = 1.0
+    for k from 1 to CAP {
+        ap = apply_A(p, mask)
+        alpha = rs / sum(p * ap)
+        u = u + alpha * p
+        r = r - alpha * ap
+        rs_new = sum(r * r)
+        hist[k] = sqrt(rs_new / bb)
+        if hist[k] < tol {
+            copy_into(out, u)
+            return k
+        }
+        p = r + (rs_new / rs) * p
+        rs = rs_new
+    }
+    return CAP
+}
+
+CG_HIST = zeros(CAP + 1)
+U_CG = zeros(N_SMALL + 2, N_SMALL + 2)
+cg_iters = cg(N_SMALL, TOL, CG_HIST, U_CG)
+
+#| The condition number of the five-point matrix with spacing h.
+def kappa_of(h) {
+    t = tan(pi * h / 2.0)
+    return 1.0 / (t * t)
+}
+
+#| The CG iteration count its error bound promises for a reduction to `tol`.
+def cg_bound(h, tol) {
+    return 0.5 * sqrt(kappa_of(h)) * log(2.0 / tol)
+}
+kappa_small = kappa_of(H_SMALL)
+show cg_iters
+show kappa_small
+show cg_bound(H_SMALL, TOL)
+show max_error(U_CG)
+
+test "CG takes 25 iterations at n = 15 (the Python twin agrees)" {
+    assert_near(cg_iters, 25, 0.0)
+}
+test "kappa is 103.09 (numpy: lambda_max / lambda_min of A), and the bound promises 97 iterations" {
+    assert_near(kappa_small, 103.08686891981748, 1.0e-9)
+    assert_near(cg_bound(H_SMALL, TOL), 97.03, 0.01)
+    assert_lt(cg_iters, cg_bound(H_SMALL, TOL))
+}
+test "CG's answer is the exact solution to 1e-10" {
+    assert_lt(max_error(U_CG), 1.0e-10)
+}
+
+###
+## The four residuals
+
+The figure plots the residual of each method against the iteration count. The
+dashed lines are the theory's rates: $(\cos \pi h)^k$ for Jacobi and
+$(\cos^2 \pi h)^k$ for Gauss-Seidel. After the first few sweeps each measured
+line runs parallel to its dashed one.
+###
+
+#| The first `count` + 1 entries of a residual history.
+def head(hist, count) {
+    out = zeros(count + 1)
+    for k to count + 1 {
+        out[k] = hist[k]
+    }
+    return out
+}
+ks_jac = linspace(0.0, jac_sweeps, jac_sweeps + 1)
+# the theory's rates start at 1, where the residuals start, and after a few
+# sweeps they fall on the measured lines; drawn a decade higher, each dashed
+# line can be seen running parallel to its measured one
+THEORY_SHIFT = 10.0
+figure("Relative residual, 15 by 15 grid", "iteration", "|b - A u| / |b|", 0.0, jac_sweeps, 1.0e-9, 20.0)
+yscale("log")
+plot(ks_jac, head(JAC_HIST, jac_sweeps), "Jacobi")
+plot(ks_jac, THEORY_SHIFT * exp(ks_jac * log(rho_jacobi)), "$10\\cos(\\pi h)^k$, a decade up")
+ks_gs = linspace(0.0, gs_sweeps, gs_sweeps + 1)
+plot(ks_gs, head(GS_HIST, gs_sweeps), "Gauss-Seidel")
+plot(ks_gs, THEORY_SHIFT * exp(ks_gs * log(rho_jacobi * rho_jacobi)), "$10\\cos^2(\\pi h)^k$, a decade up")
+plot(linspace(0.0, sor_sweeps, sor_sweeps + 1), head(SOR_HIST, sor_sweeps), "SOR")
+plot(linspace(0.0, cg_iters, cg_iters + 1), head(CG_HIST, cg_iters), "CG")
+style("Jacobi", "s1 nomarker")
+style("$10\\cos(\\pi h)^k$, a decade up", "dash s1 thin")
+style("Gauss-Seidel", "s2 nomarker")
+style("$10\\cos^2(\\pi h)^k$, a decade up", "dash s2 thin")
+style("SOR", "s3 nomarker")
+style("CG", "s4 nomarker")
+
+###
+## Halving h
+
+The last cell solves the same problem on 23 by 23 and 31 by 31 grids
+($h = 1/24$ and $1/32$) with Jacobi, SOR and CG, and plots the counts against
+$1/h$ on log axes. Doubling $1/h$ from 16 to 32 multiplies Jacobi's count by
+4.01 and SOR's and CG's by 2.00 and 2.08. The dashed lines are the
+predictions, scaled to pass through the $h = 1/16$ point: $\ln 10^{-8} /
+\ln \cos \pi h$ for Jacobi, $\ln 10^{-8} / \ln(\omega - 1)$ for SOR and
+$\sqrt\kappa$ for CG.
+###
+
+#: SIZES  interior points per side: h = 1/16, 1/24, 1/32
+SIZES = [15, 23, 31]
+NS = len(SIZES)
+inv_h = zeros(NS)
+jac_count = zeros(NS)
+sor_count = zeros(NS)
+cg_count = zeros(NS)
+jac_pred = zeros(NS)
+sor_pred = zeros(NS)
+cg_pred = zeros(NS)
+hist = zeros(CAP + 1)
+for s to NS {
+    n = SIZES[s]
+    h = 1.0 / (n + 1.0)
+    inv_h[s] = n + 1.0
+    jac_count[s] = jacobi(n, TOL, hist, zeros(n + 2, n + 2))
+    sor_count[s] = sor(n, omega_opt(h), TOL, hist, zeros(n + 2, n + 2))
+    cg_count[s] = cg(n, TOL, hist, zeros(n + 2, n + 2))
+    jac_pred[s] = log(TOL) / log(cos(pi * h))
+    sor_pred[s] = log(TOL) / log(omega_opt(h) - 1.0)
+    cg_pred[s] = sqrt(kappa_of(h))
+}
+show jac_count
+show sor_count
+show cg_count
+
+# a window a little wider than 16..32, so the end points are whole circles
+figure("Iterations to a residual of 1e-8 against grid size", "1/h", "iterations", 14.0, 36.0, 0.0, 0.0)
+xscale("log")
+yscale("log")
+plot(inv_h, jac_count, "Jacobi")
+plot(inv_h, jac_pred * (jac_count[0] / jac_pred[0]), "Jacobi, $\\ln \\mathrm{tol}/\\ln\\cos(\\pi h)$")
+plot(inv_h, sor_count, "SOR")
+plot(inv_h, sor_pred * (sor_count[0] / sor_pred[0]), "SOR, $\\ln \\mathrm{tol}/\\ln(\\omega - 1)$")
+plot(inv_h, cg_count, "CG")
+plot(inv_h, cg_pred * (cg_count[0] / cg_pred[0]), "CG, $\\sqrt{\\kappa}$")
+# the measured counts are points and the predictions dashed lines, so a point
+# sitting on its line is the agreement, and a line never hides a line
+style("Jacobi", "s1 noline ring")
+style("Jacobi, $\\ln \\mathrm{tol}/\\ln\\cos(\\pi h)$", "dash s1 thin nomarker")
+style("SOR", "s3 noline ring")
+style("SOR, $\\ln \\mathrm{tol}/\\ln(\\omega - 1)$", "dash s3 thin nomarker")
+style("CG", "s4 noline ring")
+style("CG, $\\sqrt{\\kappa}$", "dash s4 thin nomarker")
+
+test "the counts at h = 1/16, 1/24, 1/32 are the Python twin's" {
+    # the grids are the ones named: 15, 23 and 31 interior points give these h
+    assert_near(1.0 / inv_h[0], 1.0 / 16.0, 0.0)
+    assert_near(1.0 / inv_h[1], 1.0 / 24.0, 0.0)
+    assert_near(1.0 / inv_h[2], 1.0 / 32.0, 0.0)
+    assert_near(jac_count[1], 2138, 0.0)
+    assert_near(jac_count[2], 3806, 0.0)
+    assert_near(sor_count[1], 90, 0.0)
+    assert_near(sor_count[2], 120, 0.0)
+    assert_near(cg_count[1], 39, 0.0)
+    assert_near(cg_count[2], 52, 0.0)
+}
+test "halving h multiplies Jacobi's count by 4.01, and SOR's and CG's by 2.00 and 2.08" {
+    assert_near(jac_count[2] / jac_count[0], 4.01, 0.005)
+    assert_near(sor_count[2] / sor_count[0], 2.0, 0.0)
+    assert_near(cg_count[2] / cg_count[0], 2.08, 0.0)
+}
+test "each count follows its prediction's growth to within 5%" {
+    for s from 1 to NS {
+        assert_near((jac_count[s] / jac_count[0]) / (jac_pred[s] / jac_pred[0]), 1.0, 0.05)
+        assert_near((sor_count[s] / sor_count[0]) / (sor_pred[s] / sor_pred[0]), 1.0, 0.05)
+        assert_near((cg_count[s] / cg_count[0]) / (cg_pred[s] / cg_pred[0]), 1.0, 0.05)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

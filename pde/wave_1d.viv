@@ -1,0 +1,106 @@
+#! pde The wave equation
+#! equation u_{tt} = c^2\,u_{xx}
+#! kind hyperbolic
+#! method leapfrog: centered in time and space, second order, explicit
+#! checks a standing wave against its exact solution; the measured order; and that the energy does not drift
+#! | A string fixed at both ends, plucked into its fundamental: $u = \sin(\pi x)\cos(\pi c t)$.
+#! | Centered differences in both variables give the leapfrog scheme,
+#! | $u^{n+1} = 2u^n - u^{n-1} + \nu^2\,(u_{i+1} - 2u_i + u_{i-1})$, with $\nu = c\,\Delta t/\Delta x$.
+#! |
+#! | Leapfrog has no dissipation at all -- its amplification factor has modulus one for $\nu \le 1$ --
+#! | so the string's energy, $\tfrac12\int (u_t^2 + c^2 u_x^2)\,dx$, should neither grow nor decay over
+#! | many periods. That is the test a diffusive scheme cannot pass.
+#! |
+#! | The first step needs care. Leapfrog wants two earlier levels and the problem gives one,
+#! | plus an initial velocity; taking $u^1 = u^0 + \tfrac12\nu^2\,\delta^2 u^0$ (a Taylor step, with
+#! | zero velocity) keeps the whole run second order. A plain copy would make it first.
+
+pi = 3.141592653589793
+C = 1.0
+NU = 0.8
+
+#| The second difference of u, with both ends held at zero.
+def second_difference(u, n) {
+    d = -2.0 * u
+    for i to n {
+        if i > 0.0 { d[i] = d[i] + u[i - 1.0] }
+        if i < n - 1.0 { d[i] = d[i] + u[i + 1.0] }
+    }
+    return d
+}
+
+#| Leapfrog to t_end on n interior points; the L2 error against sin(pi x) cos(pi c t).
+def standing_wave_error(n, t_end) {
+    h = 1.0 / (n + 1.0)
+    steps = round(t_end * C / (NU * h))
+    dt = t_end / steps
+    nu = C * dt / h
+    x = linspace(h, 1.0 - h, n)
+    old = sin(pi * x)
+    u = old + 0.5 * nu * nu * second_difference(old, n)
+    for s to steps - 1.0 {
+        new = 2.0 * u - old + nu * nu * second_difference(u, n)
+        old = u
+        u = new
+    }
+    d = u - sin(pi * x) * cos(pi * C * t_end)
+    return sqrt(sum(d * d) * h)
+}
+
+#| The discrete energy after each of `periods` periods, relative to the first.
+def energy_drift(n, periods) {
+    h = 1.0 / (n + 1.0)
+    per_period = round(2.0 / (C * NU * h))
+    dt = 2.0 / (C * per_period)
+    nu = C * dt / h
+    x = linspace(h, 1.0 - h, n)
+    old = sin(pi * x)
+    u = old + 0.5 * nu * nu * second_difference(old, n)
+    first = 0.0
+    worst = 0.0
+    for p to periods {
+        for s to per_period {
+            new = 2.0 * u - old + nu * nu * second_difference(u, n)
+            old = u
+            u = new
+        }
+        # energy at the half step: kinetic from (u - old)/dt, potential from the two levels
+        v = (u - old) / dt
+        e = 0.5 * sum(v * v) * h - 0.5 * C * C * sum(u * second_difference(old, n)) / h
+        if p == 0.0 { first = e }
+        worst = max(worst, abs(e - first) / first)
+    }
+    return worst
+}
+
+e1 = standing_wave_error(50.0, 1.3)
+e2 = standing_wave_error(101.0, 1.3)
+order = log(e1 / e2) / log(2.0)
+drift = energy_drift(50.0, 20.0)
+show e1
+show e2
+show order
+show drift
+
+N = 80
+H = 1.0 / (N + 1.0)
+X = linspace(H, 1.0 - H, N)
+figure("A standing wave over half a period", "x", "u(x, t)")
+plot(X, sin(pi * X), "t = 0")
+plot(X, sin(pi * X) * cos(pi * 0.25), "t = 1/4")
+plot(X, sin(pi * X) * cos(pi * 0.5), "t = 1/2")
+plot(X, sin(pi * X) * cos(pi * 0.75), "t = 3/4")
+plot(X, sin(pi * X) * cos(pi), "t = 1")
+
+test "leapfrog matches the standing wave sin(pi x) cos(pi c t)" {
+    assert_lt(e2, 1.0e-4)
+}
+test "it is second order" {
+    assert_near(order, 2.0, 0.1)
+}
+test "the energy does not drift over twenty periods" {
+    assert_lt(drift, 1.0e-10)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

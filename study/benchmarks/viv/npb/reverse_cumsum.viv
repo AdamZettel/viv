@@ -1,0 +1,171 @@
+###
+Translated from driver.py by py2viv 0.2.0 (numeric Python -> Viv).
+Python source sha256: 94726a9000a632f6149d990812ac24b335c48b0d0d4574e47a5f144441adf3f3
+Each print(...) is one print(...) line; fmt(x) writes a float as Python's repr does.
+A `raise`, a failed assert and every guard `stop` with Python's exception line.
+###
+
+#| 0, 1, ..., n - 1.
+def py_iota(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+
+#| Every entry of a real array, row-major, as a vector (a copy).
+def py_flat(a: Arr) {
+    return take(a, py_iota(numel(a)))
+}
+
+#| np.cumsum(a) of a vector: entry i is entry i - 1 plus a[i], from a[0] itself (so a -0.0
+#| first stays -0.0).
+def py_cumsum(a: Arr) {
+    c = zeros(len(a))
+    if len(a) == 0 {
+        return c
+    }
+    s = a[0]
+    c[0] = s
+    for i from 1 to len(a) {
+        s += a[i]
+        c[i] = s
+    }
+    return c
+}
+
+#| An int result, as Python's int: a -0.0 becomes 0 (an int has no sign on zero), and the run
+#| stops at 2^53, past which a double no longer holds every integer (Python's int does).
+def py_int(x) {
+    if abs(x) >= 9007199254740992 {
+        stop("py2viv: an integer reached 2^53; Python's int is exact there and a double is not")
+    }
+    return x + 0.0
+}
+
+#| NumPy's pairwise sum of f[lo], ..., f[lo + n - 1] (numpy/core/src/umath/loops_utils.h):
+#| below 8 terms left to right from 0; to 128, eight running sums combined as a tree, then
+#| the rest; above, the two halves (the first a multiple of 8 long) summed apart.
+def py_pw(f: Arr, lo, n) {
+    if n < 8 {
+        s = 0.0
+        for i to n {
+            s += f[lo + i]
+        }
+        return s
+    }
+    if n <= 128 {
+        r = zeros(8)
+        for j to 8 {
+            r[j] = f[lo + j]
+        }
+        i = 8
+        while i < n - n % 8 {
+            for j to 8 {
+                r[j] += f[lo + i + j]
+            }
+            i += 8
+        }
+        s = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+        while i < n {
+            s += f[lo + i]
+            i += 1
+        }
+        return s
+    }
+    n2 = floor(n / 2)
+    n2 = n2 - n2 % 8
+    return py_pw(f, lo, n2) + py_pw(f, lo + n2, n - n2)
+}
+
+#| NumPy's sum of f[lo], ..., f[lo + n - 1] along one axis: from 0.0, a pairwise sum of each
+#| block of NumPy's buffer size (8192 entries), added in order.
+def py_blk(f: Arr, lo, n) {
+    bufsize = 8192
+    s = 0.0
+    b = 0
+    while b < n {
+        s = s + py_pw(f, lo + b, min(bufsize, n - b))
+        b += bufsize
+    }
+    return s
+}
+
+#| np.sum(a), a.sum() of a float array: NumPy's sum over the entries in row-major order (py_blk).
+def py_npsum(a: Arr) {
+    f = py_flat(a)
+    return py_blk(f, 0, len(f))
+}
+
+#| a[lo:hi:st] of a vector with a negative step st: the entries from lo down to (not including)
+#| hi, a new array. The bounds are read as Python's slice.indices reads them for a negative step
+#| (CPython's PySlice_AdjustIndices): a missing lo is the last entry, a missing hi is before the
+#| first, a negative one counts from the end, and one past either end is clamped.
+def py_rslice(a: Arr, has_lo, lo, has_hi, hi, st) {
+    n = len(a)
+    s = n - 1
+    if has_lo != 0 {
+        s = lo
+        if s < 0 {
+            s = s + n
+            if s < 0 {
+                s = -1
+            }
+        }
+        else if s >= n {
+            s = n - 1
+        }
+    }
+    e = -1
+    if has_hi != 0 {
+        e = hi
+        if e < 0 {
+            e = e + n
+            if e < 0 {
+                e = -1
+            }
+        }
+        else if e >= n {
+            e = n - 1
+        }
+    }
+    m = 0
+    if e < s {
+        m = floor((s - e - 1) / (0 - st)) + 1
+    }
+    r = zeros(m)
+    for k to m {
+        r[k] = a[s + k * st]
+    }
+    return r
+}
+
+#from: http://stackoverflow.com/questions/16541618/perform-a-reverse-cumulative-sum-on-a-numpy-array
+#pythran export reverse_cumsum(float[])
+#setup: import numpy as np ; np.random.seed(0); r = np.random.rand(1000000)
+#run: reverse_cumsum(r)
+def reverse_cumsum(x: Arr) {
+    return py_rslice(py_cumsum(py_rslice(x, 0, 0, 0, 0, -1)), 0, 0, 0, 0, -1)
+}
+# ---- harness ----
+py_s2 = split(read_text("in0.txt"))
+py_l1 = zeros(len(py_s2))
+for py_i3 to len(py_s2) {
+    py_t4 = py_s2[py_i3]
+    py_l1[py_i3] = float(py_t4)
+}
+_a0 = py_l1
+reps = py_int(int(read_text("reps.txt")))
+res = reverse_cumsum(_a0)
+print(fmt(py_npsum(res)))
+print(fmt(py_npsum(res * res)))
+_chk = 0.0
+for _i to reps {
+    res = reverse_cumsum(_a0)
+    _chk = _chk + res[0]
+}
+print(fmt(_chk))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,40 @@
+###
+post: The Moré-Garbow-Hillstrom problems in least_squares' form
+agent: claude
+
+`mgh_res(x, prob)` and `mgh_jac(x, prob)` are the residuals and the
+Jacobian of lib/minpack/mgh.viv (SSQFCN and SSQJAC of MINPACK's test
+driver) as `vp.optimize.least_squares` calls them, with `prob = [nprob, m]`.
+lib/minpack/bench_optimize.py runs them through vp.optimize and compares
+with SciPy.
+###
+
+from minpack.mgh import mgh_residuals, mgh_jacobian, mgh_start
+
+#| The m residuals of problem prob[0] at x.
+def mgh_res(x: Arr, prob: Arr) -> Arr {
+    f = zeros(int(prob[1]))
+    mgh_residuals(prob[0], prob[1], x, f)
+    return f
+}
+
+#| Their m x n Jacobian, as SSQJAC writes it.
+def mgh_jac(x: Arr, prob: Arr) -> Arr {
+    J = zeros(int(prob[1]), len(x))
+    mgh_jacobian(prob[0], prob[1], x, J)
+    return J
+}
+
+#| The standard start of problem nprob with n variables, times factor.
+def mgh_x0(nprob: Num, n: Int, factor: Num) -> Arr {
+    return mgh_start(nprob, n, factor)
+}
+
+test "Rosenbrock's residuals and Jacobian at the start" {
+    x = mgh_x0(4.0, 2, 1.0)
+    assert_allclose(mgh_res(x, [4.0, 2.0]), [10.0 * (1.0 - 1.44), 2.2], 1e-14)
+    assert_allclose(mgh_jac(x, [4.0, 2.0])[0, :], [24.0, 10.0], 1e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,149 @@
+module lib/minpack/lmpar  documents every variable
+  The inner problem of Levenberg-Marquardt: given the QR factorization of the
+  Jacobian and a trust radius $\Delta$, find the step $p$ that minimizes the
+  linear model $\lVert f + J p \rVert$ among the steps with
+  $\lVert D p \rVert \le \Delta$.
+
+  If the Gauss-Newton step (the unconstrained minimizer, $\lambda = 0$) is short
+  enough, that is the answer. Otherwise the answer lies on the boundary and has
+  the form $p(\lambda) = -(J^\top J + \lambda D^\top D)^{-1} J^\top f$ for the
+  one $\lambda > 0$ with $\lVert D p(\lambda) \rVert = \Delta$. Finding that
+  $\lambda$ is a root-finding problem in one variable, the secular equation
+  $\phi(\lambda) = \lVert D p(\lambda) \rVert - \Delta = 0$ (the name comes from
+  eigenvalue problems, where equations of this shape first appeared). The step
+  gets shorter as $\lambda$ grows, so $\phi$ decreases and has one root.
+
+  lmpar solves it loosely: it stops as soon as $\lVert D p \rVert$ is within a
+  tenth of $\Delta$, because $\Delta$ itself is only a rough guess of where the
+  model can be trusted. Each evaluation of $\phi$ costs one qrsolv, so it keeps
+  evaluations few by using Newton's method on the equivalent equation
+  $1/\lVert D p(\lambda) \rVert = 1/\Delta$, which is close to linear in
+  $\lambda$, and by keeping $\lambda$ inside a bracket
+  $[\lambda_\ell, \lambda_u]$ known to contain the root.
+
+lmpar  @72a77822
+  what    The Levenberg-Marquardt parameter $\lambda$ for trust radius $\Delta$, and
+          the step it gives: returns par, writes x with
+          $(J^\top J + \lambda D^\top D)\, x = J^\top f$ (lmder flips the sign), and
+          sdiag, the diagonal of the triangular factor of that system.
+  how     Try the Gauss-Newton step first. If it is too long, bound the root from
+          below (one Newton step from $\lambda = 0$) and above
+          ($\lVert D^{-1} J^\top f \rVert / \Delta$), start from the caller's
+          $\lambda$ clamped into that bracket, and iterate: solve for the step at
+          $\lambda$, measure $\phi = \lVert D p \rVert - \Delta$, stop if
+          $|\phi| \le \Delta / 10$ (`LMPAR_TOL`), otherwise shrink the bracket by
+          the sign of $\phi$ and take a Newton step, never below
+          $\lambda_\ell$. It also stops when $\lambda_\ell = 0$ (no lower bound,
+          $J$ rank-deficient) and the step is already inside the region and did
+          not get longer, and after `LMPAR_MAXITER` = `10` iterations.
+  why     On a 3 x 3 example with delta 1, the Gauss-Newton step is 12.2 long; the
+          lower bound is 0.65, the root 1.47, and lmpar stops at par 1.34, where
+          the step is already within 10% of delta
+          [test "3 x 3 example, delta 1: Gauss-Newton length 12.2, lower bound 0.65 < root 1.47 < upper bound, lmpar stops at par 1.34"].
+          Going on to the exact root would cost more solves and change the step
+          little.
+  r       $R$  the n x n upper triangle of $J P = Q R$ from qrfac (its strict lower
+          triangle is scratch space for qrsolv)
+  qtb     $Q^\top f$  the first n entries of $Q^\top f$
+  delta   $\Delta$  the trust radius
+  par     $\lambda$  the Levenberg-Marquardt parameter: the caller's starting guess
+          on entry, the answer on return
+  diag    $D$  the scaling
+  x       $u$  the step with its sign flipped, $u = -p$: lmpar solves for $u$
+  nsing   $n_s$  the number of leading nonzero diagonal entries of $R$: n when $J$
+          has full rank. With fewer, the Gauss-Newton step is the least-squares
+          solution that sets the trailing components to zero.
+  dxnorm  $\lVert D u \rVert$  the scaled length of the current step
+  fp      $\phi$  $\lVert D u \rVert - \Delta$, the value of the secular function:
+          positive means the step is too long ($\lambda$ too small)
+  parl    $\lambda_\ell$  lower bound for the root. The line computing it is one
+          Newton step for $1/\lVert D p \rVert = 1/\Delta$ from $\lambda = 0$.
+          Newton's method on $1/\lVert D p \rVert$ is exact when a single
+          direction dominates (then $1/\lVert D p \rVert$ is linear in
+          $\lambda$); Moré (1977, the paper behind lmpar) shows the step from
+          $\lambda = 0$ does not pass the root, which is what makes it a lower
+          bound. It needs $R$ nonsingular; with a rank-deficient $J$ it stays 0.
+  paru    $\lambda_u$  upper bound for the root,
+          $\lVert D^{-1} J^\top f \rVert / \Delta$: since
+          $J^\top J + \lambda D^\top D \succeq \lambda D^\top D$, the step at
+          $\lambda$ is at most $\lVert D^{-1} J^\top f \rVert / \lambda$ long,
+          so at $\lambda = \lambda_u$ it fits inside $\Delta$. If $J^\top f = 0$, a
+          tiny positive value instead.
+  gnorm   $\lVert D^{-1} J^\top f \rVert$  computed as
+          $\lVert D^{-1} P R^\top Q^\top f \rVert$
+  parc    $\delta\lambda$  the Newton correction for the current $\lambda$, the same
+          formula as the lower bound's but with the triangle sdiag of the damped
+          system
+  sdiag   $s$  the diagonal of $S$, the triangle qrsolv builds with
+          $S^\top S = P^\top (J^\top J + \lambda D^\top D) P$
+  iter    $k$  the number of $\lambda$ values tried; 0 means the Gauss-Newton step
+          was accepted and par is returned as 0
+  LMPAR_TOL      $0.1$  the relative tolerance on $\lVert D p \rVert - \Delta$
+  LMPAR_MAXITER  $10$  the most $\lambda$ values lmpar tries
+  n        $n$  the number of parameters
+  ipvt     $\pi$  the column order from qrfac: column j of $J P$ is column $\pi_j$ of $J$
+  wa1      a work vector of n numbers (lmder's wa3); what it holds changes from step
+           to step, and the lines below say what
+  wa1@gauss_newton  $z$  first the first n entries of $Q^\top f$, then, by back
+           substitution, the solution of $R z = (Q^\top f)_{1:n}$ before the
+           permutation
+  wa1@lower  $q$  first the scaled direction $P^\top D^\top D u / \lVert D u \rVert$,
+           then, solved against $R^\top$, the vector whose norm gives the lower bound
+  wa1@upper  $D^{-1} J^\top f$  row j of $R^\top Q^\top f$, divided by the scale of
+           the variable in position j
+  wa1@evaluate  $\sqrt{\lambda}\, D$  the damping qrsolv is given as its diagonal
+  wa1@newton  $q$  as in the lower bound, but solved against the damped triangle $S$
+  wa2      a work vector of n numbers (lmder's wa4), reused like wa1
+  wa2@gn_length  $D u$  the Gauss-Newton step, scaled, for its norm
+  wa2@evaluate  scratch space for qrsolv (its right-hand side as the rotations change
+           it)
+  wa2@evaluate#2  $D u$  the new step, scaled, for its norm
+  j        a column index, 0 to n - 1
+  i        a row index of $R$
+  kk       how many rows the back substitution has done; it runs up from the last
+           nonzero row, j = nsing - 1 - kk
+  ii       how far below row j the Newton step's substitution has gone
+  l        $\pi_j$  the column of $J$ in position j (ipvt[j])
+  temp     a number held for the next line or two
+  temp@gauss_newton  $z_j$  the component just solved, to subtract from the rows
+           above it
+  temp@lower  $\lVert q \rVert$  the length of q, which the lower bound divides by twice
+  temp@evaluate  $\sqrt{\lambda}$  the square root of the damping, which scales $D$ for qrsolv
+  temp@evaluate#2  the previous $\phi$, kept to see whether the step got longer
+  temp@newton  $q_j$  the component just solved, to subtract from the rows below
+  temp@newton#2  $\lVert q \rVert$  the length of q, which the Newton correction divides by twice
+  sum      a dot product being added up
+  sum@lower  column j of $R$ above the diagonal dotted with the components of $q$
+           already solved: forward substitution with $R^\top$
+  sum@upper  $(R^\top Q^\top f)_j$  entry j of the gradient $J^\top f$ in pivoted order
+
+  $$ \phi(\lambda) = \left\lVert D \left( J^\top J + \lambda D^\top D \right)^{-1} J^\top f \right\rVert - \Delta = 0 $$  [hold "a step with par > 0 solves the secular equation to a tenth of delta, unless lmpar ran out of iterations or had no lower bound"]
+  gauss_newton   solve R z = Q^T f by back substitution (setting z_j = 0 from the first zero diagonal of R on) and undo the column permutation: the Gauss-Newton step x
+    why            If the unconstrained minimizer of the linear model is inside the region, it is the step lmpar returns; it is also where the search for $\lambda$ starts.
+    $$ R z = (Q^\top f)_{1:n}, \qquad u = P z $$
+  gn_length      dxnorm = |D x| and fp = dxnorm - delta; the step is accepted as it is if it is at most 10% longer than delta
+    $$ \phi(0) = \lVert D u_{\mathrm{GN}} \rVert - \Delta $$
+    predict        lmder's second trial uses the same Jacobian as the first, so the Gauss-Newton step is the same, {dxnorm#2} long, but the radius is now {delta#2}. Will lmpar need $\lambda > 0$?
+    run            Yes: $\phi(0)$ = {fp#2} is far above $\Delta/10$, so lmpar goes on to bound and solve for $\lambda$. On the first call the same step was inside a radius of {delta}, and lmpar returned at once.
+  if the Gauss-Newton step is too long (fp > LMPAR_TOL delta = delta / 10)
+    lower          parl: one Newton step for 1/|D p| = 1/delta from par = 0, using R^-T on the scaled direction D^T D x / |D x| (0 if J is rank-deficient)
+      $$ \lambda_\ell = \frac{\phi(0)}{\Delta\, \lVert q \rVert^2}, \qquad q = R^{-\top} P^\top \frac{D^\top D\, u}{\lVert D u \rVert} $$  [hold "the lower bound is not negative"]
+      why            $-\lVert q \rVert^2 \lVert D u \rVert$ is the derivative of $\lVert D p \rVert$ with respect to $\lambda$ at $\lambda = 0$, so this is Newton's step for $1/\lVert D p \rVert = 1/\Delta$.
+      run            On lmder's second trial $\lambda_\ell$ = {parl}.
+    upper          paru = |D^-1 J^T f| / delta, from R^T Q^T f; if that is 0, DWARF / min(delta, LMPAR_PARU_DELTA) with LMPAR_PARU_DELTA = 0.1
+      $$ \lambda_u = \frac{\lVert D^{-1} J^\top f \rVert}{\Delta} $$
+      run            $\lambda_u$ = {paru}: the root lies in $[\lambda_\ell, \lambda_u]$.
+    start          clamp the caller's par into [parl, paru]; if that gives 0, start from |D^-1 J^T f| / |D x|
+      why            lmder passes the $\lambda$ of its last trial, adjusted by the radius update; it is usually close, and the clamp makes it safe.
+    repeat until the step length is within LMPAR_TOL = 10% of delta, or LMPAR_MAXITER = 10 tries
+      evaluate       solve the damped system with qrsolv (D scaled by sqrt(par)) and measure fp; a par of 0 is first raised to max(DWARF, LMPAR_PAR_RESTART paru) = max(DWARF, paru / 1000)
+        why            The damped normal equations are the least-squares problem $\min_u \lVert J u - f \rVert^2 + \lambda \lVert D u \rVert^2$, which qrsolv solves from $R$ without forming $J^\top J$.
+        $$ (J^\top J + \lambda D^\top D)\, u = J^\top f $$  [test "with pivoting and scaling, the step lmpar returns solves (J^T J + par D^T D) x = J^T f to rounding for every radius tried"]
+        run            The first $\lambda$ tried on lmder's second trial is {par}, where $\lVert D u \rVert$ = {dxnorm} and $\phi$ = {fp}.
+      newton         parc: the Newton correction for 1/|D p| = 1/delta at this par, from sdiag, the triangle qrsolv just built
+        $$ \lambda_{+} = \lambda + \frac{\phi(\lambda)}{\Delta\, \lVert q \rVert^2}, \qquad q = S^{-\top} P^\top \frac{D^\top D\, u}{\lVert D u \rVert} $$
+        why            $1/\lVert D p(\lambda) \rVert$ is nearly linear in $\lambda$, so Newton's method on it converges in a few steps where Newton on $\phi$ itself would overshoot.
+      bracket        fp > 0 means par is too small: raise parl to par; fp < 0 means too large: lower paru to par
+      improve        par = max(parl, par + parc): take the Newton step, but never below the lower bound
+  finish         if no iteration ran (Gauss-Newton step accepted), report par = 0
+  return par

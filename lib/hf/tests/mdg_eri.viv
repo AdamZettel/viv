@@ -1,0 +1,156 @@
+# The tests of lib/hf/mdg_eri that hold the generated
+# kernels to the general code (lib/hf/md_eri, lib/hf/md_direct) and to
+# reference data (lib/hfref). They live here so that a program that uses the
+# production modules does not load the references.
+#
+# The tolerance is the ERI registry's (lib/hf/integrals, INT_TOL_ERI):
+# |generated - general| / (1 + |general|) <= 1e-12 per integral. The two do
+# not run the same sums in the same order (the spherical transform is moved
+# into the pair store, and E^x E^y E^z is multiplied in another order), so
+# they agree to rounding, not bit for bit; each test also bounds the gap it
+# measures well below that.
+from hf.mdg_eri import mdg_build, mdg_jk_screened, mdg_schwarz_basis, mdg_screened, mdg_sph
+from hf.opts import opt_new
+from hf.basis import (
+    AT_LEN, AT_X, AT_Y, AT_Z, bas_nao_cart, bas_nao_sph, bas_ncart, bas_nsph, PR_COEF, PR_EXP,
+    PR_LEN, SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0, SH_SPH0,
+)
+from hf.md_eri import mderi_full, mderi_sph, mderi_sph_build
+from hf.md_direct import mdjk_direct, mdjk_rand_dens
+from hf.cart2sph import c2s_basis
+from hfref.prims import PRIMS_NCASE, prims_shells
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_eri8_cart, water631gs_cart_prims,
+    water631gs_cart_shells,
+)
+from hfref.water_631gs_sph import water631gs_sph_eri8_sph
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.water_tzvp import watertzvp_atoms, watertzvp_prims, watertzvp_shells
+
+# the shells of one prims case
+MDG_T_QUARTET = 4
+
+#| The largest `|a - b| / (1 + |b|)` over two vectors of one length; `1` when
+#| the lengths differ.
+#@ 58da8845
+def mdg_gap(a: Arr, b: Arr) {
+    if len(a) != len(b) {
+        return 1.0
+    }
+    return max(abs(a - b) / (1.0 + abs(b)))
+}
+
+#| Prims case `c` (lib/hfref/prims) as a four-shell basis, each shell one
+#| unit primitive on an atom of its own, numbered for both Cartesian and
+#| spherical functions: `[atoms, shells, prims]` filled in place.
+#@ dfec05b9
+def mdg_case(PS: Arr, c, atoms: Arr, shells: Arr) {
+    pr = zeros(MDG_T_QUARTET, PR_LEN)
+    oc = 0
+    os = 0
+    for k to MDG_T_QUARTET {
+        row = MDG_T_QUARTET * c + k
+        l = PS[row, 0]
+        atoms[k, AT_X] = PS[row, 2]
+        atoms[k, AT_Y] = PS[row, 3]
+        atoms[k, AT_Z] = PS[row, 4]
+        shells[k, SH_ATOM] = k
+        shells[k, SH_L] = l
+        shells[k, SH_NPRIM] = 1
+        shells[k, SH_P0] = k
+        shells[k, SH_CART0] = oc
+        shells[k, SH_SPH0] = os
+        shells[k, SH_NCART] = bas_ncart(l)
+        shells[k, SH_NSPH] = bas_nsph(l)
+        oc = oc + bas_ncart(l)
+        os = os + bas_nsph(l)
+        pr[k, PR_EXP] = PS[row, 1]
+        pr[k, PR_COEF] = 1.0
+    }
+    return pr
+}
+
+#| The sweep over every prims case (s to f on four centers, every class the
+#| kernels cover): `[Cartesian gap, spherical gap, cases]` of the generated
+#| member against md_eri's.
+#@ 33e85b86
+def mdg_sweep() {
+    PS = prims_shells()
+    wc = 0.0
+    ws = 0.0
+    for c to PRIMS_NCASE {
+        atoms = zeros(MDG_T_QUARTET, AT_LEN)
+        shells = zeros(MDG_T_QUARTET, SH_LEN)
+        pr = mdg_case(PS, c, atoms, shells)
+        wc = max(wc, mdg_gap(mdg_build(atoms, shells, pr, 0, zeros(1, 1), -1.0), mderi_full(atoms, shells, pr)))
+        M = c2s_basis(shells)
+        ws = max(ws, mdg_gap(mdg_build(atoms, shells, pr, 1, M, -1.0), mderi_sph_build(atoms, shells, pr, M, -1.0)))
+    }
+    return [wc, ws, PRIMS_NCASE]
+}
+
+test "the sweep: every prims case, s to f, Cartesian and spherical, generated against md_eri within 1e-12" {
+    mdg_sw = mdg_sweep()
+    print(f"prims sweep, {mdg_sw[2]:.0f} cases: Cartesian gap {mdg_sw[0]:.1e}, spherical gap {mdg_sw[1]:.1e}")
+    assert_lt(mdg_sw[0], 1.0e-12)
+    assert_lt(mdg_sw[1], 1.0e-12)
+    assert_lt(mdg_sw[0], 1.0e-14)
+    assert_lt(mdg_sw[1], 1.0e-14)
+}
+
+test "Cartesian water 6-31G*: generated, md_eri and PySCF's full set agree" {
+    mdg_at = water631gs_cart_atoms()
+    mdg_sh = water631gs_cart_shells()
+    mdg_pr = water631gs_cart_prims()
+    mdg_G = mdg_screened(mdg_at, mdg_sh, mdg_pr)
+    assert_lt(mdg_gap(mdg_G, mderi_full(mdg_at, mdg_sh, mdg_pr)), 1.0e-14)
+    assert_lt(mdg_gap(mdg_G, water631gs_cart_eri8_cart()), 1.0e-12)
+}
+
+test "spherical water 6-31G* and def2-TZVP (f shells): generated, md_eri's block transform and PySCF agree" {
+    mdg_sh = water631gs_cart_shells()
+    mdg_M = c2s_basis(mdg_sh)
+    mdg_G5 = mdg_sph(water631gs_cart_atoms(), mdg_sh, water631gs_cart_prims(), mdg_M)
+    assert_lt(mdg_gap(mdg_G5, water631gs_sph_eri8_sph()), 1.0e-13)
+    assert_lt(mdg_gap(mdg_G5, mderi_sph(water631gs_cart_atoms(), mdg_sh, water631gs_cart_prims(), mdg_M)), 1.0e-14)
+    mdg_sh = watertzvp_shells()
+    mdg_M = c2s_basis(mdg_sh)
+    mdg_G5 = mdg_sph(watertzvp_atoms(), mdg_sh, watertzvp_prims(), mdg_M)
+    assert_lt(mdg_gap(mdg_G5, mderi_sph(watertzvp_atoms(), mdg_sh, watertzvp_prims(), mdg_M)), 1.0e-14)
+}
+
+test "general contractions, cc-pVDZ water: the grouped generated store gives md_eri's segmented integrals" {
+    mdg_G = mdg_build(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims(), 0, zeros(1, 1), -1.0)
+    assert_lt(mdg_gap(mdg_G, mderi_full(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())), 1.0e-14)
+}
+
+test "direct J and K on the generated kernels: spherical and Cartesian water 6-31G*, against md_direct over Cartesian functions" {
+    mdg_at = water631gs_cart_atoms()
+    mdg_sh = water631gs_cart_shells()
+    mdg_pr = water631gs_cart_prims()
+    mdg_M = c2s_basis(mdg_sh)
+    mdg_nc = bas_nao_cart(mdg_sh)
+    mdg_ns = bas_nao_sph(mdg_sh)
+    mdg_D = mdjk_rand_dens(2, mdg_ns, 7)
+    mdg_o = opt_new()
+    mdg_Q = mdg_schwarz_basis(mdg_at, mdg_sh, mdg_pr, 1, mdg_M)
+    mdg_JK = mdg_jk_screened(mdg_at, mdg_sh, mdg_pr, mdg_D, mdg_o, mdg_Q, 1, mdg_M)
+    # md_direct over Cartesian functions: the density moved there, J and K back
+    mdg_Dc = zeros(2, mdg_nc, mdg_nc)
+    for mdg_d to 2 {
+        setslab(mdg_Dc, mdg_d, mdg_M @ slab(mdg_D, mdg_d) @ transpose(mdg_M))
+    }
+    mdg_R = mdjk_direct(mdg_at, mdg_sh, mdg_pr, mdg_Dc, mdg_o)
+    mdg_w = 0.0
+    for mdg_r to len(mdg_R) {
+        mdg_w = max(mdg_w, max(abs(slab(mdg_JK, mdg_r) - transpose(mdg_M) @ (slab(mdg_R, mdg_r) @ mdg_M))))
+    }
+    assert_lt(mdg_w, 1.0e-11)
+    mdg_Dc2 = mdjk_rand_dens(2, mdg_nc, 11)
+    mdg_Qc = mdg_schwarz_basis(mdg_at, mdg_sh, mdg_pr, 0, zeros(1, 1))
+    mdg_JKc = mdg_jk_screened(mdg_at, mdg_sh, mdg_pr, mdg_Dc2, mdg_o, mdg_Qc, 0, zeros(1, 1))
+    assert_lt(max(abs(mdg_JKc - mdjk_direct(mdg_at, mdg_sh, mdg_pr, mdg_Dc2, mdg_o))), 1.0e-11)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

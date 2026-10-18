@@ -1,0 +1,37 @@
+###
+A def called inside another def, whose argument types arrive only from a later
+call site, is typed by what that call site passes. Type inference visits the
+defs in order, before any call has typed their parameters; it used to answer
+"a number" for `max(a, b)` with `a` and `b` not typed yet, and a def's return
+type, once set, is never revised, so `gf` below returned a number and `step`
+was refused ("this function returns a number but this value is a array").
+min and max of two, pow and a negation now wait for their arguments' types.
+###
+
+def gf(a, b) {
+    return max(a, b)
+}
+
+def step(u, r) {
+    f = gf(u, roll(u, -1))
+    return u - r * (f - roll(f, 1))
+}
+
+def lo(a, b) {
+    return -min(a, b)
+}
+
+u = linspace(0.0, 1.0, 5)
+v = step(u, 0.1)
+print(v)
+m = lo(u, 0.5)
+print(m)
+
+test "gf of two arrays is an array" {
+    assert_near(len(v), 5, 0)
+    assert_near(v[4], 1.0, 1e-15)
+    assert_near(m[4], -0.5, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

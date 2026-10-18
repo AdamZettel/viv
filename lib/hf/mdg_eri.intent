@@ -1,0 +1,394 @@
+module lib/hf/mdg_eri
+  The production electron repulsion integrals and direct J and K, on the
+  kernels lib/cas generated (lib/hf/mdg_kernels). The method is lib/hf/md_eri's:
+  a store of shell pairs prepared once, then each shell quartet as two
+  matrix products over the pairs' E matrices and one R table per primitive
+  quartet. The R tables and the pair expansions come from the generated
+  defs, a spherical basis gets spherical rows in the store so no quartet is
+  transformed, and the E matrices are kept instead of copied for each
+  quartet. md_eri and md_direct stay as the general code that checks it.
+
+mdg_t2  @2543cdfa
+  why   The store moves each pair's E rows to spherical functions once, so this is the one transform a spherical quartet needs, built per pair from the block-diagonal `M`.
+  M       the Cartesian-to-spherical matrix of lib/hf/cart2sph, `[nao_cart, nao_sph]`; read only when `sph = 1`
+  shells  the shells table
+  sa      the first group's first shell (or the bra shell)
+  sb      the second group's first shell (or the ket shell)
+  na      the first shell's Cartesian components
+  nb      the second shell's Cartesian components
+  ma      the first shell's spherical components
+  mb      the second shell's spherical components
+  T       the pair transform `(M_a (x) M_b)^T`
+
+mdg_pair_general  @088d6645
+  why   A class above the generated ones (`mdg_pair` returns `-1`) still gets its expansion; it is the same entries in loops.
+  V   one primitive pair's expansion, Cartesian rows (flat, then as a matrix)
+  la  the first shell's angular momentum
+  lb  the second shell's angular momentum
+  a   the first primitive's exponent
+  b   the second primitive's exponent
+  X   the x component of `A - B`
+  Y   the y component of `A - B`
+  Z   the z component of `A - B`
+  PA  the first shell's component powers
+  PB  the second shell's component powers
+  nb  the second shell's Cartesian components
+  H   the Hermite index list
+  EX  the E table on x
+  EY  the E table on y
+  EZ  the E table on z
+  i   the row's first function
+  j   the row's second function
+  w   the unit factors of the component pair
+  h   half of the pairs, for the split
+
+mdg_fillpack  @8a357370
+  why   Everything about a pair that no quartet changes is computed here once: the primitive pairs, the expansion from the generated pair kernel with the contraction coefficients folded in, the move to spherical rows, and the packed index of each row for the writes.
+  ST      the store: md_eri's directory and pack headers, then the row indices
+  off     where the pair's pack starts in `ST`
+  ix      where the pair's row index starts in `ST`
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  cn      the contracted coefficients of `bas_contract`
+  sa      the first group's first shell (or the bra shell)
+  nga     the shells in the first group
+  sb      the second group's first shell (or the ket shell)
+  ngb     the shells in the second group
+  sph     `1` for spherical functions, `0` for Cartesian
+  T       the pair transform `(M_a (x) M_b)^T`
+  la      the first shell's angular momentum
+  lb      the second shell's angular momentum
+  na      the first shell's Cartesian components
+  nb      the second shell's Cartesian components
+  nra     the first shell's rows: spherical or Cartesian components
+  nrb     the second shell's rows
+  npa     the first shell's primitives
+  npb     the second shell's primitives
+  npp     primitive pairs, `npa npb`
+  nh      the Hermite functions of order up to `la + lb`
+  nr      rows per shell pair
+  A       the first shell's atom's position
+  B       one quartet's block, `[rows of k1, rows of k2]`
+  E       the pair's E matrix, `[rows, npp nh]`
+  a       the first primitive's exponent
+  b       the second primitive's exponent
+  k       a store pair
+  p       the bra product exponent `a + b`
+  Vf      the flat expansion `mdg_pair` writes
+  EX      the E table on x
+  EY      the E table on y
+  EZ      the E table on z
+  V       one primitive pair's expansion, Cartesian rows (flat, then as a matrix)
+  c       the product of the two shells' contraction coefficients
+  r0      the first row of a shell pair of the groups
+  h       half of the pairs, for the split
+  i       the row's first function
+  j       the row's second function
+
+  = ST    the pack header, md_eri's five numbers
+  = mdg_pair()  one primitive pair's Cartesian expansion; `T @ V` moves it to spherical rows
+  = E     the expansion times each shell pair's contraction coefficients
+  = ST#7  the row index: packed index and the two functions of each row
+
+mdg_nrows  @41daef4b
+  why   The row index of each pair is laid out before the packs are filled, so its size is needed from the directory alone.
+  ST      the store: md_eri's directory and pack headers, then the row indices
+  shells  the shells table
+  k       a store pair
+  sph     `1` for spherical functions, `0` for Cartesian
+  la      the first shell's angular momentum
+  lb      the second shell's angular momentum
+  n       how many basis functions
+
+mdg_pick  @301a0394
+  why   The halves of `mdg_packs` are joined by a comprehension over this, since `extend` joins real vectors only.
+  A   the first shell's atom's position
+  B   one quartet's block, `[rows of k1, rows of k2]`
+  i   the row's first function
+
+mdg_packs  @f5f23d59
+  why   Splitting the list in halves keeps each loop that holds records short, so building the store is not quadratic in the pairs.
+  ST      the store: md_eri's directory and pack headers, then the row indices
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  cn      the contracted coefficients of `bas_contract`
+  sph     `1` for spherical functions, `0` for Cartesian
+  M       the Cartesian-to-spherical matrix of lib/hf/cart2sph, `[nao_cart, nao_sph]`; read only when `sph = 1`
+  k0      the first bra primitive pair of the batch
+  n       how many basis functions
+  sa      the first group's first shell (or the bra shell)
+  sb      the second group's first shell (or the ket shell)
+  T       the pair transform `(M_a (x) M_b)^T`
+  h       half of the pairs, for the split
+  A       the first shell's atom's position
+  B       one quartet's block, `[rows of k1, rows of k2]`
+
+mdg_store  @3692d20e
+  why   One store serves every quartet of a build: the in-core ERIs, the Schwarz factors and each direct J/K build.
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  sph     `1` for spherical functions, `0` for Cartesian
+  M       the Cartesian-to-spherical matrix of lib/hf/cart2sph, `[nao_cart, nao_sph]`; read only when `sph = 1`
+  cn      the contracted coefficients of `bas_contract`
+  GT      the shell groups of `mderi_groups`
+  npl     how many store pairs
+  lmax    the highest angular momentum of the basis
+  k       a store pair
+  sa      the first group's first shell (or the bra shell)
+  sb      the second group's first shell (or the ket shell)
+  la      the first shell's angular momentum
+  lb      the second shell's angular momentum
+  ST      the store: md_eri's directory and pack headers, then the row indices
+  off     where the pair's pack starts in `ST`
+  ix      where the pair's row index starts in `ST`
+  EM      the E matrix of each store pair
+
+  = packs  the size of the directory and the pack headers, counted first
+  = ST    the directory, as md_eri lays it out
+  = EM    the E matrices, built by halves
+
+mdg_htab  @3a87b9d6
+  why   md_eri computes these offsets for every quartet; they depend on the classes only, so a build makes them once.
+  lmax  the highest angular momentum of the basis
+  lp    the pair orders of the offset table, `2 lmax + 1`
+  nl    the totals of the offset table, `4 lmax + 1`
+  hw    the row width of the offset table
+  HT    the Hermite offset table of `mdg_htab`
+  L     `L1 + L2`
+  O     one row of offsets from `mderi_hoff`
+  h     half of the pairs, for the split
+
+mdg_put  @369a2e87
+  why   Each unique integral goes to one slot of the packed-8 vector; the row indices of the store make that two loops.
+  Gp  the packed-8 ERIs being written
+  B   one quartet's block, `[rows of k1, rows of k2]`
+  ST  the store: md_eri's directory and pack headers, then the row indices
+  k1  the bra pair of the store
+  k2  the ket pair of the store
+  nr  rows per shell pair
+  ij  the packed index of the row's function pair
+  c   the product of the two shells' contraction coefficients
+  kl  the packed index of the column's function pair
+
+mdg_block  @d9cd5b2b
+  why   The quartet is two matrix products over the store's E matrices, as in md_eri, with the R values from the generated kernels.
+  ST    the store: md_eri's directory and pack headers, then the row indices
+  EM    the E matrix of each store pair
+  k1    the bra pair of the store
+  k2    the ket pair of the store
+  G     the Boys grid of `mderi_grid`
+  HT    the Hermite offset table of `mdg_htab`
+  L1    the bra pair's total angular momentum
+  L2    the ket pair's total angular momentum
+  np1   the bra pair's primitive pairs
+  np2   the ket pair's primitive pairs
+  nh1   the bra pair's Hermite functions
+  nh2   the ket pair's Hermite functions
+  L     `L1 + L2`
+  D     the densities `[nd, n, n]` in the run's functions
+  nl    the totals of the offset table, `4 lmax + 1`
+  ncd   the ket pair's rows
+  nbat  bra primitive pairs per batch
+  ncol  the columns of `BR`, `nbat nh1`
+  BRf   the signed R values of a batch, `[np2 nh2, nbat nh1]` flattened
+  hw    the row width of the offset table
+  ZT    `Z^T`, the ket-contracted R values by bra primitive and Hermite function
+  S     the R cube of one primitive quartet
+  F     the Boys values `F_0 .. F_L`
+  k0    the first bra primitive pair of the batch
+  kn    the bra primitive pairs in this batch
+  p     the bra product exponent `a + b`
+  q     a row of the quartet list
+  X     the x component of `A - B`
+  Y     the y component of `A - B`
+  Z     the z component of `A - B`
+  al    `pq/(p + q)`
+  Zb    one batch of `E_cd @ BR`
+  o     where this primitive quartet's columns start in `BRf`
+  c     the product of the two shells' contraction coefficients
+
+  = ia    where the bra offsets of the class start in the table
+  = mdg_rfill()  the R cube of one primitive quartet, from the generated kernel
+  = BRf   the signed R values, from the generated gather of the ket order (`mdg_gather`), else through the offset tables
+  = Zb    the ket side: `E_cd @ BR` for a batch of bra primitive pairs
+
+mdg_gather_general  @420ada25
+  why   The gather the generated `mdg_gather` replaces, kept for the orders above it and as the member that checks it.
+  BR    the signed R values, flattened `[nh2 rows, ncol]`
+  o     where this primitive quartet's columns start
+  ncol  the columns of `BR`
+  S     the R cube of one primitive quartet
+  HT    the offset table of `mdg_htab`
+  ia    where the bra offsets start in `HT`
+  ic    where the ket offsets start in `HT`
+  isg   where the ket signs start in `HT`
+  nh1   the bra Hermite functions
+  nh2   the ket Hermite functions
+  b     where ket Hermite function `hc`'s row starts
+  base  the ket function's offset in the cube
+  sg    the ket function's sign `(-1)^(t+u+v)`
+
+mdg_schwarz  @67464697
+  why   The Schwarz factors decide which quartets are computed at all.
+  ST   the store: md_eri's directory and pack headers, then the row indices
+  EM   the E matrix of each store pair
+  G    the Boys grid of `mderi_grid`
+  HT   the Hermite offset table of `mdg_htab`
+  npl  how many store pairs
+  Q    the Schwarz factor of each store pair
+
+mdg_schwarz_one  @81c65192
+  why   One pass of the parallel loop, with its block freed when it returns.
+  ST  the store: md_eri's directory and pack headers, then the row indices
+  EM  the E matrix of each store pair
+  G   the Boys grid of `mderi_grid`
+  HT  the Hermite offset table of `mdg_htab`
+  Q   the Schwarz factor of each store pair
+  k   a store pair
+  B   one quartet's block, `[rows of k1, rows of k2]`
+
+mdg_do  @ee3be550
+  why   One pass of the parallel loop, with its block freed when it returns.
+  Gp  the packed-8 ERIs being written
+  ST  the store: md_eri's directory and pack headers, then the row indices
+  EM  the E matrix of each store pair
+  G   the Boys grid of `mderi_grid`
+  HT  the Hermite offset table of `mdg_htab`
+  QL  the quartet list `[nq, 2]` of `mderi_qlist`
+  q   a row of the quartet list
+  k1  the bra pair of the store
+  k2  the ket pair of the store
+
+mdg_build  @6e5d6998
+  why   The in-core build: store, Schwarz list, every surviving quartet written once.
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  sph     `1` for spherical functions, `0` for Cartesian
+  M       the Cartesian-to-spherical matrix of lib/hf/cart2sph, `[nao_cart, nao_sph]`; read only when `sph = 1`
+  tol     the Schwarz threshold; negative keeps every quartet
+  ST      the store: md_eri's directory and pack headers, then the row indices
+  EM      the E matrix of each store pair
+  G       the Boys grid of `mderi_grid`
+  HT      the Hermite offset table of `mdg_htab`
+  npl     how many store pairs
+  Q       the Schwarz factor of each store pair
+  QL      the quartet list `[nq, 2]` of `mderi_qlist`
+  n       how many basis functions
+  Gp      the packed-8 ERIs being written
+
+mdg_sph  @bdc51343
+  why   The production ERIs of a spherical basis, called by lib/hf/ao.
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  M       the Cartesian-to-spherical matrix of lib/hf/cart2sph, `[nao_cart, nao_sph]`; read only when `sph = 1`
+
+mdg_screened  @9eb2795d
+  why   The production ERIs of a Cartesian basis and the first member of the ERI registry.
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+
+mdg_jk_put  @8af1c808
+  why   A direct build adds each block into J and K at once and keeps nothing; this is md_direct's eight-contribution scatter on the store's row indices.
+  W   J and K of one chunk, `[2 nd, n, n]`
+  w0  the slab of `W` the first density's J goes to
+  B   one quartet's block, `[rows of k1, rows of k2]`
+  D   the densities `[nd, n, n]` in the run's functions
+  nd  how many densities
+  ST  the store: md_eri's directory and pack headers, then the row indices
+  k1  the bra pair of the store
+  k2  the ket pair of the store
+  nr  rows per shell pair
+  ij  the packed index of the row's function pair
+  i   the row's first function
+  j   the row's second function
+  c   the product of the two shells' contraction coefficients
+  kl  the packed index of the column's function pair
+  k   a store pair
+  l   the column's second function
+  f   the integral, halved once per coincidence of indices
+
+  = ij    the row's packed index; `-1` skips a row whose pair is not canonical
+  = f     the integral, halved once for each coincidence
+  = W     the twelve J and K contributions of one unique integral
+
+mdg_dmax  @bfd24919
+  why   The density test needs the largest density element of each pair of shell groups, in the functions the quartets are in.
+  D       the densities `[nd, n, n]` in the run's functions
+  shells  the shells table
+  GT      the shell groups of `mderi_groups`
+  sph     `1` for spherical functions, `0` for Cartesian
+  A       the first shell's atom's position
+  Dm      the largest `|D|` over each pair of shell groups
+  a       the first primitive's exponent
+  b       the second primitive's exponent
+
+mdg_jk_pair  @c8c6462e
+  why   One quartet added into J and K, with its block freed when it returns.
+  W   J and K of one chunk, `[2 nd, n, n]`
+  D   the densities `[nd, n, n]` in the run's functions
+  nd  how many densities
+  ST  the store: md_eri's directory and pack headers, then the row indices
+  EM  the E matrix of each store pair
+  G   the Boys grid of `mderi_grid`
+  HT  the Hermite offset table of `mdg_htab`
+  k1  the bra pair of the store
+  k2  the ket pair of the store
+
+mdg_jk_chunk  @a800d89e
+  why   The chunks make the parallel sum independent of the thread count, as in md_direct.
+  W      J and K of one chunk, `[2 nd, n, n]`
+  D      the densities `[nd, n, n]` in the run's functions
+  nd     how many densities
+  ST     the store: md_eri's directory and pack headers, then the row indices
+  EM     the E matrix of each store pair
+  G      the Boys grid of `mderi_grid`
+  HT     the Hermite offset table of `mdg_htab`
+  Q      the Schwarz factor of each store pair
+  Dm     the largest `|D|` over each pair of shell groups
+  tol_s  the Schwarz threshold
+  tol_d  the density threshold
+  c      the product of the two shells' contraction coefficients
+  nch    how many chunks
+  npl    how many store pairs
+  k1     the bra pair of the store
+  k2     the ket pair of the store
+  q      a row of the quartet list
+
+mdg_schwarz_basis  @89b261a8
+  why   Direct J/K reads the Schwarz factors from the basis blob, so they must be those of the store and the functions it builds.
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  sph     `1` for spherical functions, `0` for Cartesian
+  M       the Cartesian-to-spherical matrix of lib/hf/cart2sph, `[nao_cart, nao_sph]`; read only when `sph = 1`
+  ST      the store: md_eri's directory and pack headers, then the row indices
+  EM      the E matrix of each store pair
+
+mdg_jk_screened  @ca2a2531
+  why   The production direct J/K, called by lib/hf/jk_direct: no packed ERIs, so molecules too large to store run.
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  D       the densities `[nd, n, n]` in the run's functions
+  opts    the options array of lib/hf/opts
+  Q       the Schwarz factor of each store pair
+  sph     `1` for spherical functions, `0` for Cartesian
+  M       the Cartesian-to-spherical matrix of lib/hf/cart2sph, `[nao_cart, nao_sph]`; read only when `sph = 1`
+  n       how many basis functions
+  nd      how many densities
+  nch     how many chunks
+  ST      the store: md_eri's directory and pack headers, then the row indices
+  EM      the E matrix of each store pair
+  G       the Boys grid of `mderi_grid`
+  HT      the Hermite offset table of `mdg_htab`
+  Dm      the largest `|D|` over each pair of shell groups
+  tol_s   the Schwarz threshold
+  tol_d   the density threshold
+  W       J and K of one chunk, `[2 nd, n, n]`
+  c       the product of the two shells' contraction coefficients

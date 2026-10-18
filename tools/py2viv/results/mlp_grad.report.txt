@@ -1,0 +1,41 @@
+py2viv 0.2.0 differential report: mlp_grad.py
+reference: CPython+NumPy 3.11.5 1.24.4, 0.25 s
+viv engines: interp 0.01 s; c 0.20 s; wasm 0.26 s
+engines agree byte for byte: yes
+tolerance (declared): |viv - python| <= 1e-16 + 1e-13 |python| per number
+  inexact operation (line 13): @ (BLAS sums in its own order)
+  inexact operation (line 13): tanh (Viv's libm is not the platform's)
+  inexact operation (line 16): np.sum left to right inside a differentiated def (Viv's grad cannot follow the pairwise recursion)
+  inexact operation (line 29): sin (Viv's libm is not the platform's)
+  inexact operation (line 31): cos (Viv's libm is not the platform's)
+  inexact operation (line 39): value_and_grad (Viv's reverse mode; the CPython reference differentiates by the complex step)
+Viv's printed text is CPython's byte for byte: no (read back and compared by value)
+
+values, exact (every print argument, Python's recorded at full precision; Viv's identical in every engine):
+line  value                           n numpy                    viv                      max|dev|  max rel   verdict
+40    l                               1 0.4085650162620805       0.4085650162620806       5.6e-17   1.4e-16   within
+41    g1                             32 [0.06072049525464344, 0. [0.06072049525464343, 0. 4.9e-17   5.1e-15   within
+43    g2                             16 [0.11735703927563468, -0 [0.11735703927563468, -0 5.6e-17   3.1e-15   within
+
+printed text (Viv's values formatted by Python's own str/repr/format and NumPy's printing):
+line  verdict   max|dev|   max rel   python  |  viv (as Python prints it)
+1     within    5.6e-17    1.4e-16   loss 0.4085650162620805  |  loss 0.4085650162620806
+2     identical 0          0         dloss/dW1 [[ 0.0607205   0.04123336  0.01474366 -0.02490837 -0.057927   -0.03488754
+3     identical 0          0            0.04065063  0.07327961]
+4     identical 0          0          [ 0.03150251  0.076316    0.07467699  0.01184761 -0.06479911 -0.08208563
+5     identical 0          0           -0.02578997  0.04019825]
+6     identical 0          0          [-0.01253159  0.07550602  0.09948856  0.04303146 -0.04119518 -0.09067757
+7     identical 0          0           -0.08010115 -0.01178897]
+8     identical 0          0          [-0.0506719   0.03918439  0.07750911  0.05397695  0.00178348 -0.05662243
+9     identical 0          0           -0.0967395  -0.05823166]]
+10    identical 0          0         dloss/dW2 [[ 0.11735704 -0.06913599]
+11    identical 0          0          [ 0.12320558 -0.00962966]
+12    identical 0          0          [ 0.11061946  0.0474645 ]
+13    identical 0          0          [ 0.08541336  0.09821691]
+14    identical 0          0          [ 0.04997024  0.13834392]
+15    identical 0          0          [ 0.00485722  0.16016663]
+16    identical 0          0          [-0.04680777  0.15348491]
+17    identical 0          0          [-0.09332904  0.1160824 ]]
+lines: 16 identical, 1 within; numbers compared: 49
+
+verdict: PASS (within the declared tolerance)

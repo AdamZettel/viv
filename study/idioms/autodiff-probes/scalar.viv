@@ -1,0 +1,132 @@
+###
+Reverse mode on scalar code: straight lines, then loops.
+
+`grad(f, x, ...)` differentiates the def `f` with respect to its first
+argument. Each test checks the gradient against a formula where one exists
+and against a central difference where it does not. A central difference
+with step h has truncation error about h^2 f'''/6 and rounding error about
+eps |f| / h; at h = 1e-5 both are near 1e-10 for these functions, so the
+tolerance is 1e-8 relative.
+###
+
+H = 1.0e-5
+FD_TOL = 1.0e-8
+
+def central(f_plus, f_minus) {
+    return (f_plus - f_minus) / (2.0 * H)
+}
+
+def poly(x) {
+    return x * x * x - 2.0 * x + 1.0
+}
+
+def mix(x, a) {
+    y = sin(x) * exp(a * x)
+    z = y / (1.0 + x * x) + sqrt(x) * log(x)
+    return tanh(z) - pow(x, 2.5) + cos(y) * a
+}
+
+def rebinds(x) {
+    y = x
+    y = y * y
+    y = y * y + x
+    return y
+}
+
+test "a polynomial: the exact derivative 3x^2 - 2" {
+    x = 1.3
+    assert_near(grad(poly, x), 3.0 * x * x - 2.0, 1.0e-14)
+}
+
+test "value_and_grad gives f's value and its gradient" {
+    v, g = value_and_grad(poly, 0.4)
+    assert_near(v, poly(0.4), 0.0)
+    assert_near(g, 3.0 * 0.4 * 0.4 - 2.0, 1.0e-15)
+}
+
+test "straight-line code with every scalar rule matches a central difference" {
+    x = 0.8
+    a = 0.3
+    g = grad(mix, x, a)
+    fd = central(mix(x + H, a), mix(x - H, a))
+    assert_near(g, fd, FD_TOL * abs(fd))
+}
+
+test "a variable rebound from itself: d/dx (x^4 + x) = 4x^3 + 1" {
+    x = 1.7
+    assert_near(grad(rebinds, x), 4.0 * x * x * x + 1.0, 1.0e-13)
+}
+
+#| A fixed-count loop: x^N by repeated multiplication.
+N = 7
+
+def power_loop(x) {
+    p = 1.0
+    for i to N {
+        p = p * x
+    }
+    return p
+}
+
+#| The loop's longer forms: `from`, `by` and `reversed`. The sum
+#| of c^k x^k for k = 1, 3, 5, walked from the top down.
+TOP = 6
+
+def series(x, c) {
+    s = 0.0
+    for k from 1 to TOP by 2 reversed {
+        s = s + pow(c * x, k)
+    }
+    return s
+}
+
+#| A while loop whose count depends on x: Newton's iteration for sqrt(x),
+#| stopped by a tolerance. The derivative follows the iterations actually
+#| taken, so it approaches 1 / (2 sqrt(x)) as they converge.
+def newton_sqrt(x) {
+    r = x
+    while abs(r * r - x) > 1.0e-15 * x {
+        r = 0.5 * (r + x / r)
+    }
+    return r
+}
+
+#| A loop-local temporary and a loop-carried value: the logistic map.
+STEPS = 12
+
+def logistic(r) {
+    u = 0.3
+    for n to STEPS {
+        t = r * u
+        u = t * (1.0 - u)
+    }
+    return u
+}
+
+test "x^N by a loop: N x^(N-1)" {
+    x = 1.1
+    assert_near(grad(power_loop, x), N * pow(x, N - 1.0), 1.0e-13)
+}
+
+test "for ... from ... to ... by ... reversed" {
+    x = 0.6
+    c = 1.4
+    g = grad(series, x, c)
+    exact = c * pow(c * x, 0.0) + 3.0 * c * pow(c * x, 2.0) + 5.0 * c * pow(c * x, 4.0)
+    assert_near(g, exact, 1.0e-14 * exact)
+}
+
+test "a while loop taped with its count: d sqrt(x) / dx" {
+    x = 2.0
+    assert_near(grad(newton_sqrt, x), 0.5 / sqrt(x), 1.0e-15)
+}
+
+test "the logistic map through 12 steps matches a central difference" {
+    r = 2.9
+    g = grad(logistic, r)
+    fd = central(logistic(r + H), logistic(r - H))
+    assert_near(g, fd, FD_TOL * abs(fd))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

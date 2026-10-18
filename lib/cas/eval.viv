@@ -1,0 +1,406 @@
+###
+post: Evaluating a CAS expression in doubles, mod p and in balls
+agent: claude
+
+Three evaluators of an expression of the store (lib/cas/store), each given
+the values of its symbols in a map from the symbol's id:
+
+- `cas_eval(e, env)`: in doubles, with Viv's own `exp`, `log`, `sin`, `erf`
+  and the rest, so every engine gives the same bits. `pi` is the double
+  nearest $\pi$. A refusal, a symbol with no value, or a power the reals do
+  not have (a negative number to a fractional power) gives NaN.
+- `cas_mod(e, env)`: the residue mod $p = 2^{26} - 5$ (lib/cas/rational), for
+  an expression that is a rational function of its symbols: numbers, sums,
+  products and integer powers. It gives `MOD_UNLUCKY` when a denominator is 0
+  mod $p$ at that point (the certificate draws another point) and
+  `MOD_NOT_RATIONAL` for anything else (a function, $\pi$, a fractional power).
+- `cas_ball(e, envm, envr)`: a midpoint and a radius that contain the
+  expression's value when each symbol `s` lies within `envr[s]` of `envm[s]`.
+  Each operation adds two units of $2^{-53}$ relative to its radius for its own
+  rounding, and each function uses a bound on its derivative over the ball;
+  the functions assume Viv's libm is within one unit in the last place
+  (fdlibm's own analysis, lang/viv/src/vmath; not proved here). A radius of
+  NaN means the ball is not known: a pole or a domain edge is inside it. This
+  is ball arithmetic in doubles instead of
+  Arb's multiprecision balls, so a ball can refute an equality and can only
+  support one. `cas_sign` reads the sign of an expression off its ball.
+
+Used with `import cas.eval`.
+###
+from cas.store import (
+    C_HALF, C_ONE, C_PI, cas_add, cas_addv, cas_div, cas_fn, cas_int, cas_isint, cas_kid,
+    cas_kind, cas_mul, cas_name_of, cas_nk, cas_np, cas_nq, cas_num, cas_pow, cas_sqrt, cas_sub,
+    cas_sym, K_ADD, K_FN, K_MUL, K_NUM, K_POW, K_SYM,
+)
+from cas.rational import mp_add, mp_inv, mp_mul, mp_pow, mp_rat
+
+# the double nearest pi
+PI_DOUBLE = 3.141592653589793
+# 2 / sqrt(pi), the bound on erf's slope
+ERF_SLOPE = 1.1283791670955126
+# two units of 2^-53: the rounding a ball adds for each operation
+BALL_EPS = 2.220446049250313e-16
+# the residues cas_mod gives when it has no residue
+MOD_UNLUCKY = -1
+MOD_NOT_RATIONAL = -2
+
+# ---- doubles -----------------------------------------------------------------------
+
+#| The value of `e` in doubles; `env` maps a symbol's id to its value.
+def cas_eval(e, env) {
+    memo = map()
+    return cas_eval_rec(e, env, memo)
+}
+
+def cas_eval_rec(e, env, memo) {
+    if has(memo, e) {
+        return memo[e]
+    }
+    k = cas_kind(e)
+    v = 0.0 / 0.0
+    if k == K_NUM {
+        v = cas_np(e) / cas_nq(e)
+    } else if k == K_SYM {
+        if e == C_PI {
+            v = PI_DOUBLE
+        } else if has(env, e) {
+            v = env[e]
+        }
+    } else if k == K_ADD {
+        v = 0.0
+        for i to cas_nk(e) {
+            v = v + cas_eval_rec(cas_kid(e, i), env, memo)
+        }
+    } else if k == K_MUL {
+        v = 1.0
+        for i to cas_nk(e) {
+            v = v * cas_eval_rec(cas_kid(e, i), env, memo)
+        }
+    } else if k == K_POW {
+        b = cas_eval_rec(cas_kid(e, 0), env, memo)
+        x = cas_kid(e, 1)
+        xv = cas_eval_rec(x, env, memo)
+        if x == C_HALF {
+            v = sqrt(b)
+        } else if b < 0 and not cas_isint(x) {
+            v = 0.0 / 0.0
+        } else {
+            v = pow(b, xv)
+        }
+    } else if k == K_FN {
+        v = cas_apply(cas_name_of(e), cas_eval_rec(cas_kid(e, 0), env, memo))
+    }
+    memo[e] = v
+    return v
+}
+
+#| One of the CAS's function heads applied to a double.
+def cas_apply(h, a) {
+    if h == "exp" {
+        return exp(a)
+    }
+    if h == "log" {
+        return log(a)
+    }
+    if h == "sin" {
+        return sin(a)
+    }
+    if h == "cos" {
+        return cos(a)
+    }
+    if h == "tan" {
+        return tan(a)
+    }
+    if h == "sinh" {
+        return sinh(a)
+    }
+    if h == "cosh" {
+        return cosh(a)
+    }
+    if h == "tanh" {
+        return tanh(a)
+    }
+    if h == "asin" {
+        return asin(a)
+    }
+    if h == "acos" {
+        return acos(a)
+    }
+    if h == "atan" {
+        return atan(a)
+    }
+    if h == "erf" {
+        return erf(a)
+    }
+    if h == "abs" {
+        return abs(a)
+    }
+    return 0.0 / 0.0
+}
+
+#| The value of `e` with no symbols but pi.
+def cas_value(e) {
+    return cas_eval(e, map())
+}
+
+#| The value of `e` with the one symbol `x` at `v`.
+def cas_value_at(e, x, v) {
+    env = map()
+    env[x] = v
+    return cas_eval(e, env)
+}
+
+# ---- mod p ---------------------------------------------------------------------------
+
+#| The residue of `e` mod MOD_P; `env` maps a symbol's id to its residue.
+def cas_mod(e, env) {
+    memo = map()
+    return cas_mod_rec(e, env, memo)
+}
+
+def cas_mod_rec(e, env, memo) {
+    if has(memo, e) {
+        return memo[e]
+    }
+    k = cas_kind(e)
+    v = MOD_NOT_RATIONAL
+    if k == K_NUM {
+        v = mp_rat(cas_np(e), cas_nq(e))
+        if v < 0 {
+            v = MOD_UNLUCKY
+        }
+    } else if k == K_SYM {
+        if e != C_PI and has(env, e) {
+            v = env[e]
+        }
+    } else if k == K_ADD or k == K_MUL {
+        v = 0
+        if k == K_MUL {
+            v = 1
+        }
+        i = 0
+        while i < cas_nk(e) and v >= 0 {
+            a = cas_mod_rec(cas_kid(e, i), env, memo)
+            if a < 0 {
+                v = a
+            } else if k == K_ADD {
+                v = mp_add(v, a)
+            } else {
+                v = mp_mul(v, a)
+            }
+            i = i + 1
+        }
+    } else if k == K_POW {
+        x = cas_kid(e, 1)
+        if cas_isint(x) {
+            b = cas_mod_rec(cas_kid(e, 0), env, memo)
+            if b < 0 {
+                v = b
+            } else if cas_np(x) >= 0 {
+                v = mp_pow(b, cas_np(x))
+            } else {
+                ib = mp_inv(b)
+                if ib < 0 {
+                    v = MOD_UNLUCKY
+                } else {
+                    v = mp_pow(ib, -cas_np(x))
+                }
+            }
+        }
+    }
+    memo[e] = v
+    return v
+}
+
+# ---- balls ---------------------------------------------------------------------------
+
+#| A ball around `e`'s value, as midpoint and radius; `envm` and `envr` give
+#| each symbol's midpoint and radius. A NaN radius means not known.
+def cas_ball(e, envm, envr) {
+    mm = map()
+    mr = map()
+    return cas_ball_rec(e, envm, envr, mm, mr)
+}
+
+def ball_add(am, ar, bm, br) {
+    m = am + bm
+    return m, ar + br + BALL_EPS * abs(m)
+}
+def ball_mul(am, ar, bm, br) {
+    m = am * bm
+    return m, abs(am) * br + abs(bm) * ar + ar * br + BALL_EPS * abs(m)
+}
+def ball_div(am, ar, bm, br) {
+    if abs(bm) <= br {
+        return 0.0, 0.0 / 0.0
+    }
+    m = am / bm
+    return m, (ar + abs(m) * br) / (abs(bm) - br) + BALL_EPS * abs(m)
+}
+#| A ball around `h(a)` for a ball `(am, ar)`.
+def ball_fn(h, am, ar) {
+    if ar != ar {
+        return 0.0, ar
+    }
+    m = cas_apply(h, am)
+    if m != m {
+        return 0.0, 0.0 / 0.0
+    }
+    own = 4.0 * BALL_EPS * (1.0 + abs(m))
+    if h == "exp" {
+        return m, abs(m) * (exp(ar) - 1.0) * (1.0 + BALL_EPS) + own
+    }
+    if h == "log" {
+        if am - ar <= 0 {
+            return 0.0, 0.0 / 0.0
+        }
+        return m, ar / (am - ar) + own
+    }
+    if h == "sin" or h == "cos" or h == "atan" or h == "tanh" or h == "abs" {
+        return m, ar + own
+    }
+    if h == "erf" {
+        return m, ERF_SLOPE * ar + own
+    }
+    if h == "sinh" or h == "cosh" {
+        return m, ar * cosh(abs(am) + ar) + own
+    }
+    if h == "tan" {
+        lo = am - ar
+        hi = am + ar
+        if ar >= 1 or cos(lo) * cos(hi) <= 0 {
+            return 0.0, 0.0 / 0.0
+        }
+        s = max(abs(tan(lo)), abs(tan(hi)))
+        return m, ar * (1.0 + s * s) * (1.0 + BALL_EPS) + own
+    }
+    if h == "asin" or h == "acos" {
+        t = abs(am) + ar
+        if t >= 1 {
+            return 0.0, 0.0 / 0.0
+        }
+        return m, ar / sqrt(1.0 - t * t) + own
+    }
+    return 0.0, 0.0 / 0.0
+}
+
+def cas_ball_rec(e, envm, envr, mm, mr) {
+    if has(mm, e) {
+        return mm[e], mr[e]
+    }
+    k = cas_kind(e)
+    m = 0.0
+    r = 0.0 / 0.0
+    if k == K_NUM {
+        m = cas_np(e) / cas_nq(e)
+        r = BALL_EPS * abs(m)
+    } else if k == K_SYM {
+        if e == C_PI {
+            m = PI_DOUBLE
+            r = BALL_EPS * PI_DOUBLE
+        } else if has(envm, e) {
+            m = envm[e]
+            r = envr[e]
+        }
+    } else if k == K_ADD {
+        m = 0.0
+        r = 0.0
+        for i to cas_nk(e) {
+            am, ar = cas_ball_rec(cas_kid(e, i), envm, envr, mm, mr)
+            m, r = ball_add(m, r, am, ar)
+        }
+    } else if k == K_MUL {
+        m = 1.0
+        r = 0.0
+        for i to cas_nk(e) {
+            am, ar = cas_ball_rec(cas_kid(e, i), envm, envr, mm, mr)
+            m, r = ball_mul(m, r, am, ar)
+        }
+    } else if k == K_POW {
+        bm, br = cas_ball_rec(cas_kid(e, 0), envm, envr, mm, mr)
+        x = cas_kid(e, 1)
+        if cas_isint(x) {
+            n = abs(cas_np(x))
+            m = 1.0
+            r = 0.0
+            for i to n {
+                m, r = ball_mul(m, r, bm, br)
+            }
+            if cas_np(x) < 0 {
+                m, r = ball_div(1.0, 0.0, m, r)
+            }
+        } else if x == C_HALF {
+            if bm - br < 0 {
+                r = 0.0 / 0.0
+            } else {
+                m = sqrt(bm)
+                r = br / (sqrt(bm - br) + m) + 4.0 * BALL_EPS * (1.0 + m)
+            }
+        } else {
+            # b^x = exp(x log b)
+            xm, xr = cas_ball_rec(x, envm, envr, mm, mr)
+            lm, lr = ball_fn("log", bm, br)
+            pm, pr = ball_mul(xm, xr, lm, lr)
+            m, r = ball_fn("exp", pm, pr)
+        }
+    } else if k == K_FN {
+        am, ar = cas_ball_rec(cas_kid(e, 0), envm, envr, mm, mr)
+        m, r = ball_fn(cas_name_of(e), am, ar)
+    }
+    mm[e] = m
+    mr[e] = r
+    return m, r
+}
+
+#| 1, -1 or 0: `e` is positive, negative, or not known to be either, for the
+#| symbols in their balls.
+def cas_sign(e, envm, envr) {
+    m, r = cas_ball(e, envm, envr)
+    if r != r {
+        return 0
+    }
+    if m - r > 0 {
+        return 1
+    }
+    if m + r < 0 {
+        return -1
+    }
+    return 0
+}
+
+test "doubles: exact numbers, pi and functions" {
+    x = cas_sym("x")
+    e = cas_addv([cas_pow(x, cas_int(2)), cas_fn("sin", x), cas_num(1, 3)])
+    assert_near(cas_value_at(e, x, 0.5), 0.25 + sin(0.5) + 1.0 / 3.0, 1.0e-16)
+    assert_near(cas_value(cas_mul(C_PI, C_HALF)), PI_DOUBLE / 2.0, 0)
+    assert_true(cas_value(cas_pow(cas_int(-8), cas_num(1, 3))) != cas_value(cas_pow(cas_int(-8), cas_num(1, 3))))
+}
+
+test "mod p: a rational function, an unlucky point, a function refused" {
+    x = cas_sym("x")
+    env = map()
+    env[x] = 3
+    e = cas_add(cas_pow(x, cas_int(2)), cas_div(C_ONE, x))
+    # 9 + 1/3
+    assert_near(cas_mod(e, env), mp_add(9, mp_rat(1, 3)), 0)
+    env[x] = 0
+    assert_near(cas_mod(e, env), MOD_UNLUCKY, 0)
+    assert_near(cas_mod(cas_fn("exp", x), env), MOD_NOT_RATIONAL, 0)
+}
+
+test "balls contain the value and decide signs" {
+    x = cas_sym("x")
+    em = map()
+    er = map()
+    em[x] = 1.5
+    er[x] = 0.5
+    # x in [1, 2]: x^2 - 5 is negative, log(x) is not negative, sqrt(x) - 2 is negative
+    assert_near(cas_sign(cas_sub(cas_pow(x, cas_int(2)), cas_int(5)), em, er), -1, 0)
+    assert_near(cas_sign(cas_sub(cas_sqrt(x), cas_int(2)), em, er), -1, 0)
+    assert_near(cas_sign(cas_fn("log", x), em, er), 0, 0)
+    m, r = cas_ball(cas_fn("exp", x), em, er)
+    assert_true(m - r <= exp(1.0) and m + r >= exp(2.0))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

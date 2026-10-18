@@ -1,0 +1,235 @@
+# Hasegawa-Wakatani (1983): resistive drift-wave turbulence. Two coupled 2D fields,
+# the vorticity w = lap(phi) (phi is the electrostatic potential) and the density n,
+# on a periodic slab with a background density gradient kappa:
+#
+#   d_t w + {phi, w} = alpha (phi - n) + nu  lap(w)
+#   d_t n + {phi, n} = alpha (phi - n) - kappa d_y phi + D lap(n)
+#
+# with {a,b} = d_x a d_y b - d_y a d_x b the E x B advection. The resistive coupling
+# alpha(phi - n) is the parallel electron response; its phase shift between phi and n
+# is what makes the drift wave grow. The E x B nonlinearity saturates it into
+# turbulence, and a sheared ZONAL FLOW (the y-averaged flow) emerges and regulates it.
+#
+# Validation: the linear growth rate measured from the early exponential rise of the
+# energy matches the analytic drift-wave dispersion relation (the 2x2 eigenvalue).
+# Then the run saturates, a zonal flow builds, and the particle flux is outward.
+
+def submean(f, N) {
+    s = 0.0
+    for i to N {
+        for j to N {
+            s = s + f[i, j]
+        }
+    }
+    s = s / (N * N)
+    for i to N {
+        for j to N {
+            f[i, j] = f[i, j] - s
+        }
+    }
+}
+
+# SOR solve of lap(phi) = w on a periodic grid (warm-started in phi)
+def poisson(phi, w, N, dx2, nsweep, omega) {
+    for s to nsweep {
+        for i to N {
+            ip = mod(i + 1.0, N)
+            im = mod(i - 1.0 + N, N)
+            for j to N {
+                jp = mod(j + 1.0, N)
+                jm = mod(j - 1.0 + N, N)
+                res = phi[ip, j] + phi[im, j] + phi[i, jp] + phi[i, jm] - dx2 * w[i, j]
+                phi[i, j] = (1.0 - omega) * phi[i, j] + omega * 0.25 * res
+            }
+        }
+    }
+}
+
+# right-hand sides dw, dn given w, n, phi
+def rhs(w, n, phi, dw, dn, N, dx, alpha, kappa, nu, D) {
+    d2 = dx * dx
+    tj = 0.5 / dx
+    for i to N {
+        ip = mod(i + 1.0, N)
+        im = mod(i - 1.0 + N, N)
+        for j to N {
+            jp = mod(j + 1.0, N)
+            jm = mod(j - 1.0 + N, N)
+            phix = (phi[ip, j] - phi[im, j]) * tj
+            phiy = (phi[i, jp] - phi[i, jm]) * tj
+            wx = (w[ip, j] - w[im, j]) * tj
+            wy = (w[i, jp] - w[i, jm]) * tj
+            nx = (n[ip, j] - n[im, j]) * tj
+            ny = (n[i, jp] - n[i, jm]) * tj
+            lw = (w[ip, j] + w[im, j] + w[i, jp] + w[i, jm] - 4.0 * w[i, j]) / d2
+            ln = (n[ip, j] + n[im, j] + n[i, jp] + n[i, jm] - 4.0 * n[i, j]) / d2
+            Jw = phix * wy - phiy * wx
+            Jn = phix * ny - phiy * nx
+            cpl = alpha * (phi[i, j] - n[i, j])
+            dw[i, j] = -Jw + cpl + nu * lw
+            dn[i, j] = -Jn + cpl - kappa * phiy + D * ln
+        }
+    }
+}
+
+# analytic linear growth rate: max Re of the 2x2 eigenvalue, given the Laplacian
+# wavenumber-squared k2 and the drive (first-derivative) wavenumber kdr.
+def growth2(k2, kdr, alpha, kappa, nu, D) {
+    a = -(alpha / k2) - nu * k2
+    b = alpha / k2
+    d = -alpha - D * k2
+    # eigenvalues (tr/2) +/- sqrt(disc), disc = ((a-d)/2)^2 + b*c, c = alpha - i kappa kdr
+    P = 0.25 * (a - d) * (a - d) + b * alpha
+    Q = b * kappa * kdr
+    modd = sqrt(P * P + Q * Q)
+    return 0.5 * (a + d) + sqrt(0.5 * (modd + P))
+}
+
+# --- parameters ---
+N = 24
+kmin = 0.2
+L = 2.0 * 3.141592653589793 / kmin
+dx = L / N
+alpha = 0.8
+kappa = 3.0
+nu = 0.02
+D = 0.02
+dt = 0.01
+nsteps = 2200
+N2 = N * N
+
+# analytic growth of the seeded mode (kx=0, ky = 5 kmin = 1.0). The continuous rate
+# uses ky; the DISCRETE rate uses the finite-difference wavenumbers the grid actually
+# sees (centered-diff k, 5-point Laplacian k^2), which is what the sim reproduces.
+kys = 5.0 * kmin
+gamma_lin = growth2(kys * kys, kys, alpha, kappa, nu, D)
+keff = sin(kys * dx) / dx
+k2eff = 2.0 * (1.0 - cos(kys * dx)) / (dx * dx)
+gamma_disc = growth2(k2eff, keff, alpha, kappa, nu, D)
+
+# --- fields, seeded with a small mode-(0,3) density ripple ---
+w = zeros(N, N)
+n = zeros(N, N)
+phi = zeros(N, N)
+phim = zeros(N, N)
+dw = zeros(N, N)
+dn = zeros(N, N)
+wm = zeros(N, N)
+nm = zeros(N, N)
+dw2 = zeros(N, N)
+dn2 = zeros(N, N)
+amp = 1.0e-3
+for i to N {
+    for j to N {
+        y = j * dx
+        n[i, j] = amp * sin(kys * y)
+    }
+}
+
+dx2 = dx * dx
+Egrow = zeros(nsteps)
+flux = zeros(nsteps)
+zonal = zeros(nsteps)
+for step to nsteps {
+    submean(w, N)
+    poisson(phi, w, N, dx2, 12.0, 1.7)
+    submean(phi, N)
+    rhs(w, n, phi, dw, dn, N, dx, alpha, kappa, nu, D)
+    for i to N {
+        for j to N {
+            wm[i, j] = w[i, j] + 0.5 * dt * dw[i, j]
+            nm[i, j] = n[i, j] + 0.5 * dt * dn[i, j]
+        }
+    }
+    submean(wm, N)
+    poisson(phim, wm, N, dx2, 6.0, 1.7)
+    submean(phim, N)
+    rhs(wm, nm, phim, dw2, dn2, N, dx, alpha, kappa, nu, D)
+    for i to N {
+        for j to N {
+            w[i, j] = w[i, j] + dt * dw2[i, j]
+            n[i, j] = n[i, j] + dt * dn2[i, j]
+        }
+    }
+    # diagnostics: energy (0.5 (|grad phi|^2 + n^2)), particle flux -<n d_y phi>, zonal rms
+    en = 0.0
+    fl = 0.0
+    tj = 0.5 / dx
+    for i to N {
+        ip = mod(i + 1.0, N)
+        im = mod(i - 1.0 + N, N)
+        for j to N {
+            jp = mod(j + 1.0, N)
+            jm = mod(j - 1.0 + N, N)
+            phix = (phi[ip, j] - phi[im, j]) * tj
+            phiy = (phi[i, jp] - phi[i, jm]) * tj
+            en = en + 0.5 * (phix * phix + phiy * phiy + n[i, j] * n[i, j])
+            fl = fl - n[i, j] * phiy
+        }
+    }
+    Egrow[step] = en
+    flux[step] = fl / N2
+    # zonal flow: y-averaged v_y = d_x phi, its rms over x
+    zz = 0.0
+    for i to N {
+        ip = mod(i + 1.0, N)
+        im = mod(i - 1.0 + N, N)
+        uy = 0.0
+        for j to N {
+            uy = uy + (phi[ip, j] - phi[im, j]) * tj
+        }
+        uy = uy / N
+        zz = zz + uy * uy
+    }
+    zonal[step] = sqrt(zz / N)
+}
+
+# measure the growth rate over a fixed post-transient window t in [3, 7]
+epk = 0.0
+for s to nsteps {
+    if Egrow[s] > epk {
+        epk = Egrow[s]
+    }
+}
+i1 = 3.0 / dt
+i2 = 7.0 / dt
+sn = 0.0
+st = 0.0
+sy = 0.0
+sty = 0.0
+stt = 0.0
+for s to nsteps {
+    if s >= i1 {
+        if s <= i2 {
+            tt = s * dt
+            yy = log(Egrow[s])
+            sn = sn + 1.0
+            st = st + tt
+            sy = sy + yy
+            sty = sty + tt * yy
+            stt = stt + tt * tt
+        }
+    }
+}
+gamma_meas = (sn * sty - st * sy) / (sn * stt - st * st) / 2.0
+
+fmax = 0.0
+zmax = 0.0
+for s to nsteps {
+    if flux[s] > fmax {
+        fmax = flux[s]
+    }
+    if zonal[s] > zmax {
+        zmax = zonal[s]
+    }
+}
+
+show gamma_lin     # continuous drift-wave growth rate of the seeded mode
+show gamma_disc    # same, at the discrete FD wavenumbers (what the grid sees)
+show gamma_meas    # measured growth rate from the energy rise
+show epk           # saturated energy level
+show fmax          # peak outward particle flux
+show zmax          # peak zonal-flow amplitude
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

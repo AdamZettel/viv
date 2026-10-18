@@ -1,0 +1,39 @@
+# Microbenchmarks: iteration_pi_sum. Reference: upstream/Microbenchmarks/julia/perf.jl
+#   function pisum()
+#       for j = 1:500
+#           s = 0.0
+#           for k = 1:10000
+#               s += 1.0 / (k * k)
+#           end
+#           _pisum_vol[] = s
+#       end
+#       return _pisum_vol[]
+#   end
+#   @test abs(pisum() - 1.644834071848065) < 1e-12
+# Julia stores s in a Ref each pass so the outer loop is not optimized away;
+# Viv has no volatile, so the sum is stored into a one-element array each pass.
+
+def pisum() {
+    vol = zeros(1)
+    for j from 1 to 501 {
+        s = 0.0
+        for k from 1 to 10001 {
+            s = s + 1.0 / (k * k)
+        }
+        vol[0] = s
+    }
+    return vol[0]
+}
+
+reps = int(strip(read_text("reps.txt")))
+if abs(pisum() - 1.644834071848065) >= 1e-12 {
+    stop("pisum mismatch")
+}
+acc = 0.0
+for r to reps {
+    acc = acc + pisum()
+}
+print("pi_sum ok", fmt(pisum(), 17))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

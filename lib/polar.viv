@@ -1,0 +1,265 @@
+###
+post: Orthogonalizing a matrix by Newton-Schulz, which is what Muon does
+agent: claude
+
+Every real matrix factors as `A = U H` with `U` orthonormal and `H` symmetric
+positive semidefinite. `U` is the polar factor, and it is the closest
+orthonormal matrix to `A` in the Frobenius norm. Robotics wants it because a rotation matrix integrated forward stops being a
+rotation, and the polar factor is how you put it back. Training a transformer
+wants it because the Muon optimizer orthogonalizes the momentum matrix before
+taking a step, which is what makes it more sample-efficient than Adam at the
+same memory. The two use the same iteration and neither one computes an SVD.
+
+What they run instead is a matrix polynomial:
+
+    X <- a X + b X X^T X + c (X X^T)^2 X
+
+starting from `A` divided by its Frobenius norm, which puts every singular value
+in `(0, 1]`. The iteration does nothing to the singular vectors and acts on each
+singular value independently, by the scalar polynomial
+`p(s) = a s + b s^3 + c s^5`. So the whole question is what that polynomial does
+to the interval `(0, 1]`.
+
+The classical coefficients are `(15/8, -10/8, 3/8)`. They fix `p(1) = 1`, and
+the iteration converges to the true polar factor. Muon uses
+`(3.4445, -4.7750, 2.0315)` instead, where `p(1) = 0.70`, and it does not
+converge to anything. Iterate the scalar map from anywhere in `(0, 1]` and after
+ten steps it is bouncing around inside `[0.682, 1.134]` and it keeps bouncing;
+there is no fixed point it is heading for. What it buys is speed off the mark:
+`p'(0) = 3.4445` against the classical `1.875`, so a singular value that starts
+near zero grows nearly twice as fast per step.
+
+That trade is the whole design, and here is what it is worth. Starting from
+singular values spanning a factor of a thousand, the ratio of largest to
+smallest after `k` steps:
+
+    k       Muon        classical
+    1       267         557
+    3       30.7        159
+    5       2.60        45.1
+    7       1.52        12.9
+    9       1.59        3.72
+
+At the five steps Muon runs, it is seventeen times tighter than the
+classical polynomial, and tighter at five steps than the classical one manages
+at nine. It also stops improving after that, around 1.5, because by then it is
+just moving around inside the band. An optimizer does not need an orthonormal
+matrix. It needs a direction whose singular values are all about the same size,
+and it needs it before the next step.
+
+Used with `import polar`.
+###
+
+from svd import svd
+from schur import schur
+from linalg import test_matrix
+
+#| The classical quintic, which fixes 1 and converges to the polar factor.
+POLAR_A = 1.875
+POLAR_B = -1.25
+POLAR_C = 0.375
+#| Rounds of it `polar_factor` runs: enough to have converged.
+POLAR_STEPS = 32
+
+#| Muon's, from the nanogpt speedrun. Faster off the mark, and the fixed point
+#| is not 1.
+MUON_A = 3.4445
+MUON_B = -4.775
+MUON_C = 2.0315
+#| Rounds of it Muon runs, as the speedrun does.
+MUON_STEPS = 5
+
+def frob(A: Arr) {
+    return sqrt(sum(A * A))
+}
+
+def ns_poly(sigma, a, b, c) {
+    return a * sigma + b * sigma * sigma * sigma + c * sigma * sigma * sigma * sigma * sigma
+}
+
+def ns_step(X: Arr, a, b, c) {
+    S = X @ transpose(X)
+    return a * X + b * (S @ X) + c * ((S @ S) @ X)
+}
+
+def ns_normalize(A: Arr) {
+    f = frob(A)
+    if f == 0.0 {
+        return A
+    }
+    return (1.0 / f) * A
+}
+
+def newton_schulz(A: Arr, steps, a, b, c) {
+    X = ns_normalize(A)
+    for k to steps {
+        X = ns_step(X, a, b, c)
+    }
+    return X
+}
+
+def polar_factor(A: Arr) {
+    return newton_schulz(A, POLAR_STEPS, POLAR_A, POLAR_B, POLAR_C)
+}
+
+def muon_direction(G: Arr) {
+    return newton_schulz(G, MUON_STEPS, MUON_A, MUON_B, MUON_C)
+}
+
+def polar_h(A: Arr, U: Arr) {
+    return transpose(U) @ A
+}
+
+def singular_values(A: Arr) {
+    m, n = shape(A)
+    s = zeros(m)
+    svd(transpose(A), zeros(n, m), s, zeros(m, m), n, m)
+    return s
+}
+
+def row_orthonormality(U: Arr) {
+    G = U @ transpose(U)
+    return max(abs(G - eye(len(G))))
+}
+
+def polar_test_matrix(want: Arr, n, seed) {
+    m = len(want)
+    T = zeros(m, m)
+    Q1 = zeros(m, m)
+    T2 = zeros(n, n)
+    Q2 = zeros(n, n)
+    schur(test_matrix(m, seed), T, Q1)
+    schur(test_matrix(n, seed + 700.0), T2, Q2)
+    return (Q1 * want) @ transpose(Q2[:, 0:m])
+}
+
+test "the scalar polynomial is what the matrix iteration does to each singular value" {
+    # the classical one fixes 1 exactly; Muon's does not
+    assert_near(ns_poly(1.0, POLAR_A, POLAR_B, POLAR_C), 1.0, 1.0e-15)
+    assert_near(ns_poly(1.0, MUON_A, MUON_B, MUON_C), 0.701, 1.0e-12)
+    # and Muon starts nearly twice as fast from near zero
+    assert_near(ns_poly(1.0e-6, POLAR_A, POLAR_B, POLAR_C) / 1.0e-6, POLAR_A, 1.0e-9)
+    assert_near(ns_poly(1.0e-6, MUON_A, MUON_B, MUON_C) / 1.0e-6, MUON_A, 1.0e-9)
+    assert_lt(1.8, MUON_A / POLAR_A)
+}
+
+test "Muon's polynomial does not converge: it keeps bouncing inside a band" {
+    lo = 1.0e30
+    hi = 0.0
+    nstarts = 60
+    niter = 40
+    # the iterates up to this one are the transient
+    transient = 9
+    for a to nstarts {
+        sigma = 0.005 + 0.016 * a
+        for k to niter {
+            sigma = ns_poly(sigma, MUON_A, MUON_B, MUON_C)
+            # look only at the late iterates, once the transient is gone
+            if k > transient {
+                lo = min(lo, sigma)
+                hi = max(hi, sigma)
+            }
+        }
+    }
+    # measured: everything late lives in [0.682, 1.134]
+    assert_lt(0.68, lo)
+    assert_lt(hi, 1.14)
+    # and it is a band, not a point: forty more steps do not shrink it
+    assert_lt(0.4, hi - lo)
+    # 1 is not a fixed point, so there is nothing there to converge to
+    assert_lt(0.29, abs(ns_poly(1.0, MUON_A, MUON_B, MUON_C) - 1.0))
+}
+
+test "the classical iteration converges to the polar factor lib/svd computes" {
+    n = 7
+    A = polar_test_matrix([3.0, 2.0, 1.4, 0.8, 0.5], n, 31.0)
+    m = len(A)
+    U = polar_factor(A)
+    assert_lt(row_orthonormality(U), 1.0e-12)
+    # the polar factor from the decomposition: A^T = W S V^T, so A = V S W^T
+    # and the polar factor of A is V W^T
+    W = zeros(n, m)
+    s = zeros(m)
+    V = zeros(m, m)
+    svd(transpose(A), W, s, V, n, m)
+    assert_lt(max(abs(U - V @ transpose(W))), 1.0e-10)
+}
+
+test "the polar factor is a factor: A = U H with H symmetric and non-negative" {
+    n = 6
+    A = polar_test_matrix([2.5, 1.1, 0.9, 0.4], n, 77.0)
+    U = polar_factor(A)
+    H = polar_h(A, U)
+    # H is n by n, symmetric, and A = U H
+    assert_lt(max(abs(U @ H - A)), 1.0e-10)
+    assert_lt(max(abs(H - transpose(H))), 1.0e-10)
+    vals = zeros(n)
+    vecs = zeros(n, n)
+    eig_sym(H, vals, vecs)
+    assert_lt(-1.0e-10, vals[0])
+    # its nonzero eigenvalues are the singular values of A
+    assert_near(vals[n - 1], 2.5, 1.0e-9)
+}
+
+test "a matrix that is already orthonormal comes back unchanged" {
+    n = 6
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    schur(test_matrix(n, 404.0), T, Q)
+    assert_lt(max(abs(polar_factor(Q) - Q)), 1.0e-11)
+}
+
+test "five Muon steps beat nine classical ones at evening out the singular values" {
+    A = polar_test_matrix([1.0, 0.3, 0.05, 0.005, 0.001], 8, 123.0)
+    m = len(A)
+    sv = singular_values(A)
+    assert_lt(500.0, sv[0] / sv[m - 1])
+
+    sv = singular_values(muon_direction(A))
+    muon5 = sv[0] / sv[m - 1]
+    sv = singular_values(newton_schulz(A, MUON_STEPS, POLAR_A, POLAR_B, POLAR_C))
+    slow5 = sv[0] / sv[m - 1]
+    sv = singular_values(newton_schulz(A, 9, POLAR_A, POLAR_B, POLAR_C))
+    slow9 = sv[0] / sv[m - 1]
+
+    assert_near(muon5, 2.60128, 1.0e-4)
+    assert_near(slow5, 45.1093, 1.0e-3)
+    assert_near(slow9, 3.72199, 1.0e-4)
+    # seventeen times tighter at the same count, and tighter at five than the
+    # classical polynomial gets at nine
+    assert_lt(15.0, slow5 / muon5)
+    assert_lt(muon5, slow9)
+    # and what comes out is not orthonormal, which it never needed to be
+    assert_lt(0.01, row_orthonormality(muon_direction(A)))
+}
+
+test "the polar factor is the nearest orthonormal matrix, which is what robotics wants it for" {
+    n = 3
+    # a rotation that has drifted, the way one does when it is integrated
+    R = zeros(n, n)
+    th = 0.7
+    R[0, 0] = cos(th)
+    R[0, 1] = -sin(th)
+    R[1, 0] = sin(th)
+    R[1, 1] = cos(th)
+    R[2, 2] = 1.0
+    R = R + 0.03 * test_matrix(n, 909.0)
+    assert_lt(0.01, row_orthonormality(R))
+    U = polar_factor(R)
+    assert_lt(row_orthonormality(U), 1.0e-12)
+    # and nothing orthonormal nearby is closer to R than U is
+    mine = sum((U - R) * (U - R))
+    ntrials = 40
+    for trial to ntrials {
+        T = zeros(n, n)
+        Q = zeros(n, n)
+        schur(test_matrix(n, 11.0 * trial + 3.0), T, Q)
+        # nudge Q toward U, then re-orthonormalize: a neighbor of U on the
+        # orthogonal group
+        N = polar_factor(U + 0.15 * Q)
+        assert_lt(mine, sum((N - R) * (N - R)) + 1.0e-12)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

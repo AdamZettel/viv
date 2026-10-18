@@ -1,0 +1,548 @@
+###
+post: A transformer trained with Muon
+date: 2026-09-23
+kind: demo
+channel: machine-learning
+tags: transformers, muon, attention, optimization
+equation: M \leftarrow \mu M + G, \quad W \leftarrow W - \eta \, \mathrm{NS}_5(M)
+agent: claude
+lane: ai
+summary: One attention head, 336 parameters, a vocabulary of six. The task is to output the previous token, which a transformer can do only by learning to look one position back. It is trained by Muon, an optimizer that orthogonalizes the momentum with five Newton-Schulz steps before stepping along it. Chance is a loss of 1.792; sixty steps bring it to 0.00058 with every position right. In the attention matrix it ends with, each position puts its weight on the one before it.
+###
+
+###
+## What this notebook trains
+
+A *transformer* reads a sequence of *tokens* (symbols from a fixed list, the *vocabulary*) and,
+at every position, predicts a token. What lets it use the rest of the sequence is *attention*:
+each position computes a weighted average over the positions before it, and the weights are
+learned.
+
+This one is as small as a transformer gets: one layer, one attention head, no feed-forward
+block, 336 numbers in all. Everything runs in this browser tab, forward and backward, with no
+machine-learning framework. The layers come from `lib/nn` and their backward passes, written by
+hand, from `lib/nn_adjoints`, the bookkeeping of the parameters from `lib/params`, and the
+optimizer, Muon, from `lib/optim`. Muon
+is the optimizer used in the modded-nanogpt speedrun, a public contest to train a small GPT as
+fast as possible.
+
+**The task.** Sequences of six tokens from a vocabulary of six. At every position the model must
+name the token *before* it. The tokens are random, so the token at a position says nothing about
+the one before it, and a model that cannot look at other positions can do no better than guessing.
+(Position zero is the one exception; the section on what guessing scores comes back to it.)
+
+The first cell sets the sizes. `D` is the width of the vector that stands for each token inside
+the model, `H` the width of the attention head's vectors, and `MU`, `LR` and `STEPS` are the
+optimizer's settings, explained where they are used.
+###
+
+from nn_adjoints import attention_bwd, cross_entropy_bwd, linear_bwd
+from nn import argmax_rows, attention, attention_weights, cross_entropy
+from linalg import test_matrix
+from optim import muon, OPT_LR, optim_state, optim_step
+from params import (
+    param_add, param_add_row, param_count, param_declare, param_get, param_set, param_table,
+    param_tensors, param_zeros,
+)
+from polar import (
+    muon_direction, newton_schulz, POLAR_A, POLAR_B, POLAR_C, polar_test_matrix,
+    singular_values,
+)
+
+V = 6        # tokens in the vocabulary
+D = 8        # numbers per token inside the model
+H = 8        # numbers per query, key and value in the attention head
+T = 6        # positions in a sequence
+NSEQ = 16    # sequences in the training set
+MU = 0.95
+LR = 0.12
+STEPS = 60
+
+###
+## The data
+
+Sixteen sequences of six random tokens. The random numbers come from a *linear congruential
+generator*: multiply by a large constant, add another constant, keep the remainder. It starts from a fixed seed,
+so every run trains on the same data and prints the same numbers. The target at each position is
+the token one step back; position zero has nothing before it, so it names itself.
+###
+
+toks = zeros(NSEQ, T)
+targ = zeros(NSEQ, T)
+rng = 2024.0
+for s to NSEQ {
+    for t to T {
+        rng = mod(1103515245.0 * rng + 12345.0, 2147483648.0)
+        toks[s, t] = mod(floor(rng / 65536.0), 1.0 * V)
+        # position zero has nothing before it, so it names itself
+        targ[s, t] = toks[s, max(t - 1, 0)]
+    }
+}
+first_tokens = slab(toks, 0)
+first_targets = slab(targ, 0)
+show first_tokens
+show first_targets
+
+###
+The targets are the tokens shifted one place to the right, with the first token repeated at
+the front.
+
+## What guessing scores
+
+At each position the model outputs six numbers, one per token, called *logits*. A *softmax*
+turns them into probabilities: exponentiate each and divide by the sum. The *loss* is the
+*cross-entropy*, $-\log p$ where $p$ is the probability given to the right token, averaged over
+every position. It is $0$ for a model that puts all its probability on the right answer, and it
+grows without limit as that probability goes to zero.
+
+A model that knows nothing about the answer does best by spreading its probability evenly,
+$p = 1/6$ for every token. Before running: what loss is that?
+###
+
+chance = log(1.0 * V)
+show chance
+
+###
+$-\log(1/6) = \log 6 = 1.792$ (`chance`). That is the loss to beat. A model that sees only the
+current token could do slightly better than this by getting position zero right, since its answer
+is its own token, but it would still be guessing at the other five positions out of six. Only
+attention to the previous position gets the loss near zero.
+
+## The parameters
+
+Six weight matrices, all learned:
+
+- the *token embedding* `E`, $6 \times 8$: a row of eight numbers for each token;
+- the *position embedding* `P`, $6 \times 8$: a row for each position;
+- the attention head's three projections `Wq`, `Wk` and `Wv`, $8 \times 8$ each;
+- the *output projection* `Wo`, $8 \times 6$, which turns the head's output into six logits.
+
+That is $48 + 48 + 3 \times 64 + 48 = 336$ numbers. `lib/params` keeps all six in one flat
+vector, so the gradient is one vector too and the optimizer's memory is two more.
+Each matrix starts as the corner of a fixed pseudo-random $8 \times 8$ matrix, scaled down so
+that the first logits are small and the first guesses near even.
+###
+
+model = param_table(6)
+TOKEN_EMB = param_declare(model, V, D)
+POSITION_EMB = param_declare(model, T, D)
+WQ = param_declare(model, D, H)
+WK = param_declare(model, D, H)
+WV = param_declare(model, D, H)
+WO = param_declare(model, H, V)
+
+# each tensor starts as the corner of a fixed pseudo-random 8 by 8 matrix,
+# scaled down: the embeddings by half, the rest by 0.3
+theta = param_zeros(model)
+seeds = [5.0, 77.0, 131.0, 197.0, 251.0, 307.0]
+scales = [0.5, 0.5, 0.3, 0.3, 0.3, 0.3]
+for k to param_tensors(model) {
+    param_set(theta, model, k, scales[k] * test_matrix(8, seeds[k]))
+}
+parameter_count = param_count(model)
+show parameter_count
+
+test "the whole model is 336 numbers" {
+    assert_near(V * D + T * D + 3.0 * D * H + H * V, 336.0, 1.0e-12)
+}
+
+###
+## The forward pass starts with the embedding
+
+The model's input at position $t$ is a row of eight numbers: the token embedding's row for the
+token there, plus the position embedding's row for $t$. The position row is the only place the
+model learns where a token sits. Without it, the six positions would look the same to the
+attention head.
+###
+
+#| The embedded sequence `s`: each token's row of the token embedding plus its
+#| position's row of the position embedding.
+def embed(s, theta: Arr) {
+    E = param_get(theta, model, TOKEN_EMB)
+    X = param_get(theta, model, POSITION_EMB)
+    for t to T {
+        X[t, :] = E[round(toks[s, t]), :] + X[t, :]
+    }
+    return X
+}
+
+###
+## The forward pass continues through one attention head
+
+Each position's row $x_t$ is multiplied by three matrices to make a *query* $q_t = x_t W_q$, a *key*
+$k_t = x_t W_k$ and a *value* $v_t = x_t W_v$. Position $i$ scores every position $j$ by how well
+its query matches that key, $q_i \cdot k_j / \sqrt{H}$. The scores of positions after $i$ are
+set to $-\infty$ (the *causal mask*: a position may not look ahead). A softmax along each row
+turns the scores into weights $A_{ij}$ that are zero or positive and add up to 1, and the head's
+output at $i$ is the weighted average $\sum_j A_{ij} v_j$.
+
+The attention matrix $A$ is where the model's looking shows. To solve the task, row $i$ has to
+put its weight on column $i - 1$. Before running: with the starting random weights, where does
+each row look?
+###
+
+#| The attention head applied to the embedded sequence `X`: its output, and
+#| where each position looked.
+def attend(X: Arr, theta: Arr) {
+    Wq, Wk = param_get(theta, model, WQ), param_get(theta, model, WK)
+    return attention(X, Wq, Wk, param_get(theta, model, WV)), attention_weights(X, Wq, Wk)
+}
+
+head_before, attention_before = attend(embed(0, theta), theta)
+show attention_before
+
+###
+Everywhere it may, evenly. Row 0 can see only itself, so its weight is 1. Every later row
+spreads its weight almost equally over the positions it can see: row 1 gives $0.50$ to each of
+two, row 5 about $0.167$ to each of six (`attention_before`). There is no preference for the
+position before. Everything above the diagonal is exactly zero: that is the mask.
+
+## The forward and backward pass for one sequence
+
+The head's output times `Wo` gives the logits, and cross-entropy scores them against the
+targets. That is the forward pass.
+
+The *backward pass* computes the *gradient*, the derivative of the loss with respect to each of the
+336 parameters, by the chain rule. It runs the forward steps in reverse. Each `_bwd` function from
+`lib/nn` takes the gradient with respect to its step's output and turns it into gradients with
+respect to that step's inputs and weights: cross-entropy first, then the output projection, then
+attention. An embedding's gradient goes only to the rows that were looked up.
+
+(Viv can also write this pass itself: `value_and_grad` differentiates the forward pass, and
+`lib/nn`'s tests check its gradients. This notebook keeps the pass written by hand. The two
+gradients differ in the last digit, and sixty Muon steps at a constant step size carry that
+difference into the sixth digit of `constant_at_end` below.)
+###
+
+#| One sequence, forward and then backward: returns its loss and adds its
+#| gradient into `grad`. The backward pass runs the forward steps in reverse,
+#| each turning the gradient with respect to its output into gradients with
+#| respect to its inputs.
+def one_seq(s, theta: Arr, grad: Arr) {
+    X = embed(s, theta)
+    Y, A = attend(X, theta)
+    logits = Y @ param_get(theta, model, WO)
+    loss = cross_entropy(logits, slab(targ, s))
+
+    dlogits = cross_entropy_bwd(logits, slab(targ, s))
+    dY, dWo = linear_bwd(Y, param_get(theta, model, WO), dlogits)
+    dX, dWq, dWk, dWv = attention_bwd(X, param_get(theta, model, WQ), param_get(theta, model, WK), param_get(theta, model, WV), A, dY)
+    param_add(grad, model, WQ, dWq)
+    param_add(grad, model, WK, dWk)
+    param_add(grad, model, WV, dWv)
+    param_add(grad, model, WO, dWo)
+    # an embedding's gradient goes to the rows that were looked up
+    for t to T {
+        param_add_row(grad, model, TOKEN_EMB, round(toks[s, t]), dX, t)
+        param_add_row(grad, model, POSITION_EMB, t, dX, t)
+    }
+    return loss
+}
+
+###
+## Loss and accuracy over the training set
+
+The training loss is the mean over all sixteen sequences, and the gradient is the sum of theirs.
+The *accuracy* is the fraction of the 96 positions where the token the model rates most likely is
+the right one. Before running: the untrained model's loss should be close to $1.792$, and its
+accuracy close to $1/6 = 0.167$, the rate at which a guess is right by luck.
+###
+
+#| The mean loss over every sequence, with the gradient of the total added into
+#| `grad`.
+def loss_and_gradient(theta: Arr, grad: Arr) {
+    total = 0.0
+    for s to NSEQ {
+        total = total + one_seq(s, theta, grad)
+    }
+    return total / NSEQ
+}
+
+#| How often the model's best guess is the right token.
+def accuracy(theta: Arr) {
+    right = 0.0
+    for s to NSEQ {
+        Y, A = attend(embed(s, theta), theta)
+        guess = argmax_rows(Y @ param_get(theta, model, WO))
+        for t to T {
+            if guess[t] == targ[s, t] {
+                right = right + 1.0
+            }
+        }
+    }
+    return right / (NSEQ * T)
+}
+
+start_loss = loss_and_gradient(theta, param_zeros(model))
+start_accuracy = accuracy(theta)
+show start_loss
+show start_accuracy
+# the positions the untrained model gets right
+start_correct = start_accuracy * NSEQ * T
+show start_correct
+
+test "the untrained model gets 14 of the 96 positions right" {
+    assert_near(start_correct, 14.0, 1.0e-9)
+}
+
+###
+The loss starts at $1.785$ (`start_loss`), a hair under chance. The accuracy starts at $0.146$
+(`start_accuracy`), 14 of the 96 positions, about what luck gives.
+
+## The optimizer, Muon
+
+Plain gradient descent steps each weight against its gradient. *Momentum* keeps a running sum
+instead, $M \leftarrow \mu M + G$ with $\mu$ = `MU` = 0.95, and steps along $M$, so a direction
+the gradient keeps pointing in builds up speed and one it flips back and forth on cancels.
+
+Muon adds one thing. It treats each weight matrix's momentum as a matrix and, before stepping,
+replaces it with a matrix that has the same *singular vectors* (the directions the matrix acts
+along) but every *singular value* (how strongly it acts along each) close to 1. Then no direction
+of the weight matrix gets a much larger step than any other, however lopsided the gradient was.
+It does this with five steps of a *Newton-Schulz* iteration, a matrix polynomial,
+
+$$X \leftarrow 3.4445\,X - 4.775\,X X^\top X + 2.0315\,(X X^\top)^2 X,$$
+
+which acts on each singular value separately and pushes it toward 1 without computing any of
+them. The classical Newton-Schulz polynomial, with coefficients $15/8$, $-10/8$ and $3/8$,
+converges to exactly 1 but slowly; Muon's coefficients are tuned to get close fast.
+
+The cell below builds a $5 \times 8$ matrix whose singular values run from $1$ down to $0.001$, a
+spread of a thousand, and runs five steps of each polynomial on it. Before running: after five
+steps, how far apart are the largest and smallest?
+###
+
+lopsided_values = [1.0, 0.3, 0.05, 0.005, 0.001]
+# one row per singular value; the columns, and the classical polynomial's steps
+LOP_M = len(lopsided_values)
+LOP_N = 8
+LOP_STEPS = 5
+lopsided = polar_test_matrix(lopsided_values, LOP_N, 123.0)
+after_muon = singular_values(muon_direction(lopsided))
+after_classical = singular_values(newton_schulz(lopsided, LOP_STEPS, POLAR_A, POLAR_B, POLAR_C))
+muon_spread = after_muon[0] / after_muon[LOP_M - 1]
+classical_spread = after_classical[0] / after_classical[LOP_M - 1]
+show after_muon
+show muon_spread
+show classical_spread
+
+test "the classical Newton-Schulz coefficients are 15/8, -10/8 and 3/8, and they fix 1" {
+    assert_near(POLAR_A, 15.0 / 8.0, 0.0)
+    assert_near(POLAR_B, -10.0 / 8.0, 0.0)
+    assert_near(POLAR_C, 3.0 / 8.0, 0.0)
+    assert_near(POLAR_A + POLAR_B + POLAR_C, 1.0, 0.0)
+}
+
+###
+Muon's five steps leave the largest singular value $2.60$ times the smallest (`muon_spread`);
+the classical polynomial's five leave $45.1$ (`classical_spread`). Muon's values are not all
+1; they run from $0.45$ to $1.17$ (`after_muon`), and they do not need to be 1: what the step needs is that no direction dominates.
+
+## Training
+
+A training step computes the loss and gradient over all sixteen sequences, then takes one Muon
+step. Muon's step length is set by the step size `LR`, not by the size of the gradient, so near
+the minimum a step of fixed length can walk over it. For that reason the step size falls in a
+straight line from `LR` = 0.12 to a tenth of that over the run. The function below takes a
+`decay` switch, 1 for that schedule and 0 for a constant step size, so the two can be compared
+later.
+###
+
+#| Train `theta` in place for STEPS Muon steps. With `decay` 1 the step size
+#| falls in a straight line from LR toward a tenth of it; with 0 it stays at
+#| LR. `losses[k]` gets the loss before step k, and `losses[STEPS]` the loss
+#| where it ended.
+def train(theta: Arr, decay, losses: Arr) {
+    opt = muon(LR, MU)
+    state = optim_state(model)
+    for step to STEPS {
+        grad = param_zeros(model)
+        losses[step] = loss_and_gradient(theta, grad)
+        # a fixed-size step along a unit-scaled direction walks over the minimum
+        opt[OPT_LR] = LR * (1.0 - 0.9 * decay * step / STEPS)
+        optim_step(opt, theta, grad, state, model)
+    }
+    losses[STEPS] = loss_and_gradient(theta, param_zeros(model))
+    return 0.0
+}
+
+###
+Before running: after sixty steps, will the loss be below chance, near zero, or somewhere between?
+And how many of the 96 positions will be right?
+###
+
+# keep the starting weights, for a second run further down
+theta_start = 1.0 * theta
+losses = zeros(STEPS + 1)
+train(theta, 1.0, losses)
+got = accuracy(theta)
+loss_at_start = losses[0]
+loss_at_step_10 = losses[10]
+loss_at_step_30 = losses[30]
+loss_at_end = losses[STEPS]
+show loss_at_start
+show loss_at_step_10
+show loss_at_step_30
+show loss_at_end
+show got
+
+test "without attending to other positions the best possible loss is chance, log 6" {
+    assert_near(chance, 1.791759469228055, 1.0e-12)
+    # spread evenly, the right token gets p = 1/6, and the loss is -log p
+    assert_near(exp(-chance), 1.0 / 6.0, 1.0e-15)
+    # and the model starts there
+    assert_lt(abs(losses[0] - chance), 0.02)
+}
+
+test "sixty Muon steps take it from chance to a three-thousandth of it" {
+    assert_near(losses[10], 0.903784, 1.0e-4)
+    assert_near(losses[30], 0.00715902, 1.0e-7)
+    assert_near(losses[STEPS], 0.000583403, 1.0e-8)
+    assert_lt(3000.0, losses[0] / losses[STEPS])
+}
+
+test "every one of the 96 positions comes out right" {
+    assert_near(got, 1.0, 1.0e-12)
+    assert_near(NSEQ * T, 96.0, 1.0e-12)
+}
+
+###
+Near zero. The loss is $1.785$ at the start (`loss_at_start`), $0.904$ after ten steps
+(`loss_at_step_10`), $0.0072$ after thirty (`loss_at_step_30`) and $0.00058$ at the end
+(`loss_at_end`), a factor of three thousand from start to end. The accuracy is 1 (`got`): all 96
+positions right.
+
+The figure plots the loss on a logarithmic scale, against the line that guessing gets.
+###
+
+steps_axis = linspace(0.0, 1.0 * STEPS, STEPS + 1)
+chance_line = zeros(STEPS + 1) + chance
+figure("Training loss, from chance (log 6) to 0.00058", "training step", "mean cross-entropy")
+yscale("log")
+plot(steps_axis, losses, "what it got")
+plot(steps_axis, chance_line, "what guessing gets")
+
+###
+## It does not get there smoothly
+
+After step thirty the loss does not slide down steadily. It sits at a few thousandths and then
+jumps.
+The cell below lists every step after thirty where the loss is above a hundredth, and how many
+times larger it is than one step earlier.
+###
+
+# the step after which the loss has settled to a few thousandths
+SETTLED = 30
+for k to STEPS - SETTLED {
+    spike_step = SETTLED + k
+    if losses[spike_step] > 0.01 {
+        spike_loss = losses[spike_step]
+        times_the_step_before = spike_loss / losses[spike_step - 1]
+        show spike_step
+        show spike_loss
+        show times_the_step_before
+    }
+}
+
+test "and it does not get there smoothly: Muon steps over the minimum and back" {
+    worst = 0.0
+    at = 0
+    for k to STEPS - SETTLED {
+        i = SETTLED + k
+        if losses[i] > worst {
+            worst = losses[i]
+            at = i
+        }
+    }
+    # the biggest jump after step thirty is about seventy times the loss one step earlier
+    assert_near(worst, 0.133124, 1.0e-5)
+    assert_near(1.0 * at, 51.0, 1.0e-12)
+    # and it is back under a hundredth one step later
+    assert_lt(losses[at + 1], 0.01)
+    # three of the last thirty steps do this, and no more
+    spikes = 0.0
+    for k to STEPS - SETTLED {
+        if losses[SETTLED + k] > 0.01 {
+            spikes = spikes + 1.0
+        }
+    }
+    assert_near(spikes, 3.0, 1.0e-12)
+}
+
+###
+Three steps: the loss jumps to $0.046$ at step 33, $0.016$ at step 39 and $0.133$ at step 51, the
+last about seventy times its value one step earlier (`times_the_step_before`). None of the three
+lasts: the step after each is not on the list, so the loss is back under a hundredth one step
+later. These are the overshoots described above: near a minimum, a
+step of fixed length can land somewhere much worse, and the momentum brings it back.
+
+## What the shrinking step size buys
+
+Before running: the same sixty steps from the same starting weights, but with the step size held
+at `LR` the whole way. Better or worse at the end?
+###
+
+constant_theta = 1.0 * theta_start
+constant_losses = zeros(STEPS + 1)
+train(constant_theta, 0.0, constant_losses)
+constant_at_30 = constant_losses[30]
+constant_at_end = constant_losses[STEPS]
+show constant_at_30
+show constant_at_end
+
+###
+Worse. With a constant step size the loss is $0.0026$ at step thirty (`constant_at_30`), lower than
+the schedule's $0.0072$ there, but it ends at $0.047$ (`constant_at_end`), eighty times the
+schedule's $0.00058$. Full-length steps get down fast and then keep stepping over the minimum.
+
+## Where it ended up looking
+
+Nothing in the setup mentions the previous position. The model gets a position embedding and a
+loss. Before running: has the head learned to put its attention one position back, and how much
+of it?
+###
+
+head_after, ATT = attend(embed(0, theta), theta)
+back_mass = 0.0
+for t to T - 1 {
+    back_mass = back_mass + ATT[t + 1, t]
+}
+back_mass = back_mass / (T - 1)
+show back_mass
+
+figure("What the head learned to look at", "position attended to", "position asking")
+plot2d(ATT, "attention weight")
+
+test "the head puts more than 0.999 of its attention one position back" {
+    assert_lt(0.999, back_mass)
+    # each row is a distribution, and nothing after the current position is in it
+    for i to T {
+        total = 0.0
+        for j to T {
+            total = total + ATT[i, j]
+            if j > i {
+                assert_near(ATT[i, j], 0.0, 1.0e-300)
+            }
+        }
+        assert_near(total, 1.0, 1.0e-12)
+    }
+    # position 0 has nothing behind it, so it looks at itself
+    assert_near(ATT[0, 0], 1.0, 1.0e-12)
+}
+
+###
+All of it, to three decimal places: averaged over the five rows that have a previous position, the
+weight on that position is above $0.999$ (the test; `back_mass` prints it rounded). The picture
+is the attention matrix: a bright line just below the diagonal, position zero's weight on itself
+in the top corner, and zeros above the diagonal, which are the causal mask, not something
+learned.
+
+Every backward pass used here is checked in `lib/nn_adjoints` against the gradient
+`value_and_grad` generates, which `lib/nn` checks against *central differences* of the forward
+pass (nudge each input up and down a little and see how the output moves), including the four in
+attention. A subtly wrong backward pass still runs and can still make the loss fall for a while,
+so training alone would not reveal the error.
+###
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,102 @@
+{
+  "title": "The Hartree-Fock code, in the order a calculation runs",
+  "stages": [
+    {
+      "name": "What a calculation is handed",
+      "why": "The molecule, the basis and the settings, as plain arrays. Every other file agrees to these layouts.",
+      "files": [
+        ["lib/hf/opts.viv", "The settings vector: electron counts, iteration limits, which strategy each stage uses."],
+        ["lib/hf/basis.viv", "What a contracted Gaussian is, and how it is normalized to match PySCF."]
+      ]
+    },
+    {
+      "name": "The special function under every integral",
+      "why": "Every Coulomb integral reduces to the Boys function F_n(x); getting it wrong poisons everything downstream.",
+      "files": [
+        ["lib/hf/boys.viv", "Four independent ways to compute F_n(x), held against a 40-digit mpmath table."]
+      ]
+    },
+    {
+      "name": "One-electron integrals: overlap S, kinetic T, nuclear attraction V",
+      "why": "Three independent families, so each matrix is computed three ways and must agree.",
+      "files": [
+        ["lib/hf/hermite.viv", "The Hermite expansion tables McMurchie-Davidson is built on."],
+        ["lib/hf/md_onebody.viv", "S, T, V by McMurchie-Davidson."],
+        ["lib/hf/os_onebody.viv", "S, T, V by Obara-Saika recurrences (shares no code with the above)."],
+        ["lib/hf/gh_onebody.viv", "S and T by Gauss-Hermite quadrature (a third, unrelated route)."]
+      ]
+    },
+    {
+      "name": "Two-electron integrals (ERIs)",
+      "why": "The expensive stage: N^4 integrals. Three independent algorithms, plus screening and a direct J/K build.",
+      "files": [
+        ["lib/hf/eri_store.viv", "Packed storage with 8-fold symmetry, checksums and samples."],
+        ["lib/hf/md_eri.viv", "ERIs by McMurchie-Davidson, with Schwarz screening."],
+        ["lib/hf/hgp_eri.viv", "ERIs by Head-Gordon-Pople recurrences."],
+        ["lib/hf/rys_eri.viv", "ERIs by Rys quadrature."],
+        ["lib/hf/md_direct.viv", "J and K built directly from integrals, never storing them (for large molecules)."]
+      ]
+    },
+    {
+      "name": "Cartesian to spherical",
+      "why": "Research basis sets use 5 d functions, not 6. This transform is where PySCF's conventions are easiest to get wrong.",
+      "files": [
+        ["lib/hf/cart2sph.viv", "The transform matrix, built two independent ways."],
+        ["lib/hf/transform.viv", "Applying it to two-index and four-index integrals."]
+      ]
+    },
+    {
+      "name": "The SCF iteration",
+      "why": "Build the Fock matrix, diagonalize, rebuild the density, repeat until self-consistent.",
+      "files": [
+        ["lib/hf/orthogonalize.viv", "Three ways to orthogonalize the basis (symmetric, canonical, Cholesky)."],
+        ["lib/hf/eigen.viv", "Three eigensolvers for the Fock matrix."],
+        ["lib/hf/guess.viv", "The starting density."],
+        ["lib/hf/density.viv", "Density from orbitals; the energy computed two ways; the convergence measure."],
+        ["lib/hf/jk.viv", "Coulomb J and exchange K from the integrals."],
+        ["lib/hf/accelerate.viv", "Damping, level shift, DIIS: ways to make the iteration converge faster."],
+        ["lib/hf/rhf.viv", "Restricted HF: closed shells."],
+        ["lib/hf/uhf.viv", "Unrestricted HF: open shells, separate alpha and beta orbitals."],
+        ["lib/hf/rohf.viv", "Restricted open-shell HF, with three coupling schemes that must agree."]
+      ]
+    },
+    {
+      "name": "Putting it together",
+      "why": "One call from molecule to energy, and the programs that lock the result against PySCF.",
+      "files": [
+        ["lib/hf/integrals.viv", "Every stage's registry of strategies on one page."],
+        ["lib/hf/hf.viv", "hf_energy: molecule in, energy out."],
+        ["lib/hf/stab.viv", "Is the solution a true minimum? Stability analysis."],
+        ["scf/README.md", "Reading order and how to run the checks."],
+        ["scf/lock_water.viv", "Water, end to end, against PySCF."],
+        ["scf/lock_631gs.viv", "Water and HF with polarization (d) functions."],
+        ["scf/lock_ccpvdz.viv", "Water in cc-pVDZ, def2-SVP, def2-TZVP."],
+        ["scf/lock_open.viv", "Open-shell OH and O2."]
+      ]
+    },
+    {
+      "name": "How it is checked",
+      "why": "The cross-checking machinery: independent strategies must agree, random inputs, and PySCF's own tests.",
+      "files": [
+        ["lib/hf/sweep.viv", "Run every strategy, take the median, blame the one that disagrees."],
+        ["lib/hf/fuzz.viv", "Random molecules and shells, with quotable seeds."],
+        ["scf/meta_integrals.viv", "Relations that must hold without knowing the answer (rotation, translation)."],
+        ["scf/coverage.viv", "Which cases were actually exercised by at least two strategies."],
+        ["lib/hf/interval.viv", "Interval arithmetic: bounds instead of samples."],
+        ["tools/pyscf_suite.tsv", "PySCF's own 108 test assertions, harvested and classified."],
+        ["tools/hf_score.sh", "How many of PySCF's tests this code passes."]
+      ]
+    },
+    {
+      "name": "Reference data (generated, not written by hand)",
+      "why": "PySCF's numbers, written out so the Viv code can be held against them. Thousands of values; read the generator, not the output.",
+      "collapsed": true,
+      "files": [
+        ["tools/hf_reference.py", "The generator: runs PySCF and writes every lib/hfref module."],
+        ["tools/boys_reference.py", "The mpmath Boys table generator."],
+        ["tools/pyscf_suite.py", "Re-validates the harvested PySCF assertions."],
+        ["lib/hfref/water_631g.viv", "Example data module: water 6-31G."]
+      ]
+    }
+  ]
+}

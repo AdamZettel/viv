@@ -1,0 +1,110 @@
+###
+post: The power flow against MATPOWER's own solution
+agent: claude
+
+MATPOWER's test suite solves its 9-bus case t_case9_pf (lib/t/t_case9_pf.m,
+bus 3 renumbered 30) and stores the result in lib/t/soln9_pf.mat (AC) and
+soln9_dcpf.mat (DC), in the MATPOWER repository (commit 80b6e16, 2026-10-12;
+BSD-3-Clause, see lib/power/cases/LICENSE-MATPOWER). The numbers below are
+those files' result columns, read with scipy.io.loadmat and printed with
+every digit.
+
+Newton's method and the DC solve agree with MATPOWER to rounding. The
+fast-decoupled method converges to the same equations at the same
+tolerance (mismatch below 1e-8 per unit) along a different path, so it is
+held to that tolerance: about 1e-6 MVAr and 1e-7 degrees here.
+###
+
+from power.case import PF, PG, PT, QF, QG, QMAX, QMIN, QT, VA, VM, read_case
+from power.pf import DC, FDXB, NR, runpf
+
+TOL: Num = 1e-8
+#: rounding of Newton's answer, in per unit, degrees and MW (MATPOWER's values carry about 13 digits)
+NR_ATOL: Num = 1e-10
+#: the fast-decoupled answer is right to the mismatch tolerance, magnified in MW by baseMVA
+FD_ATOL: Num = 1e-5
+MAX_IT: Int = 30
+#: a held generator sits on its limit; the others are inside it by more than the solve's error
+QLIM_SLACK: Num = 1e-6
+
+PF_VM = [1.0, 0.9999999999999998, 0.9999999999999999, 0.9870068523919053, 0.975472177085053, 1.0033754364528003, 0.9856448817249466, 0.9961852458090698, 0.957621040429904]
+PF_VA = [0.0, 9.668741126628127, 4.771073237177321, -2.406643919519411, -4.01726432670755, 1.9256016868285664, 0.6215445553889333, 3.7991201926923224, -4.34993357656101]
+PF_PG = [71.9547015892219, 85.0, 163.0]
+PF_QG = [24.068957772759347, -3.649025534209524, 14.460119531125173]
+PF_PF = [71.9547015892219, 30.728280279736758, -59.445314441944795, 84.99999999999997, 24.10613416723329, -75.98935222105762, -162.99999999999972, 86.50443565720315, -40.960113134644104]
+PF_QF = [24.068957772759347, -0.5858508226422805, -16.312049500578592, -3.649025534209524, 4.536791179891787, -10.599237559223031, 2.276189879408795, -2.5324293491302003, -35.71801701219844]
+PF_PT = [-71.95470158922191, -30.55468555805444, 60.89386583276659, -84.99999999999997, -24.010647778941497, 76.49556434279414, 162.99999999999974, -84.03988686535044, 41.2264213094818]
+PF_QT = [-20.753044538740305, -13.687950499421419, -12.427469531088455, 7.890678351196219, -24.400762440777147, 0.25623946972257383, 14.460119531125173, -14.281982987799147, 21.33889536138395]
+
+DC_VM = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+DC_VA = [0.0, 9.796018855085988, 5.060560045142459, -2.211158722968871, -3.7380912469925134, 2.2066572675958294, 0.8224410569767293, 3.9590113171907273, -4.06340049078228]
+DC_PG = [66.99999999999994, 85.0, 163.0]
+DC_QG = [0.0, 0.0, 0.0]
+DC_PF = [66.99999999999994, 28.9673913043478, -61.03260869565219, 84.99999999999999, 23.96739130434781, -76.03260869565217, -162.99999999999997, 86.96739130434786, -38.032608695652144]
+DC_QF = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+DC_PT = [-66.99999999999994, -28.9673913043478, 61.03260869565219, -84.99999999999999, -23.96739130434781, 76.03260869565217, 162.99999999999997, -86.96739130434786, 38.032608695652144]
+DC_QT = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+CASE = read_case("lib/power/cases/t_case9_pf.m")
+
+#: MATPOWER's result columns for one solve
+record Expected {
+    vm: Arr
+    va: Arr
+    pg: Arr
+    qg: Arr
+    pf: Arr
+    qf: Arr
+    pt: Arr
+    qt: Arr
+}
+
+def agrees(m: Int, atol: Num, e: Expected) {
+    r = runpf(CASE, m, false, TOL, MAX_IT)
+    assert_true(r.success)
+    assert_allclose(r.bus[:, VM], e.vm, atol)
+    assert_allclose(r.bus[:, VA], e.va, atol)
+    assert_allclose(r.gen[:, PG], e.pg, atol)
+    assert_allclose(r.gen[:, QG], e.qg, atol)
+    assert_allclose(r.branch[:, PF], e.pf, atol)
+    assert_allclose(r.branch[:, QF], e.qf, atol)
+    assert_allclose(r.branch[:, PT], e.pt, atol)
+    assert_allclose(r.branch[:, QT], e.qt, atol)
+}
+
+AC = Expected { vm: PF_VM, va: PF_VA, pg: PF_PG, qg: PF_QG, pf: PF_PF, qf: PF_QF, pt: PF_PT, qt: PF_QT }
+DCX = Expected { vm: DC_VM, va: DC_VA, pg: DC_PG, qg: DC_QG, pf: DC_PF, qf: DC_QF, pt: DC_PT, qt: DC_QT }
+
+test "Newton-Raphson reproduces MATPOWER's soln9_pf" {
+    agrees(NR, NR_ATOL, AC)
+}
+
+test "the fast-decoupled method reproduces soln9_pf to its tolerance" {
+    agrees(FDXB, FD_ATOL, AC)
+}
+
+test "the DC power flow reproduces MATPOWER's soln9_dcpf" {
+    agrees(DC, NR_ATOL, DCX)
+}
+
+test "with Q limits enforced every generator ends inside its limits" {
+    c = read_case("lib/power/cases/case14.m")
+    free = runpf(c, NR, false, TOL, MAX_IT)
+    held = runpf(c, NR, true, TOL, MAX_IT)
+    assert_true(held.success)
+    #: case14's slack generator (bus 1) falls below its Qmin of 0 when the limits are ignored;
+    #: held there, its bus stops being the reference and bus 2 takes over
+    over: Int = 0
+    ng: Int = int(shape(free.gen)[0])
+    for g to ng {
+        if free.gen[g, QG] > free.gen[g, QMAX] or free.gen[g, QG] < free.gen[g, QMIN] {
+            over += 1
+        }
+        assert_true(held.gen[g, QG] <= held.gen[g, QMAX] + QLIM_SLACK and held.gen[g, QG] >= held.gen[g, QMIN] - QLIM_SLACK)
+    }
+    assert_true(over == 1)
+    assert_near(held.gen[0, QG], held.gen[0, QMIN], 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

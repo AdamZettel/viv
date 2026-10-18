@@ -1,0 +1,363 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# Python's str and lists of str: py2viv's translation rules (format: ../RULES.md; the
+# translator's side, which these rules' hooks call, is ../strs.py).
+#
+# Viv's string builtins are Python's, character for character (positions in code points,
+# CPython 3.11's Unicode tables, Python's split, strip, find, replace, float and int parsing,
+# checked against CPython on 18,846 calls in the three engines: tools/strings/cases.py), so a
+# method is one Viv call. The rules here come first (before builtins.toml and numpy.toml): a
+# rule for a name that also takes numbers (len, float, int, list, count, index) translates its
+# argument, and declines (`next`) when it is not text, handing the translation on.
+#
+# A test value `{ str = "..." }` is a Python str (check_rules.py; a plain TOML string is a
+# number's name there: "inf", "nan", a complex number).
+
+# ---------------------------------------------------------------- builtins
+
+[[rule]]
+id = "str"
+match = "str(object=None)"
+params = { object = "list" }
+exactness = "exact"
+evidence = "tests/test_py_str.py (CPython against the three engines, byte for byte) and check_rules.py's generated cases (results/rule_tests.json)"
+note = "An int is written by fmt(n, \"d\") (Viv's str(3) is \"3.0\"), a Bool as True or False (Viv's str writes true), a float as its repr, a list of floats, ints or strings as Python prints it. A NumPy array, a complex number, a list mixing ints and floats, and an object are refused."
+cases = [
+  { if = "not object.given", viv = '""', type = "STR" },
+  { hook = "str_text", args = ["str", "object"] },
+]
+tests = [{ object = 3 }, { object = 0.1 }, { object = true }, { object = { str = "héllo" } }, { object = [1.5, -0.0] }, { object = 1e16 }]
+
+[[rule]]
+id = "repr"
+match = "repr(obj, /)"
+exactness = "exact"
+evidence = "tests/test_py_str.py (CPython against the three engines, byte for byte) and check_rules.py's generated cases (results/rule_tests.json)"
+note = "A string in Python's quotes and escapes (Viv's repr is CPython's, with CPython 3.11's list of printable characters); a number, a Bool and a list as str writes them."
+cases = [
+  { hook = "str_text", args = ["repr", "obj"] },
+]
+tests = [{ obj = { str = "it's \"x\"\n" } }, { obj = -0.0 }, { obj = 7 }, { obj = { str = "tab\there \u00e9 \u0007" } }]
+
+[[rule]]
+id = "format"
+match = "format(value, format_spec=None, /)"
+params = { format_spec = "literal" }
+exactness = "exact"
+evidence = "tests/test_py_str.py (CPython against the three engines, byte for byte) and check_rules.py's generated cases (results/rule_tests.json)"
+note = "The spec is a literal. Numbers: [[fill]align][width][.precision] with type d, e, f or g (an int's digits for no type); strings: [[fill]align][width][.precision]; anything else is refused."
+cases = [
+  { hook = "str_format", args = ["value", "format_spec"] },
+]
+tests = [{ value = 2.5, format_spec = { str = ".3f" } }, { value = { str = "ab" }, format_spec = { str = "*^7" } }, { value = 42, format_spec = { str = ">6" } }, { value = 0.1 }]
+
+[[rule]]
+id = "chr"
+match = "chr(i, /)"
+exactness = "exact"
+evidence = "tests/test_py_str.py and check_rules.py's generated cases (results/rule_tests.json); Viv's chr stops with Python's ValueError text for a code point past 0x10FFFF and refuses a surrogate"
+guard = "not a surrogate (Python makes a string holding one; a Viv string is UTF-8 and stops the run)"
+cases = [
+  { if = "i.kind == 'bool'", refuse = "chr of a Bool", hint = "Python reads True as 1; pass the int." },
+  { if = "not (i.kind == 'num' and i.py == 'int')", refuse = "chr of {i.words}", hint = "Python raises TypeError: chr takes an int." },
+  { if = "unicode_same", viv = "chr({i})", type = "STR" },
+  { use = ["py_ascii_text"], viv = "py_ascii_text(chr({i}))", type = "STR" },
+]
+tests = [{ i = 233 }, { i = 65 }, { i = 128512 }, { i = 1114112 }]
+
+[[rule]]
+id = "ord"
+match = "ord(c, /)"
+exactness = "exact"
+evidence = "tests/test_py_str.py and check_rules.py's generated cases (results/rule_tests.json)"
+cases = [
+  { if = "c.kind != 'str'", refuse = "ord of {c.words}", hint = "Python raises TypeError: ord takes a string of one character." },
+  { viv = "ord({c})", type = "NUM_I" },
+]
+tests = [{ c = { str = "é" } }, { c = { str = "A" } }, { c = { str = "ab" } }]
+
+[[rule]]
+id = "len-str"
+match = "len(x, /)"
+params = { x = "list" }
+exactness = "exact"
+evidence = "tests/test_py_str.py and check_rules.py's generated cases (results/rule_tests.json); a length in code points, as Python's"
+cases = [
+  { eval = ["x"] },
+  { if = "x.kind not in ['str', 'strs']", next = true },
+  { viv = "len({x})", type = "NUM_I" },
+]
+tests = [{ x = { str = "héllo 𝔘" } }, { x = { str = "" } }, { x = [{ str = "a" }, { str = "bc" }] }]
+
+[[rule]]
+id = "float-str"
+match = "float(x=None, /)"
+exactness = "exact"
+evidence = "CPython's float(str), step for step (correctly rounded in each engine); tests/test_py_str.py"
+cases = [
+  { if = "not x.given", next = true },
+  { eval = ["x"] },
+  { if = "x.kind != 'str'", next = true },
+  { viv = "float({x})", type = "NUM_F" },
+]
+tests = [{ x = { str = " 1_000.5 " } }, { x = { str = "-0.0" } }, { x = { str = "1e-7" } }, { x = { str = "inf" } }, { x = { str = "nan" } }, { x = { str = "abc" } }, { x = { str = "0x10" } }]
+
+[[rule]]
+id = "int-str"
+match = "int(x=None, /, base=None)"
+exactness = "exact"
+evidence = "CPython's int(str, base); tests/test_py_str.py"
+guard = "a value below 2^53 in magnitude (py_int stops the run past it, where Python's int stays exact)"
+cases = [
+  { if = "not x.given", next = true },
+  { eval = ["x"] },
+  { if = "x.kind != 'str' and not base.given", next = true },
+  { if = "x.kind != 'str'", refuse = "int of {x.words} with a base", hint = "Python raises TypeError: int() can't convert non-string with explicit base." },
+  { if = "base.given and not (base.kind == 'num' and base.py == 'int')", refuse = "int with a base that is {base.words}", hint = "Python takes an int base (TypeError otherwise)." },
+  { if = "base.given", use = ["py_int"], viv = "py_int(int({x}, {base}))", type = "NUM_I" },
+  { use = ["py_int"], viv = "py_int(int({x}))", type = "NUM_I" },
+]
+tests = [{ x = { str = " -42 " } }, { x = { str = "ff" }, base = 16 }, { x = { str = "0b101" }, base = 0 }, { x = { str = "1_000" } }, { x = { str = "1.5" } }, { x = { str = "9007199254740993" } }]
+
+[[rule]]
+id = "list-str"
+match = "list(x=None, /)"
+params = { x = "list" }
+exactness = "exact"
+evidence = "tests/test_py_str.py and check_rules.py's generated cases (results/rule_tests.json)"
+cases = [
+  { if = "not x.given", next = true },
+  { eval = ["x"] },
+  { if = "x.kind == 'str'", use = ["py_chars"], viv = "py_chars({x})", type = "STRS" },
+  { if = "x.kind == 'strs'", viv = "{x}", type = "STRS", prec = "x.prec" },
+  { next = true },
+]
+tests = [{ x = { str = "héllo" } }, { x = [{ str = "a" }, { str = "b" }] }]
+
+# ---------------------------------------------------------------- methods of str
+
+[[rule]]
+id = "str.upper-lower"
+match = ["s.upper()", "s.lower()"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py (CPython's full case mappings, final sigma included); tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { viv = "{short}({s})", type = "STR" },
+]
+tests = [{ s = { str = "Straße ΑΣ İx" } }, { s = { str = "" } }]
+
+[[rule]]
+id = "str.predicates"
+match = ["s.isspace()", "s.isalpha()", "s.isalnum()", "s.isdigit()", "s.isdecimal()", "s.isnumeric()", "s.isupper()", "s.islower()", "s.isascii()", "s.isprintable()"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py (CPython's predicates on every character class); tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { viv = "{short}({s})", type = "BOOL" },
+]
+tests = [{ s = { str = "abc" } }, { s = { str = "" } }, { s = { str = "٣4" } }, { s = { str = " \t\u00a0" } }, { s = { str = "ABC" } }]
+
+[[rule]]
+id = "str.strip"
+match = ["s.strip(chars=None, /)", "s.lstrip(chars=None, /)", "s.rstrip(chars=None, /)"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py (every Unicode space); tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "not chars.given or chars.kind == 'none'", viv = "{short}({s})", type = "STR" },
+  { if = "chars.kind != 'str'", refuse = "str.{short} of {chars.words}", hint = "Python raises TypeError: strip takes a string of characters or None." },
+  { viv = "{short}({s}, {chars})", type = "STR" },
+]
+tests = [{ s = { str = " \t x y \n\u2003" } }, { s = { str = "xxhixx" }, chars = { str = "x" } }, { s = { str = "" } }]
+
+[[rule]]
+id = "str.split"
+match = ["s.split(sep=None, maxsplit=-1)", "s.rsplit(sep=None, maxsplit=-1)"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py (split on every Unicode space, with separators and maxsplit); tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "maxsplit.given and not (maxsplit.kind == 'num' and maxsplit.py == 'int')", refuse = "str.{short} with maxsplit {maxsplit.words}", hint = "Python takes an int (TypeError otherwise)." },
+  { if = "(not sep.given or sep.kind == 'none') and maxsplit.given", refuse = "str.{short} on whitespace with maxsplit", hint = "Viv's split on whitespace takes no maxsplit; split on a separator, or take the pieces you need." },
+  { if = "not sep.given or sep.kind == 'none'", viv = "{short}({s})", type = "STRS" },
+  { if = "sep.kind != 'str'", refuse = "str.{short} on {sep.words}", hint = "Python raises TypeError: the separator is a string or None." },
+  { if = "maxsplit.given", viv = "{short}({s}, {sep}, {maxsplit})", type = "STRS" },
+  { viv = "{short}({s}, {sep})", type = "STRS" },
+]
+tests = [{ s = { str = "  a b\u00a0 c  " } }, { s = { str = "a,b,,c" }, sep = { str = "," } }, { s = { str = "a,b,c" }, sep = { str = "," }, maxsplit = 1 }, { s = { str = "" } }, { s = { str = "abc" }, sep = { str = "" } }]
+
+[[rule]]
+id = "str.splitlines"
+match = "s.splitlines(keepends=False)"
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py (every line boundary Python's splitlines knows); tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "keepends.given and keepends.lit != False", refuse = "str.splitlines with keepends", hint = "Viv's splitlines drops the line ends; add them back, or split on \"\\n\"." },
+  { viv = "splitlines({s})", type = "STRS" },
+]
+tests = [{ s = { str = "a\nb\r\nc\u2028d\n" } }, { s = { str = "" } }]
+
+[[rule]]
+id = "str.join"
+match = "s.join(iterable, /)"
+when = "s.kind == 'str'"
+params = { iterable = "list" }
+exactness = "exact"
+evidence = "tests/test_py_str.py (lists, generators and comprehensions of strings; the characters of a string)"
+cases = [
+  { eval = [] },
+  { if = "s.kind != 'str'", next = true },
+  { hook = "str_join", args = ["s", "iterable"] },
+]
+tests = [{ s = { str = ", " }, iterable = [{ str = "a" }, { str = "b" }, { str = "c" }] }, { s = { str = "-" }, iterable = { str = "abc" } }]
+
+[[rule]]
+id = "str.find"
+match = ["s.find(sub, start=None, end=None, /)", "s.rfind(sub, start=None, end=None, /)", "s.index(sub, start=None, end=None, /)", "s.rindex(sub, start=None, end=None, /)", "s.count(sub, start=None, end=None, /)"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py (positions in code points, with start and end); tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "sub.kind != 'str'", refuse = "str.{short} of {sub.words}", hint = "Python raises TypeError: look for a string." },
+  { if = "start.given and start.kind != 'none' and not (start.kind == 'num' and start.py == 'int')", refuse = "str.{short} with a start that is {start.words}", hint = "Python takes an int or None." },
+  { if = "end.given and end.kind != 'none' and not (end.kind == 'num' and end.py == 'int')", refuse = "str.{short} with an end that is {end.words}", hint = "Python takes an int or None." },
+  { if = "end.given and end.kind != 'none'", viv = "{short}({s}, {sub}, {start.code if start.given and start.kind != 'none' else '0'}, {end})", type = "NUM_I" },
+  { if = "start.given and start.kind != 'none'", viv = "{short}({s}, {sub}, {start})", type = "NUM_I" },
+  { viv = "{short}({s}, {sub})", type = "NUM_I" },
+]
+tests = [{ s = { str = "héllo héllo" }, sub = { str = "llo" } }, { s = { str = "abcabc" }, sub = { str = "c" }, start = 3 }, { s = { str = "abcabc" }, sub = { str = "b" }, start = -5, end = -1 }, { s = { str = "abc" }, sub = { str = "" } }, { s = { str = "abc" }, sub = { str = "z" } }]
+
+[[rule]]
+id = "str.replace"
+match = "s.replace(old, new, count=-1, /)"
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py; tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "old.kind != 'str' or new.kind != 'str'", refuse = "str.replace of {old.words} by {new.words}", hint = "Python raises TypeError: replace strings." },
+  { if = "count.given and not (count.kind == 'num' and count.py == 'int')", refuse = "str.replace with a count that is {count.words}", hint = "Python takes an int." },
+  { if = "count.given", viv = "replace({s}, {old}, {new}, {count})", type = "STR" },
+  { viv = "replace({s}, {old}, {new})", type = "STR" },
+]
+tests = [{ s = { str = "hello" }, old = { str = "l" }, new = { str = "L" } }, { s = { str = "aaa" }, old = { str = "" }, new = { str = "-" } }, { s = { str = "hello" }, old = { str = "l" }, new = { str = "" }, count = 1 }]
+
+[[rule]]
+id = "str.startswith-endswith"
+match = ["s.startswith(prefix, start=None, end=None, /)", "s.endswith(prefix, start=None, end=None, /)"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "start.given or end.given", refuse = "str.{short} with a start or an end", hint = "Slice first: s[start:end].{short}(prefix)." },
+  { if = "prefix.syntax == 'Tuple'", refuse = "str.{short} of a tuple", hint = "Test each: `s.{short}(a) or s.{short}(b)`." },
+  { if = "prefix.kind != 'str'", refuse = "str.{short} of {prefix.words}", hint = "Python raises TypeError: pass a string (or a tuple of strings)." },
+  { viv = "{short}({s}, {prefix})", type = "BOOL" },
+]
+tests = [{ s = { str = "héllo" }, prefix = { str = "hé" } }, { s = { str = "abc" }, prefix = { str = "" } }, { s = { str = "abc" }, prefix = { str = "bc" } }]
+
+[[rule]]
+id = "str.removeprefix-removesuffix"
+match = ["s.removeprefix(prefix, /)", "s.removesuffix(prefix, /)"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tests/test_py_str.py; py_removeprefix and py_removesuffix are CPython's (an empty affix leaves the string)"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "prefix.kind != 'str'", refuse = "str.{short} of {prefix.words}", hint = "Python raises TypeError: pass a string." },
+  { use = ["py_{short}"], viv = "py_{short}({s}, {prefix})", type = "STR" },
+]
+tests = [{ s = { str = "test_case" }, prefix = { str = "test_" } }, { s = { str = "abc" }, prefix = { str = "" } }, { s = { str = "abc" }, prefix = { str = "x" } }]
+
+[[rule]]
+id = "str.pad"
+match = ["s.ljust(width, fillchar=None, /)", "s.rjust(width, fillchar=None, /)", "s.center(width, fillchar=None, /)"]
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py (CPython's str.center puts the odd space by its own rule); tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "not (width.kind == 'num' and width.py == 'int')", refuse = "str.{short} to a width that is {width.words}", hint = "Python takes an int." },
+  { if = "fillchar.given and fillchar.kind != 'str'", refuse = "str.{short} with a fill that is {fillchar.words}", hint = "Python raises TypeError: the fill is one character." },
+  { if = "fillchar.given", viv = "{short}({s}, {width}, {fillchar})", type = "STR" },
+  { viv = "{short}({s}, {width})", type = "STR" },
+]
+tests = [{ s = { str = "ab" }, width = 5 }, { s = { str = "ab" }, width = 6, fillchar = { str = "*" } }, { s = { str = "abc" }, width = 2 }, { s = { str = "ab" }, width = 5, fillchar = { str = "**" } }]
+
+[[rule]]
+id = "str.zfill"
+match = "s.zfill(width, /)"
+when = "s.kind == 'str'"
+exactness = "exact"
+evidence = "tools/strings/cases.py; tests/test_py_str.py"
+cases = [
+  { if = "s.kind != 'str'", next = true },
+  { if = "not (width.kind == 'num' and width.py == 'int')", refuse = "str.zfill to a width that is {width.words}", hint = "Python takes an int." },
+  { viv = "zfill({s}, {width})", type = "STR" },
+]
+tests = [{ s = { str = "-42" }, width = 6 }, { s = { str = "+7" }, width = 4 }, { s = { str = "abc" }, width = 2 }]
+
+[[rule]]
+id = "str.refused-methods"
+match = ["s.casefold(...)", "s.title(...)", "s.capitalize(...)", "s.swapcase(...)", "s.partition(...)", "s.rpartition(...)", "s.encode(...)", "s.expandtabs(...)", "s.translate(...)", "s.maketrans(...)", "s.format_map(...)", "s.isidentifier(...)", "s.istitle(...)"]
+exactness = "refuse"
+lift = "out of scope: casefold, title, capitalize, swapcase, partition, translate, expandtabs, bytes"
+cases = [
+  { refuse = "str.{name}", hint = "Not in Viv's strings; write it from upper, lower, find and slices." },
+]
+
+# ---------------------------------------------------------------- lists of strings
+
+[[rule]]
+id = "strs.index-count"
+match = ["a.index(x, /)", "a.count(x, /)"]
+when = "a.kind == 'strs'"
+params = { a = "list" }
+exactness = "exact"
+evidence = "tests/test_py_str.py; a missing item stops with Python's ValueError, the item in repr"
+cases = [
+  { if = "a.kind != 'strs'", next = true },
+  { hook = "strs_find", args = ["{name}", "a", "x"] },
+]
+tests = [{ a = [{ str = "b" }, { str = "a" }, { str = "b" }], x = { str = "b" } }, { a = [{ str = "a" }], x = { str = "z" } }]
+
+[[rule]]
+id = "strs.methods-statement"
+match = ["a.pop(i=None, /)", "a.insert(i, x, /)", "a.extend(x, /)", "a.remove(x, /)", "a.clear()", "a.reverse()", "a.sort()"]
+context = "stmt"
+when = "a.grows and a.kind == 'strs'"
+params = { a = "list", x = "list" }
+exactness = "exact"
+evidence = "tests/test_py_str.py (CPython against the three engines)"
+guard = "a list nothing else can hold (py2viv.py's grow_refusal proves it and refuses the list otherwise)"
+note = "Each rebinds the list's name to a new list (a Viv list of strings is never changed in place): pop, insert and remove copy it."
+cases = [
+  { eval = ["a"] },
+  { if = "a.kind != 'strs'", next = true },
+  { hook = "strs_method", args = ["{name}", "a", "i", "x"] },
+]
+tests = [{ a = [{ str = "b" }, { str = "a" }, { str = "c" }] }, { a = [{ str = "b" }, { str = "a" }], i = 1, x = { str = "z" } }, { a = [{ str = "x" }], x = [{ str = "y" }] }, { a = [{ str = "x" }, { str = "y" }], x = { str = "y" } }]
+
+[[rule]]
+id = "strs.pop"
+match = "a.pop(i=None, /)"
+when = "a.grows and a.kind == 'strs'"
+params = { a = "list" }
+exactness = "exact"
+evidence = "tests/test_py_str.py (CPython against the three engines)"
+guard = "a list nothing else can hold; the whole value of an assignment or a return"
+cases = [
+  { eval = ["a"] },
+  { if = "a.kind != 'strs'", next = true },
+  { hook = "strs_method", args = ["pop", "a", "i"] },
+]
+tests = [{ a = [{ str = "b" }, { str = "a" }, { str = "c" }] }, { a = [{ str = "b" }, { str = "a" }], i = 0 }, { a = [], i = 0 }]

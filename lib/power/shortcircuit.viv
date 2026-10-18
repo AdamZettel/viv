@@ -1,0 +1,166 @@
+###
+post: Three-phase short-circuit current by IEC 60909
+agent: claude
+
+IEC 60909-0:2016 computes the initial symmetrical short-circuit current
+Ik'' at a bus without a load flow: an equivalent voltage source c Un / sqrt(3)
+at the fault drives the positive-sequence network seen from the fault, so
+
+    Ik'' = c Un / (sqrt(3) |Zk|)
+
+with Zk the Thevenin impedance at the bus, Zbus[k, k] of the network's
+short-circuit admittance matrix. In that network:
+
+  - lines and cables are their series impedance; line charging, shunts
+    and loads are left out (sections 3.6.1 and 4.4);
+  - transformers are at their rated ratio (per unit 1 on the bus bases)
+    and their impedance is multiplied by K_T = 0.95 cmax / (1 + 0.6 x_T),
+    x_T in per unit of the system base (section 6.3.3, eq. 12a);
+  - each generator in service is a shunt of impedance K_G (R_G + j X''d),
+    K_G = cmax / (1 + X''d sin(phi_rG)) for a generator at its bus's
+    nominal voltage (section 6.6.1, eq. 18), with R_G + j X''d on the
+    machine base (PSS/E's ZSORCE) moved to the system base;
+  - c = cmax = 1.1 for networks above 1 kV (Table 1).
+
+A branch is a transformer when its tap ratio is set (not 0) or it shifts
+phase, MATPOWER's convention. The admittance matrix is complex; each
+column of Zbus needed is one sparse solve of its real form
+[[G, -B]; [B, G]] [zr; zi] = [e_k; 0].
+###
+
+from power.case import BR_R, BR_STATUS, BR_X, BUS_I, Case, F_BUS, GEN_BUS, GEN_STATUS, SHIFT, T_BUS, TAP
+from power.contingency import csc_from_triplets
+from power.splu import lu_solve, mindeg_order, splu
+
+#: IEC 60909-0 Table 1, maximum currents above 1 kV
+CMAX: Num = 1.1
+KT_NUM: Num = 0.95
+KT_X: Num = 0.6
+PIVOT: Num = 0.001
+#: the generator machine table's columns (power.raw's Raw.machine)
+M_MBASE: Int = 0
+M_ZR: Int = 1
+M_ZX: Int = 2
+BASE_KV: Int = 9
+MBASE: Int = 6
+#: MATPOWER's bus and branch width, and a gen matrix through PMIN
+BUS_COLS: Int = 13
+GEN_COLS: Int = 10
+
+record Fault {
+    #: per faulted bus: Ik'' (kA), Sk'' = sqrt(3) Un Ik'' (MVA), Zk (per unit, system base)
+    ikss_ka: Arr
+    skss_mva: Arr
+    rk: Arr
+    xk: Arr
+}
+
+#| Ik'' at each bus row in `buses`, for generators with source impedance
+#| machine[g] = (MBASE, R, X''d) on their own base and rated power factor
+#| cos_phi; with_kt multiplies transformer impedances by K_T.
+def ikss(c: Case, machine: Arr, cos_phi: Num, with_kt: Bool, buses: [Int]) -> Fault {
+    nb: Int = int(shape(c.bus)[0])
+    nl: Int = int(shape(c.branch)[0])
+    ng: Int = int(shape(c.gen)[0])
+    row = map()
+    for i to nb {
+        row[c.bus[i, BUS_I]] = i
+    }
+    #: the real form of Y: G at (i, j) and (n + i, n + j), -B at (i, n + j), B at (n + i, j)
+    ri: [Int] = []
+    ci: [Int] = []
+    vals = []
+    for k to nl {
+        if c.branch[k, BR_STATUS] > 0.0 {
+            f: Int = int(row[c.branch[k, F_BUS]])
+            t: Int = int(row[c.branch[k, T_BUS]])
+            z = c.branch[k, BR_R] + c.branch[k, BR_X] * 1.0i
+            if c.branch[k, TAP] != 0.0 or c.branch[k, SHIFT] != 0.0 {
+                z = z * (KT_NUM * CMAX / (1.0 + KT_X * c.branch[k, BR_X]))
+            }
+            ys = 1.0 / z
+            ri, ci, vals = _put(ri, ci, vals, nb, f, f, ys)
+            ri, ci, vals = _put(ri, ci, vals, nb, t, t, ys)
+            ri, ci, vals = _put(ri, ci, vals, nb, f, t, -ys)
+            ri, ci, vals = _put(ri, ci, vals, nb, t, f, -ys)
+        }
+    }
+    sin_phi = sqrt(max(1.0 - cos_phi * cos_phi, 0.0))
+    for g to ng {
+        if c.gen[g, GEN_STATUS] > 0.0 {
+            b: Int = int(row[c.gen[g, GEN_BUS]])
+            xd = machine[g, M_ZX]
+            kg = CMAX / (1.0 + xd * sin_phi)
+            zg = kg * (machine[g, M_ZR] + xd * 1.0i) * c.base_mva / machine[g, M_MBASE]
+            ri, ci, vals = _put(ri, ci, vals, nb, b, b, 1.0 / zg)
+        }
+    }
+    m: Int = 2 * nb
+    cp, rr, vv = csc_from_triplets(m, ri, ci, vals)
+    lu = splu(m, cp, rr, vv, mindeg_order(m, cp, rr), PIVOT)
+    nf: Int = len(buses)
+    ik = zeros(nf)
+    sk = zeros(nf)
+    rk = zeros(nf)
+    xk = zeros(nf)
+    for q to nf {
+        k = buses[q]
+        e = zeros(m)
+        e[k] = 1.0
+        col = lu_solve(lu, e)
+        rk[q] = col[k]
+        xk[q] = col[nb + k]
+        un = c.bus[k, BASE_KV]
+        #: per unit current c / |Zk| times the base current baseMVA / (sqrt(3) Un), kA
+        ik[q] = CMAX / hypot(rk[q], xk[q]) * c.base_mva / (sqrt(3.0) * un)
+        sk[q] = sqrt(3.0) * un * ik[q]
+    }
+    return Fault { ikss_ka: ik, skss_mva: sk, rk: rk, xk: xk }
+}
+
+def _put(ri: [Int], ci: [Int], vals: Arr, n: Int, i: Int, j: Int, y: Complex) {
+    ri = append(ri, i)
+    ci = append(ci, j)
+    vals = append(vals, re(y))
+    ri = append(ri, n + i)
+    ci = append(ci, n + j)
+    vals = append(vals, re(y))
+    ri = append(ri, i)
+    ci = append(ci, n + j)
+    vals = append(vals, -im(y))
+    ri = append(ri, n + i)
+    ci = append(ci, j)
+    vals = append(vals, im(y))
+    return ri, ci, vals
+}
+
+test "a generator behind a line: Ik'' is c / |K_G Z_G + Z_line| in base current" {
+    bus = zeros(2, BUS_COLS)
+    bus[0, BUS_I] = 1.0
+    bus[1, BUS_I] = 2.0
+    bus[0, BASE_KV] = 138.0
+    bus[1, BASE_KV] = 138.0
+    gen = zeros(1, GEN_COLS)
+    gen[0, GEN_BUS] = 1.0
+    gen[0, GEN_STATUS] = 1.0
+    gen[0, MBASE] = 200.0
+    branch = zeros(1, BUS_COLS)
+    branch[0, F_BUS] = 1.0
+    branch[0, T_BUS] = 2.0
+    branch[0, BR_R] = 0.01
+    branch[0, BR_X] = 0.1
+    branch[0, BR_STATUS] = 1.0
+    machine = zeros(1, M_ZX + 1)
+    machine[0, M_MBASE] = 200.0
+    machine[0, M_ZX] = 0.2
+    c = Case { base_mva: 100.0, bus: bus, gen: gen, branch: branch }
+    f = ikss(c, machine, 0.85, true, [0, 1])
+    kg = 1.1 / (1.0 + 0.2 * sqrt(1.0 - 0.85 * 0.85))
+    zk = kg * 0.2 * 0.5 * 1.0i + (0.01 + 0.1i)
+    ib = 100.0 / (sqrt(3.0) * 138.0)
+    assert_near(f.ikss_ka[1], 1.1 / abs(zk) * ib, 1e-12)
+    assert_near(f.xk[0], kg * 0.1, 1e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

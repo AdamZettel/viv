@@ -1,0 +1,129 @@
+###
+Maps: `map()` is an empty map from numbers to numbers,
+`m[k] = v` stores, `m[k]` reads (a key that is not there stops the run),
+and `has`, `get`, `remove`, `keys`, `values`, `copy`, `clear` and `len` do
+the rest. The keys stay in the order they were first inserted, so nothing
+printed depends on the hash. A map is one handle: a second name, a def's
+parameter and a record field all change the same map.
+###
+
+# count what a scan finds, keyed by the value itself
+xs = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+counts = map()
+for i to len(xs) {
+    counts[xs[i]] = get(counts, xs[i], 0) + 1
+}
+show counts
+print(fmt(counts, "d", "d"))
+
+# a loop over a map is a loop over a snapshot of its keys
+ks = keys(counts)
+most = ks[0]
+for i to len(ks) {
+    if counts[ks[i]] > counts[most] {
+        most = ks[i]
+    }
+}
+show most
+
+# an update keeps a key's place; a key removed and stored again goes last
+seen = map()
+seen[10] = 1
+seen[20] = 2
+seen[30] = 3
+seen[10] = 11
+gone = remove(seen, 20)
+seen[20] = 22
+show seen
+show gone
+show remove(seen, 99, -1)
+
+# 0.0 and -0.0 are one key, and the first stored is kept
+z = map()
+z[-0.0] = 1
+z[0.0] = 2
+print(fmt(z))
+
+# memoized recursion through a map a def reaches as a global
+memo = map()
+def fib(n) {
+    if n < 2 {
+        return n
+    }
+    if has(memo, n) {
+        return memo[n]
+    }
+    v = fib(n - 1) + fib(n - 2)
+    memo[n] = v
+    return v
+}
+show fib(80)
+show len(memo)
+
+# a def that fills a map it is given, and one that returns a new map
+def tally(m, a) {
+    for i to len(a) {
+        m[a[i]] = get(m, a[i], 0) + 1
+    }
+}
+def squares(n) {
+    s = map()
+    for i to n {
+        s[i] = i * i
+    }
+    return s
+}
+t = map()
+tally(t, [7, 7, 8])
+show t
+sq = squares(5)
+show values(sq)
+
+# one handle: an alias, a record field and a closure see the same map; copy does not
+alias = t
+alias[9] = 1
+record Tally {
+    m: Map
+}
+box = Tally { m: t }
+box.m[7] += 10
+look = fn(k) -> get(t, k, 0)
+twin = copy(t)
+twin[100] = 1
+show t
+show look(7)
+show len(twin)
+clear(twin)
+show twin
+
+# string keys and string values: word counts,
+# names by number, symbols by name; keys(m) of string keys is a list of strings
+words = map()
+for w in split("the cat and the hat and the bat") {
+    words[w] = get(words, w, 0) + 1
+}
+show words
+names = map()
+names[8] = "oxygen"
+names[1] = "hydrogen"
+show names
+symbol = map()
+symbol["oxygen"] = "O"
+symbol["hydrogen"] = "H"
+print(join("", [symbol[names[1]], symbol[names[1]], symbol[names[8]]]))
+wk = keys(words)
+
+test "maps" {
+    assert_true(counts[5] == 3 and len(counts) == 7)
+    assert_true(most == 5)
+    assert_true(keys(seen)[2] == 20 and gone == 2)
+    assert_true(len(z) == 1 and z[0] == 2)
+    assert_true(fib(80) == 23416728348467685)
+    assert_true(len(t) == 3 and t[7] == 12)
+    assert_true(len(twin) == 0)
+    assert_true(words["the"] == 3 and join(",", wk) == "the,cat,and,hat,bat")
+    assert_true(names[8] == "oxygen" and not has(symbol, "carbon"))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# @@ bisection: halve the bracket until it is small
+def bisect(f, lo, hi, tol):
+    flo = f(lo)
+    if flo * f(hi) > 0:
+        raise ValueError("the bracket does not change sign")
+    steps = 0
+    while hi - lo > tol:
+        mid = 0.5 * (lo + hi)
+        fmid = f(mid)
+        if flo * fmid <= 0:
+            hi = mid
+        else:
+            lo, flo = mid, fmid
+        steps += 1
+    return 0.5 * (lo + hi), steps
+
+# @@ a cubic with one real root
+def cubic(x):
+    return x ** 3 - 2.0 * x - 5.0
+
+root, steps = bisect(cubic, 2.0, 3.0, 1e-10)
+print(f"root {root:.10f} after {steps} halvings, f(root) = {cubic(root):.2e}")
+
+# @@ the bracket shrinks by half each step
+for tol in [1e-2, 1e-4, 1e-8]:
+    r, n = bisect(cubic, 2.0, 3.0, tol)
+    print(f"tol {tol:.0e}: {n:2d} steps, root {r:.8f}")
+
+# @@ checks
+assert abs(cubic(root)) < 1e-8

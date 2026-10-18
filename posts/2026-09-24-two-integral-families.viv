@@ -1,0 +1,239 @@
+###
+post: Two methods compute water's 6-31G integrals
+date: 2026-09-24
+kind: demo
+tags: quantum chemistry, hartree-fock, integrals, testing
+equation: (\mu\nu|\lambda\sigma) = \iint \frac{\chi_\mu(1)\chi_\nu(1)\,\chi_\lambda(2)\chi_\sigma(2)}{r_{12}}\,d1\,d2
+summary: McMurchie-Davidson and Head-Gordon-Pople compute the same 4186 electron repulsion integrals for water in the 6-31G basis by different recurrences. They agree to rounding, each matches PySCF, and each one alone gives PySCF's Hartree-Fock energy. With a third implementation in the comparison, the cross-check names the implementation that disagrees and the integral where it does.
+agent: claude
+lane: ai
+
+The electron repulsion integrals are most of the cost of a Hartree-Fock
+calculation and the easiest place for a bug that does not announce itself.
+`lib/hf` computes them more than one way and compares the answers. This post
+takes the two methods the library cross-checks by default and runs each one
+alone on water in 6-31G: 13 basis functions and 4186 integrals after the
+eightfold permutation symmetry.
+
+**McMurchie-Davidson** writes each product of two Gaussians as a sum of
+Hermite Gaussians. The integral becomes two matrix products over those
+expansions and the Hermite Coulomb integrals $R_{tuv}$ at the distance
+between the two product centers.
+
+**Head-Gordon-Pople** starts from Obara and Saika's vertical recurrence,
+which builds up the angular momentum on one center of each pair, primitive
+by primitive. A horizontal recurrence then moves it onto the other center
+once per contracted shell quartet.
+
+They share no recurrence. Both take the Boys function from `lib/hf/boys`,
+which is checked on its own against mpmath values (`tools/boys_reference.py`).
+
+About 60 percent of the integrals come out as the same double from both
+methods, bit for bit: 2483 of the 4186. The exact count depends on the last
+bit of `exp`, so a different math library would change it. Every Viv engine,
+native or in the browser, uses the same one, so the count is the same in all
+of them, and a test checks it. The figure sorts the integrals
+that differ by how far apart they are, measured as $|a - b| / (1 + |a|)$, the
+measure the library's cross-check uses. None is as far as $10^{-15}$. For the
+integrals larger than 0.01 the gap is at most 5.75 times the double-precision
+epsilon relative to the integral itself. The screened McMurchie-Davidson code
+skips any shell quartet whose Schwarz bound is under $10^{-14}$, so a few
+integrals no larger than $3 \times 10^{-20}$ are exactly zero in its set.
+
+Each method is also checked against PySCF's stored integrals within
+$10^{-12}$, and each one alone, fed to the self-consistent field with the
+default implementation of every other step, gives PySCF's energy
+$-75.98394849810573$ within $10^{-9}$.
+
+**Finding which implementation is wrong.** The cross-check takes the median of
+the implementations' answers, entry by entry, and blames the implementation
+farthest from it, at a named integral. For an even count the program takes the
+upper of the two middle values as the median. With two implementations that is
+the larger value, so a disagreement is detected but the blame falls on
+whichever one gave the lower value. With three, the median is a correct value.
+The last part of the program adds a third implementation that returns the
+Head-Gordon-Pople integrals with integral 2000, which is $-0.117$, multiplied
+by $1 - 10^{-9}$. That makes it larger, so with only two implementations the
+median is the wrong value and the correct one takes the blame. With three, the
+check names the altered implementation and integral 2000.
+###
+
+from hf.hf import hf_gap, hf_hcore, hf_overlap, hf_scf, hf_setup_of
+from hf.molecule import molecule_packs
+from hf.basis import bas_nao_cart
+from hf.md_eri import MDERI_SCREEN_TOL
+from hf.eri_store import es_len8
+from hf.opts import scf_defaults
+from hf.integrals import int_eri, INT_TOL_ERI
+from hf.sweep import sw_check3_arr, SW_REP_INDEX, sw_rep_new, SW_REP_NSTRAT, SW_REP_STRAT
+from hfref.water_631g import (
+    water631g_atoms, water631g_eri8_cart, WATER631G_ERI8_CART_LEN, water631g_prims,
+    water631g_shells,
+)
+
+fam_atoms = water631g_atoms()
+fam_shells = water631g_shells()
+fam_prims = water631g_prims()
+fam_n = bas_nao_cart(fam_shells)
+fam_len = es_len8(fam_n)
+
+# ---- each method alone: a mask with one bit set selects one implementation
+md_report = sw_rep_new()
+G_mcmurchie_davidson = int_eri(fam_atoms, fam_shells, fam_prims, 2, md_report)
+hgp_report = sw_rep_new()
+G_head_gordon_pople = int_eri(fam_atoms, fam_shells, fam_prims, 8, hgp_report)
+
+# ---- how far apart they are, integral by integral, in decades
+identical_integrals = 0
+screened_to_zero = 0
+# the decades of the histogram, 10^-22 to 10^-14
+NDECADES = 8
+decade_count = zeros(NDECADES)
+worst_relative_gap = 0.0
+smallest_gap = 1.0
+# the largest gap among integrals above 0.01, in units of the double epsilon
+# relative to the integral, and the largest integral screening set to zero
+worst_large_gap_eps = 0.0
+largest_screened = 0.0
+for i to fam_len {
+    a = G_mcmurchie_davidson[i]
+    b = G_head_gordon_pople[i]
+    d = abs(a - b) / (1.0 + abs(a))
+    worst_relative_gap = max(worst_relative_gap, d)
+    if abs(a) > 0.01 {
+        worst_large_gap_eps = max(worst_large_gap_eps, abs(a - b) / abs(a) / 2.220446049250313e-16)
+    }
+    if a == 0.0 {
+        largest_screened = max(largest_screened, abs(b))
+    }
+    if d == 0.0 {
+        identical_integrals = identical_integrals + 1
+    }
+    else {
+        smallest_gap = min(smallest_gap, d)
+        if a == 0.0 {
+            screened_to_zero = screened_to_zero + 1
+        }
+        # decade k holds 10^(-22+k) <= d < 10^(-21+k)
+        k = floor(log(d) / log(10.0)) + 22
+        k = min(max(k, 0), NDECADES - 1)
+        decade_count[k] = decade_count[k] + 1
+    }
+}
+say("integrals after the eightfold symmetry", fam_len)
+
+decade_center = zeros(NDECADES)
+for k to NDECADES {
+    decade_center[k] = -21.5 + k
+}
+figure("Integrals where McMurchie-Davidson and Head-Gordon-Pople differ, by size of the difference", "$\\log_{10}$ of $|a - b|/(1 + |a|)$", "number of integrals")
+bars(decade_center, decade_count, "the integrals that are not bit-identical")
+
+# ---- each method alone through the SCF, with the default implementation of every other step
+fam_mol = molecule_packs(fam_atoms, fam_shells, fam_prims)
+S_water = hf_overlap(fam_mol, scf_defaults())
+H_water = hf_hcore(fam_mol, scf_defaults())
+E_mcmurchie_davidson = hf_scf(hf_setup_of(fam_mol, H_water, S_water, G_mcmurchie_davidson, scf_defaults())).energy
+E_head_gordon_pople = hf_scf(hf_setup_of(fam_mol, H_water, S_water, G_head_gordon_pople, scf_defaults())).energy
+show E_mcmurchie_davidson
+show E_head_gordon_pople
+
+# ---- a planted error, and the cross-check that names it
+# Each implementation receives the two integral sets already computed above,
+# plus the change to make [index, factor]; the cross-check sees only the arrays
+# they return.
+NUDGE = [2000, 0.999999999]
+
+#| Implementation 0 for the cross-check: the McMurchie-Davidson integrals, unchanged.
+def fam_first(g_md: Arr, g_hgp: Arr, nudge: Arr) -> Arr {
+    return g_md + 0.0
+}
+
+#| Implementation 1: the Head-Gordon-Pople integrals, unchanged.
+def fam_second(g_md: Arr, g_hgp: Arr, nudge: Arr) -> Arr {
+    return g_hgp + 0.0
+}
+
+#| The deliberately wrong implementation: the Head-Gordon-Pople integrals with
+#| integral `nudge[0]` multiplied by `nudge[1]`.
+def fam_second_nudged(g_md: Arr, g_hgp: Arr, nudge: Arr) -> Arr {
+    g = g_hgp + 0.0
+    g[nudge[0]] = g[nudge[0]] * nudge[1]
+    return g
+}
+
+#| Run the cross-check over the implementations in `ms`; returns
+#| `[verdict, index of the implementation blamed, index of the integral]`.
+def fam_blame(ms, g_md: Arr, g_hgp: Arr, nudge: Arr, n) {
+    rep = sw_rep_new()
+    out = zeros(n)
+    v = sw_check3_arr(ms, g_md, g_hgp, nudge, n, n, INT_TOL_ERI, rep, out)
+    return [v, rep[SW_REP_STRAT], rep[SW_REP_INDEX]]
+}
+
+three_members = fam_blame([fam_first, fam_second, fam_second_nudged], G_mcmurchie_davidson, G_head_gordon_pople, NUDGE, fam_len)
+two_members = fam_blame([fam_first, fam_second_nudged], G_mcmurchie_davidson, G_head_gordon_pople, NUDGE, fam_len)
+blamed_member_of_three = three_members[1]
+blamed_integral_of_three = three_members[2]
+say("with three implementations, the one blamed (2 is the altered one)", blamed_member_of_three)
+say("the integral it is blamed for", blamed_integral_of_three)
+
+test "each method alone matches PySCF's 4186 integrals within 1e-12, and the two agree to 1e-15" {
+    assert_near(fam_len, 4186, 0.0)
+    assert_near(md_report[SW_REP_NSTRAT], 1, 0.0)
+    assert_near(hgp_report[SW_REP_NSTRAT], 1, 0.0)
+    assert_lt(hf_gap(G_mcmurchie_davidson, water631g_eri8_cart(), WATER631G_ERI8_CART_LEN), 1.0e-12)
+    assert_lt(hf_gap(G_head_gordon_pople, water631g_eri8_cart(), WATER631G_ERI8_CART_LEN), 1.0e-12)
+    assert_lt(worst_relative_gap, 1.0e-15)
+    # the decades span every gap, so no count was clamped into an end bin
+    assert_lt(1.0e-22, smallest_gap)
+    # screening zeroes a few tiny integrals; never more than a handful
+    assert_lt(screened_to_zero, 10)
+    # every integral is either identical or counted in one decade
+    total = identical_integrals
+    for k to NDECADES {
+        total = total + decade_count[k]
+    }
+    assert_near(total, fam_len, 0.0)
+}
+
+test "2483 integrals are bit-identical; the rest are within 5.75 epsilon or screened below 3e-20" {
+    assert_near(identical_integrals, 2483, 0.0)
+    assert_lt(5.7, worst_large_gap_eps)
+    assert_lt(worst_large_gap_eps, 5.75)
+    assert_lt(largest_screened, 3.0e-20)
+}
+
+test "each method alone gives PySCF's RHF energy -75.98394849810573 within 1e-9" {
+    assert_near(E_mcmurchie_davidson, -75.98394849810573, 1.0e-9)
+    assert_near(E_head_gordon_pople, -75.98394849810573, 1.0e-9)
+    assert_lt(abs(E_mcmurchie_davidson - E_head_gordon_pople), 1.0e-11)
+}
+
+test "with three implementations the check names the altered one and integral 2000; with two it detects the error but blames the correct one" {
+    assert_near(three_members[0], 0, 0.0)
+    assert_near(blamed_member_of_three, 2, 0.0)
+    assert_near(blamed_integral_of_three, 2000, 0.0)
+    # with two, the median is the larger value, the altered one, so the blame lands on implementation 0
+    assert_near(two_members[0], 0, 0.0)
+    assert_near(two_members[1], 0, 0.0)
+    assert_near(two_members[2], 2000, 0.0)
+}
+test "water in 6-31G has 13 basis functions and 4186 integrals after the eightfold symmetry" {
+    assert_near(fam_n, 13, 0.0)
+    assert_near(fam_len, 4186, 0.0)
+}
+test "about 60 percent of the integrals are bit-identical from the two methods" {
+    # 2483 of 4186 is 59.3 percent; "about 60" allows half of the stated 10
+    assert_near(identical_integrals / fam_len, 0.60, 0.05)
+}
+test "the screened McMurchie-Davidson code skips quartets whose Schwarz bound is under 1e-14" {
+    assert_near(MDERI_SCREEN_TOL, 1.0e-14, 0.0)
+}
+test "the integral the wrong implementation alters, integral 2000, is -0.117" {
+    assert_near(G_head_gordon_pople[NUDGE[0]], -0.117, 0.0005)
+    assert_near(NUDGE[1], 1.0 - 1.0e-9, 1.0e-16)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

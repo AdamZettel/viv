@@ -1,0 +1,84 @@
+# The tests of lib/hf/cart2sph that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/cart2sph does not load the references.
+from hf.cart2sph import c2s_basis, c2s_closed, C2S_CLOSED_LMAX, c2s_general
+from hf.basis import (
+    bas_nao_cart, bas_nao_sph, bas_ncart, bas_nsph, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NSPH,
+    SH_SPH0,
+)
+from hfref.c2s import C2S_LMAX, c2s_m0, c2s_m1, c2s_m2, c2s_m3, c2s_m4
+
+#| The reference M_l from PySCF (`lib/hfref/c2s`), l <= 4.
+def c2s_ref_block(l) -> Arr {
+    if l == 0 {
+        return c2s_m0()
+    }
+    if l == 1 {
+        return c2s_m1()
+    }
+    if l == 2 {
+        return c2s_m2()
+    }
+    if l == 3 {
+        return c2s_m3()
+    }
+    return c2s_m4()
+}
+
+#| Test helper: a shells pack with the given l per shell: only the columns the transforms
+#| read (l and the AO offsets and counts) are filled.
+#@ f5eb6bac
+def c2s_shells_of(ls: Arr) -> Arr {
+    sh = zeros(len(ls), SH_LEN)
+    c0 = 0
+    s0 = 0
+    for s to len(ls) {
+        l = ls[s]
+        sh[s, SH_L] = l
+        sh[s, SH_CART0] = c0
+        sh[s, SH_SPH0] = s0
+        sh[s, SH_NCART] = bas_ncart(l)
+        sh[s, SH_NSPH] = bas_nsph(l)
+        c0 = c0 + bas_ncart(l)
+        s0 = s0 + bas_nsph(l)
+    }
+    return sh
+}
+
+test "c2s_closed and c2s_general match PySCF's M_l within 1e-15 for l = 0 .. 3" {
+    for c2s_tl to C2S_CLOSED_LMAX + 1 {
+        c2s_tref = c2s_ref_block(c2s_tl)
+        assert_lt(max(abs(c2s_closed(c2s_tl) - c2s_tref)), 1.0e-15)
+        assert_lt(max(abs(c2s_general(c2s_tl) - c2s_tref)), 1.0e-15)
+    }
+}
+
+test "c2s_general matches PySCF's g block within 1e-15" {
+    # the reference table stops at g, C2S_LMAX = 4
+    assert_lt(max(abs(c2s_general(C2S_LMAX) - c2s_ref_block(C2S_LMAX))), 1.0e-15)
+}
+
+test "c2s_basis places one block per shell and zeros between them" {
+    c2s_tsh = c2s_shells_of([0, 1, 2, 3, 1, 2, 0])
+    c2s_tm = c2s_basis(c2s_tsh)
+    # 1 + 3 + 6 + 10 + 3 + 6 + 1 Cartesian, 1 + 3 + 5 + 7 + 3 + 5 + 1 spherical
+    assert_near(bas_nao_cart(c2s_tsh), 30.0, 0.0)
+    assert_near(bas_nao_sph(c2s_tsh), 25.0, 0.0)
+    c2s_tworst = 0.0
+    c2s_tblk = 0.0
+    for c2s_ts to len(c2s_tsh) {
+        c2s_tl = c2s_tsh[c2s_ts, SH_L]
+        c2s_tc0 = c2s_tsh[c2s_ts, SH_CART0]
+        c2s_ts0 = c2s_tsh[c2s_ts, SH_SPH0]
+        c2s_tb = c2s_tm[c2s_tc0:c2s_tc0 + bas_ncart(c2s_tl), c2s_ts0:c2s_ts0 + bas_nsph(c2s_tl)]
+        c2s_tworst = max(c2s_tworst, max(abs(c2s_tb - c2s_ref_block(c2s_tl))))
+        c2s_tblk = c2s_tblk + sum(abs(c2s_tb))
+    }
+    assert_lt(c2s_tworst, 1.0e-15)
+    # the blocks tile M: its entries outside them are exactly zero, so the sum
+    # of |M| equals the sum of the blocks' |M_l|
+    assert_near(sum(abs(c2s_tm)), c2s_tblk, 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

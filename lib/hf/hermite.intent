@@ -1,0 +1,208 @@
+module lib/hf/hermite
+  The two tables every McMurchie-Davidson integral is built from.
+
+  McMurchie-Davidson is a way to integrate products of Gaussians. The product
+  of two Gaussians on centers A and B, exponents $a$ and $b$, is one Gaussian
+  on a point P between them, with exponent $p = a + b$, times a polynomial.
+  McMurchie and Davidson write that polynomial as a sum of Hermite Gaussians:
+  derivatives of the plain Gaussian $e^{-p (x - P_x)^2}$ with respect to
+  $P_x$. The coefficients of that sum, one axis at a time, are the E table,
+  $E(i, j, t)$ for powers $i$ on A, $j$ on B and derivative order $t$.
+
+  A derivative with respect to P passes through an integral over the
+  electron's position, so each integral becomes the E coefficients times
+  derivatives of one function of P. For the $1/r$ integrals (nuclear
+  attraction, electron repulsion) that function is the Boys function $F_0$,
+  and its derivatives are the R table, $R(t, u, v)$, one derivative order
+  per axis. This module fills both tables from the bottom up, so each entry
+  is computed once, into flat buffers a caller reuses for every primitive
+  pair or quartet.
+
+herm_nh  @30c06c91
+  why   The length of a Hermite index list and the count of R entries an
+        integral of total order L uses.
+  L     the total derivative order, $t + u + v \le L$
+
+herm_tuv  @16cccd0c
+  why   The integral codes loop over Hermite functions by one index; this is
+        the map from that index to $(t, u, v)$.
+  L     the total order
+  H     the list being filled, `[nh, 3]`
+  h     the next row of H
+
+herm_esize  @5901b9db
+  why   Callers size one E buffer per axis from it before a loop over
+        primitive pairs.
+  la    the highest power on center A
+  lb    the highest power on center B
+
+herm_efill  @e4f648f1
+  why   The E coefficients of a primitive pair, computed once per pair and
+        axis, and read by every integral over that pair. Filling upward from
+        $E(0, 0, 0)$ computes each entry once; recursing downward for each
+        wanted entry, as lib/gto_md did, computes the same entries many times
+        over.
+  E      the buffer written, from `e0` on
+  e0     where this table starts in `E`
+  la     the highest power on A
+  lb     the highest power on B
+  a      A's exponent
+  b      B's exponent
+  X      $X_{AB} = A - B$ on this axis
+  nt     the number of $t$ values per $(i, j)$, `la + lb + 1`
+  ld     the number of $j$ values, `lb + 1`
+  p      $p = a + b$, the exponent of the product
+  o2p    $\frac{1}{2p}$
+  xpa    $X_{PA}$  the product center minus A, $-b X_{AB} / p$
+  xpb    $X_{PB}$  the product center minus B, $a X_{AB} / p$
+  src    where the row being raised from starts
+  dst    where the row being written starts
+  v      the entry being computed
+
+  $$ E_{i+1,j}^{t} = \frac{1}{2p} E_{ij}^{t-1} + X_{PA} E_{ij}^{t} + (t+1) E_{ij}^{t+1} $$  [test "E reproduces the Gaussian product pointwise for i, j <= 3"]
+  = E#2  the start: $E(0, 0, 0) = e^{-\mu X_{AB}^2}$ with $\mu = ab/p$, this axis's share of the product's prefactor
+  = E#3  raise $i$ with $j = 0$, by the recursion above
+  = E#4  then raise $j$ for every $i$, the same recursion with $X_{PB}$
+
+herm_etab  @3e9d6a50
+  why   The shape the frozen interface and the tests
+        read, `E[i, j, t]`, copied out of the flat table.
+  la    the highest power on A
+  lb    the highest power on B
+  a     A's exponent
+  b     B's exponent
+  XAB   A minus B on this axis
+  F     the flat table
+  nt    the number of $t$ values
+  E     the result, `[la+1, lb+1, la+lb+1]`
+
+herm_rfill  @34a9076b
+  why   The R table of one Coulomb integral: every derivative of
+        $F_0(\alpha |P - C|^2)$ an integral of total order L needs, from one
+        Boys evaluation at the top order.
+  S      the buffer: `2 (L+1)^3` entries, two cubes that hold alternate levels
+  L      the total order
+  alpha  $\alpha$  the exponent in the Boys argument: $p$ for a nucleus,
+         $pq/(p+q)$ for a pair of pairs
+  X      $X$  the $x$ component of $P - C$; Y and Z likewise
+  F      $F_0 \ldots F_L$ at $\alpha (X^2 + Y^2 + Z^2)$
+  pref   a factor applied to every entry, so the caller need not scale after
+  D      the side of one cube, `L + 1`
+  D2     $D^2$
+  D3     $D^3$, the size of one cube
+  m2a    $-2\alpha$
+  pw     $\mathrm{pref}\,(-2\alpha)^n$ for the current level
+  cur    the start of the cube being written
+  prv    the start of the cube read, the level above
+  n      the level being written; level `0` is the answer
+  m      the highest total order level `n` needs
+
+  $$ R_{n}(t+1, u, v) = t R_{n+1}(t-1, u, v) + X R_{n+1}(t, u, v) $$  [test "R(2, 0, 0) and R(1, 1, 0) match the chain rule on F_0"]
+  = S#2    the top level holds one entry, $(-2\alpha)^L F_L$
+  = cur#2  each level writes the cube the level above did not
+  = S#3    the level's base entry, $(-2\alpha)^n F_n$
+  = S#4    entries with $t = 1$: only the $X$ term
+  = S#5    entries with $t \ge 2$: the recursion along $x$
+  = S#6    $t = 0$, $u = 1$: the $Y$ term alone
+  = S#7    $t = 0$, $u \ge 2$: the recursion along $y$
+  = S#8    $t = u = 0$, $v = 1$
+  = S#9    $t = u = 0$, $v \ge 2$: the recursion along $z$
+
+herm_rfill_box  @ac1715c4
+  why   An integral over one component of each shell needs R only for
+        $t \le T_x$, $u \le T_y$, $v \le T_z$; building only that box saves
+        most of the cube for components that point along one axis
+        [test "the box R equals the full cube wherever both are defined"].
+  S      the buffer: two boxes from `s0` on
+  s0     where the boxes start
+  Tx     the highest $t$ needed; Ty and Tz likewise for $u$ and $v$
+  alpha  $\alpha$  the exponent in the Boys argument
+  X      the $x$ component of $P - C$; Y and Z likewise
+  F      $F_0 \ldots F_L$
+  pref   a factor applied to every entry
+  L      $T_x + T_y + T_z$, the total order
+  DV     the stride of $u$ in a box
+  DU     the stride of $t$
+  C      the size of one box
+  m2a    $-2\alpha$
+  n      the level being written
+  cur    the start of the box being written
+  prv    the start of the box read
+  pw     $\mathrm{pref}\,(-2\alpha)^n$
+  o      the offset of $(t, u, v)$ in a box
+  w      the entry being computed
+
+  = cur  levels alternate between the two boxes by the parity of $n$
+  = w#1  $t \ge 1$: the recursion along $x$
+  = w#3  $t = 0$, $u \ge 1$: along $y$
+  = w#5  $t = u = 0$, $v \ge 1$: along $z$
+
+herm_rtab  @2a6abd1b
+  why   The frozen interface's form `R[t, u, v]`, for the tests and the
+        one-electron code, copied out of the flat buffer.
+  L     the total order
+  p     the exponent
+  PC    $P - C$, `[3]`
+  F     the Boys values at $p |PC|^2$
+  D     the side of the cube
+  S     the flat buffer herm_rfill writes
+  R     the result, `[L+1, L+1, L+1]`
+
+herm_grid  @455defa7
+  why   herm_boys_fill runs once per primitive quartet and must not call
+        boys_switch there, since that builds its list each time; the grid
+        carries the switches with it.
+  nmax  the highest order the grid serves
+  xmax  the largest argument expected
+  G     the grid of boys_grid_new, with the switches in its header row
+
+herm_boys_fill  @26420582
+  why   The Boys values of the innermost loop of every $1/r$ integral, written
+        into the caller's buffer. It gives the same numbers as boys_grid_eval
+        [test "the in-place Boys fill equals boys_values to 1e-14 across the grid, the switch and the tail"],
+        without allocating an array per call.
+  G     the grid from herm_grid
+  nmax  the highest order wanted
+  x     the argument
+  F     filled with $F_0 \ldots F_{n_{\max}}$
+  ex    $e^{-x}$
+  xs    the switch for order `nmax`
+  i     the index of the nearest grid node
+  r     that node's row in `G`
+  top   $F_{n_{\max}}(x)$
+  md    $x_0 - x$, the node minus the argument
+  c     the node's value of $F_{n_{\max}}$
+
+  = xs#2   the switch, read from the grid's header when the grid covers this order
+  = F#1    above the switch: $F_0 = \frac12\sqrt{\pi/x}$, then upward
+  = top#2  outside the grid: the series
+  = top#3  the Taylor step from the nearest node, in Horner form [test "the Taylor step in herm_boys_fill has the grid's 8 extra orders"]
+  = F#4    the lower orders by the downward step
+
+herm_lambda  @4e9b214f
+  why   The tests check E against the Hermite Gaussians it expands into, and
+        this computes them by a different route.
+  t     the derivative order
+  p     the exponent
+  xp    $x - P$
+  s     $\sqrt{p}$
+  z     $\sqrt{p}\,(x - P)$, the argument of the Hermite polynomial
+  h     $H_t(z)$; h0 and h1 are the two orders below it
+
+herm_overlap_1d  @a7abf623
+  why   A second route to the 1-D overlap, from the binomial expansion and the
+        Gaussian moments, so the test of $E(i, j, 0)$ does not check E against
+        itself.
+  i     the power on A
+  j     the power on B
+  a     A's exponent
+  b     B's exponent
+  X     A minus B
+  p     $a + b$
+  xpa   $X_{PA}$
+  xpb   $X_{PB}$
+  tot   the sum over the binomial terms
+  cr    the binomial coefficient $\binom{i}{r}$
+  cs    the binomial coefficient $\binom{j}{s}$
+  m     the power of $(x - P)$ in a term
+  mom   the Gaussian moment $\int (x - P)^m e^{-p (x - P)^2} dx$

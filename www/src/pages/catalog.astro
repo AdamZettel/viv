@@ -1,0 +1,245 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// DRAFT for release 0.0.1: the programs and
+// kernels that ship as one C file plus a Python wrapper. Not linked from the
+// nav until the release. An entry `viv export` builds and whose tests pass
+// (tools/export_ci.sh) is "built"; the rest are "coming soon".
+// `checked` says what the exported library is held to.
+import Code from '../components/Code.astro';
+import Base from '../layouts/Base.astro';
+import Toc from '../components/Toc.astro';
+
+const CC = 'cc -O2 -ffp-contract=off -shared -fPIC';
+
+interface Entry {
+  id: string;
+  name: string;
+  what: string;
+  source: string;
+  checked: string;
+  python: string;
+  status: string;
+}
+
+const programs: Entry[] = [
+  {
+    id: 'pwdft',
+    name: 'pwdft',
+    what: 'Plane-wave density-functional theory in the local-density approximation: the total energy, the Fermi level and the band structure of silicon, germanium, diamond, gallium arsenide, aluminum and copper.',
+    source: 'dft/',
+    checked: 'An independent numpy implementation to 1e-7 Ha and 1e-5 eV, and the LDA band energies of Marini, Onida and Del Sole, PRL 88, 016403 (2002).',
+    python: `import pwdft
+r = pwdft.run(material="si", ecut=12.0, nkmesh=3)
+print(r["etot"], r["evb"].shape)       # hartree; path points x bands, eV`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'vivscf',
+    name: 'vivscf',
+    what: 'Restricted and unrestricted Hartree–Fock for molecules in Gaussian basis sets: the total energy, the orbital energies and the density matrix.',
+    source: 'study/ports/pyscf/vivscf.viv over lib/hf',
+    checked: 'PySCF 2.5.0 on eleven cases (water and its cation, by UHF, in STO-3G to cc-pVTZ; one to eight waters in 6-31G*; benzene in cc-pVDZ): total energies within 1.6e-11 Ha (tolerance 1e-10), orbital energies within 3.0e-9 Ha (tolerance 1e-8).',
+    python: `import vivscf
+r = vivscf.run(basis="cc-pvdz")       # water by default; atoms= and coords= for another molecule
+print(r["e_tot"], r["mo_energy"][:5])`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'vlasov',
+    name: 'vlasov',
+    what: 'The 1D1V Vlasov–Poisson equations by the Cheng–Knorr split-step method: a Langmuir wave in a Maxwellian plasma and its Landau damping rate.',
+    source: 'lang/viv/examples/vlasov_landau.viv',
+    checked: 'The root of the Langmuir dispersion relation, ω = 1.41566 − 0.15336i at kλ<sub>D</sub> = 0.5, from scipy.special.wofz and mpmath. Not yet within a stated tolerance: the damping rate is 12% off at the default grid.',
+    python: `import vlasov
+r = vlasov.run(Nx=128, Nv=512, dt=0.0125)
+print(r["gamma_meas"], r["omega_meas"])`,
+    status: 'coming soon',
+  },
+  {
+    id: 'skyrmehf',
+    name: 'skyrmehf',
+    what: 'Skyrme Hartree–Fock of oxygen-16 with the SLy5 force on a radial mesh: the binding energy per nucleon, the proton, neutron and charge radii, and the six occupied orbital energies.',
+    source: 'lib/skyrme/skyrmehf.viv over lib/skyrme/skyrme.viv',
+    checked: 'A numpy twin with the same discretization to 1e-7 on two meshes, and skyrme_rpa (Colò, Cao, Van Giai and Capelli, CPC 184, 142 (2013)): 8.0250 against 8.0261 MeV per nucleon after extrapolating the two meshes.',
+    python: `import skyrmehf
+r = skyrmehf.run(spacing=0.05)        # SLy5; t0= ... w0= for another force
+print(r["e_per_a"], r["r_ch"])`,
+    status: 'built by viv export; not released yet',
+  },
+];
+
+const kernels: Entry[] = [
+  {
+    id: 'boys',
+    name: 'boys(n_max, T)',
+    what: 'The Boys functions F₀(T) … Fₙ(T), which every Gaussian integral with a 1/r in it needs, for orders up to 16.',
+    source: 'lib/hf/boys.viv',
+    checked: 'mpmath at 50 digits, through the incomplete gamma function: worst relative error 8.0e-16, tolerance 5e-15.',
+    python: `import k1
+F = k1.boys(8, 2.5)          # F_0 .. F_8
+print(F[0], F[8])`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'plasma_z',
+    name: 'plasma_z(zeta)',
+    what: 'The plasma dispersion function Z(ζ) of Fried and Conte and its derivative Z′(ζ), anywhere in the complex plane.',
+    source: 'lib/zfunc.viv',
+    checked: 'i√π · scipy.special.wofz: worst relative error 7.4e-15 for Z (tolerance 2e-14) and 5.8e-13 for Z′ (tolerance 1e-12).',
+    python: `import k1
+Z, Zp = k1.plasma_z(2.0 - 0.2j)
+print(Z, Zp)`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'faddeeva_w',
+    name: 'faddeeva_w(z)',
+    what: 'The Faddeeva function w(z) = e^(−z²) erfc(−iz), by Weideman’s rational expansion with 40 terms.',
+    source: 'lib/zfunc.viv',
+    checked: 'scipy.special.wofz on −6 ≤ Re z ≤ 6, −1 ≤ Im z ≤ 4: worst relative error 7.4e-15, tolerance 2e-14.',
+    python: `import k1
+w = k1.faddeeva_w(1.0 + 0.5j)
+print(w)`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'enorm',
+    name: 'enorm(x)',
+    what: 'The Euclidean norm without overflow or underflow, as MINPACK computes it: entries from subnormal to 1e300 in one vector.',
+    source: 'lib/minpack/enorm.viv',
+    checked: 'mpmath at 50 digits, and scipy.linalg.norm where its sum of squares stays finite: worst relative error 1.7e-16, tolerance 1e-14.',
+    python: `import k1, numpy as np
+x = np.array([3e300, 4e300])
+print(k1.enorm(x))           # 5e300; the plain sum of squares overflows`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'schur',
+    name: 'schur(A)',
+    what: 'The real Schur decomposition A = Z T Zᵀ by Hessenberg reduction and Francis’s double-shift QR.',
+    source: 'lib/schur.viv',
+    checked: 'Residuals, since T is not unique: max|A − Z T Zᵀ| / max|A| at most 3.2e-15 and max|ZᵀZ − I| at most 2.4e-15 (tolerance 2e-13); the eigenvalues match scipy.linalg.eigvals.',
+    python: `import k1, numpy as np
+T, Z = k1.schur(np.random.default_rng(0).standard_normal((5, 5)))
+print(np.diag(T))`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'solve_care',
+    name: 'solve_care(A, B, Q, R)',
+    what: 'The stabilizing solution of the continuous algebraic Riccati equation, by Laub’s Schur method as in SLICOT’s SB02MD.',
+    source: 'lib/are.viv',
+    checked: 'scipy.linalg.solve_continuous_are, by the relative residual: at most 6.3e-15, tolerance 1e-13.',
+    python: `import k1, numpy as np
+A = np.array([[0.0, 1.0], [0.0, 0.0]]); B = np.array([[0.0], [1.0]])
+X = k1.solve_care(A, B, np.eye(2), np.eye(1))`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'solve_lyapunov',
+    name: 'solve_lyapunov(A, Q)',
+    what: 'The solution of A X + X Aᵀ = Q, by Bartels and Stewart as in SLICOT’s SB03MD.',
+    source: 'lib/lyap.viv',
+    checked: 'scipy.linalg.solve_continuous_lyapunov, by the relative residual: at most 8.9e-16, tolerance 1e-13.',
+    python: `import k1, numpy as np
+A = np.array([[-1.0, 2.0], [0.0, -3.0]])
+X = k1.solve_lyapunov(A, np.eye(2))`,
+    status: 'built by viv export; not released yet',
+  },
+  {
+    id: 'lqr',
+    name: 'lqr(A, B, Q, R)',
+    what: 'The linear-quadratic regulator: the gain K with u = −K x, and the Riccati solution P.',
+    source: 'lib/are.viv (lib/lqr.viv is the single-input front end)',
+    checked: 'K from scipy.linalg.solve_continuous_are and R⁻¹BᵀP: worst relative difference 2.8e-13, tolerance 1e-9.',
+    python: `import k1, numpy as np
+A = np.array([[0.0, 1.0], [0.0, 0.0]]); B = np.array([[0.0], [1.0]])
+K, P = k1.lqr(A, B, np.eye(2), np.eye(1))     # K = [1, sqrt(3)]`,
+    status: 'built by viv export; not released yet',
+  },
+];
+
+const TOC: [string, string][] = [
+  ['how', 'How to use one'],
+  ['programs', 'Programs'],
+  ...programs.map((p): [string, string] => [p.id, p.name]),
+  ['kernels', 'Kernels (k1)'],
+  ['limits', 'What 0.0.1 does not do'],
+];
+---
+
+<Base
+  title="Catalog · Viv"
+  description="Viv programs and kernels published as one C file and a Python wrapper: plane-wave DFT, Hartree–Fock, Vlasov–Poisson, Skyrme Hartree–Fock, and eight numerical kernels, each checked against PySCF, SciPy, mpmath or a published table."
+  eyebrow="Catalog · draft for 0.0.1"
+  heading="Programs you build with one cc line">
+  <div class="withtoc">
+    <div>
+      <p class="lede">
+        Each program here is written in Viv and published as a single C file with a Python wrapper.
+        You need a C compiler and NumPy. You do not need Viv: compile the file, import the
+        module and call it with parameters.
+      </p>
+      <p class="note">
+        Nothing on this page is released yet. An entry marked <em>built</em> is written by
+        <code>viv export</code> and passes its tests on macOS; Linux follows once the
+        repository has a remote for CI. The rest are <em>coming soon</em>.
+      </p>
+
+      <h2 id="how">How to use one</h2>
+      <p>Download the program’s files, then build the library once:</p>
+      <Code lang="sh" code={`${CC} pwdft.c -o libpwdft.so -lm`} />
+      <p>
+        Those flags are the exact build: the results are the same bits as Viv’s interpreter
+        gives, on every platform, because <code>-ffp-contract=off</code> stops the compiler from
+        fusing multiplies and adds and the file carries its own math library. If you skip the
+        command, the Python module runs it on first import. Every program ships with
+        <code>test_&lt;name&gt;.py</code>, which runs the program’s own tests through Python and
+        compares the results to the interpreter’s.
+      </p>
+
+      <h2 id="programs">Programs</h2>
+      {programs.map((p) => (
+        <section>
+          <h3 id={p.id}><code>{p.name}</code> <span class="pill pill-wip">{p.status}</span></h3>
+          <p>{p.what}</p>
+          <p><strong>Checked against:</strong> <Fragment set:html={p.checked} /></p>
+          <p><strong>Viv source:</strong> <code>{p.source}</code></p>
+          <Code lang="sh" code={`${CC} ${p.id}.c -o lib${p.id}.so -lm`} />
+          <Code lang="python" code={p.python} />
+        </section>
+      ))}
+
+      <h2 id="kernels">Kernels (k1)</h2>
+      <p>
+        One C file, <code>k1.c</code>, with eight functions. Each takes and returns what the SciPy
+        function of the same name does, and each states its tolerance before it is tested. The
+        errors below are the worst over the fixed test inputs, through the exported library;
+        its results are the same bits as Viv’s interpreter gives for every input.
+      </p>
+      <Code lang="sh" code={`${CC} k1.c -o libk1.so -lm`} />
+      {kernels.map((k) => (
+        <section>
+          <h3 id={k.id}><code>{k.name}</code> <span class="pill pill-wip">{k.status}</span></h3>
+          <p>{k.what}</p>
+          <p><strong>Checked against:</strong> <Fragment set:html={k.checked} /></p>
+          <p><strong>Viv source:</strong> <code>{k.source}</code></p>
+          <Code lang="python" code={k.python} />
+        </section>
+      ))}
+
+      <h2 id="limits">What 0.0.1 does not do</h2>
+      <ul>
+        <li>No MSVC: it lacks C99 complex numbers. On Windows, use MinGW-w64 GCC or clang.</li>
+        <li>No BLAS and no OpenMP: a run uses one core. Run several parameter sets as separate processes.</li>
+        <li>One run at a time in a process.</li>
+        <li>
+          “Exact” means the same bits as Viv’s interpreter on every platform. How close those bits
+          are to the true answer is what the “checked against” line of each entry says.
+        </li>
+      </ul>
+    </div>
+    <Toc items={TOC} />
+  </div>
+</Base>

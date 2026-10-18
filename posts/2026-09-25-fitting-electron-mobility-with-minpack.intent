@@ -1,0 +1,64 @@
+<main>  @afa73aad
+  what   Fit NIST's Thurber model to its 37 measurements with lmder1, from NIST's
+         first starting point, and compare the answer with the Fortran, scipy
+         and NIST's certified values; then draw the data with the fitted curve,
+         and the convergence of the norm and the trust radius
+         [test "the Fortran stops the same way: info 1, 33 evaluations of f and 27 of J"].
+  b      $b$  the seven parameters: NIST's start on entry to lmder1, the fit after
+  TH_X   $X$  the 37 measured values of $x = \ln(\text{density})$
+  TH_Y   $Y$  the 37 measured mobilities
+  fvec   $f$  the residuals, model minus measurement, at the fit
+  fnorm  $\lVert f \rVert$  the norm of the residuals at the fit
+  NOBS   $m$  the number of measurements
+  NPAR   $n$  the number of parameters
+  LM_TOL      the tolerance handed to lmder1, the square root of machine epsilon
+
+  $$ \min_b \sum_{i=0}^{m-1} \left( y(X_i; b) - Y_i \right)^2 $$  [test "the residual sum of squares is NIST's 5642.7082397 to 1e-8"]
+  = info   lmder1 does the fit: th_fcn gives it the residuals and the Jacobian, and it returns why it stopped
+  = fnorm  the norm of the residuals at the fit, from the residuals lmder1 left in fvec
+    $$ \lVert f \rVert^2 = \sum_i f_i^2 $$  [test "the residual sum of squares is NIST's 5642.7082397 to 1e-8"]
+
+th_model  @56139941
+  what  The model's prediction at x: a ratio of two cubics in x. The code counts
+        the parameters from `0`, so `b[0]` is NIST's $b_1$.
+  b     $b$  the seven parameters
+  x     $x$  the point, the natural log of the carrier density
+  x2    $x^2$
+  x3    $x^3$
+  num   $u$  the numerator, a cubic in $x$
+  den   $v$  the denominator, a cubic in $x$ with constant term 1
+
+  $$ y(x; b) = \frac{b_0 + b_1 x + b_2 x^2 + b_3 x^3}{1 + b_4 x + b_5 x^2 + b_6 x^3} $$  [test "every parameter is within 0.001 standard deviations of NIST's certified value"]
+
+th_fcn  @b216b308
+  what  The function lmder calls: for iflag `1` the residuals $f_i = y(X_i; b) - Y_i$
+        into fvec, for iflag `2` their Jacobian into fjac, one row per
+        measurement. It returns iflag, so lmder goes on.
+  how   The derivatives are exact, not differenced. The numerator's parameters
+        enter linearly, so $\partial f_i / \partial b_k = X_i^k / v_i$; a
+        denominator parameter changes $v_i$, so by the quotient rule
+        $\partial f_i / \partial b_{k+3} = -X_i^k\, u_i / v_i^2$. The operations are
+        those of lib/minpack/oracle/thurber.f, in the same order, so the
+        Fortran and the port compute the same numbers.
+  b     $b$  the seven parameters at which lmder wants the residuals or the Jacobian
+  fvec  $f$  the residuals, written for iflag 1
+  fjac  $J$  the 37 x 7 Jacobian, written for iflag 2
+  x     $x_i$  the i-th measured x
+  x2    $x_i^2$
+  x3    $x_i^3$
+  num   $u_i$  the model's numerator at $x_i$
+  den   $v_i$  the model's denominator at $x_i$
+  t     $t_i$  $u_i / v_i^2$, shared by the three denominator derivatives
+  TH_X  $X$  the measured x values
+  TH_Y  $Y$  the measured mobilities
+
+  = fvec    the residual: the model's prediction at $x_i$ minus the measurement
+  = fjac    a numerator parameter: the prediction changes by $x_i^k / v_i$ per unit of $b_k$
+    $$ \frac{\partial f_i}{\partial b_k} = \frac{x_i^k}{v_i}, \qquad k = 0, 1, 2, 3 $$
+  = fjac#5  a denominator parameter: raising $v_i$ lowers the prediction
+    $$ \frac{\partial f_i}{\partial b_{k+3}} = -\frac{x_i^k\, u_i}{v_i^2}, \qquad k = 1, 2, 3 $$
+
+th_oracle_fnorm  @e55189bb
+  what  The norm of the residuals after each trial step of the Fortran oracle
+        (lib/minpack/oracle/build.sh, thurber.txt), from NIST's first start: what
+        the port's history is compared with, number for number.

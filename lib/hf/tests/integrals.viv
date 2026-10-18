@@ -1,0 +1,110 @@
+# The tests of lib/hf/integrals that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/integrals does not load the references.
+from hf.integrals import (
+    int_c2s, int_check3, int_contract, int_eri, int_kinetic, int_nuclear, int_overlap, int_sph2,
+    int_sph4, int_sweep3,
+)
+from hf.basis import AT_LEN, bas_random_shells
+from hf.sweep import SW_REP_INDEX, sw_rep_new, SW_REP_NSTRAT, SW_REP_STRAT, SW_REP_WORST
+from hf.md_onebody import md1_s
+from hf.md_eri import mderi_screened
+from hf.hgp_eri import hgp_eri
+from hf.rys_eri import rys_eri
+from hf.cart2sph import c2s_basis, C2S_CLOSED_LMAX
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_prims, water631gs_cart_s_unit,
+    water631gs_cart_shells, water631gs_cart_t_unit, water631gs_cart_v_unit,
+)
+from hfref.water_631gs_sph import (
+    water631gs_sph_atoms, water631gs_sph_eri8_sph, water631gs_sph_prims, water631gs_sph_s_sph,
+    water631gs_sph_shells,
+)
+from hfref.water_sto3g import (
+    watersto3g_atoms, watersto3g_eri8_cart, WATERSTO3G_ERI8_CART_LEN, watersto3g_prims,
+    watersto3g_shells,
+)
+
+#| Test member: MD with packed entry `57` moved by `1.0e-10`.
+def int_t_bad_eri(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    G = mderi_screened(atoms, shells, prims)
+    G[57] = G[57] + 1.0e-10
+    return G
+}
+
+test "the numeric contraction agrees with the closed form on water 6-31G* and random shells" {
+    int_rep = sw_rep_new()
+    int_cn = int_contract(water631gs_cart_atoms(), water631gs_cart_shells(), water631gs_cart_prims(), int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 3, 0.0)
+    assert_lt(int_rep[SW_REP_WORST], 1.0e-14)
+    int_nsh = 12
+    int_sh, int_pr = bas_random_shells(int_nsh, 4242)
+    int_at = zeros(1, AT_LEN)
+    int_cn = int_contract(int_at, int_sh, int_pr, int_rep)
+    assert_lt(int_rep[SW_REP_WORST], 1.0e-14)
+}
+
+test "S, T and V from every member match PySCF on water 6-31G*" {
+    int_at = water631gs_cart_atoms()
+    int_sh = water631gs_cart_shells()
+    int_pr = water631gs_cart_prims()
+    int_rep = sw_rep_new()
+    int_S = int_overlap(int_at, int_sh, int_pr, int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 3, 0.0)
+    assert_lt(max(abs(int_S - water631gs_cart_s_unit())), 1.0e-12)
+    int_T = int_kinetic(int_at, int_sh, int_pr, int_rep)
+    assert_lt(max(abs(int_T - water631gs_cart_t_unit())), 1.0e-12)
+    int_V = int_nuclear(int_at, int_sh, int_pr, int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 2, 0.0)
+    assert_lt(max(abs(int_V - water631gs_cart_v_unit())), 1.0e-12)
+}
+
+test "all five ERI members agree on water STO-3G and match PySCF's full set" {
+    int_rep = sw_rep_new()
+    int_G = int_eri(watersto3g_atoms(), watersto3g_shells(), watersto3g_prims(), 0, int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 5, 0.0)
+    assert_lt(int_rep[SW_REP_WORST], 1.0e-14)
+    assert_lt(max(abs(int_G - watersto3g_eri8_cart())), 1.0e-12)
+}
+
+test "the masked driver runs the selected members and blames by registry index" {
+    int_at = watersto3g_atoms()
+    int_sh = watersto3g_shells()
+    int_pr = watersto3g_prims()
+    int_ms = [mderi_screened, hgp_eri, int_t_bad_eri, rys_eri]
+    int_rep = sw_rep_new()
+    int_out = zeros(WATERSTO3G_ERI8_CART_LEN)
+    # members 0, 2 and 3: the bad one is registry member 2
+    assert_near(int_check3(int_ms, 13, int_at, int_sh, int_pr, WATERSTO3G_ERI8_CART_LEN, 1.0e-11, int_rep, int_out), 0.0, 0.0)
+    assert_near(int_rep[SW_REP_STRAT], 2, 0.0)
+    assert_near(int_rep[SW_REP_INDEX], 57, 0.0)
+    assert_near(int_rep[SW_REP_NSTRAT], 3, 0.0)
+    # without it the others agree
+    assert_near(int_check3(int_ms, 11, int_at, int_sh, int_pr, WATERSTO3G_ERI8_CART_LEN, 1.0e-11, int_rep, int_out), 1.0, 0.0)
+    assert_near(int_rep[SW_REP_NSTRAT], 3, 0.0)
+    # one member selected: it runs alone
+    int_one = int_sweep3(int_ms, 8, int_at, int_sh, int_pr, WATERSTO3G_ERI8_CART_LEN, 1.0e-11, int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 1, 0.0)
+    assert_near(int_rep[SW_REP_STRAT], 3, 0.0)
+    assert_lt(max(abs(int_one - watersto3g_eri8_cart())), 1.0e-12)
+}
+
+test "the spherical transforms reproduce PySCF's 5D water 6-31G* integrals" {
+    int_at = water631gs_sph_atoms()
+    int_sh = water631gs_sph_shells()
+    int_pr = water631gs_sph_prims()
+    int_rep = sw_rep_new()
+    int_M = c2s_basis(int_sh)
+    for int_l to C2S_CLOSED_LMAX + 1 {
+        int_B = int_c2s(int_l, int_rep)
+        assert_near(int_rep[SW_REP_NSTRAT], 2, 0.0)
+    }
+    int_S = int_sph2(md1_s(int_at, int_sh, int_pr), int_M, int_sh, int_rep)
+    assert_lt(max(abs(int_S - water631gs_sph_s_sph())), 1.0e-13)
+    int_G = int_sph4(mderi_screened(int_at, int_sh, int_pr), int_M, int_sh, int_rep)
+    assert_near(int_rep[SW_REP_NSTRAT], 2, 0.0)
+    assert_lt(max(abs(int_G - water631gs_sph_eri8_sph())), 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

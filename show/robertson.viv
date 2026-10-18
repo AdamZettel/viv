@@ -1,0 +1,87 @@
+###
+post: Robertson's stiff kinetics over sixteen decades of time
+equation: y_1' = -k_1 y_1 + k_2 y_2 y_3, \quad y_2' = k_1 y_1 - k_2 y_2 y_3 - k_3 y_2^2, \quad y_3' = k_3 y_2^2
+summary: Three species react with rate constants $0.04$, $10^4$ and $3\times10^7$. Radau IIA from `lib/ode` carries the solution from $t = 10^{-5}$ to $10^{11}$ and lands on the reference solution of the Bari IVP test set (Mazzia and Magherini) to a relative $10^{-7}$ in under a thousand steps, while the three concentrations keep adding up to one.
+
+Robertson's reactions are the standard example of a stiff system. Species 1
+turns slowly into species 2 (rate $0.04$). Two molecules of species 2 react
+quickly to give species 3 ($2y_2 \to y_2 + y_3$, rate $3\times10^7$), and
+species 3 turns species 2 back into species 1 (rate $10^4$). The fast
+reactions hold species 2 near $3.6\times10^{-5}$, which it reaches within a
+few milliseconds; the slow one keeps going until $t = 10^{11}$. An explicit
+method is held to steps of about $10^{-4}$ by the fast rates the whole way,
+even after they have nothing left to do, which would be $10^{15}$ steps.
+
+An implicit method takes steps as long as the accuracy allows. Radau IIA
+(the method of `lib/ode/solve.viv`, after Hairer and Wanner) solves a small
+nonlinear system each step with an exact Jacobian, which `lib/ode/problems`
+builds with one reverse-mode `grad` per row. The figure shows the three
+concentrations on a logarithmic time axis; $y_2$ is drawn times $10^4$ so it
+is visible. The marks at $t = 10^{11}$ are the published reference values.
+###
+
+from ode.solve import ode_cfg, ode_solve, no_events
+from ode.core import RADAU, DONE, JAC_GIVEN
+from ode.problems import robertson, robertson_jac
+
+T_END = 1.0e11
+Y0 = [1.0, 0.0, 0.0]
+RATES = [0.04, 1.0e4, 3.0e7]
+RTOL = 1.0e-6
+ATOL = 1.0e-20
+MAX_STEPS: Int = 100000
+# output times: t = 0, then ten per decade from 1e-5 to 1e11
+FIRST_DECADE = -5.0
+LAST_DECADE = 11.0
+PER_DECADE = 10.0
+# y2 is drawn this many times larger, to share the axis with y1 and y3
+Y2_SCALE = 1.0e4
+# the IVP test set of Mazzia and Magherini (Bari, release 2.4, 2008): y at t = 1e11
+BARI_REF = [0.2083340149701255e-07, 0.8333360770334713e-13, 0.9999999791665050]
+# the largest relative error a test allows at t = 1e11
+REF_TOL = 1.0e-7
+
+n_out = int((LAST_DECADE - FIRST_DECADE) * PER_DECADE) + 1
+t_out = zeros(n_out + 1)
+for i to n_out {
+    t_out[i + 1] = 10.0 ^ (FIRST_DECADE + i / PER_DECADE)
+}
+
+cfg = ode_cfg(RADAU, T_END, RTOL, ATOL * ones(len(Y0)), 0.0, inf, MAX_STEPS, JAC_GIVEN)
+sol = ode_solve(robertson, robertson_jac, no_events, 0.0, T_END, Y0, RATES, cfg, t_out, zeros(0), zeros(0))
+steps = sol.nsteps
+show steps
+
+y_end = sol.y[n_out, :]
+rel_err = amax(abs(y_end - BARI_REF) / abs(BARI_REF))
+show rel_err
+mass_drift = 0.0
+for i to n_out + 1 {
+    mass_drift = max(mass_drift, abs(sol.y[i, 0] + sol.y[i, 1] + sol.y[i, 2] - 1.0))
+}
+show mass_drift
+
+#| The curves from t = 1e-5 on: the first output, t = 0, has no logarithm.
+ts = sol.t[1:]
+figure("Robertson's kinetics, Radau IIA at rtol 1e-6", "t", "concentration")
+xscale("log")
+plot(ts, sol.y[1:, 0], "y1")
+plot(ts, Y2_SCALE * sol.y[1:, 1], "y2 times 1e4")
+plot(ts, sol.y[1:, 2], "y3")
+scatter([T_END, T_END, T_END], [BARI_REF[0], Y2_SCALE * BARI_REF[1], BARI_REF[2]], "Bari test set, t = 1e11")
+
+test "Radau IIA reaches t = 1e11" {
+    assert_near(sol.status, DONE, 0.0)
+}
+test "at t = 1e11 every species is the Bari reference value to a relative 1e-7" {
+    assert_lt(rel_err, REF_TOL)
+}
+test "the three concentrations add up to 1 within 1e-12 at every output" {
+    assert_lt(mass_drift, 1.0e-12)
+}
+test "sixteen decades take fewer than a thousand steps" {
+    assert_lt(steps, 1000.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

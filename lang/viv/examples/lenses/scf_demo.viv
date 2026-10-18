@@ -1,0 +1,107 @@
+# A self-consistent field in miniature: the debug lens and the story lens on a
+# loop shaped like the Hartree-Fock one.
+#
+# Three sites, two electrons in one orbital. The Fock matrix is the core
+# Hamiltonian plus an on-site repulsion that depends on the density, so the
+# orbital that fills the density depends on the density: solve, rebuild,
+# repeat until nothing changes. The steps carry no text here; their words are
+# in scf_demo.intent, and what to watch is in scf_demo.debug.
+
+#: H   core Hamiltonian: site energies on the diagonal, hopping off it
+H = [[-1.0, -0.5, 0.0], [-0.5, -0.2, -0.5], [0.0, -0.5, 0.3]]
+#: U   on-site repulsion between the two electrons
+U = 1.5
+
+#| The mean-field Fock matrix: H, plus on each site the repulsion from the
+#| other electron's share of that site.
+def fock(H: Arr, D: Arr, U) -> Arr {
+    F = H * 1.0
+    for i to 3 {
+        F[i, i] = H[i, i] + 0.5 * U * D[i, i]
+    }
+    return F
+}
+
+#| The density of two electrons in the lowest orbital: `D = 2 c c^T`.
+def density(C: Arr) -> Arr {
+    D = zeros(3, 3)
+    for i to 3 {
+        for j to 3 {
+            D[i, j] = 2.0 * C[i, 0] * C[j, 0]
+        }
+    }
+    return D
+}
+
+#| The mean-field energy, `E = sum(D * (H + F)) / 2`.
+def energy(H: Arr, F: Arr, D: Arr) {
+    return 0.5 * sum(D * (H + F))
+}
+
+#| Extrapolate the Fock matrix from the last few iterations (DIIS). Not
+#| written yet: the plain iteration below converges without it.
+placeholder def diis(F: Arr, D: Arr) -> Arr
+
+#| Iterate the density to self-consistency, mixing each new density half and
+#| half with the old one; return [energy, iterations, last density change,
+#| largest element of the commutator F D - D F].
+def scf(H: Arr, U, tol, maxit) -> Arr {
+    vals = zeros(3)
+    C = zeros(3, 3)
+    step guess {
+        eig_sym(H, vals, C)
+        D = density(C)
+    }
+    E = 0.0
+    dE = 0.0
+    dnorm = 1.0
+    it = 0
+    while dnorm > tol and it < maxit {
+        step fock {
+            F = fock(H, D, U)
+        }
+        step solve {
+            eig_sym(F, vals, C)
+        }
+        step density {
+            Dn = density(C)
+            dnorm = sqrt(sum((Dn - D) * (Dn - D)))
+        }
+        step mix {
+            D = 0.5 * (D + Dn)
+        }
+        step energy {
+            E_old = E
+            E = energy(H, F, D)
+            dE = E - E_old
+        }
+        it = it + 1
+    }
+    step check {
+        F = fock(H, D, U)
+        comm = F @ D - D @ F
+        worst = 0.0
+        for i to 3 {
+            for j to 3 {
+                worst = max(worst, abs(comm[i, j]))
+            }
+        }
+    }
+    return [E, it, dnorm, worst]
+}
+
+r = scf(H, U, 1e-10, 100)
+print(r[0])
+print(r[1])
+
+test "the density stops changing, in fewer than 100 iterations" {
+    assert_lt(r[2], 1e-10)
+    assert_lt(r[1], 100.0)
+}
+
+test "at self-consistency the Fock matrix commutes with the density" {
+    assert_lt(r[3], 1e-10)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,195 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One engine: its card (the `#!` header), the instrument that runs it, and the
+// measurements that hold it to its references. The card comes from the
+// engine's own source (scripts/engine-build.mjs); the measured numbers from
+// the last `npm run enginerun` (scripts/enginetest.mjs --run, which writes
+// src/data/engineRuns.json only when every check passes).
+import RepoLink from '../../components/RepoLink.astro';
+import { REPO_PUBLIC } from '../../lib/repo.js';
+import Base from '../../layouts/Base.astro';
+import Code from '../../components/Code.astro';
+import DftBandsEngine from '../../components/DftBandsEngine.jsx';
+import HfEnergyEngine from '../../components/HfEnergyEngine.jsx';
+import data from '../../data/engines.json';
+import runsData from '../../data/engineRuns.json';
+import dftCost from '../../lib/engines/dft-cost.json';
+import hfCost from '../../lib/engines/hf-cost.json';
+import { BASIS_NAMES } from '../../lib/engines/molecule.js';
+import '../../styles/dft.css';
+import '../../styles/engines.css';
+
+export function getStaticPaths() {
+  return data.engines.map((e) => ({ params: { name: e.name }, props: { e } }));
+}
+const { e } = Astro.props;
+const runs = runsData.runs.filter((r) => r.engine === e.name);
+const header = e.source.split('\n').filter((l) => l.startsWith('#!') && !l.startsWith('#! use')).join('\n');
+const exp = (x: number) => (x === 0 ? '0' : x.toExponential(1));
+const isDft = e.name === 'dft-bands';
+const fitted = isDft ? dftCost.fitted : hfCost.measured;
+---
+
+<Base
+  title={`${e.title} · Engines · Viv`}
+  description={isDft
+    ? 'Drop a POSCAR, a CIF, a Quantum ESPRESSO pw.x input or an extended XYZ file and get its LDA band structure and total energy, computed in the browser tab by a plane-wave DFT code written in Viv.'
+    : 'Drop an XYZ file, pick a basis, and get the Hartree-Fock energy and orbital energies, computed in the browser tab by lib/hf and compared with the PySCF energy when lib/hfref has the same calculation.'}>
+  <p class="eyebrow"><a href="/engines">Engines</a> · <code>{e.name}</code></p>
+  <h1>{e.title}</h1>
+
+  {isDft ? (
+    <p class="lede">
+      Give it a crystal in a format you already have. It finds the primitive cell, writes the same kind of
+      input file the <a href="/dft">DFT program</a> runs from, and computes the self-consistent LDA band
+      structure in your browser. Silicon takes about eight seconds.
+    </p>
+  ) : (
+    <p class="lede">
+      Give it a molecule as an XYZ file and name a basis. It builds the Gaussian basis the way PySCF does,
+      runs Hartree–Fock through <code>lib/hf</code> in your browser, and prints the energy and the orbital
+      energies. Water in 6-31G takes about three seconds.
+    </p>
+  )}
+
+  {isDft ? <DftBandsEngine client:load refs={data.dftRefs} /> : <HfEnergyEngine client:load refs={data.hfRefs} />}
+
+  <h2 id="card">What it takes and gives</h2>
+  <p>
+    The engine is <RepoLink path={e.file}><code>{e.file}</code></RepoLink>, {e.lines} lines of Viv that run
+    <RepoLink path={`${e.program}.viv`}><code>{e.program}</code></RepoLink>. Its header says what it takes and gives:
+  </p>
+  <Code lang="viv" code={header} />
+  <dl class="eng-card">
+    {e.inputs.map((i) => <div><dt>input</dt><dd><b>{i.what}</b>: {i.how}</dd></div>)}
+    <div><dt>output</dt><dd>{e.outputs.join(', ')}</dd></div>
+    {e.limits.map((l) => <div><dt>limit</dt><dd><b>{l.where}</b>: {l.what}</dd></div>)}
+    {e.validated.map((v) => <div><dt>validated</dt><dd>{v.what}{REPO_PUBLIC && <>: <RepoLink path={v.file}><code>{v.file}</code></RepoLink></>}</dd></div>)}
+  </dl>
+
+  {isDft ? (
+    <>
+      <h2 id="how">What happens to your file</h2>
+      <ol>
+        <li>
+          <strong>An input reader parses it</strong> (<code>www/src/lib/engines/formats/</code>): a POSCAR’s scale and
+          species line, a CIF’s cell parameters and symmetry operations, a pw.x input’s <code>ibrav</code>,
+          <code>celldm</code> and cards, an extended XYZ’s <code>Lattice</code>. Each gives the same thing, a cell
+          and atoms in it.
+        </li>
+        <li>
+          <strong>The crystal is reduced to the engine’s cell.</strong> Every translation that maps the structure
+          onto itself is found, which is how an 8-atom cubic cell or a supercell reveals the 2-atom primitive one.
+          The lattice must be face-centered cubic, because the engine’s k-mesh and band path are. It is rotated
+          into <code>dft/</code>’s orientation and the atoms are centered the way <code>dft/ref/materials.py</code>
+          places them.
+        </li>
+        <li>
+          <strong>The input file is written</strong> as <code>dft/ref/make_deck.py</code> writes one: pseudopotentials from
+          CP2K’s table, picked as <code>dft/pseudo/make_pseudo.py</code> picks them, and the cutoff, k-mesh, smearing
+          and band count <code>materials.py</code> measured. Silicon from any of the four formats gives
+          <code>dft/si.viv</code> character for character.
+        </li>
+        <li>
+          <strong>It runs.</strong> Compiled, the engine is one WebAssembly module for every input: it was built from
+          the program with silicon’s input in place, plus a loader that replaces every input variable, by name, with
+          the one the page hands it on standard input. Interpreted, <code>viv.wasm</code> reads the program with your
+          input pasted in.
+        </li>
+      </ol>
+      <p>
+        The cost estimate is a model with one constant fitted to the compiled engine on <code>dft/</code>’s five
+        tab-sized materials: time grows with the bands, the FFT grid and the k-points. It lands within
+        {Math.round(dftCost.worst_relative_error * 100)}% of the time measured on those five, and predicts copper at
+        {dftCost.copper.predicted} s where the compiled module took {dftCost.copper.measured_wasm} s, so treat it as a rough guide.
+        A crystal estimated above 90 s is not offered here.
+      </p>
+    </>
+  ) : (
+    <>
+      <h2 id="how">What happens to your file</h2>
+      <ol>
+        <li>
+          <strong>The XYZ file is read</strong>: symbols (or atomic numbers) and positions in ångström. The comment line
+          may carry <code>basis=</code>, <code>charge=</code> and <code>multiplicity=</code> (or <code>spin=</code>, as
+          N<sub>α</sub> − N<sub>β</sub>), which fill in the form above.
+        </li>
+        <li>
+          <strong>The basis is built as PySCF builds it</strong>: its library’s shells, every general contraction split
+          into one shell per column, zero coefficients dropped, ångström converted with PySCF’s own bohr. For water,
+          hydroxyl and ammonia the basis-set data it builds matches <code>lib/hfref</code>’s, number for number.
+        </li>
+        <li>
+          <strong><code>lib/hf</code> runs</strong>: overlap, kinetic and nuclear-attraction integrals, the
+          two-electron integrals, the optional transform to spherical functions, and RHF, UHF or ROHF, each stage using
+          the implementation <code>lib/hf</code> uses by default. Then the converged Fock matrix is diagonalized once more for the orbital energies.
+        </li>
+      </ol>
+      <p>
+        The cost estimate is <code>c · P^a · n^b</code>, where P counts primitive Cartesian functions and n basis
+        functions, fitted to {hfCost.measured.length} runs from water in 6-31G ({hfCost.measured[0].seconds} s) to
+        ethanol in 6-31G* ({hfCost.measured[hfCost.measured.length - 1].seconds} s). It is within
+        {Math.round(hfCost.worst_relative_error * 100)}% of every one of them. A molecule estimated above 60 s, or
+        with more than 60 basis functions, is not offered here.
+      </p>
+    </>
+  )}
+
+  <h2 id="checked">How it is checked</h2>
+  {isDft ? (
+    <p>
+      Every example input is compared with <code>dft/</code>’s own, and when it is identical the run is compared with the
+      numpy reference stored in that material’s check file: the total energy to 10<sup>−7</sup> hartree and every band at
+      every one of the 61 path points to 10<sup>−5</sup> eV, the tolerances <code>dft/</code>’s tests use. The engine
+      computes the difference itself and prints it. These are the last recorded runs:
+    </p>
+  ) : (
+    <p>
+      When <code>lib/hfref</code> holds the same molecule, basis, charge, spin and method, its PySCF energy is handed to
+      the program, which prints the difference; the tests of <code>lib/hf</code> require it to match PySCF to 10<sup>−9</sup> hartree. The
+      orbital energies of water and hydroxyl are compared with PySCF’s in the tests. These are the last recorded
+      runs:
+    </p>
+  )}
+  <div class="tablewrap">
+    <table class="eng-table eng-validation">
+      <thead>
+        {isDft
+          ? <tr><th>input</th><th>reference input</th><th class="r">energy error, Ha</th><th class="r">worst band error, eV</th><th class="r">seconds</th></tr>
+          : <tr><th>input</th><th>reference</th><th class="r">energy, Ha</th><th class="r">error, Ha</th><th class="r">seconds</th></tr>}
+      </thead>
+      <tbody>
+        {runs.map((r) => isDft
+          ? <tr><td>{r.label}</td><td><code>{r.deck}</code></td><td class="num r">{exp(r.energyError)}</td><td class="num r">{exp(r.bandError)}</td><td class="num r">{r.seconds}</td></tr>
+          : <tr><td>{r.label}</td><td><code>{r.reference}</code></td><td class="num r">{r.energy.toFixed(10)}</td><td class="num r">{exp(r.energyError)}</td><td class="num r">{r.seconds}</td></tr>)}
+      </tbody>
+    </table>
+  </div>
+  <p class="note">
+    Seconds are timings under Node.js on the machine that ran the tests; a browser tab is usually a little slower.
+    {isDft ? ' The input readers have their own tests: every example, all six materials of materials.py written as shifted POSCARs, silicon written four other ways, and inputs that must be refused, each with its reason.' : ' The XYZ reader and basis builder have their own tests: the basis arrays for every example, and inputs that must be refused, each with its reason.'}
+  </p>
+  <p class="note">
+    {isDft
+      ? "The GTH pseudopotential parameters are CP2K's GTH_POTENTIALS table as PySCF ships it (Goedecker, Teter and Hutter 1996; Hartwigsen, Goedecker and Hutter 1998); only the numbers are used, no CP2K or PySCF code."
+      : 'The basis sets come from the Basis Set Exchange. PySCF 2.5.0 (Apache-2.0) is the reference the energies are compared with; no PySCF code is copied.'}
+  </p>
+
+  <h2 id="not">What it does not do</h2>
+  {isDft ? (
+    <ul>
+      <li><strong>Lattices other than fcc.</strong> Diamond, zincblende, rock salt and fcc metals only; anything else is refused with the lattice it found.</li>
+      <li><strong>Spin.</strong> A magnetic input (a pw.x <code>nspin = 2</code>, a magnetic CIF, an XYZ with moments) is refused, not run without its spin.</li>
+      <li><strong>Pseudopotentials you name.</strong> The engine uses GTH pseudopotentials from CP2K’s table; a pw.x input’s UPF files are listed as not used.</li>
+      <li><strong>Elements without a measured cutoff</strong> run only when you give a cutoff, and the result says it is unvalidated.</li>
+      <li><strong>Total energies between structures.</strong> The ion–ion term is left out, as in <code>dft/</code>.</li>
+    </ul>
+  ) : (
+    <ul>
+      <li><strong>Elements past argon, or basis sets other than</strong> {BASIS_NAMES.join(', ')}.</li>
+      <li><strong>Geometry optimization, correlation, or properties</strong> beyond the energy and orbital energies.</li>
+      <li><strong>Large molecules in a browser.</strong> The integrals grow as the fourth power of the basis; a run estimated above a minute is refused.</li>
+    </ul>
+  )}
+</Base>

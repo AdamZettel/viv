@@ -1,0 +1,30 @@
+# PySCF's test_bz.py:56 replayed natively: benzene in cc-pVDZ, 114 spherical
+# AOs, RHF -230.720825199 to 9 places. At this size the packed ERIs would be
+# 21 million values, so the SCF runs direct: the direct J/K member
+# recomputes the integrals from the basis (`mdjk_direct`) every iteration and
+# never stores one. Only the production member of each integral stage runs.
+#
+# This program is not run by the interpreter (an interpreted direct SCF at
+# this size would take hours); tools/hf_score.sh builds it natively, runs it
+# once and reports its time. The row is reported, not gated.
+#
+#     target/release/viv scf/suite/native/bz.viv -o bz.c && cc -O2 bz.c -lm -o bz && ./bz
+from hf.hf import hf_energy
+from hf.molecule import molecule_packs
+from hf.basis import bas_nao_sph
+from hf.opts import scf_defaults, ScfOptions
+from hf.jk_direct import INT_JK_DIRECT
+from hfref.pyscf_tests import PST_BZ_56, PST_BZ_56_P, PST_FILE_BZ
+from scf.suite.ref.sts import sts_row
+from scf.suite.ref.stb import stb_bz_atoms, stb_bz_prims, stb_bz_shells
+
+test "benzene cc-pVDZ, direct RHF: -230.720825199 (test_bz.py:56)" {
+    sbz_m = molecule_packs(stb_bz_atoms(), stb_bz_shells(), stb_bz_prims())
+    assert_near(bas_nao_sph(sbz_m.shells), 114, 0.0)
+    sbz_r = hf_energy(sbz_m, ScfOptions { jk: INT_JK_DIRECT, ..scf_defaults() })
+    assert_near(sbz_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_BZ, 56, sbz_r.energy, PST_BZ_56, PST_BZ_56_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,142 @@
+###
+title: QR keeps the digits the normal equations lose
+line: On nine NIST datasets QR keeps at least 7.5 digits and leads the normal equations by at least 2; on Filip Cholesky keeps none.
+claim: On nine NIST StRD linear least-squares datasets (Norris to Filip), pivoted Householder QR with one step of refinement gets at least 7.5 certified digits of every coefficient on every dataset (on Filip that is the limit its stored data allow) and at least $16 - \log_{10}\kappa - 3$ on each, where $\kappa$ is the condition number of the column-scaled design matrix (from 3 for Norris to $5 \times 10^{9}$ for Filip). The normal equations solved by Cholesky lose digits twice as fast in $\log_{10}\kappa$, keeping between $16 - 2\log_{10}\kappa - 4$ and $16 - 2\log_{10}\kappa + 2$ (none on Filip), and QR is ahead by at least 2 digits on every dataset.
+topic: stats
+section: linear regression
+reference: NIST Statistical Reference Datasets, linear least squares (lib/stats/data, https://www.itl.nist.gov/div898/strd/lls/lls.shtml), coefficients certified to 15 digits; Golub and Van Loan, Matrix Computations (4th ed.), section 5.3.8, for why the normal equations square the condition number.
+scope: Digits are the smallest log relative error over the coefficients, capped at the 15 NIST certifies. The bands around $16 - 2\log_{10}\kappa$ are what these nine datasets show, a rule of thumb with its margins measured here, not a bound for every problem; the residual size also matters (Wampler4 and 5 have large residuals). On Filip the stored $x^{10}$ column has already lost digits, so a QR fit cannot certify much more than about 8 digits there (lib/stats/nist_lls.py).
+lane: ai
+by: claude
+cost: fast
+###
+
+from stats.linmod import col_scale, lstsq, LSTSQ_CHOL, LSTSQ_QR
+
+DATASETS = ["Norris", "Pontius", "Longley", "Wampler1", "Wampler2", "Wampler3", "Wampler4", "Wampler5", "Filip"]
+#: NIST certifies 15 digits
+CAP = 15.0
+#: the rank tolerance, vp.stats.ols's default
+RANK_TOL = 1.0e-10
+#: refinement on (1.0), as vp.stats.ols does by default
+REFINE = 1.0
+
+#| The certified coefficients and the data (y, then the predictors) of a NIST StRD .dat file.
+def read_strd(path: Str) {
+    lines = read_lines(path)
+    cert = []
+    rows = []
+    in_data = false
+    for ln in lines {
+        f = split(strip(ln))
+        if in_data and len(f) > 0 {
+            rows = append(rows, [float(x) for x in f])
+        }
+        if len(f) >= 3 and len(f[0]) >= 2 and startswith(f[0], "B") and not in_data {
+            cert = append(cert, float(f[1]))
+        }
+        if len(f) >= 2 and f[0] == "Data:" and f[1] == "y" {
+            in_data = true
+        }
+    }
+    return cert, rows
+}
+
+#| The design matrix: an intercept and the predictors (Longley), or the powers 0 .. p-1 of x.
+def design(rows: Arr, p: Int, poly: Bool) -> Arr {
+    n: Int = int(shape(rows)[0])
+    x = zeros(n, p)
+    for i to n {
+        for j to p {
+            if poly {
+                #: powers by repeated multiplication, as the vipyr twin builds them
+                x[i, j] = 1.0
+                if j > 0 {
+                    x[i, j] = x[i, j - 1] * rows[i, 1]
+                }
+            }
+            else {
+                x[i, j] = 1.0
+                if j > 0 {
+                    x[i, j] = rows[i, j]
+                }
+            }
+        }
+    }
+    return x
+}
+
+#| The smallest log relative error over the coefficients, capped at 15.
+def lre(b: Arr, c: Arr) -> Num {
+    worst = CAP
+    for j to len(c) {
+        e = abs(b[j] - c[j]) / abs(c[j])
+        if e > 0.0 {
+            worst = min(worst, -log(e) / log(10.0))
+        }
+    }
+    return max(0.0, worst)
+}
+
+n_sets: Int = len(DATASETS)
+log10_cond = zeros(n_sets)
+digits_qr = zeros(n_sets)
+digits_normal = zeros(n_sets)
+for ds to n_sets {
+    ds_cert, ds_rows = read_strd("lib/stats/data/" + DATASETS[ds] + ".dat")
+    ds_p: Int = len(ds_cert)
+    ds_x = design(ds_rows, ds_p, DATASETS[ds] != "Longley")
+    ds_y = ds_rows[:, 0]
+    u_sv, sv, vt_sv = svd(ds_x / col_scale(ds_x))
+    log10_cond[ds] = log(max(sv) / min(sv)) / log(10.0)
+    bq, rq, pq, cq = lstsq(ds_x, ds_y, LSTSQ_QR, RANK_TOL, REFINE)
+    bn, rn, pn, cn = lstsq(ds_x, ds_y, LSTSQ_CHOL, RANK_TOL, REFINE)
+    digits_qr[ds] = lre(bq, ds_cert)
+    digits_normal[ds] = lre(bn, ds_cert)
+}
+show log10_cond
+show digits_qr
+show digits_normal
+cond_min = pow(10.0, min(log10_cond))
+cond_max = pow(10.0, max(log10_cond))
+show cond_min
+show cond_max
+min_digits_qr = min(digits_qr)
+show min_digits_qr
+
+#: the figure: digits against log10 kappa for both methods, with 16 - log10 kappa and 16 - 2 log10 kappa
+DOUBLE_DIGITS = 16.0
+fg_x = [0.0, max(log10_cond)]
+figure("Certified digits on nine NIST StRD datasets", "log10 of the condition number", "correct digits")
+plot(fg_x, DOUBLE_DIGITS - fg_x, "16 - log10 kappa")
+style("16 - log10 kappa", "dash s1 nomarker thin")
+plot(fg_x, DOUBLE_DIGITS - 2.0 * fg_x, "16 - 2 log10 kappa")
+style("16 - 2 log10 kappa", "dash s2 nomarker thin")
+scatter(log10_cond, digits_qr, "QR")
+style("QR", "s1 circle")
+scatter(log10_cond, digits_normal, "normal equations")
+style("normal equations", "s2 square")
+
+test "QR gets at least 7.5 digits on every dataset, and at least 16 - log10 kappa - 3 on each" {
+    assert_gt(min_digits_qr, 7.5)
+    for ds to n_sets {
+        assert_gt(digits_qr[ds], 16.0 - log10_cond[ds] - 3.0)
+    }
+}
+test "Cholesky on the normal equations keeps between 16 - 2 log10 kappa - 4 and 16 - 2 log10 kappa + 2 digits" {
+    for ds to n_sets {
+        assert_gt(digits_normal[ds], 16.0 - 2.0 * log10_cond[ds] - 4.0)
+        assert_lt(digits_normal[ds], max(0.0, 16.0 - 2.0 * log10_cond[ds] + 2.0) + 1.0e-9)
+    }
+}
+test "none on Filip" {
+    assert_near(digits_normal[n_sets - 1], 0.0, 0.0)
+}
+test "QR is ahead by at least 2 digits on every dataset" {
+    for ds to n_sets {
+        assert_gt(digits_qr[ds] - digits_normal[ds], 2.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

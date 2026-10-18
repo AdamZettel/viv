@@ -1,0 +1,46 @@
+# Row groups shared by the catalog's features: rows sorted by (key, ts).
+
+#| The end (exclusive) of the key group that starts at row `start`, after
+#| checking that the rows are sorted by (key, ts); `who` names the caller in
+#| the error.
+#: key  the entity key of each row
+#: ts  each row's time, int64 nanoseconds
+#: start  the first row of the group
+#@ 2c0afca7
+def group_end(key: [Int], ts: [Int], start: Int, who: Str) -> Int {
+    n = len(ts)
+    stop_at: Int = start + 1
+    while stop_at < n and key[stop_at] == key[start] {
+        if ts[stop_at] < ts[stop_at - 1] {
+            stop(f"{who}: rows must be sorted by (key, ts); row {stop_at} goes back in time")
+        }
+        stop_at += 1
+    }
+    if stop_at < n and key[stop_at] < key[start] {
+        stop(f"{who}: rows must be sorted by (key, ts); the key falls at row {stop_at}")
+    }
+    return stop_at
+}
+
+#| The end (exclusive) of the run of rows at row `i`'s instant, within a group
+#| ending at `stop_at`.
+#: i  the first row of the instant
+#: stop_at  the end of the key group
+#@ 9ee224e9
+def instant_end(ts: [Int], i: Int, stop_at: Int) -> Int {
+    j: Int = i
+    while j < stop_at and ts[j] == ts[i] {
+        j += 1
+    }
+    return j
+}
+
+test "groups and instants" {
+    key: [Int] = [1, 1, 1, 2]
+    ts: [Int] = [5, 5, 7, 0]
+    assert_true(group_end(key, ts, 0, "t") == 3 and group_end(key, ts, 3, "t") == 4)
+    assert_true(instant_end(ts, 0, 3) == 2 and instant_end(ts, 2, 3) == 3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

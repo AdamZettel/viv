@@ -1,0 +1,195 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr: the user guide's front page. What vipyr is for, by topic, how to
+// install it, a first call, and how its results are checked. Function pages
+// are under /vipyr/api; everything they say comes from src/data/vipyr.json.
+import DocPage from '../../layouts/DocPage.astro';
+import Code from '../../components/Code.astro';
+import GalleryCard from '../../components/GalleryCard.astro';
+import data from '../../data/vipyr.json';
+import { REPO_PUBLIC, GITHUB } from '../../lib/repo.js';
+import gallery from '../../data/gallery.json';
+import { vipyrTree, TOPICS } from '../../lib/site';
+
+const fns = Object.values(data.functions) as any[];
+const fieldOf = (id: string) => data.fields.find((f: any) => f.id === id) as any;
+const topics = TOPICS.map((t) => ({
+  ...t,
+  fams: t.families.map(fieldOf).filter(Boolean).filter((f: any) => fns.some((x) => x.family === f.id && x.kind !== 'coming')),
+  examples: (gallery as any).entries.filter((e: any) => e.topic === t.id),
+}));
+// the cards under a topic: its first examples, then a link to the rest
+const SHOWN = 4;
+const built = fns.filter((f) => f.kind !== 'coming').length;
+
+const FIRST = `import numpy as np
+import vipyr as vp
+
+# the optimal gain for a cart-pole, and the system run under it
+A, B = vp.control.cartpole_model(h=1e-5)
+r = vp.control.lqr(A=A, B=B, Q=np.diag([1.0, 1.0, 20.0, 1.0]), R=np.array([[0.05]]))
+r.K          # array([[ -4.4721,  -8.2239, -63.0331, -16.0163]])
+r.check()    # CheckReport(passed=True, ...): the program's own tests on this run`;
+const OWN = `k = vp.load("kernels.viv")     # your own Viv file, compiled to C once and cached
+k.sumsq(np.arange(4.0))          # each annotated def is a Python function on NumPy arrays`;
+const TOC: [string, string][] = [
+  ...TOPICS.map((t) => [t.id, t.title] as [string, string]),
+  ['install', 'Install'],
+  ['first', 'A first call'],
+  ['checked', 'How results are checked'],
+  ['viv', 'The Viv language'],
+];
+---
+
+<DocPage
+  title="vipyr user guide"
+  icon="/brand/vipyr/vipyr-icon.svg"
+  image="/brand/vipyr/vipyr-icon-512.png"
+  description="vipyr is the Viv language as a Python package: your own .viv files load as Python modules, and Viv's checked programs (Hartree-Fock, the shell model, option pricing, control, features on event tables) are Python functions."
+  tree={vipyrTree(Astro.url.pathname)}
+  toc={TOC}>
+  <h1 class="ug-logo">
+    <img class="brand-on-light" src="/brand/vipyr/vipyr-logo-light.svg" alt="vipyr" width="250" height="73" />
+    <img class="brand-on-dark" src="/brand/vipyr/vipyr-logo-dark.svg" alt="vipyr" width="250" height="73" />
+  </h1>
+  <p class="lede">
+    vipyr runs numerical code written in Viv from Python. Your own functions compile to C and come back as Python
+    functions on NumPy arrays, and a library of programs checked against their reference codes is one import away.
+  </p>
+  <p>
+    {built} functions run today. Each has a reference page with its signature,
+    every parameter's type, default, range and units, the fields of its result, an example that ran when the page was
+    built, and what it is checked against.
+  </p>
+
+  {
+    topics.map((t) => (
+      <section class="ug-topic">
+        <h2 id={t.id}>{t.title}</h2>
+        <p>{t.pitch}</p>
+        <ul class="ug-fams">
+          {t.fams.map((f: any) => (
+            <li>
+              <a href={`/vipyr/${f.id}`}>
+                <code>vp.{f.id}</code>
+              </a>{' '}
+              {f.about}
+            </li>
+          ))}
+          {t.id === 'data' && (
+            <li>
+              <code>vp.check_point_in_time</code>, <code>vp.check_parity</code> and <code>vp.compile</code>: the tools
+              described under <a href="/vipyr/getting-started#tools">Getting started</a>.
+            </li>
+          )}
+        </ul>
+        {t.examples.length > 0 && (
+          <div class="ug-cards">
+            {t.examples.slice(0, SHOWN).map((e: any) => (
+              <GalleryCard entry={e} />
+            ))}
+          </div>
+        )}
+        {t.examples.length > SHOWN && (
+          <p class="ug-all">
+            <a href={`/vipyr/gallery#${t.id}`}>
+              All {t.examples.length} in {t.title} →
+            </a>
+          </p>
+        )}
+      </section>
+    ))
+  }
+
+  <h2 id="install">Install</h2>
+  <Code lang="sh" code={(REPO_PUBLIC ? `git clone ${GITHUB} && cd viv\n` : '') + 'cargo build --release -p viv\nPYTHONPATH=python python3 -c "import vipyr as vp"'} />
+  <p>
+    vipyr runs from a checkout of the repository and needs NumPy and a C compiler. The packages are not on PyPI yet;
+    <code>pip install vipyr</code> is planned. <a href="/vipyr/install">Install</a> has the details and the
+    distributions each domain will ship in.
+  </p>
+
+  <h2 id="first">A first call</h2>
+  <Code lang="python" code={FIRST} />
+  <p>
+    Arguments are keywords and are checked before anything compiles: a matrix of the wrong shape or a value outside
+    its range raises <code>vipyr.ParameterError</code> naming the parameter. The result is a frozen object whose
+    fields are documented on the function's page, with units. Your own Viv works the same way:
+  </p>
+  <Code lang="python" code={OWN} />
+  <p><a href="/vipyr/getting-started">Getting started →</a></p>
+
+  <h2 id="checked">How results are checked</h2>
+  <p>
+    Each function's page says what it is checked against, under <em>Checked against</em>: a reference code (PySCF,
+    BIGSTICK, SciPy, mpmath), a published value, or an identity the answer has to satisfy, with the tolerance and the
+    reason for it.
+  </p>
+  <ul>
+    <li>
+      <code>check()</code> on a result runs the program's own tests on that run.
+    </li>
+    <li>
+      The default build is designed to give the same bits on every machine: fused multiply-add is off and the math
+      functions are Viv's own rather than the platform's. <code>fast=True</code> trades that for speed.
+    </li>
+    <li>
+      Every example on these pages ran when the pages were built, and the output shown is what it printed.
+    </li>
+  </ul>
+
+  <h2 id="viv">The Viv language</h2>
+  <p>
+    The programs are written in Viv, a small numerical language that compiles to C99 and to WebAssembly. You can use
+    vipyr without reading any of it, and step through any of it when you want to see how a result was computed.
+    <a href="/tour">The Viv language tour →</a>
+  </p>
+</DocPage>
+
+<style>
+  .ug-logo {
+    margin: 0 0 0.6rem;
+  }
+  .ug-logo img {
+    width: 250px;
+    max-width: 70vw;
+    height: auto;
+  }
+  .ug-topic {
+    margin: 1.4rem 0 2rem;
+  }
+  .ug-fams {
+    padding-left: 1.1rem;
+    color: var(--text-muted);
+  }
+  .ug-fams a {
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .ug-fams code {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: inherit;
+  }
+  .ug-cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 1rem 0 0.4rem;
+  }
+  @media (min-width: 900px) {
+    .ug-cards {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+  .ug-cards :global(.g-card h4) {
+    font-size: 0.92rem;
+    margin: 10px 12px 12px;
+  }
+  .ug-all {
+    margin: 0.4rem 0 0;
+    font-weight: 500;
+  }
+</style>

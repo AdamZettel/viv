@@ -1,0 +1,239 @@
+# Symbolic regression in Viv: recover a formula from data by brute force.
+#
+# The AI-Feynman core loop, from scratch: enumerate every RPN expression over a
+# small op alphabet in order of length (= description length), fit the one free
+# multiplicative prefactor by least squares, and keep the champion plus the
+# best-per-length Pareto frontier. Four hidden "mystery" functions are searched
+# in sequence; the browser component replays the champion race from the output.
+#
+# Output protocol (Viv prints numbers only, so labeled `show` lines are the
+# wire format; a reader keys on the labels):
+#   m_id / ch_len / ch_err / ch_c / ch_code    a new champion record
+#   pf_len / pf_err / pf_c / pf_code           a Pareto-frontier row
+#   m_done / n_valid / n_seen                  end of one mystery
+#
+# Alphabet (codes): 0 x   1 one   2 +   3 -   4 *   5 /   6 sin   7 exp
+#                   8 sqrt   9 neg      -- leaves 0-1, binary 2-5, unary 6-9
+
+MAXLEN = 6
+NPTS = 25
+
+xs = zeros(32)
+ys = zeros(32)
+syy = zeros(1)
+
+def gen_mystery(m) {
+    for i to NPTS {
+        x = 0.4 + 0.1 * i
+        xs[i] = x
+        if m == 1 { ys[i] = x * x + x }
+        if m == 2 { ys[i] = 2.5 * x * sin(x) }
+        if m == 3 { ys[i] = x / (1.0 + x) }
+        if m == 4 { ys[i] = exp(0.0 - x * x) }
+    }
+    s = 0.0
+    for i to NPTS { s = s + ys[i] * ys[i] }
+    syy[0] = s
+}
+
+def arity(c) {
+    if c <= 1.0 { return 0.0 }
+    if c <= 5.0 { return 2.0 }
+    return 1.0
+}
+
+# candidate + evaluation state
+code = zeros(8)
+stk = zeros(8)
+bad = zeros(1)
+
+# evaluate the RPN in code[0..L) at x; bad[0] flags domain/overflow trouble
+def eval_rpn(L, x) {
+    sp = 0.0
+    for k to L {
+        c = code[k]
+        if c == 0.0 {
+            stk[sp] = x
+            sp = sp + 1.0
+        }
+        if c == 1.0 {
+            stk[sp] = 1.0
+            sp = sp + 1.0
+        }
+        if c >= 2.0 {
+            if c <= 5.0 {
+                b = stk[sp - 1.0]
+                a = stk[sp - 2.0]
+                r = 0.0
+                if c == 2.0 { r = a + b }
+                if c == 3.0 { r = a - b }
+                if c == 4.0 { r = a * b }
+                if c == 5.0 {
+                    if abs(b) < 1.0e-12 { bad[0] = 1.0 }
+                    if bad[0] == 0.0 { r = a / b }
+                }
+                stk[sp - 2.0] = r
+                sp = sp - 1.0
+            }
+            if c >= 6.0 {
+                a = stk[sp - 1.0]
+                r = 0.0
+                if c == 6.0 { r = sin(a) }
+                if c == 7.0 {
+                    if a > 40.0 { bad[0] = 1.0 }
+                    if bad[0] == 0.0 { r = exp(a) }
+                }
+                if c == 8.0 {
+                    if a < 0.0 { bad[0] = 1.0 }
+                    if bad[0] == 0.0 { r = sqrt(a) }
+                }
+                if c == 9.0 { r = 0.0 - a }
+                stk[sp - 1.0] = r
+            }
+        }
+    }
+    return stk[0]
+}
+
+# least-squares multiplicative prefactor: y ~ c * f. Writes [err, c] into sc.
+sc = zeros(2)
+def score(L) {
+    syf = 0.0
+    sff = 0.0
+    bad[0] = 0.0
+    for p to NPTS {
+        f = eval_rpn(L, xs[p])
+        if bad[0] == 1.0 { break }
+        if abs(f) > 1.0e14 { bad[0] = 1.0 }
+        if bad[0] == 1.0 { break }
+        syf = syf + ys[p] * f
+        sff = sff + f * f
+    }
+    sc[0] = 1.0e30
+    sc[1] = 0.0
+    if bad[0] == 1.0 { return 0.0 }
+    if sff < 1.0e-12 { return 0.0 }
+    cbest = syf / sff
+    sse = syy[0] - cbest * syf
+    if sse < 0.0 { sse = 0.0 }
+    sc[0] = sqrt(sse / NPTS)
+    sc[1] = cbest
+    return 0.0
+}
+
+# per-length bests for the Pareto frontier
+pl_err = zeros(8)
+pl_c = zeros(8)
+pl_code = zeros(8, 8)
+
+d = zeros(8)   # the odometer over alphabet digits
+
+def search(m_id) {
+    gen_mystery(m_id)
+    show m_id
+
+    ch_err = 1.0e30
+    n_seen = 0.0
+    n_valid = 0.0
+    for i to 8 { pl_err[i] = ch_err }
+
+    for LL to MAXLEN {
+        L = LL + 1.0
+        for i to L { d[i] = 0.0 }
+        going = true
+        while going {
+            n_seen = n_seen + 1.0
+
+            # validity: simulate stack depth; must never underflow, end at 1
+            depth = 0.0
+            ok = true
+            for k to L {
+                a = arity(d[k])
+                if a == 0.0 { depth = depth + 1.0 }
+                if a == 1.0 {
+                    if depth < 1.0 { ok = false }
+                }
+                if a == 2.0 {
+                    if depth < 2.0 { ok = false }
+                    depth = depth - 1.0
+                }
+                if not ok { break }
+            }
+            if depth == 1.0 {
+                if ok {
+                    n_valid = n_valid + 1.0
+                    for k to L { code[k] = d[k] }
+                    score(L)
+                    err = sc[0]
+                    if err < pl_err[L] {
+                        pl_err[L] = err
+                        pl_c[L] = sc[1]
+                        for k to L { pl_code[L, k] = code[k] }
+                    }
+                    if err < ch_err * (1.0 - 1.0e-6) {
+                        ch_err = err
+                        ch_len = L
+                        ch_c = sc[1]
+                        ch_code = zeros(L)
+                        for k to L { ch_code[k] = code[k] }
+                        show ch_len
+                        show ch_err
+                        show ch_c
+                        show ch_code
+                    }
+                }
+            }
+
+            # odometer increment with carry over 10 symbols
+            pos = 0.0
+            carry = true
+            while carry {
+                if pos >= L {
+                    going = false
+                    carry = false
+                }
+                else {
+                    d[pos] = d[pos] + 1.0
+                    if d[pos] > 9.0 {
+                        d[pos] = 0.0
+                        pos = pos + 1.0
+                    }
+                    else {
+                        carry = false
+                    }
+                }
+            }
+        }
+    }
+
+    # Pareto frontier: per-length bests that strictly beat every shorter length
+    best_so_far = 1.0e30
+    for LL to MAXLEN {
+        L = LL + 1.0
+        if pl_err[L] < best_so_far * (1.0 - 1.0e-6) {
+            best_so_far = pl_err[L]
+            pf_len = L
+            pf_err = pl_err[L]
+            pf_c = pl_c[L]
+            pf_code = zeros(L)
+            for k to L { pf_code[k] = pl_code[L, k] }
+            show pf_len
+            show pf_err
+            show pf_c
+            show pf_code
+        }
+    }
+
+    m_done = m_id
+    show m_done
+    show n_valid
+    show n_seen
+}
+
+search(1.0)
+search(2.0)
+search(3.0)
+search(4.0)
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

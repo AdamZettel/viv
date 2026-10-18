@@ -1,0 +1,482 @@
+###
+post: What a contracted Cartesian Gaussian is, and how to normalize one
+agent: claude
+
+A molecular orbital is built from atomic orbitals, and in a Gaussian basis
+each atomic orbital is a fixed sum of Gaussians centered on one atom:
+
+    phi(r) = Nc * sum_p cn[p] * x^lx y^ly z^lz * exp(-a_p r^2)
+
+where `x, y, z` are measured from the atom. The exponents `a_p` and the raw
+coefficients come from the basis-set file; they are fixed before the SCF
+starts and never optimized. All the Gaussians in one sum share the same
+angular part `x^lx y^ly z^lz`, and `l = lx + ly + lz` is the shell's angular
+momentum. A shell is the set of all components with the same `l`: one for s,
+three for p (x, y, z), six Cartesian ones for d (xx, xy, xz, yy, yz, zz), ten
+for f.
+
+Why Gaussians, when the true atomic orbitals fall off as `exp(-r)`? Because
+the product of two Gaussians on different centers is a single Gaussian on a
+point between them. Every integral the SCF needs then reduces to closed forms
+and one special function (Boys). A contraction of three to six Gaussians
+imitates the cusp and the tail well enough.
+
+**Normalization.** This library works with one convention: every Cartesian
+component has self-overlap exactly 1. The Gaussian moment
+
+    integral x^(2k) exp(-2a x^2) dx = (2k-1)!! / (4a)^k * sqrt(pi / (2a))
+
+fixes the norm of one primitive component as a radial factor times a
+component factor:
+
+    Nr(a, l)          = (2a/pi)^(3/4) (4a)^(l/2)
+    Nc(lx, ly, lz)    = 1 / sqrt((2lx-1)!! (2ly-1)!! (2lz-1)!!)
+
+`Nc` cancels the double factorials the moments produce, so the overlap of two
+primitives of the same shell does not depend on which component they are:
+
+    <a|b> = (2 sqrt(ab) / (a+b))^(l + 3/2)
+
+That is why one contracted coefficient per primitive, `cn[p]`, serves every
+component of a shell. `bas_contract` multiplies each raw coefficient by
+`Nr(a_p, l)` and rescales the whole shell so the contracted self-overlap is
+1. The rescale matters because the tabulated coefficients are rounded to 8
+figures or so; PySCF does the same renormalization.
+
+**PySCF's convention differs for l >= 2.** PySCF's Cartesian d and f
+functions are not unit-normalized: its function equals ours times
+
+    F(lx, ly, lz)^2 = 4 pi (2lx-1)!! (2ly-1)!! (2lz-1)!! / (2l+1)!!
+
+and `F = 1` for s and p. On the diagonal of PySCF's `int1e_ovlp_cart`, xx
+gives 2.513274122871835 and xy gives 0.8377580409572782; the tests below
+check `bas_fc` against both.
+
+**Component order** is PySCF's `cart_labels`: `lx` counts down from `l`, then
+`ly` counts down from `l - lx`, and `lz` takes the rest.
+
+The packs (`atoms`, `shells`, `prims`) and their column constants are frozen.
+
+Used with `import hf.basis`.
+###
+
+BAS_PI = 3.141592653589793
+# x, y and z: the columns of a power table, the axes of a position
+BAS_NDIM = 3
+
+AT_CHG = 0
+AT_X = 1
+AT_Y = 2
+AT_Z = 3
+AT_LEN = 4
+
+SH_ATOM = 0
+SH_L = 1
+SH_NPRIM = 2
+SH_P0 = 3
+SH_CART0 = 4
+SH_SPH0 = 5
+SH_NCART = 6
+SH_NSPH = 7
+SH_LEN = 8
+
+PR_EXP = 0
+PR_COEF = 1
+PR_LEN = 2
+
+AO_SH = 0
+AO_ATOM = 1
+AO_LX = 2
+AO_LY = 3
+AO_LZ = 4
+AO_LEN = 5
+
+# Park-Miller's minimal standard generator, for the test helpers' draws
+BAS_MINSTD_A = 16807.0
+BAS_MINSTD_M = 2147483647.0
+# the seeded test shells: l drawn from 0 .. BAS_T_NL - 1 (s to f), 1 to
+# BAS_T_NPRIM_MAX primitives each, and BAS_T_NSHELL of them per test
+BAS_T_NL = 4.0
+BAS_T_NPRIM_MAX = 4.0
+BAS_T_NSHELL = 16
+
+#| Cartesian components in a shell of angular momentum `l`.
+def bas_ncart(l) {
+    return (l + 1) * (l + 2) / 2
+}
+
+#| Spherical components in a shell of angular momentum `l`.
+def bas_nsph(l) {
+    return 2 * l + 1
+}
+
+#| The odd double factorial `(2k-1)!!`, with `(-1)!! = 1`.
+def bas_odfact(k) {
+    r = 1.0
+    for i to k {
+        r = r * (2 * i + 1)
+    }
+    return r
+}
+
+#| The powers of every Cartesian component of a shell, `[ncart, 3]`, in
+#| PySCF's order.
+def bas_powers(l) {
+    P = zeros(bas_ncart(l), BAS_NDIM)
+    row = 0
+    for i to l + 1 {
+        lx = l - i
+        for j to l - lx + 1 {
+            ly = l - lx - j
+            P[row, 0] = lx
+            P[row, 1] = ly
+            P[row, 2] = l - lx - ly
+            row = row + 1
+        }
+    }
+    return P
+}
+
+#| The factor between PySCF's Cartesian component and the unit one:
+#| PySCF = unit * F. It is one for s and p
+#| [test "F squared matches PySCF's int1e_ovlp_cart diagonal for xx and xy"].
+def bas_fc(lx, ly, lz) {
+    l = lx + ly + lz
+    if l < 2 {
+        return 1.0
+    }
+    return sqrt(4.0 * BAS_PI * bas_odfact(lx) * bas_odfact(ly) * bas_odfact(lz) / bas_odfact(l + 1))
+}
+
+#| The component factor `Nc`: it cancels the double factorials of the
+#| Gaussian moments, so `cn` can be shared by every component of a shell.
+def bas_nc(lx, ly, lz) {
+    return 1.0 / sqrt(bas_odfact(lx) * bas_odfact(ly) * bas_odfact(lz))
+}
+
+#| The radial norm `Nr(a, l) = (2a/pi)^(3/4) (4a)^(l/2)`.
+def bas_nr(a, l) {
+    return pow(2.0 * a / BAS_PI, 0.75) * pow(4.0 * a, 0.5 * l)
+}
+
+#| Overlap of two unit primitives of one shell with exponents `a` and `b`.
+def bas_prim_overlap(a, b, l) {
+    return pow(2.0 * sqrt(a * b) / (a + b), l + 1.5)
+}
+
+# ---- the columns, read by name ----------------------------------------------------
+# The layout of the atoms, shells and primitives tables belongs to this module
+# (and to lib/basis/basis, and to lib/hf/molecule, which builds them): a module
+# that reads a row's field calls one of these, so a change of layout is a
+# change here. There is one for each field a module outside the owners reads;
+# the integral kernels still read the columns in their loops, where a call
+# costs time (lib/hf/layers.arch, the `private` block).
+
+#| The atom shell `s` sits on.
+def shell_atom(shells: Arr, s) {
+    return round(shells[s, SH_ATOM])
+}
+
+#| The angular momentum of shell `s`.
+def shell_l(shells: Arr, s) {
+    return shells[s, SH_L]
+}
+
+#| The index of shell `s`'s first Cartesian basis function.
+def shell_cart0(shells: Arr, s) {
+    return round(shells[s, SH_CART0])
+}
+
+#| The index of shell `s`'s first spherical basis function.
+def shell_sph0(shells: Arr, s) {
+    return round(shells[s, SH_SPH0])
+}
+
+#| The number of primitives of shell `s`.
+#: shells  the shells table
+#: s       a shell
+#@ 3184dfd1
+def shell_nprim(shells: Arr, s) {
+    return round(shells[s, SH_NPRIM])
+}
+
+#| The row of shell `s`'s first primitive in the primitives table.
+#: shells  the shells table
+#: s       a shell
+#@ 7e308b85
+def shell_p0(shells: Arr, s) {
+    return round(shells[s, SH_P0])
+}
+
+#| The index of shell `s`'s first basis function: spherical when `sph = 1`,
+#| Cartesian otherwise.
+#: shells  the shells table
+#: s       a shell
+#: sph     `1` for spherical functions, `0` for Cartesian
+#@ 9d19a8ad
+def shell_f0(shells: Arr, s, sph) {
+    if sph > 0 {
+        return round(shells[s, SH_SPH0])
+    }
+    return round(shells[s, SH_CART0])
+}
+
+#| The position of atom `a`, `[x, y, z]` in bohr.
+#: atoms  the atoms table
+#: a      an atom
+#@ 9d96797e
+def bas_atom_pos(atoms: Arr, a) -> Arr {
+    return atoms[a, AT_X:AT_Z + 1]
+}
+
+#| The exponent of primitive `p`.
+#: prims  the primitives table
+#: p      a primitive
+#@ f402814e
+def bas_prim_exp(prims: Arr, p) {
+    return prims[p, PR_EXP]
+}
+
+#| Cartesian AO count of a shell pack.
+def bas_nao_cart(shells: Arr) {
+    n = 0
+    for s to len(shells) {
+        n = n + bas_ncart(shells[s, SH_L])
+    }
+    return n
+}
+
+#| Spherical AO count of a shell pack.
+def bas_nao_sph(shells: Arr) {
+    n = 0
+    for s to len(shells) {
+        n = n + bas_nsph(shells[s, SH_L])
+    }
+    return n
+}
+
+#| One row per Cartesian AO: (shell, atom, lx, ly, lz), `[nao_cart, 5]`.
+#| Rows follow the shells in order and the components in PySCF's order, which
+#| is what `SH_CART0` counts.
+def bas_ao_table(shells: Arr) {
+    T = zeros(bas_nao_cart(shells), AO_LEN)
+    row = 0
+    for s to len(shells) {
+        l = shells[s, SH_L]
+        P = bas_powers(l)
+        for c to bas_ncart(l) {
+            T[row, AO_SH] = s
+            T[row, AO_ATOM] = shells[s, SH_ATOM]
+            T[row, AO_LX] = P[c, 0]
+            T[row, AO_LY] = P[c, 1]
+            T[row, AO_LZ] = P[c, 2]
+            row = row + 1
+        }
+    }
+    return T
+}
+
+#| Contracted coefficients `cn[nprimtot]` in the unit-Cartesian convention:
+#| raw coefficient times `Nr(a_p, l)`, with the shell rescaled to contracted
+#| self-overlap one
+#| [test "16 seeded shells up to f come out with unit self-overlap in every component"].
+def bas_contract(shells: Arr, prims: Arr) {
+    cn = zeros(len(prims))
+    for s to len(shells) {
+        l = shells[s, SH_L]
+        p0 = round(shells[s, SH_P0])
+        np = round(shells[s, SH_NPRIM])
+        ss = 0.0
+        for i to np {
+            for j to np {
+                ss = ss + prims[p0 + i, PR_COEF] * prims[p0 + j, PR_COEF] * bas_prim_overlap(prims[p0 + i, PR_EXP], prims[p0 + j, PR_EXP], l)
+            }
+        }
+        scale = 1.0 / sqrt(ss)
+        for i to np {
+            cn[p0 + i] = scale * prims[p0 + i, PR_COEF] * bas_nr(prims[p0 + i, PR_EXP], l)
+        }
+    }
+    return cn
+}
+
+#| Test helper: the next uniform number in `(0, 1)` from a Park-Miller state
+#| held in `st[0]`, so a failing shell can be quoted by its seed.
+def bas_rng(st: Arr) {
+    st[0] = mod(BAS_MINSTD_A * st[0], BAS_MINSTD_M)
+    return st[0] / BAS_MINSTD_M
+}
+
+#| Test helper: the self-overlap of component `(lx, ly, lz)` of shell `s`,
+#| summed from 1-D Gaussian moments, one axis at a time. It shares no
+#| formula with `bas_prim_overlap`.
+def bas_moment_self_overlap(shells: Arr, prims: Arr, cn: Arr, s, lx, ly, lz) {
+    p0 = round(shells[s, SH_P0])
+    np = round(shells[s, SH_NPRIM])
+    nc = bas_nc(lx, ly, lz)
+    tot = 0.0
+    for i to np {
+        for j to np {
+            p = prims[p0 + i, PR_EXP] + prims[p0 + j, PR_EXP]
+            mx = bas_odfact(lx) / pow(2.0 * p, lx) * sqrt(BAS_PI / p)
+            my = bas_odfact(ly) / pow(2.0 * p, ly) * sqrt(BAS_PI / p)
+            mz = bas_odfact(lz) / pow(2.0 * p, lz) * sqrt(BAS_PI / p)
+            tot = tot + cn[p0 + i] * cn[p0 + j] * mx * my * mz
+        }
+    }
+    return nc * nc * tot
+}
+
+#| Test helper: `nsh` random shells with `l < BAS_T_NL` (s to f), from one to
+#| `BAS_T_NPRIM_MAX` primitives each, exponents spread from $10^{-1.5}$ to
+#| $10^{3.5}$ and coefficients that are sometimes negative. Returns the
+#| shells and prims packs.
+def bas_random_shells(nsh, seed) {
+    st = zeros(1)
+    st[0] = seed
+    shells = zeros(nsh, SH_LEN)
+    total = 0
+    for s to nsh {
+        l = floor(BAS_T_NL * bas_rng(st))
+        np = 1 + floor(BAS_T_NPRIM_MAX * bas_rng(st))
+        shells[s, SH_ATOM] = 0
+        shells[s, SH_L] = l
+        shells[s, SH_NPRIM] = np
+        shells[s, SH_P0] = total
+        shells[s, SH_NCART] = bas_ncart(l)
+        shells[s, SH_NSPH] = bas_nsph(l)
+        total = total + np
+    }
+    prims = zeros(total, PR_LEN)
+    for p to total {
+        prims[p, PR_EXP] = pow(10.0, -1.5 + 5.0 * bas_rng(st))
+        prims[p, PR_COEF] = bas_rng(st) - 0.2
+    }
+    return shells, prims
+}
+
+test "d and f components come in PySCF's cart_labels order" {
+    bas_d = bas_powers(2)
+    bas_dw = [[2, 0, 0], [1, 1, 0], [1, 0, 1], [0, 2, 0], [0, 1, 1], [0, 0, 2]]
+    for bas_i to len(bas_dw) {
+        for bas_k to BAS_NDIM {
+            assert_near(bas_d[bas_i, bas_k], bas_dw[bas_i, bas_k], 0.0)
+        }
+    }
+    bas_f = bas_powers(3)
+    bas_fw = [[3, 0, 0], [2, 1, 0], [2, 0, 1], [1, 2, 0], [1, 1, 1], [1, 0, 2], [0, 3, 0], [0, 2, 1], [0, 1, 2], [0, 0, 3]]
+    for bas_i to len(bas_fw) {
+        for bas_k to BAS_NDIM {
+            assert_near(bas_f[bas_i, bas_k], bas_fw[bas_i, bas_k], 0.0)
+        }
+    }
+    bas_p1 = bas_powers(1)
+    assert_near(bas_p1[0, 0] + bas_p1[1, 1] + bas_p1[2, 2], 3.0, 0.0)
+}
+
+test "every shell up to g lists each component once, with the right total" {
+    # l = 0 .. 4, s to g
+    bas_lg = 4
+    for bas_l to bas_lg + 1 {
+        bas_pw = bas_powers(bas_l)
+        assert_near(len(bas_pw), (bas_l + 1) * (bas_l + 2) / 2, 0.0)
+        assert_near(bas_nsph(bas_l), 2 * bas_l + 1, 0.0)
+        bas_dupes = 0
+        for bas_i to len(bas_pw) {
+            assert_near(bas_pw[bas_i, 0] + bas_pw[bas_i, 1] + bas_pw[bas_i, 2], bas_l, 0.0)
+            for bas_j to bas_i {
+                if bas_pw[bas_i, 0] == bas_pw[bas_j, 0] and bas_pw[bas_i, 1] == bas_pw[bas_j, 1] {
+                    bas_dupes = bas_dupes + 1
+                }
+            }
+        }
+        assert_near(bas_dupes, 0.0, 0.0)
+    }
+}
+
+test "F squared matches PySCF's int1e_ovlp_cart diagonal for xx and xy" {
+    assert_near(bas_fc(2, 0, 0) * bas_fc(2, 0, 0), 2.513274122871835, 1.0e-15)
+    assert_near(bas_fc(1, 1, 0) * bas_fc(1, 1, 0), 0.8377580409572782, 1.0e-15)
+    # s and p carry no factor
+    assert_near(bas_fc(0, 0, 0), 1.0, 0.0)
+    assert_near(bas_fc(0, 1, 0), 1.0, 0.0)
+    # f: xxx is 4 pi 15 / 105 = 4 pi / 7, xyz is 4 pi / 105
+    assert_near(bas_fc(3, 0, 0) * bas_fc(3, 0, 0), 4.0 * BAS_PI / 7.0, 1.0e-15)
+    assert_near(bas_fc(1, 1, 1) * bas_fc(1, 1, 1), 4.0 * BAS_PI / 105.0, 1.0e-15)
+    # F depends on the powers only as a multiset
+    assert_near(bas_fc(2, 1, 0), bas_fc(0, 1, 2), 0.0)
+    assert_near(bas_fc(0, 2, 0), bas_fc(0, 0, 2), 0.0)
+}
+
+test "16 seeded shells up to f come out with unit self-overlap in every component" {
+    bas_sh, bas_pr = bas_random_shells(BAS_T_NSHELL, 20260923)
+    bas_cn = bas_contract(bas_sh, bas_pr)
+    bas_worst = 0.0
+    bas_lmax = 0
+    for bas_s to len(bas_sh) {
+        bas_l = bas_sh[bas_s, SH_L]
+        bas_lmax = max(bas_lmax, bas_l)
+        bas_pw = bas_powers(bas_l)
+        for bas_c to len(bas_pw) {
+            bas_ov = bas_moment_self_overlap(bas_sh, bas_pr, bas_cn, bas_s, bas_pw[bas_c, 0], bas_pw[bas_c, 1], bas_pw[bas_c, 2])
+            bas_worst = max(bas_worst, abs(bas_ov - 1.0))
+        }
+    }
+    assert_lt(bas_worst, 1.0e-14)
+    # the seed reaches f, so the l = 3 path is exercised
+    assert_near(bas_lmax, 3, 0.0)
+}
+
+test "scaling every exponent by lambda squared leaves the renormalized coefficients alone" {
+    bas_sh, bas_pr = bas_random_shells(BAS_T_NSHELL, 777)
+    bas_cn = bas_contract(bas_sh, bas_pr)
+    bas_pr2 = copy(bas_pr)
+    bas_pr2[:, PR_EXP] = 2.25 * bas_pr[:, PR_EXP]
+    bas_cn2 = bas_contract(bas_sh, bas_pr2)
+    bas_worst = 0.0
+    for bas_s to len(bas_sh) {
+        bas_l = bas_sh[bas_s, SH_L]
+        for bas_i to bas_sh[bas_s, SH_NPRIM] {
+            bas_p = bas_sh[bas_s, SH_P0] + bas_i
+            bas_r1 = bas_cn[bas_p] / bas_nr(bas_pr[bas_p, PR_EXP], bas_l)
+            bas_r2 = bas_cn2[bas_p] / bas_nr(bas_pr2[bas_p, PR_EXP], bas_l)
+            bas_worst = max(bas_worst, abs(bas_r1 - bas_r2) / abs(bas_r1))
+        }
+    }
+    assert_lt(bas_worst, 1.0e-14)
+}
+
+test "a single primitive with PySCF's 1.0000000000000002 contracts to the bare norm" {
+    bas_sh = zeros(1, SH_LEN)
+    bas_sh[0, SH_L] = 2
+    bas_sh[0, SH_NPRIM] = 1
+    bas_pr = zeros(1, PR_LEN)
+    bas_pr[0, PR_EXP] = 0.8
+    bas_pr[0, PR_COEF] = 1.0000000000000002
+    bas_cn = bas_contract(bas_sh, bas_pr)
+    assert_near(bas_cn[0] / bas_nr(0.8, 2), 1.0, 1.0e-15)
+}
+
+test "a water 6-31G* shell pack has 19 Cartesian and 18 spherical AOs" {
+    # O: s, s, p, s, p, d; each H: s, s
+    bas_ls = [0, 0, 1, 0, 1, 2, 0, 0, 0, 0]
+    bas_at = [0, 0, 0, 0, 0, 0, 1, 1, 2, 2]
+    bas_sh = zeros(len(bas_ls), SH_LEN)
+    for bas_s to len(bas_ls) {
+
+        bas_sh[bas_s, SH_L] = bas_ls[bas_s]
+        bas_sh[bas_s, SH_ATOM] = bas_at[bas_s]
+    }
+    assert_near(bas_nao_cart(bas_sh), 19, 0.0)
+    assert_near(bas_nao_sph(bas_sh), 18, 0.0)
+    bas_ao = bas_ao_table(bas_sh)
+    assert_near(len(bas_ao), 19, 0.0)
+    # the d shell starts at AO 9 (1 + 1 + 3 + 1 + 3) and its second component is xy
+    assert_near(bas_ao[9, AO_SH], 5, 0.0)
+    assert_near(bas_ao[10, AO_LX] * bas_ao[10, AO_LY], 1.0, 0.0)
+    assert_near(bas_ao[18, AO_ATOM], 2, 0.0)
+    assert_near(bas_ao[18, AO_LX] + bas_ao[18, AO_LY] + bas_ao[18, AO_LZ], 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

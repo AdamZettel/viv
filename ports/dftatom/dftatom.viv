@@ -1,0 +1,1184 @@
+###
+A port of dftatom, Ondrej Certik, John E. Pask and Jiri Vackar's solver for
+the radial Schrodinger and Dirac equations and the self-consistent
+Kohn-Sham atom (Comput. Phys. Commun. 184, 1777 (2013);
+https://github.com/certik/dftatom). The algorithms, their order of
+operations and their constants are upstream's; ports/dftatom/UPSTREAM.md
+lists every place the port differs.
+
+An atom's orbitals are one-dimensional. With `P = r R(r)`, the Schrodinger
+equation is the first-order pair
+
+    P' = Q,    Q' = [ l(l+1)/r^2 + 2(V - E) ] P,
+
+and the Dirac equation is a pair of the same shape in the large and small
+components. dftatom integrates both on an exponential mesh
+`r_i = alpha (e^(beta i) - 1) + r_min`, written in the uniform index
+`t = i`, so every derivative gains a factor `dr/dt`. Four points from the
+origin come from fourth-order Runge-Kutta on the power series start; from
+there implicit Adams-Moulton of fourth order carries the solution, the
+implicit part solved exactly because the equations are linear. An
+eigenvalue comes from bisection on the node count, refined by the
+perturbative correction of the mismatch at the classical turning point.
+###
+# Derived from dftatom src/mesh.f90, ode1d.f90, rschroed.f90, rdirac.f90,
+# reigen.f90, rpoisson.f90, energies.f90, dft.f90, mixings.f90 and
+# drivers.f90, Copyright (c) 2006-2012 Ondrej Certik, Jiri Vackar, John Pask;
+# MIT license, see ports/dftatom/LICENSE. Upstream commit e49b3042.
+#
+# Indices: upstream's arrays start at 1, these at 0. A count that upstream
+# returns as an index (imax, minidx, ctp) is kept as upstream's number, so
+# `P(:imax)` there is `P[0:imax]` here.
+
+from states import STATE_START, STATE_N, STATE_L, STATE_F
+
+#| Fortran's `epsilon(1._dp)` and `tiny(1._dp)`: the spacing of doubles at 1,
+#| and the smallest normal double.
+DP_EPSILON = 2.220446049250313e-16
+DP_TINY = 2.2250738585072014e-308
+
+#| Where the outward integrations stop because the solution has grown past
+#| any eigenfunction's size (upstream's `max_val`), and the same limits for
+#| the inward ones and for the Poisson solver's start.
+OUTWARD_MAX = 1.0e6
+SCHROED_INWARD_MAX = 1.0e300
+DIRAC_INWARD_MAX = 1.0e20
+POISSON_RK4_MAX = 1.0e10
+
+#| The points Runge-Kutta supplies before Adams-Moulton takes over, and the
+#| cubic through them that gives Runge-Kutta its midpoint values.
+START_POINTS: Int = 4
+
+#| The points past the inward start that are set from the asymptotic form
+#| (upstream's `i_max:i_max+4`, with i_max = size(R) - 4).
+TAIL_POINTS: Int = 4
+
+#| The points at each end of the mesh that the integration rule weights
+#| specially (integrate_trapz_7).
+END_POINTS: Int = 7
+
+#| The SCF iteration from which the convergence test may stop the loop.
+SCF_MIN_ITER: Int = 3
+
+#| The heaviest atom upstream lists a configuration for.
+Z_MAX: Int = 92
+
+#| The implicit Adams-Moulton weight of the new point, 9/24.
+AM_LAMBDA = 9.0 / 24.0
+
+#| The SCF loop counts a step as converged when the relative L2 norm of the
+#| residual is below this and the eigenvalues have stopped moving (upstream
+#| mixings.f90).
+SCF_L2_TOL = 5.0e-5
+
+#| A state with no bound below this is searched up to here: a few states may
+#| be unbound during the first iterations (upstream drivers.f90).
+E_MAX_INIT = 10.0
+
+#| The lower bound of each eigenvalue search: the hydrogen-like energy in the
+#| bare nucleus, lowered by this factor for safety.
+E_MIN_FACTOR = 1.1
+
+#| A matching factor larger than this means the inward solution is useless
+#| (upstream reigen.f90, `converged = 7`).
+MATCH_FACTOR_MAX = 1.0e9
+
+#| How far out the turning point may sit, as a fraction of the mesh, before
+#| the perturbative correction is abandoned for bisection.
+CTP_FRACTION_MAX = 0.5
+
+#| The fewest points the inward integration needs past the turning point.
+CTP_MIN_TAIL = 10
+
+#| VWN's correlation parameters, as upstream writes them: Vosko, Wilk and
+#| Nusair's fit to Ceperley and Alder's paramagnetic electron gas (Can. J.
+#| Phys. 58, 1200 (1980)).
+VWN_Y0 = -0.10498
+VWN_B = 3.72744
+VWN_C = 12.9352
+VWN_A = 0.0621814
+
+#| Thomas-Fermi screening fit used for the starting potential (upstream
+#| energies.f90).
+TF_ALPHA = 0.7280642371
+TF_BETA = -0.5430794693
+TF_GAMMA = 0.3612163121
+
+# ===================================================================== mesh
+
+#| The exponential mesh: `N + 1` points from `r_min` to `r_max`, the last
+#| interval `a` times the first. `a = 1` gives the uniform mesh.
+def mesh_exp(r_min, r_max, a, N: Int) -> Arr {
+    if a < 0.0 {
+        stop("mesh_exp: a > 0 required")
+    }
+    R = zeros(N + 1)
+    if abs(a - 1.0) < DP_TINY {
+        alpha = (r_max - r_min) / N
+        for i to N + 1 {
+            R[i] = alpha * i + r_min
+        }
+    }
+    else if N > 1 {
+        beta = log(a) / (N - 1)
+        alpha = (r_max - r_min) / (exp(beta * N) - 1.0)
+        for i to N + 1 {
+            R[i] = alpha * (exp(beta * i) - 1.0) + r_min
+        }
+    }
+    else if N == 1 {
+        R[0] = r_min
+        R[1] = r_max
+    }
+    else {
+        stop("mesh_exp: N >= 1 required")
+    }
+    return R
+}
+
+#| `dr/dt` on the same mesh, with `t` the point's index.
+def mesh_exp_deriv(r_min, r_max, a, N: Int) -> Arr {
+    if a < 0.0 or abs(a - 1.0) < DP_TINY or N <= 1 {
+        stop("mesh_exp_deriv: a > 0, a != 1 and N > 1 required")
+    }
+    Rp = zeros(N + 1)
+    beta = log(a) / (N - 1)
+    alpha = (r_max - r_min) / (exp(beta * N) - 1.0)
+    for i to N + 1 {
+        Rp[i] = alpha * beta * exp(beta * i)
+    }
+    return Rp
+}
+
+# ==================================================================== ode1d
+
+#| The integral of `f` over the mesh, `sum f(r(t)) r'(t)` in `t`, by the
+#| trapezoid rule with seventh-order end corrections (upstream's
+#| integrate_trapz_7, the rule its `integrate` uses).
+def integrate(Rp: Arr, f: Arr) -> Num {
+    N = len(Rp)
+    g = f * Rp
+    s = (36799.0 * (g[0] + g[N - 1]) + 176648.0 * (g[1] + g[N - 2]) + 54851.0 * (g[2] + g[N - 3]) + 177984.0 * (g[3] + g[N - 4]) + 89437.0 * (g[4] + g[N - 5]) + 130936.0 * (g[5] + g[N - 6]) + 119585.0 * (g[6] + g[N - 7])) / 120960.0
+    inner = 0.0
+    for i from END_POINTS to N - END_POINTS {
+        inner += g[i]
+    }
+    return s + inner
+}
+
+#| The number of sign changes among `y[0:n]` (upstream get_n_nodes). Fortran's
+#| `sign(1, y)` is -1 for a negative zero; a negative zero never reaches here.
+def n_nodes(y: Arr, n: Int) -> Int {
+    nodes: Int = 0
+    last_sign: Int = 1
+    if y[0] < 0.0 {
+        last_sign = -1
+    }
+    for i from 1 to n {
+        isy: Int = 1
+        if y[i] < 0.0 {
+            isy = -1
+        }
+        if isy == -last_sign {
+            last_sign = isy
+            nodes += 1
+        }
+    }
+    return nodes
+}
+
+#| Upstream's get_min_idx on `y[0:n]`: walking in from the end while |y|
+#| falls, the 1-based index one before the smallest |y| of the tail. The tail
+#| past it is the solution's runaway growth, which the converged state cuts.
+def min_idx(y: Arr, n: Int) -> Int {
+    k: Int = n
+    while abs(y[k - 2]) < abs(y[k - 1]) {
+        k -= 1
+        if k == 1 {
+            break
+        }
+    }
+    return k - 1
+}
+
+#| Fortran's `x**n` for an integer `n`, as gfortran computes it (libgcc's
+#| __powidf2: repeated squaring), so the start of the Schrodinger
+#| integration has upstream's bits.
+def powi(x, n: Int) -> Num {
+    m: Int = abs(n)
+    b = x
+    r = 1.0
+    if m % 2 == 1 {
+        r = b
+    }
+    m = m // 2
+    while m > 0 {
+        b = b * b
+        if m % 2 == 1 {
+            r = r * b
+        }
+        m = m // 2
+    }
+    if n < 0 {
+        return 1.0 / r
+    }
+    return r
+}
+
+#| The cubic through the first four points of `V`, at the three midpoints
+#| between them: what fourth-order Runge-Kutta needs at its half steps
+#| (upstream get_midpoints and get_val, which for four points always
+#| interpolate through all four).
+def midpoints4(R: Arr, V: Arr, o: Int) -> Arr {
+    Vmid = zeros(START_POINTS - 1)
+    for k to START_POINTS - 1 {
+        t = (R[o + k] + R[o + k + 1]) / 2.0
+        val = 0.0
+        for j to START_POINTS {
+            f = 1.0
+            den = 1.0
+            for i to START_POINTS {
+                if i != j {
+                    f = f * (t - R[o + i])
+                    den = den * (R[o + j] - R[o + i])
+                }
+            }
+            val = val + V[o + j] * f / den
+        }
+        Vmid[k] = val
+    }
+    return Vmid
+}
+
+# ================================================================= rschroed
+
+#| The first four points of the Schrodinger solution, by fourth-order
+#| Runge-Kutta on `y = R(r) = P / r`, which is regular at the origin:
+#| `y'' = (2(V - E) + l(l+1)/r^2) y - (2/r) y'`. Starts from the series
+#| `1 - Z r` for `l = 0` and `r^l` otherwise. Writes `P` and `Q = P'`.
+def schroed_rk4_start(l: Int, Z: Int, E, R: Arr, V: Arr, P: Arr, Q: Arr) {
+    Vmid = midpoints4(R, V, 0)
+    y1 = 0.0
+    y2 = 0.0
+    if l == 0 {
+        y1 = 1.0 - Z * R[0]
+        y2 = -1.0 * Z
+    }
+    else {
+        y1 = powi(R[0], l)
+        y2 = l * powi(R[0], l - 1)
+    }
+    ll = l * (l + 1)
+    P[0] = y1 * R[0]
+    Q[0] = y2 * R[0] + y1
+    for i from 1 to START_POINTS {
+        h = R[i] - R[i - 1]
+        c1a = 2.0 * (V[i - 1] - E) + ll / (R[i - 1] * R[i - 1])
+        c2a = -2.0 / R[i - 1]
+        rm = (R[i - 1] + R[i]) / 2.0
+        c1m = 2.0 * (Vmid[i - 1] - E) + ll / (rm * rm)
+        c2m = -2.0 / rm
+        c1b = 2.0 * (V[i] - E) + ll / (R[i] * R[i])
+        c2b = -2.0 / R[i]
+        d1 = y2
+        d2 = c1a * y1 + c2a * y2
+        t1 = y1 + h / 2.0 * d1
+        t2 = y2 + h / 2.0 * d2
+        e1 = t2
+        e2 = c1m * t1 + c2m * t2
+        t1 = y1 + h / 2.0 * e1
+        t2 = y2 + h / 2.0 * e2
+        m1 = t2
+        m2 = c1m * t1 + c2m * t2
+        t1 = y1 + h * m1
+        t2 = y2 + h * m2
+        m1 = e1 + m1
+        m2 = e2 + m2
+        e1 = t2
+        e2 = c1b * t1 + c2b * t2
+        y1 = y1 + h / 6.0 * (d1 + e1 + 2.0 * m1)
+        y2 = y2 + h / 6.0 * (d2 + e2 + 2.0 * m2)
+        P[i] = y1 * R[i]
+        Q[i] = y2 * R[i] + y1
+    }
+}
+
+#| Integrate the Schrodinger pair outward over the first `n` mesh points,
+#| filling `P[0:n]` and `Q[0:n]`. Implicit Adams-Moulton of fourth order:
+#| the new point's derivative enters with weight 9/24, and because the
+#| equation is linear the implicit step is a 2 by 2 solve, done exactly.
+#| Returns upstream's imax: the count of points that can be trusted, short of
+#| `n` when the solution grows past OUTWARD_MAX.
+def schroed_outward(l: Int, Z: Int, E, R: Arr, Rp: Arr, V: Arr, n: Int, P: Arr, Q: Arr) -> Int {
+    if n < 5 {
+        stop("schroed_outward: at least 5 points needed")
+    }
+    ll = l * (l + 1)
+    C = zeros(n)
+    for i to n {
+        C[i] = ll / (R[i] * R[i]) + 2.0 * (V[i] - E)
+    }
+    schroed_rk4_start(l, Z, E, R, V, P, Q)
+    u1p = zeros(n)
+    u2p = zeros(n)
+    for i to START_POINTS {
+        u1p[i] = Rp[i] * Q[i]
+        u2p[i] = Rp[i] * C[i] * P[i]
+    }
+    lam2 = AM_LAMBDA * AM_LAMBDA
+    for i from START_POINTS - 1 to n - 1 {
+        u1p[i] = Rp[i] * Q[i]
+        u2p[i] = Rp[i] * C[i] * P[i]
+        u1t = P[i] + (19.0 * u1p[i] - 5.0 * u1p[i - 1] + u1p[i - 2]) / 24.0
+        u2t = Q[i] + (19.0 * u2p[i] - 5.0 * u2p[i - 1] + u2p[i - 2]) / 24.0
+        delta = 1.0 - lam2 * C[i + 1] * (Rp[i + 1] * Rp[i + 1])
+        m11 = 1.0 / delta
+        m21 = AM_LAMBDA * C[i + 1] * Rp[i + 1] / delta
+        m12 = AM_LAMBDA * Rp[i + 1] / delta
+        P[i + 1] = m11 * u1t + m12 * u2t
+        Q[i + 1] = m21 * u1t + m11 * u2t
+        if abs(P[i + 1]) >= OUTWARD_MAX or abs(Q[i + 1]) >= OUTWARD_MAX {
+            return i + 1
+        }
+    }
+    return n
+}
+
+#| Integrate the Schrodinger pair inward over the mesh points from `o` to the
+#| end, filling `P[o:]` and `Q[o:]`. It starts where the decaying
+#| `exp(-sqrt(-2E) r)` has fallen to DP_EPSILON (2.2e-16) of its value at `r[o]`, so
+#| nothing past that point matters, and runs Adams-Moulton backwards. Returns
+#| upstream's imin, 1 when it reached `o`.
+def schroed_inward(l: Int, E, R: Arr, Rp: Arr, V: Arr, o: Int, P: Arr, Q: Arr) -> Int {
+    m: Int = len(R) - o
+    ll = l * (l + 1)
+    C = zeros(m)
+    for j to m {
+        C[j] = ll / (R[o + j] * R[o + j]) + 2.0 * (V[o + j] - E)
+    }
+    i_max: Int = m - TAIL_POINTS
+    if i_max < TAIL_POINTS {
+        stop("schroed_inward: imax < 4")
+    }
+    lam = sqrt(-2.0 * E)
+    r_max = R[o] - log(DP_EPSILON) / lam
+    while R[o + i_max - 1] > r_max {
+        if i_max == 2 {
+            stop("schroed_inward: cannot start the inward integration")
+        }
+        i_max -= 1
+    }
+    u1 = zeros(m)
+    u2 = zeros(m)
+    u1p = zeros(m)
+    u2p = zeros(m)
+    for j from i_max - 1 to i_max + TAIL_POINTS {
+        u1[j] = exp(-lam * (R[o + j] - R[o]))
+        u2[j] = -lam * u1[j]
+        u1p[j] = Rp[o + j] * u2[j]
+        u2p[j] = Rp[o + j] * C[j] * u1[j]
+    }
+    lm = -AM_LAMBDA
+    lm2 = lm * lm
+    imin: Int = 1
+    for i from 1 to i_max reversed {
+        u1p[i] = Rp[o + i] * u2[i]
+        u2p[i] = Rp[o + i] * C[i] * u1[i]
+        u1t = u1[i] - (19.0 * u1p[i] - 5.0 * u1p[i + 1] + u1p[i + 2]) / 24.0
+        u2t = u2[i] - (19.0 * u2p[i] - 5.0 * u2p[i + 1] + u2p[i + 2]) / 24.0
+        delta = 1.0 - lm2 * C[i - 1] * (Rp[o + i - 1] * Rp[o + i - 1])
+        m11 = 1.0 / delta
+        m21 = lm * C[i - 1] * Rp[o + i - 1] / delta
+        m12 = lm * Rp[o + i - 1] / delta
+        u1[i - 1] = m11 * u1t + m12 * u2t
+        u2[i - 1] = m21 * u1t + m11 * u2t
+        if abs(u1[i - 1]) >= SCHROED_INWARD_MAX or abs(u2[i - 1]) >= SCHROED_INWARD_MAX {
+            for j from i_max to m {
+                u1[j] = 0.0
+                u2[j] = 0.0
+            }
+            imin = i + 1
+            break
+        }
+    }
+    if imin == 1 {
+        for j from i_max - 1 + TAIL_POINTS to m {
+            u1[j] = 0.0
+            u2[j] = 0.0
+        }
+    }
+    for j to m {
+        P[o + j] = u1[j]
+        Q[o + j] = u2[j]
+    }
+    return imin
+}
+
+# =================================================================== rdirac
+
+#| The Dirac coefficients at radius `r` and potential `v`, as upstream's
+#| `Ctot`: `P' = c11 P + c12 Q`, `Q' = c21 P + c22 Q` with
+#| `c11 = -kappa/r`, `c22 = kappa/r`, `c12 = (E - V)/c + 2c`, `c21 = -(E - V)/c`.
+#| Returns c11, c12, c21, c22.
+def dirac_coef(kappa: Int, E, c, r, v) {
+    return -kappa / r, (E - v) / c + 2.0 * c, -((E - v) / c), kappa / r
+}
+
+#| The first four points of the Dirac solution by fourth-order Runge-Kutta,
+#| from the point-nucleus start `P = r^beta`, `Q = r^beta c (beta + kappa)/Z`
+#| with `beta = sqrt(kappa^2 - (Z/c)^2)`.
+def dirac_rk4_start(c, kappa: Int, Z: Int, E, R: Arr, V: Arr, P: Arr, Q: Arr) {
+    if Z == 0 {
+        stop("dirac_rk4_start: Z > 0 required by this port")
+    }
+    Vmid = midpoints4(R, V, 0)
+    beta = sqrt(kappa * kappa - (Z / c) * (Z / c))
+    y1 = pow(R[0], beta)
+    y2 = pow(R[0], beta) * c * (beta + kappa) / Z
+    P[0] = y1
+    Q[0] = y2
+    for i from 1 to START_POINTS {
+        h = R[i] - R[i - 1]
+        a11, a12, a21, a22 = dirac_coef(kappa, E, c, R[i - 1], V[i - 1])
+        rm = (R[i - 1] + R[i]) / 2.0
+        m11, m12, m21, m22 = dirac_coef(kappa, E, c, rm, Vmid[i - 1])
+        b11, b12, b21, b22 = dirac_coef(kappa, E, c, R[i], V[i])
+        d1 = a11 * y1 + a12 * y2
+        d2 = a21 * y1 + a22 * y2
+        t1 = y1 + h / 2.0 * d1
+        t2 = y2 + h / 2.0 * d2
+        e1 = m11 * t1 + m12 * t2
+        e2 = m21 * t1 + m22 * t2
+        t1 = y1 + h / 2.0 * e1
+        t2 = y2 + h / 2.0 * e2
+        f1 = m11 * t1 + m12 * t2
+        f2 = m21 * t1 + m22 * t2
+        t1 = y1 + h * f1
+        t2 = y2 + h * f2
+        f1 = e1 + f1
+        f2 = e2 + f2
+        e1 = b11 * t1 + b12 * t2
+        e2 = b21 * t1 + b22 * t2
+        y1 = y1 + h / 6.0 * (d1 + e1 + 2.0 * f1)
+        y2 = y2 + h / 6.0 * (d2 + e2 + 2.0 * f2)
+        P[i] = y1
+        Q[i] = y2
+        if abs(y1) >= OUTWARD_MAX or abs(y2) >= OUTWARD_MAX {
+            stop("dirac_rk4_start: the Runge-Kutta start overflowed")
+        }
+    }
+}
+
+#| Integrate the Dirac pair outward over the first `n` mesh points, as
+#| schroed_outward does the Schrodinger pair: Runge-Kutta for four points,
+#| then implicit Adams-Moulton with the 2 by 2 implicit step solved exactly.
+def dirac_outward(c, kappa: Int, Z: Int, E, R: Arr, Rp: Arr, V: Arr, n: Int, P: Arr, Q: Arr) -> Int {
+    if n < 4 {
+        stop("dirac_outward: at least 4 points needed")
+    }
+    dirac_rk4_start(c, kappa, Z, E, R, V, P, Q)
+    u1p = zeros(n)
+    u2p = zeros(n)
+    for i to START_POINTS {
+        a11, a12, a21, a22 = dirac_coef(kappa, E, c, R[i], V[i])
+        u1p[i] = Rp[i] * (a11 * P[i] + a12 * Q[i])
+        u2p[i] = Rp[i] * (a21 * P[i] + a22 * Q[i])
+    }
+    lam2 = AM_LAMBDA * AM_LAMBDA
+    for i from START_POINTS - 1 to n - 1 {
+        a11, a12, a21, a22 = dirac_coef(kappa, E, c, R[i], V[i])
+        u1p[i] = Rp[i] * (a11 * P[i] + a12 * Q[i])
+        u2p[i] = Rp[i] * (a21 * P[i] + a22 * Q[i])
+        u1t = P[i] + (19.0 * u1p[i] - 5.0 * u1p[i - 1] + u1p[i - 2]) / 24.0
+        u2t = Q[i] + (19.0 * u2p[i] - 5.0 * u2p[i - 1] + u2p[i - 2]) / 24.0
+        b11, b12, b21, b22 = dirac_coef(kappa, E, c, R[i + 1], V[i + 1])
+        rp = Rp[i + 1]
+        delta = 1.0 - lam2 * (rp * rp) * (b12 * b21 - b11 * b22)
+        m11 = (1.0 - AM_LAMBDA * rp * b22) / delta
+        m21 = AM_LAMBDA * rp * b21 / delta
+        m12 = AM_LAMBDA * rp * b12 / delta
+        m22 = (1.0 - AM_LAMBDA * rp * b11) / delta
+        P[i + 1] = m11 * u1t + m12 * u2t
+        Q[i + 1] = m21 * u1t + m22 * u2t
+        if abs(P[i + 1]) >= OUTWARD_MAX or abs(Q[i + 1]) >= OUTWARD_MAX {
+            return i + 1
+        }
+    }
+    return n
+}
+
+#| Integrate the Dirac pair inward from the far end to mesh point `o`,
+#| starting from the asymptotic `P ~ exp(-lambda r) / sqrt(-E/(E + 2c^2))`,
+#| `Q ~ -exp(-lambda r)`, `lambda = sqrt(-2E - E^2/c^2)`.
+def dirac_inward(c, kappa: Int, E, R: Arr, Rp: Arr, V: Arr, o: Int, P: Arr, Q: Arr) -> Int {
+    m: Int = len(R) - o
+    if E > 0.0 {
+        stop("dirac_inward: E < 0 required")
+    }
+    i_max: Int = m - TAIL_POINTS
+    if i_max < 2 {
+        stop("dirac_inward: too few points to start the inward integration")
+    }
+    lam = sqrt(-2.0 * E - E * E / (c * c))
+    r_max = R[o] - log(DP_EPSILON) / lam
+    while R[o + i_max - 1] > r_max {
+        if i_max == 2 {
+            stop("dirac_inward: cannot start the inward integration")
+        }
+        i_max -= 1
+    }
+    u1 = zeros(m)
+    u2 = zeros(m)
+    u1p = zeros(m)
+    u2p = zeros(m)
+    norm = sqrt(-E / (E + 2.0 * (c * c)))
+    for j from i_max - 1 to i_max + TAIL_POINTS {
+        ex = exp(-lam * (R[o + j] - R[o]))
+        u1[j] = ex / norm
+        u2[j] = -ex
+        a11, a12, a21, a22 = dirac_coef(kappa, E, c, R[o + j], V[o + j])
+        u1p[j] = Rp[o + j] * (a11 * u1[j] + a12 * u2[j])
+        u2p[j] = Rp[o + j] * (a21 * u1[j] + a22 * u2[j])
+    }
+    lm = -AM_LAMBDA
+    lm2 = lm * lm
+    imin: Int = 1
+    for i from 1 to i_max reversed {
+        a11, a12, a21, a22 = dirac_coef(kappa, E, c, R[o + i], V[o + i])
+        u1p[i] = Rp[o + i] * (a11 * u1[i] + a12 * u2[i])
+        u2p[i] = Rp[o + i] * (a21 * u1[i] + a22 * u2[i])
+        u1t = u1[i] - (19.0 * u1p[i] - 5.0 * u1p[i + 1] + u1p[i + 2]) / 24.0
+        u2t = u2[i] - (19.0 * u2p[i] - 5.0 * u2p[i + 1] + u2p[i + 2]) / 24.0
+        b11, b12, b21, b22 = dirac_coef(kappa, E, c, R[o + i - 1], V[o + i - 1])
+        rp = Rp[o + i - 1]
+        delta = 1.0 - lm2 * (rp * rp) * (b12 * b21 - b11 * b22)
+        m11 = (1.0 - lm * rp * b22) / delta
+        m21 = lm * rp * b21 / delta
+        m12 = lm * rp * b12 / delta
+        m22 = (1.0 - lm * rp * b11) / delta
+        u1[i - 1] = m11 * u1t + m12 * u2t
+        u2[i - 1] = m21 * u1t + m22 * u2t
+        if abs(u1[i - 1]) >= DIRAC_INWARD_MAX or abs(u2[i - 1]) >= DIRAC_INWARD_MAX {
+            imin = i + 1
+            break
+        }
+    }
+    for j to m {
+        P[o + j] = u1[j]
+        Q[o + j] = u2[j]
+    }
+    return imin
+}
+
+# =================================================================== reigen
+
+#| The outermost mesh point, 1-based as upstream's find_ctp, where
+#| `V + l(l+1)/2r^2 <= E`: the classical turning point. 0 when there is none.
+def find_ctp(R: Arr, V: Arr, l: Int, E) -> Int {
+    ll = l * (l + 1)
+    nr: Int = len(R)
+    for i to nr reversed {
+        if V[i] + ll / (2.0 * (R[i] * R[i])) - E <= 0.0 {
+            return i + 1
+        }
+    }
+    return 0
+}
+
+#| Upstream's `relat` code for a state: 0 Schrodinger, 2 Dirac with
+#| `kappa = -l - 1` (j = l + 1/2), 3 Dirac with `kappa = l` (j = l - 1/2).
+def kappa_of(l: Int, relat: Int) -> Int {
+    if relat == 3 {
+        if l == 0 {
+            stop("for l = 0 only j = 1/2 (relat = 2) is allowed")
+        }
+        return l
+    }
+    return -l - 1
+}
+
+#| Integrate outward over the first `n` points, Schrodinger or Dirac.
+def outward(l: Int, E, R: Arr, Rp: Arr, V: Arr, Z: Int, c, relat: Int, n: Int, P: Arr, Q: Arr) -> Int {
+    if relat == 0 {
+        return schroed_outward(l, Z, E, R, Rp, V, n, P, Q)
+    }
+    return dirac_outward(c, kappa_of(l, relat), Z, E, R, Rp, V, n, P, Q)
+}
+
+#| Integrate inward from the end to point `o`, Schrodinger or Dirac.
+def inward(l: Int, E, R: Arr, Rp: Arr, V: Arr, c, relat: Int, o: Int, P: Arr, Q: Arr) -> Int {
+    if relat == 0 {
+        return schroed_inward(l, E, R, Rp, V, o, P, Q)
+    }
+    return dirac_inward(c, kappa_of(l, relat), E, R, Rp, V, o, P, Q)
+}
+
+#| The integral of `P^2` (Schrodinger) or `P^2 + Q^2` (Dirac).
+def norm2(Rp: Arr, P: Arr, Q: Arr, relat: Int) -> Num {
+    if relat == 0 {
+        return integrate(Rp, P * P)
+    }
+    return integrate(Rp, P * P + Q * Q)
+}
+
+#| The eigenvalue of state `n, l` (and `relat`, see kappa_of) in the potential
+#| `V`, with `P` and `Q` its normalized radial functions. Returns upstream's
+#| `converged` code (0 on success; 2 out of iterations; 4 to 10 the failures
+#| upstream names in reigen.f90) and the energy.
+#|
+#| Node counting says which state a trial energy belongs to: too many nodes
+#| means E is too high. Once the outward solution has the right count, the
+#| inward one is matched to it at the turning point, and the jump in `Q`
+#| there gives the first-order correction `dE = P (Q_out - Q_in) / 2 int P^2`
+#| (times `2c` for Dirac). A correction that leaves the bracket is replaced
+#| by bisection.
+def solve_radial_eigenproblem(n: Int, l: Int, Ein, eps, max_iter: Int, R: Arr, Rp: Arr, V: Arr, Z: Int, c, relat: Int, perturb: Bool, Emin_init, Emax_init, P: Arr, Q: Arr) {
+    N: Int = len(R)
+    E = Ein
+    if n <= 0 {
+        stop("n > 0 not satisfied")
+    }
+    if l < 0 or l >= n {
+        stop("0 <= l < n not satisfied")
+    }
+    Pr = zeros(N)
+    Qr = zeros(N)
+    Emax = Emax_init
+    Emin = Emin_init
+    if E > Emax or E < Emin {
+        E = (Emin + Emax) / 2.0
+    }
+    want: Int = n - l - 1
+    iter: Int = 0
+    last_bisect = true
+    while iter < max_iter {
+        iter += 1
+        if abs(Emax - Emin) < eps {
+            if not last_bisect {
+                return 6, E
+            }
+            if abs(Emax - Emax_init) < DP_TINY {
+                return 10, E
+            }
+            if abs(Emin - Emin_init) < DP_TINY {
+                return 9, E
+            }
+            imax = outward(l, E, R, Rp, V, Z, c, relat, N, P, Q)
+            minidx = min_idx(P, imax)
+            if minidx <= 0 {
+                return 4, E
+            }
+            for i from minidx - 1 to N {
+                P[i] = 0.0
+                Q[i] = 0.0
+            }
+            if n_nodes(P, minidx - 1) != want {
+                return 5, E
+            }
+            break
+        }
+        ctp = find_ctp(R, V, l, E)
+        if not perturb {
+            ctp = N
+        }
+        else if ctp == 0 {
+            ctp = N
+        }
+        else if R[ctp - 1] / R[N - 1] > CTP_FRACTION_MAX {
+            ctp = N
+        }
+        else if N - ctp <= CTP_MIN_TAIL {
+            ctp = N
+        }
+        else if E >= 0.0 {
+            ctp = N
+        }
+        imax = outward(l, E, R, Rp, V, Z, c, relat, ctp, P, Q)
+        nnodes = n_nodes(P, imax)
+        if nnodes != want or ctp == N or imax < ctp {
+            if nnodes > want {
+                Emax = E
+            }
+            else {
+                Emin = E
+            }
+            E = (Emin + Emax) / 2.0
+            last_bisect = true
+            continue
+        }
+        imin = inward(l, E, R, Rp, V, c, relat, ctp - 1, Pr, Qr)
+        if imin > 1 {
+            return 8, E
+        }
+        factor = P[ctp - 1] / Pr[ctp - 1]
+        if abs(factor) > MATCH_FACTOR_MAX {
+            return 7, E
+        }
+        for i from ctp - 1 to N {
+            Pr[i] = Pr[i] * factor
+            Qr[i] = Qr[i] * factor
+        }
+        for i from ctp to N {
+            P[i] = Pr[i]
+            Q[i] = Qr[i]
+        }
+        S = norm2(Rp, P, Q, relat)
+        dE = P[ctp - 1] * (Q[ctp - 1] - Qr[ctp - 1]) / (2.0 * S)
+        if relat != 0 {
+            dE = 2.0 * c * dE
+        }
+        if abs(dE) < eps {
+            break
+        }
+        if dE < 0.0 {
+            Emax = E
+        }
+        else {
+            Emin = E
+        }
+        if E + dE > Emax or E + dE < Emin {
+            E = (Emin + Emax) / 2.0
+            last_bisect = true
+        }
+        else {
+            E = E + dE
+            last_bisect = false
+        }
+    }
+    if iter == max_iter {
+        return 2, E
+    }
+    S = sqrt(abs(norm2(Rp, P, Q, relat)))
+    if S <= 0.0 {
+        stop("solve_radial_eigenproblem: zero function")
+    }
+    for i to N {
+        P[i] = P[i] / S
+        Q[i] = Q[i] / S
+    }
+    return 0, E
+}
+
+# ================================================================= rpoisson
+
+#| The Hartree potential of the density `rho`: the solution of
+#| `V'' + (2/r) V' = -4 pi rho` with `V(r_min) = 4 pi int rho r dr` and
+#| `V'(r_min) = 0`. Four points by Runge-Kutta, then Adams-Bashforth predictor
+#| and two Adams-Moulton corrector passes per step (upstream
+#| rpoisson_outward_pc).
+def rpoisson_outward_pc(R: Arr, Rp: Arr, rho: Arr) -> Arr {
+    N: Int = len(R)
+    fourpi = 4.0 * pi
+    rho_mid = midpoints4(R, rho, 0)
+    u1 = zeros(N)
+    u2 = zeros(N)
+    u1p = zeros(N)
+    u2p = zeros(N)
+    y1 = fourpi * integrate(Rp, rho * R)
+    y2 = 0.0
+    u1[0] = y1
+    u2[0] = y2
+    for i from 1 to START_POINTS {
+        h = R[i] - R[i - 1]
+        c1a = -(fourpi * rho[i - 1])
+        c2a = -2.0 / R[i - 1]
+        rm = (R[i - 1] + R[i]) / 2.0
+        c1m = -(fourpi * rho_mid[i - 1])
+        c2m = -2.0 / rm
+        c1b = -(fourpi * rho[i])
+        c2b = -2.0 / R[i]
+        d1 = y2
+        d2 = c1a + c2a * y2
+        t1 = y1 + h / 2.0 * d1
+        t2 = y2 + h / 2.0 * d2
+        e1 = t2
+        e2 = c1m + c2m * t2
+        t1 = y1 + h / 2.0 * e1
+        t2 = y2 + h / 2.0 * e2
+        m1 = t2
+        m2 = c1m + c2m * t2
+        t1 = y1 + h * m1
+        t2 = y2 + h * m2
+        m1 = e1 + m1
+        m2 = e2 + m2
+        e1 = t2
+        e2 = c1b + c2b * t2
+        y1 = y1 + h / 6.0 * (d1 + e1 + 2.0 * m1)
+        y2 = y2 + h / 6.0 * (d2 + e2 + 2.0 * m2)
+        u1[i] = y1
+        u2[i] = y2
+        if abs(y1) >= POISSON_RK4_MAX {
+            stop("Poisson solver diverged.")
+        }
+    }
+    for i to START_POINTS {
+        u1p[i] = u2[i] * Rp[i]
+        u2p[i] = -((fourpi * rho[i] + 2.0 * u2[i] / R[i]) * Rp[i])
+    }
+    for i from START_POINTS - 1 to N - 1 {
+        u1[i + 1] = u1[i] + (55.0 * u1p[i] - 59.0 * u1p[i - 1] + 37.0 * u1p[i - 2] - 9.0 * u1p[i - 3]) / 24.0
+        u2[i + 1] = u2[i] + (55.0 * u2p[i] - 59.0 * u2p[i - 1] + 37.0 * u2p[i - 2] - 9.0 * u2p[i - 3]) / 24.0
+        for it to 2 {
+            u1p[i + 1] = Rp[i + 1] * u2[i + 1]
+            u2p[i + 1] = -(Rp[i + 1] * (fourpi * rho[i + 1] + 2.0 * u2[i + 1] / R[i + 1]))
+            u1[i + 1] = u1[i] + (9.0 * u1p[i + 1] + 19.0 * u1p[i] - 5.0 * u1p[i - 1] + u1p[i - 2]) / 24.0
+            u2[i + 1] = u2[i] + (9.0 * u2p[i + 1] + 19.0 * u2p[i] - 5.0 * u2p[i - 1] + u2p[i - 2]) / 24.0
+        }
+    }
+    return u1
+}
+
+# ================================================================= energies
+
+#| The exact energy of state `n, l` in the bare Coulomb potential `-Z/r`:
+#| `-Z^2/2n^2`, or for Dirac (`relat` 2 or 3) Sommerfeld's fine-structure
+#| formula less the rest energy `c^2`.
+def E_nl(c, n: Int, l: Int, Z: Int, relat: Int) -> Num {
+    if l < 0 or n <= l {
+        stop("E_nl: 0 <= l < n required")
+    }
+    if relat == 0 {
+        return -(Z * Z / (2.0 * (n * n)))
+    }
+    kappa = kappa_of(l, relat)
+    beta = sqrt(kappa * kappa - (Z / c) * (Z / c))
+    t = n - abs(kappa) + beta
+    return c * c / sqrt(1.0 + (Z / c) * (Z / c) / (t * t)) - c * c
+}
+
+#| The Thomas-Fermi potential of a neutral atom, `-Z_eff(r)/r`, through the
+#| analytic fit upstream uses; `Z_eff` is not let fall below 1. The starting
+#| potential of every SCF run.
+def thomas_fermi_potential(R: Arr, Z: Int) -> Arr {
+    N: Int = len(R)
+    scale = pow(128 * Z / (9.0 * (pi * pi)), 1.0 / 3.0)
+    V = zeros(N)
+    for i to N {
+        x = R[i] * scale
+        sx = sqrt(x)
+        t = 1.0 + TF_ALPHA * sx + TF_BETA * x * exp(-(TF_GAMMA * sx))
+        zeff = Z * (t * t) * exp(-(2.0 * TF_ALPHA * sx))
+        if zeff < 1.0 {
+            zeff = 1.0
+        }
+        V[i] = -zeff / R[i]
+    }
+    return V
+}
+
+# ====================================================================== dft
+
+#| VWN's `y^2 + b y + c`.
+def vwn_Y(y) -> Num {
+    return y * y + VWN_B * y + VWN_C
+}
+
+#| The LDA exchange-correlation energy density and potential at density `n`:
+#| Slater exchange and VWN correlation, and with `relat` the relativistic
+#| correction of exchange (MacDonald and Vosko's factors R and S, the RLDA
+#| NIST uses). Returns exc, Vxc.
+def vxc_scalar(n, relat: Bool, c_light) {
+    if n < DP_EPSILON {
+        return 0.0, 0.0
+    }
+    q = sqrt(4.0 * VWN_C - VWN_B * VWN_B)
+    rs = pow(3.0 / (4.0 * pi * n), 1.0 / 3.0)
+    y = sqrt(rs)
+    gy = vwn_Y(y)
+    at = atan(q / (2.0 * y + VWN_B))
+    ec = VWN_A / 2.0 * (log(y * y / gy) + 2.0 * VWN_B / q * at - VWN_B * VWN_Y0 / vwn_Y(VWN_Y0) * (log((y - VWN_Y0) * (y - VWN_Y0) / gy) + 2.0 * (VWN_B + 2.0 * VWN_Y0) / q * at))
+    vc = ec - VWN_A / 6.0 * (VWN_C * (y - VWN_Y0) - VWN_B * VWN_Y0 * y) / ((y - VWN_Y0) * gy)
+    ex = -(3.0 / (4.0 * pi) * pow(3.0 * (pi * pi) * n, 1.0 / 3.0))
+    vx = 4.0 * ex / 3.0
+    if relat {
+        beta = -(4.0 * pi * ex / (3.0 * c_light))
+        mu = sqrt(1.0 + beta * beta)
+        lg = log(beta + mu)
+        w = (beta * mu - lg) / (beta * beta)
+        rr = 1.0 - 3.0 * (w * w) / 2.0
+        ss = 3.0 * lg / (2.0 * beta * mu) - 1.0 / 2.0
+        ex = ex * rr
+        vx = vx * ss
+    }
+    return ex + ec, vx + vc
+}
+
+#| One atom's self-consistent state and what the SCF loop needs to carry it:
+#| upstream's dft_data_t.
+record AtomState {
+    Z: Int
+    dirac: Bool
+    perturb: Bool
+    c: Num
+    reigen_eps: Num
+    reigen_max_iter: Int
+    R: Arr
+    Rp: Arr
+    V_coulomb: Arr
+    V_h: Arr
+    V_xc: Arr
+    e_xc: Arr
+    V_tot: Arr
+    rho: Arr
+    orbitals: Arr
+    no: [Int]
+    lo: [Int]
+    so: [Int]
+    fo: Arr
+    ks: Arr
+    Emin_init: Arr
+    Emax_init: Arr
+    energies: Arr
+}
+
+#| Index of the energy components in AtomState.energies: kinetic, Hartree,
+#| electron-nucleus, exchange-correlation, total.
+EKIN: Int = 0
+ECOUL: Int = 1
+EENUC: Int = 2
+EXC: Int = 3
+ETOT: Int = 4
+
+#| Upstream's total_energy: the variational form, with the kinetic energy
+#| from the eigenvalue sum less the input potential's expectation,
+#| `T_s = sum f_i e_i - int V_in n`. Writes the five components.
+def total_energy(d: AtomState) {
+    N = len(d.R)
+    r2 = d.R * d.R
+    rho = -d.rho
+    e_band = 0.0
+    for i to len(d.fo) {
+        e_band += d.fo[i] * d.ks[i]
+    }
+    t_s = e_band + 4.0 * pi * integrate(d.Rp, d.V_tot * rho * r2)
+    e_ee = -(2.0 * pi * integrate(d.Rp, d.V_h * rho * r2))
+    e_en = 4.0 * pi * integrate(d.Rp, -d.V_coulomb * rho * r2)
+    e_xc = -(4.0 * pi * integrate(d.Rp, d.e_xc * rho * r2))
+    d.energies[EKIN] = t_s
+    d.energies[ECOUL] = e_ee
+    d.energies[EENUC] = e_en
+    d.energies[EXC] = e_xc
+    d.energies[ETOT] = t_s + (e_ee + e_en) + e_xc
+}
+
+#| Upstream's rho2V: the exchange-correlation and Hartree potentials of the
+#| current density, the energy at the input potential, then the new total
+#| potential.
+def rho2V(d: AtomState) {
+    for i to len(d.R) {
+        ex, vx = vxc_scalar(d.rho[i], d.dirac, d.c)
+        d.e_xc[i] = ex
+        d.V_xc[i] = vx
+    }
+    vh = rpoisson_outward_pc(d.R, d.Rp, d.rho)
+    for i to len(d.R) {
+        d.V_h[i] = vh[i]
+    }
+    total_energy(d)
+    for i to len(d.R) {
+        d.V_tot[i] = d.V_coulomb[i] + d.V_xc[i] + d.V_h[i]
+    }
+}
+
+#| Upstream's V2rho: every occupied orbital in the current potential, each
+#| search started from the last iteration's eigenvalue, and the density
+#| `n = sum_i f_i |R_i|^2 / 4 pi`.
+def V2rho(d: AtomState, it: Int) {
+    N = len(d.R)
+    for k to N {
+        d.rho[k] = 0.0
+    }
+    P = zeros(N)
+    Q = zeros(N)
+    for i to len(d.no) {
+        relat: Int = 0
+        if d.dirac {
+            relat = 3
+            if d.so[i] == 1 {
+                relat = 2
+            }
+        }
+        conv, E = solve_radial_eigenproblem(d.no[i], d.lo[i], d.ks[i], d.reigen_eps, d.reigen_max_iter, d.R, d.Rp, d.V_tot, d.Z, d.c, relat, d.perturb, d.Emin_init[i], d.Emax_init[i], P, Q)
+        if conv != 0 {
+            stop(f"V2rho: radial eigenproblem n={d.no[i]} l={d.lo[i]} did not converge (code {conv}) at SCF iteration {it}")
+        }
+        d.ks[i] = E
+        for k to N {
+            y = 0.0
+            if relat == 0 {
+                y = P[k] / d.R[k]
+            }
+            else {
+                y = sqrt(P[k] * P[k] + Q[k] * Q[k]) / d.R[k]
+            }
+            d.rho[k] = d.rho[k] + d.fo[i] * (y * y)
+            d.orbitals[i, k] = y
+        }
+    }
+    for k to N {
+        d.rho[k] = d.rho[k] / (4.0 * pi)
+    }
+}
+
+#| Upstream's KS_step: the residual `KS(V) - V` of the non-Coulomb part of
+#| the potential, which is what the mixing drives to zero.
+def KS_step(V: Arr, it: Int, d: AtomState) -> Arr {
+    for k to len(V) {
+        d.V_tot[k] = d.V_coulomb[k] + V[k]
+    }
+    V2rho(d, it)
+    rho2V(d)
+    return d.V_xc + d.V_h - V
+}
+
+#| Upstream's mixing_anderson with its energy criterion: Anderson mixing of
+#| depth one on the non-Coulomb potential. It stops when, from the third
+#| iteration on, the residual's relative L2 norm is below SCF_L2_TOL and the
+#| largest eigenvalue change was below `eps` in this iteration and the last.
+#| Returns whether it converged and the iterations run; upstream stops with an
+#| error when it does not converge.
+def mixing_anderson(x0: Arr, max_iter: Int, d: AtomState, alpha, eps) {
+    n: Int = len(x0)
+    r2 = d.R * d.R
+    x_i = copy(x0)
+    x1_i = zeros(n)
+    R1_i = zeros(n)
+    dx = zeros(n)
+    dR = zeros(n)
+    ks_old = copy(d.ks)
+    nk: Int = len(d.ks)
+    err_old = 1.0e12
+    for i from 1 to max_iter + 1 {
+        R_i = KS_step(x_i, i, d)
+        x_norm = sqrt(4.0 * pi * integrate(d.Rp, x_i * x_i * r2))
+        R_norm = sqrt(4.0 * pi * integrate(d.Rp, R_i * R_i * r2))
+        if x_norm < 1.0e-12 {
+            x_norm = 1.0e-12
+        }
+        L2_err = R_norm / x_norm
+        err = 0.0
+        for k to nk {
+            err = max(err, abs(ks_old[k] - d.ks[k]))
+        }
+        if i >= SCF_MIN_ITER and L2_err < SCF_L2_TOL {
+            if err < eps and err_old < eps {
+                return true, i
+            }
+        }
+        for k to nk {
+            ks_old[k] = d.ks[k]
+        }
+        err_old = err
+        if i > 1 {
+            for k to n {
+                dx[k] = x_i[k] - x1_i[k]
+                dR[k] = R_i[k] - R1_i[k]
+            }
+        }
+        for k to n {
+            x1_i[k] = x_i[k]
+            R1_i[k] = R_i[k]
+            x_i[k] = x_i[k] + alpha * R_i[k]
+        }
+        if i > 1 {
+            sn = 0.0
+            sd = 0.0
+            for k to n {
+                sn += R_i[k] * dR[k] * r2[k]
+            }
+            for k to n {
+                sd += dR[k] * dR[k] * r2[k]
+            }
+            beta = sn / sd
+            for k to n {
+                x_i[k] = x_i[k] - beta * (dx[k] + alpha * dR[k])
+            }
+        }
+    }
+    return false, max_iter
+}
+
+# ================================================================== drivers
+
+#| The ground configuration of atom Z: n, l, the spin code `so` (1 for
+#| `j = l + 1/2` and for every nonrelativistic orbital, 0 for `j = l - 1/2`)
+#| and the occupations. With `relativistic`, each `l > 0` level is split into
+#| `j = l - 1/2` then `j = l + 1/2`, the electrons shared by degeneracy
+#| `2l : 2l + 2` (upstream get_atomic_states_rel).
+def atomic_states(Z: Int, relativistic: Bool) {
+    if Z < 1 or Z > Z_MAX {
+        stop(f"Z must be between 1 and {Z_MAX}; it is {Z}")
+    }
+    no: [Int] = []
+    lo: [Int] = []
+    so: [Int] = []
+    fo = []
+    for k from STATE_START[Z - 1] to STATE_START[Z] {
+        n: Int = STATE_N[k]
+        l: Int = STATE_L[k]
+        f = 1.0 * STATE_F[k]
+        if relativistic and l > 0 {
+            no = append(no, n)
+            lo = append(lo, l)
+            so = append(so, 0)
+            fo = append(fo, f * (2 * l) / (2 * (2 * l + 1)))
+            no = append(no, n)
+            lo = append(lo, l)
+            so = append(so, 1)
+            fo = append(fo, f * (2 * l + 2) / (2 * (2 * l + 1)))
+        }
+        else {
+            no = append(no, n)
+            lo = append(lo, l)
+            so = append(so, 1)
+            fo = append(fo, f)
+        }
+    }
+    return no, lo, so, fo
+}
+
+#| Upstream's atom_lda and atom_rlda in one: the self-consistent LDA (or,
+#| with `relativistic`, Dirac RLDA) atom on the exponential mesh
+#| `(r_min, r_max, a, N)`, from the Thomas-Fermi potential and hydrogen-like
+#| starting eigenvalues. Returns the state, whether the SCF converged and the
+#| iterations it took.
+def atom_scf(Z: Int, relativistic: Bool, r_min, r_max, a, N: Int, c, reigen_eps, reigen_max_iter: Int, mixing_eps, mixing_alpha, mixing_max_iter: Int, perturb: Bool) {
+    no, lo, so, fo = atomic_states(Z, relativistic)
+    norb = len(no)
+    R = mesh_exp(r_min, r_max, a, N)
+    Rp = mesh_exp_deriv(r_min, r_max, a, N)
+    ks = zeros(norb)
+    emin = zeros(norb)
+    emax = zeros(norb)
+    for i to norb {
+        ks[i] = -1.0 * (Z * Z) / (2 * (no[i] * no[i]))
+        emax[i] = E_MAX_INIT
+        relat: Int = 0
+        if relativistic {
+            relat = 3
+            if so[i] == 1 {
+                relat = 2
+            }
+        }
+        emin[i] = E_MIN_FACTOR * E_nl(c, no[i], lo[i], Z, relat)
+    }
+    V_tot = thomas_fermi_potential(R, Z)
+    V_coulomb = zeros(N + 1)
+    for k to N + 1 {
+        V_coulomb[k] = -Z / R[k]
+    }
+    d = AtomState { Z: Z, dirac: relativistic, perturb: perturb, c: c, reigen_eps: reigen_eps, reigen_max_iter: reigen_max_iter, R: R, Rp: Rp, V_coulomb: V_coulomb, V_h: zeros(N + 1), V_xc: zeros(N + 1), e_xc: zeros(N + 1), V_tot: V_tot, rho: zeros(N + 1), orbitals: zeros(norb, N + 1), no: no, lo: lo, so: so, fo: fo, ks: ks, Emin_init: emin, Emax_init: emax, energies: zeros(ETOT + 1) }
+    converged, iterations = mixing_anderson(V_tot - V_coulomb, mixing_max_iter, d, mixing_alpha, mixing_eps)
+    return d, converged, iterations
+}
+
+test "the exponential mesh ends at r_min and r_max, its last interval a times its first" {
+    R = mesh_exp(1.0e-7, 50.0, 2.7e6, 1000)
+    assert_near(R[0], 1.0e-7, 0.0)
+    assert_near(R[1000], 50.0, 1.0e-12)
+    assert_near((R[1000] - R[999]) / (R[1] - R[0]), 2.7e6, 1.0e-4)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2006-2012 Ondřej Čertík, Jiří Vackář, John Pask
+# SPDX-FileCopyrightText: 2026 The Viv authors

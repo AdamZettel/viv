@@ -1,0 +1,277 @@
+###
+post: Restricted open-shell Hartree-Fock
+agent: claude
+
+ROHF keeps one set of spatial orbitals for both spins: `Nb` closed-shell
+orbitals holding an alpha and a beta electron, `Na - Nb` open orbitals
+holding one alpha electron each, and the virtual rest. Unlike UHF the
+wavefunction is an eigenfunction of `S^2`, with `<S^2> = S(S+1)` exactly.
+
+No single Fock operator has these orbitals as eigenvectors, so the loop
+(lib/hf/scf_loop, `options.method = SCF_ROHF`) diagonalizes an effective
+matrix whose off-diagonal blocks are the three stationarity conditions and
+whose diagonal blocks are a choice: the coupling (lib/hf/coupling explains
+it and holds the registry of four). The choice changes the orbital energies
+and the path, not the converged energy or densities. For `Na < Nb` (PySCF's
+negative spin) the run swaps the two counts, since only the number of open
+orbitals matters, and swaps the densities back at the end.
+
+The result's `mo_occ` is 2, 1 or 0 per orbital, `alpha` and `beta` hold the
+spin densities, and `grad` is the largest of `|F_a D_a S - S D_a F_a|` and
+the same for beta, which does not vanish for ROHF; convergence reads the
+effective matrix's error instead.
+
+This page holds the ROHF checks against PySCF 2.5.0:
+
+- H2O+ 6-31G with every coupling, and triplet water at spin -2 and +2;
+- `E_UHF <= E_ROHF` for H2O+, OH and O2 on every basis with full integrals;
+- O2 6-31G: the plain step from PySCF's default and stable densities;
+- every SCF regime (RHF closed shell, UHF closed and open shell, ROHF open
+  shell) reached by at least two accelerators.
+
+Used with `import hf.rohf`.
+###
+
+from hf.rhf import RhfImport
+from hf.scf_loop import (
+    scf, scf_densities, scf_density_gap, scf_run_from, scf_setup, scf_setup_with, scf_step,
+    ScfResult, ScfSetup,
+)
+from hf.opts import scf_defaults, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.density import den_trace
+from hf.guess import GS_CORE
+from hf.accelerate import accel_methods
+from hf.coupling import ROHF_C_GS, rohf_couplings
+import hf.uhf
+from hf.sweep import sw_cov_covered, sw_cov_gate, sw_cov_hit, sw_cov_new, SW_NCLS_SCF
+from hfref.oh_sto3g import (
+    OH_STO3G_E_NUC, OH_STO3G_E_ROHF, OH_STO3G_E_UHF, oh_sto3g_eri8_cart, OH_STO3G_ROHF_NALPHA,
+    OH_STO3G_ROHF_NBETA, oh_sto3g_s_unit, oh_sto3g_t_unit, OH_STO3G_UHF_NALPHA,
+    OH_STO3G_UHF_NBETA, oh_sto3g_v_unit,
+)
+from hfref.oh_631g import (
+    OH_631G_E_NUC, OH_631G_E_ROHF, oh_631g_eri8_cart, OH_631G_ROHF_NALPHA, OH_631G_ROHF_NBETA,
+    oh_631g_s_unit, oh_631g_t_unit, oh_631g_v_unit,
+)
+from hfref.oh_631gs import (
+    OH_631GS_E_NUC, OH_631GS_E_ROHF, OH_631GS_E_ROHF_CART, OH_631GS_E_UHF, OH_631GS_E_UHF_CART,
+    oh_631gs_eri8_cart, oh_631gs_eri8_sph, OH_631GS_ROHF_NALPHA, OH_631GS_ROHF_NBETA,
+    oh_631gs_s_sph, oh_631gs_s_unit, oh_631gs_t_sph, oh_631gs_t_unit, oh_631gs_v_sph,
+    oh_631gs_v_unit,
+)
+from hfref.o2_sto3g import (
+    O2_STO3G_E_NUC, O2_STO3G_E_ROHF_DEFAULT, O2_STO3G_E_ROHF_STABLE, O2_STO3G_E_UHF_DEFAULT,
+    O2_STO3G_E_UHF_STABLE, o2_sto3g_eri8_cart, O2_STO3G_ROHF_NALPHA, O2_STO3G_ROHF_NBETA,
+    o2_sto3g_s_unit, o2_sto3g_t_unit, o2_sto3g_v_unit,
+)
+from hfref.o2_631g import (
+    O2_631G_E_NUC, O2_631G_E_ROHF_DEFAULT, O2_631G_E_ROHF_STABLE, O2_631G_E_UHF,
+    o2_631g_eri8_cart, o2_631g_rohf_da, o2_631g_rohf_db, O2_631G_ROHF_NALPHA,
+    O2_631G_ROHF_NBETA, O2_631G_ROHF_SELF_STEP, o2_631g_rohf_stable_da, o2_631g_rohf_stable_db,
+    O2_631G_ROHF_STABLE_SELF_STEP, o2_631g_s_unit, o2_631g_t_unit, o2_631g_v_unit,
+)
+from hfref.water_631g import (
+    water631g_cation_rohf_da, water631g_cation_rohf_db, WATER631G_CATION_ROHF_NALPHA,
+    WATER631G_CATION_ROHF_NBETA, WATER631G_E_CATION_UHF, WATER631G_E_NUC, water631g_eri8_cart,
+    water631g_s_unit, WATER631G_SPIN2_ROHF_NALPHA, WATER631G_SPIN2_ROHF_NBETA,
+    WATER631G_SPINM2_ROHF_NALPHA, WATER631G_SPINM2_ROHF_NBETA, water631g_t_unit,
+    water631g_v_unit,
+)
+from hfref.water_sto3g import (
+    WATERSTO3G_E_NUC, WATERSTO3G_E_RHF, watersto3g_eri8_cart, WATERSTO3G_RHF_NALPHA,
+    WATERSTO3G_RHF_NBETA, watersto3g_s_unit, watersto3g_t_unit, watersto3g_v_unit,
+)
+
+# the iteration limit of the coverage runs: plain iteration from the core
+# guess needs far more than the default
+ROHF_T_MAXIT = 200
+
+#| ROHF options with coupling `c`.
+#~ test
+#@ d91228c7
+def rohf_t_options(c) -> ScfOptions {
+    return ScfOptions { method: SCF_ROHF, rohf_coupling: c, ..scf_defaults() }
+}
+
+#~ test
+def rohf_t_water(na, nb, c) -> ScfResult {
+    H = water631g_t_unit() + water631g_v_unit()
+    return scf(scf_setup(H, water631g_s_unit(), water631g_eri8_cart(), na, nb, WATER631G_E_NUC, rohf_t_options(c)))
+}
+
+#| E_UHF, E_ROHF, and how many of the two runs converged.
+#~ test
+#@ 032e5de0
+def rohf_t_pair(H: Arr, S: Arr, G: Arr, na, nb, enuc) {
+    p = scf_setup(H, S, G, na, nb, enuc, ScfOptions { method: SCF_UHF, ..scf_defaults() })
+    u = scf(p)
+    r = scf(scf_setup_with(p, rohf_t_options(ROHF_C_GS)))
+    return u.energy, r.energy, u.converged + r.converged
+}
+
+test "H2O+ 6-31G: PySCF's energy, and every coupling lands on it" {
+    rohf_e = zeros(len(rohf_couplings()))
+    for rohf_c to len(rohf_e) {
+        rohf_r = rohf_t_water(WATER631G_CATION_ROHF_NALPHA, WATER631G_CATION_ROHF_NBETA, rohf_c)
+        assert_near(rohf_r.converged, 1.0, 0.0)
+        rohf_e[rohf_c] = rohf_r.energy
+        # a restricted open shell is a pure doublet
+        assert_lt(abs(rohf_r.s2 - 0.75), 1.0e-10)
+        assert_lt(abs(rohf_r.energy_check - rohf_r.energy), 1.0e-10)
+        assert_lt(max(abs(rohf_r.alpha.density - water631g_cation_rohf_da())), 1.0e-7)
+        assert_lt(max(abs(rohf_r.beta.density - water631g_cation_rohf_db())), 1.0e-7)
+        # four closed orbitals and one open
+        assert_near(sum(rohf_r.mo_occ), 9, 0.0)
+        assert_near(max(rohf_r.mo_occ), 2, 0.0)
+    }
+    assert_lt(abs(rohf_e[0] - (-75.578396379589748)), 1.0e-9)
+    for rohf_c to len(rohf_e) {
+        assert_lt(abs(rohf_e[rohf_c] - rohf_e[0]), 1.0e-10)
+    }
+}
+
+test "triplet water ROHF: spin -2 gives PySCF's energy, and +2 the same" {
+    rohf_m = rohf_t_water(WATER631G_SPINM2_ROHF_NALPHA, WATER631G_SPINM2_ROHF_NBETA, ROHF_C_GS)
+    rohf_p = rohf_t_water(WATER631G_SPIN2_ROHF_NALPHA, WATER631G_SPIN2_ROHF_NBETA, ROHF_C_GS)
+    assert_near(rohf_m.converged, 1.0, 0.0)
+    assert_near(rohf_p.converged, 1.0, 0.0)
+    assert_lt(abs(rohf_m.energy - (-75.723654936331599)), 1.0e-9)
+    assert_lt(abs(rohf_m.energy - rohf_p.energy), 1.0e-10)
+    assert_lt(abs(rohf_m.s2 - 2.0), 1.0e-10)
+    # with fewer alpha than beta electrons the beta density is the larger one
+    rohf_D = scf_densities(rohf_m)
+    assert_lt(abs(den_trace(rohf_D, 0, water631g_s_unit()) - 4.0), 1.0e-12)
+    assert_lt(abs(den_trace(rohf_D, 1, water631g_s_unit()) - 6.0), 1.0e-12)
+    assert_near(sum(rohf_m.alpha.mo_occ), 4, 0.0)
+    assert_near(sum(rohf_m.beta.mo_occ), 6, 0.0)
+}
+
+test "E_UHF <= E_ROHF for H2O+, OH and O2 on every basis with full integrals" {
+    # H2O+ 6-31G
+    rohf_eu, rohf_er, rohf_nc = rohf_t_pair(water631g_t_unit() + water631g_v_unit(), water631g_s_unit(), water631g_eri8_cart(), WATER631G_CATION_ROHF_NALPHA, WATER631G_CATION_ROHF_NBETA, WATER631G_E_NUC)
+    assert_near(rohf_nc, 2.0, 0.0)
+    assert_lt(rohf_eu, rohf_er)
+    assert_lt(abs(rohf_eu - WATER631G_E_CATION_UHF), 1.0e-9)
+    # OH STO-3G, 6-31G, 6-31G* in 6D and in 5D
+    rohf_eu, rohf_er, rohf_nc = rohf_t_pair(oh_sto3g_t_unit() + oh_sto3g_v_unit(), oh_sto3g_s_unit(), oh_sto3g_eri8_cart(), OH_STO3G_ROHF_NALPHA, OH_STO3G_ROHF_NBETA, OH_STO3G_E_NUC)
+    assert_near(rohf_nc, 2.0, 0.0)
+    assert_lt(rohf_eu, rohf_er)
+    assert_lt(abs(rohf_eu - OH_STO3G_E_UHF), 1.0e-9)
+    assert_lt(abs(rohf_er - OH_STO3G_E_ROHF), 1.0e-9)
+    rohf_eu, rohf_er, rohf_nc = rohf_t_pair(oh_631g_t_unit() + oh_631g_v_unit(), oh_631g_s_unit(), oh_631g_eri8_cart(), OH_631G_ROHF_NALPHA, OH_631G_ROHF_NBETA, OH_631G_E_NUC)
+    assert_near(rohf_nc, 2.0, 0.0)
+    assert_lt(rohf_eu, rohf_er)
+    assert_lt(abs(rohf_er - OH_631G_E_ROHF), 1.0e-9)
+    rohf_eu, rohf_er, rohf_nc = rohf_t_pair(oh_631gs_t_unit() + oh_631gs_v_unit(), oh_631gs_s_unit(), oh_631gs_eri8_cart(), OH_631GS_ROHF_NALPHA, OH_631GS_ROHF_NBETA, OH_631GS_E_NUC)
+    assert_near(rohf_nc, 2.0, 0.0)
+    assert_lt(rohf_eu, rohf_er)
+    assert_lt(abs(rohf_eu - OH_631GS_E_UHF_CART), 1.0e-9)
+    assert_lt(abs(rohf_er - OH_631GS_E_ROHF_CART), 1.0e-9)
+    rohf_eu, rohf_er, rohf_nc = rohf_t_pair(oh_631gs_t_sph() + oh_631gs_v_sph(), oh_631gs_s_sph(), oh_631gs_eri8_sph(), OH_631GS_ROHF_NALPHA, OH_631GS_ROHF_NBETA, OH_631GS_E_NUC)
+    assert_near(rohf_nc, 2.0, 0.0)
+    assert_lt(rohf_eu, rohf_er)
+    assert_lt(abs(rohf_eu - OH_631GS_E_UHF), 1.0e-9)
+    assert_lt(abs(rohf_er - OH_631GS_E_ROHF), 1.0e-9)
+    # O2 STO-3G and 6-31G: each lands on one of its labeled states
+    rohf_eu, rohf_er, rohf_nc = rohf_t_pair(o2_sto3g_t_unit() + o2_sto3g_v_unit(), o2_sto3g_s_unit(), o2_sto3g_eri8_cart(), O2_STO3G_ROHF_NALPHA, O2_STO3G_ROHF_NBETA, O2_STO3G_E_NUC)
+    assert_near(rohf_nc, 2.0, 0.0)
+    assert_lt(rohf_eu, rohf_er)
+    assert_lt(min(abs(rohf_eu - O2_STO3G_E_UHF_DEFAULT), abs(rohf_eu - O2_STO3G_E_UHF_STABLE)), 1.0e-9)
+    assert_lt(min(abs(rohf_er - O2_STO3G_E_ROHF_DEFAULT), abs(rohf_er - O2_STO3G_E_ROHF_STABLE)), 1.0e-9)
+    rohf_eu, rohf_er, rohf_nc = rohf_t_pair(o2_631g_t_unit() + o2_631g_v_unit(), o2_631g_s_unit(), o2_631g_eri8_cart(), O2_631G_ROHF_NALPHA, O2_631G_ROHF_NBETA, O2_631G_E_NUC)
+    assert_near(rohf_nc, 2.0, 0.0)
+    assert_lt(rohf_eu, rohf_er)
+    assert_lt(abs(rohf_eu - O2_631G_E_UHF), 1.0e-9)
+    assert_lt(min(abs(rohf_er - O2_631G_E_ROHF_DEFAULT), abs(rohf_er - O2_631G_E_ROHF_STABLE)), 1.0e-9)
+}
+
+#~ test
+def rohf_t_import(Da: Arr, Db: Arr, eref) -> RhfImport {
+    H = o2_631g_t_unit() + o2_631g_v_unit()
+    p = scf_setup(H, o2_631g_s_unit(), o2_631g_eri8_cart(), O2_631G_ROHF_NALPHA, O2_631G_ROHF_NBETA, O2_631G_E_NUC, rohf_t_options(ROHF_C_GS))
+    f = scf_step(p, Da, Db)
+    tight = ScfSetup { options: ScfOptions { e_tol: 1.0e-13, grad_tol: 1.0e-11, ..p.options }, ..p }
+    r = scf_run_from(tight, Da, Db)
+    assert_near(r.converged, 1.0, 0.0)
+    g = scf_step(tight, r.alpha.density, r.beta.density)
+    step = max(max(abs(f.alpha.density - Da)), max(abs(f.beta.density - Db)))
+    drift = max(max(abs(r.alpha.density - Da)), max(abs(r.beta.density - Db)))
+    return RhfImport { step: step, step_energy: f.energy - eref, drift: drift, step_after: scf_density_gap(g, r), energy_after: r.energy - eref }
+}
+
+test "O2 6-31G: the fixed-point step from the default and stable densities" {
+    # tools/hf_reference.py re-converges each stored pair until PySCF's own
+    # ROHF step (get_fock, eig, get_occ, make_rdm1) moves it by less than
+    # 1e-10 and records that move as _SELF_STEP (max abs over both spins).
+    # This step moves them by the same amounts.
+    rohf_a = rohf_t_import(o2_631g_rohf_da(), o2_631g_rohf_db(), O2_631G_E_ROHF_DEFAULT)
+    assert_lt(rohf_a.step, 1.0e-8)
+    assert_lt(abs(rohf_a.step - O2_631G_ROHF_SELF_STEP), 1.0e-12)
+    assert_lt(abs(rohf_a.step_energy), 1.0e-10)
+    rohf_b = rohf_t_import(o2_631g_rohf_stable_da(), o2_631g_rohf_stable_db(), O2_631G_E_ROHF_STABLE)
+    assert_lt(abs(rohf_b.step - O2_631G_ROHF_STABLE_SELF_STEP), 1.0e-12)
+    assert_lt(abs(rohf_b.step_energy), 1.0e-10)
+    # converged tightly from each, the run stays on that state, and there
+    # the step is a fixed point
+    assert_lt(rohf_a.drift, 1.0e-6)
+    assert_lt(abs(rohf_a.energy_after), 1.0e-11)
+    assert_lt(rohf_a.step_after, 1.0e-9)
+    assert_lt(rohf_b.drift, 1.0e-6)
+    assert_lt(abs(rohf_b.energy_after), 1.0e-11)
+    assert_lt(rohf_b.step_after, 1.0e-9)
+}
+
+test "O2 6-31G: the fixed-point step reproduces the default and the tightly converged stable densities within 1e-8" {
+    rohf_a = rohf_t_import(o2_631g_rohf_da(), o2_631g_rohf_db(), O2_631G_E_ROHF_DEFAULT)
+    assert_lt(rohf_a.step, 1.0e-8)
+    rohf_b = rohf_t_import(o2_631g_rohf_stable_da(), o2_631g_rohf_stable_db(), O2_631G_E_ROHF_STABLE)
+    assert_lt(rohf_b.step, 1.0e-8)
+    # PySCF's step moves this pair by about 6e-12, so this one must be as small
+    assert_lt(rohf_b.step, 1.0e-10)
+    # it is the labeled stable state: the energy matches, and converging it
+    # further here moves the pair by less than 1e-6 and the energy by less
+    # than 1e-11
+    assert_lt(abs(rohf_b.step_energy), 1.0e-10)
+    assert_lt(rohf_b.drift, 1.0e-6)
+    assert_lt(abs(rohf_b.energy_after), 1.0e-11)
+}
+
+#~ test
+def rohf_t_regime(method, open, a) {
+    step system {
+        o = ScfOptions { method: method, accelerator: a, guess: GS_CORE, max_iter: ROHF_T_MAXIT, ..scf_defaults() }
+        p = scf_setup(watersto3g_t_unit() + watersto3g_v_unit(), watersto3g_s_unit(), watersto3g_eri8_cart(), WATERSTO3G_RHF_NALPHA, WATERSTO3G_RHF_NBETA, WATERSTO3G_E_NUC, o)
+        eref = WATERSTO3G_E_RHF
+        if open > 0 {
+            p = scf_setup(oh_sto3g_t_unit() + oh_sto3g_v_unit(), oh_sto3g_s_unit(), oh_sto3g_eri8_cart(), OH_STO3G_UHF_NALPHA, OH_STO3G_UHF_NBETA, OH_STO3G_E_NUC, o)
+            eref = OH_STO3G_E_UHF
+            if method == SCF_ROHF {
+                eref = OH_STO3G_E_ROHF
+            }
+        }
+    }
+    step run {
+        r = scf(p)
+    }
+    return abs(r.energy - eref)
+}
+
+test "every SCF regime is reached by at least two accelerators" {
+    # regimes: 0 RHF closed shell,
+    # 1 UHF closed shell, 2 UHF open shell, 3 ROHF open shell
+    rohf_cov = sw_cov_new(SW_NCLS_SCF)
+    rohf_meth = [SCF_RHF, SCF_UHF, SCF_UHF, SCF_ROHF]
+    rohf_open = [0, 0, 1, 1]
+    for rohf_g to len(rohf_meth) {
+        for rohf_acc to len(accel_methods()) {
+            if rohf_t_regime(rohf_meth[rohf_g], rohf_open[rohf_g], rohf_acc) < 1.0e-9 {
+                sw_cov_hit(rohf_cov, rohf_g, rohf_acc)
+            }
+        }
+    }
+    assert_near(sw_cov_covered(rohf_cov), 4, 0.0)
+    sw_cov_gate(rohf_cov)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,111 @@
+###
+post: A molecule from text and a basis name, as PySCF takes them
+agent: claude
+
+    import basis.pople631g
+    from hf.mole import molecule
+    from hf.scf import rhf
+
+    mol = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")
+    r = rhf(mol)
+    show r.energy
+
+`molecule(atoms, basis)` is PySCF's `gto.M(atom=atoms, basis=basis)`: the
+atoms as text, each an element symbol and three coordinates in angstrom,
+separated by `;` or by newlines, or a whole XYZ file (a count line, a comment
+line, then the atoms), read by lib/xyz's `parse_xyz`; the basis by the name
+PySCF uses, in any case, with or without the hyphens (lib/basis/named:
+"sto-3g", "6-31g", "6-31g*", "6-31g**", "cc-pvdz", "cc-pvtz", "def2-svp",
+"def2-tzvp"). It gives the `Molecule` of lib/hf/molecule, the one
+`molecule_from` builds from atomic numbers, an array of coordinates and a
+`Basis` record: the same atoms, shells and primitives, bit for bit
+(scf/molecule_text.viv checks every molecule of the lock ladder).
+
+`molecule_in(atoms, basis, unit)` reads the coordinates in `unit`: "bohr"
+(or "b", "au", any case, PySCF's `unit="B"`) or "angstrom" ("a", "ang").
+Charge, spin and Cartesian functions are record updates, as for every
+`Molecule`:
+
+    cation = Molecule { charge: 1, spin: 1, ..mol }
+
+An element symbol lib/xyz does not know, a basis name that is not one of
+the eight, or an element the chosen basis set has no functions for stops
+the run and says what is available.
+
+The name is looked up among the tables of lib/basis (lib/basis/named). A
+program that uses none of them gets all eight; one that uses the table it
+names (`import basis.pople631g`) links that table alone, and a name whose
+table such a program does not use stops the run and says which import
+line to add.
+
+Used with `import hf.mole`.
+###
+
+from xyz import ELEMENTS, parse_xyz
+from basis.named import basis_named
+from basis.basis import Basis, basis_first, BS_Z
+from hf.molecule import Molecule, molecule_bohr, molecule_from
+
+#| The elements a basis set has functions for, as "H to Ar" when they run
+#| without a gap from the first, else listed.
+def mol_coverage(b: Basis) -> Str {
+    zs = []
+    for s to len(b.shells) {
+        if s == 0 or b.shells[s, BS_Z] != b.shells[s - 1, BS_Z] {
+            zs = append(zs, b.shells[s, BS_Z])
+        }
+    }
+    last = len(zs) - 1
+    if zs[last] - zs[0] == last {
+        return ELEMENTS[zs[0] - 1] + " to " + ELEMENTS[zs[last] - 1]
+    }
+    names = []
+    for z in zs {
+        names = append(names, ELEMENTS[z - 1])
+    }
+    return join(", ", names)
+}
+
+#| Whether `unit` names bohr rather than angstrom, as PySCF reads `unit=`:
+#| a unit starting with B or AU is bohr, one starting with A is angstrom, and
+#| any other unit stops the run.
+def mol_is_bohr(unit: Str) {
+    u = unit.strip().upper()
+    if u.startswith("B") or u.startswith("AU") {
+        return 1
+    }
+    if not u.startswith("A") {
+        stop(f"unknown unit {unit!r}: \"angstrom\" or \"bohr\"")
+    }
+    return 0
+}
+
+#| The molecule of `atoms` (text: `symbol x y z` per atom, `;` or newlines
+#| between atoms, or an XYZ file) with coordinates in `unit`, in the basis set
+#| PySCF names `basis`.
+def molecule_in(atoms: Str, basis: Str, unit: Str) -> Molecule {
+    bohr = mol_is_bohr(unit)
+    if atoms.replace(";", " ").strip() == "" {
+        stop("molecule: the text has no atoms")
+    }
+    g = parse_xyz(atoms)
+    b = basis_named(basis)
+    for i to len(g.z) {
+        if basis_first(b, g.z[i]) < 0 {
+            stop(f"the basis set {basis!r} has no functions for {g.symbols[i]} (Z = {g.z[i]:d}); it covers " + mol_coverage(b))
+        }
+    }
+    if bohr > 0 {
+        return molecule_bohr(g.z, g.xyz, b)
+    }
+    return molecule_from(g.z, g.xyz, b)
+}
+
+#| The molecule of `atoms` (angstrom, as PySCF's default) in the basis set
+#| PySCF names `basis`: `molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")`.
+def molecule(atoms: Str, basis: Str) -> Molecule {
+    return molecule_in(atoms, basis, "angstrom")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,78 @@
+# Enums, match and optionals in all three engines:
+# lang/viv/tests/int_enum.rs runs this and holds its output to enums.txt.
+
+enum Color { Red, Green, Blue }
+enum Node {
+    Num(Int)
+    Sym(Str)
+    Add(Node, Node)
+    Fail(Str)
+}
+
+def eval_node(n: Node, x: Int) -> Int {
+    match n {
+        Num(v) => {
+            return v
+        }
+        Sym(_) => {
+            return x
+        }
+        Add(a, b) => {
+            return eval_node(a, x) + eval_node(b, x)
+        }
+        Fail(why) => {
+            print("failed:", why)
+            return 0
+        }
+    }
+    return 0
+}
+
+def lookup(names: [Str], want: Str) -> Int? {
+    n: Int = len(names)
+    for k to n {
+        if names[k] == want {
+            return Some(k)
+        }
+    }
+    return None
+}
+
+c = Color.Green
+print(c)
+print(c == Color.Green, c != Color.Blue)
+e = Node.Add(Node.Num(2), Node.Add(Node.Sym("x"), Node.Num(40)))
+print(e)
+show e
+print(eval_node(e, 10))
+print(str(Node.Fail("no \"rule\"")))
+names = ["a", "b", "c"]
+r = lookup(names, "c")
+print(r)
+match r {
+    Some(k) => print("found at", k)
+    None => print("missing")
+}
+match lookup(names, "z") {
+    Some(k) => print("found", k)
+    None => print("missing")
+}
+match c {
+    Red | Blue => print("red or blue")
+    _ => print("green")
+}
+t: Int? = None
+five: Int = 5
+for i to five {
+    t = Some(i * i)
+}
+print(t)
+
+test "a match reads a payload, and a variant prints its name" {
+    e = Node.Add(Node.Num(2), Node.Sym("x"))
+    assert_true(eval_node(e, 5) == 7)
+    assert_true(str(Color.Green) == "Green")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

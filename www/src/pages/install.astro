@@ -1,0 +1,162 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import { REPO_PUBLIC, GITHUB } from '../lib/repo.js';
+import Code from '../components/Code.astro';
+import Base from '../layouts/Base.astro';
+import Toc from '../components/Toc.astro';
+import facts from '../data/facts.json';
+
+const mb = (facts.wasmBytes / 1024 / 1024).toFixed(1);
+const TOC: [string, string][] = [
+  ['source', 'Build from source'],
+  ['hello', 'A first program'],
+  ['speed', 'What compiling is for'],
+  ['wasm', 'Straight to wasm'],
+  ['browser', 'The browser compiler'],
+  ['editor', 'Editor support'],
+  ['binaries', 'Prebuilt binaries'],
+];
+---
+
+<Base
+  title="Install · Viv"
+  description="Build the Viv compiler from source with cargo, then compile a program to C99 and run it. Two commands, no dependency beyond a C compiler and libm."
+  eyebrow="Install"
+  heading="Get a compiler on your machine">
+  <div class="withtoc">
+    <div>
+  <p class="lede">
+    There is nothing to install if you only want to read and run — the
+    <a href="/workbench">workbench</a> and <a href="/cli">terminal</a> are the same compiler as
+    a {mb} MB wasm module. Install when you want native speed, OpenMP, or to link Viv output into
+    something else.
+  </p>
+
+  <h2 id="source">Build from source</h2>
+  <p>
+    Rust is the only prerequisite. Viv is a cargo workspace member, so one command builds it:
+  </p>
+  {!REPO_PUBLIC && <p class="note">The repository is not public yet; these commands run in a checkout of it.</p>}
+  <Code lang="sh" code={`${REPO_PUBLIC ? `git clone ${GITHUB}\ncd viv\n` : ''}cargo build --release -p viv`} />
+  <p>
+    The binary lands at <code>target/release/viv</code>. Put it on your <code>PATH</code> or call
+    it where it is. <code>cargo install --path lang/viv</code> works too if you would rather it go
+    to <code>~/.cargo/bin</code>.
+  </p>
+  <p class="note">
+    The workspace pins <code>blake3</code> to the 1.5 line, because newer releases pull a
+    dependency that needs Rust edition 2024. Anything from Rust 1.77 up will build it.
+  </p>
+
+  <h3>Check that it works</h3>
+  <p>The test suite covers the kit and all four languages built on it:</p>
+  <Code lang="sh" code={`cargo test --workspace`} />
+
+  <h2 id="hello">A first program</h2>
+  <p>
+    A restricted Hartree–Fock calculation on H₂ in an STO-3G basis (the Gaussian integrals, the
+    Fock build and the self-consistent-field loop, all in Viv), compiled to C and run:
+  </p>
+  <Code lang="console" code={`$ viv lang/viv/examples/h2_sto3g.viv -o h2.c
+wrote h2.c (624 IR nodes, 1891 debug entries)
+
+$ wc -l h2.c
+4637 h2.c
+
+$ cc -std=c99 -O2 h2.c -lm -o h2 && ./h2
+...
+narrate: Converged.
+narrate: Final E_total (hartree):
+E_total: -1.11671
+PASS H2/STO-3G total energy near textbook -1.117`} />
+  <p>
+    That <code>-1.11671</code> is the Szabo &amp; Ostlund reference value, and the
+    <code>PASS</code> line is the program checking itself — the <code>test</code> block is in the
+    source, and what it prints is the claim the author wrote. The C needs no library but
+    libm.
+  </p>
+
+  <h3>With OpenMP</h3>
+  <p>
+    <code>parallel for</code> becomes an OpenMP pragma, so the compiled program needs the runtime
+    flag to use it. On macOS with Homebrew's libomp:
+  </p>
+  <Code lang="sh" code={`cc -std=c99 -O3 -Xpreprocessor -fopenmp \\
+   -I/opt/homebrew/opt/libomp/include -L/opt/homebrew/opt/libomp/lib \\
+   program.c -lomp -lm -o program
+OMP_NUM_THREADS=8 ./program`} />
+  <p>On Linux with gcc, add <code>-fopenmp</code>.</p>
+
+  <h2 id="speed">What compiling is for</h2>
+  <p>
+    The interpreter answers quickly and is the one the browser runs. For long runs, compile the
+    same source to C: the compiled program's speed comes from the C compiler's optimizer (clang
+    or gcc), since Viv itself contains no optimizer.
+  </p>
+
+  <h2 id="wasm">Compile straight to wasm</h2>
+  <p>
+    The direct backend skips C and emits a module itself. So far it handles numbers, arrays,
+    control flow and functions (see the <a href="/reference#backends">backend matrix</a>), and on
+    anything else it stops with an error naming the unsupported feature:
+  </p>
+  <Code lang="console" code={`$ viv sumsq.viv -o sumsq.wasm
+wrote sumsq.wasm (317 bytes wasm)`} />
+  <p>
+    The module imports the transcendentals and an output hook from its host, so running it takes
+    a few lines of JavaScript and no runtime. The
+    <a href="/internals#wasm-backend">internals page</a> pulls one of these apart section by
+    section.
+  </p>
+
+  <h2 id="browser">Build the browser compiler</h2>
+  <p>
+    The wasm module this site runs on is built from the same crate, as a cdylib against
+    <code>wasm32-unknown-unknown</code> without emscripten or wasm-bindgen.
+    JavaScript calls its exported functions directly, passing bytes through a shared buffer:
+  </p>
+  <Code lang="sh" code={`cd www
+sh ./build-wasm.sh     # -> www/public/viv/viv.wasm
+npm install && npm run dev`} />
+  <p class="note">
+    The script passes <code>--remap-path-prefix</code> so no local filesystem path ends up in the
+    served binary (rustc embeds source paths in panic messages), and then greps the output to
+    check. The site build needs neither Rust nor this script; it serves the <code>viv.wasm</code> the
+    script produced.
+  </p>
+
+  <h2 id="editor">Editor support</h2>
+  <p>
+    None yet, beyond the Monaco grammar the <a href="/workbench">workbench</a> registers. An LSP
+    server is the likely next step, and most of what it needs exists: every IR node already carries
+    a span, and diagnostics are structured values with a JSON renderer. Until then,
+    <code>viv file.viv -o /dev/null</code> type-checks a file and prints its diagnostics.
+  </p>
+
+  <h2 id="binaries">Prebuilt binaries</h2>
+  <p>
+    Not published yet. The plan is macOS arm64 first and linux x86_64 next, attached to a GitHub
+    release with checksums, once the small open items in
+    the project's list of gaps are fixed. The project publishes no
+    binaries until then.
+  </p>
+
+  <div class="nextprev">
+    <span><a href="/tour">← Learn the language</a></span>
+    <span><a href="/examples">Programs to compile →</a></span>
+  </div>
+</div>
+    <Toc items={TOC} />
+  </div>
+
+  <style>
+    h2 {
+      scroll-margin-top: 72px;
+    }
+    .r {
+      text-align: right;
+      padding-right: 1.3rem;
+    }
+  </style>
+</Base>

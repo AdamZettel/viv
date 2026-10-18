@@ -1,0 +1,315 @@
+###
+Strings, ported from TheAlgorithms/Python: strings/knuth_morris_pratt.py,
+strings/palindrome.py, strings/check_anagrams.py. A string is an array of character
+codes: `chars("text")` makes one, `text(a)` prints one, and `zeros(0)` is the empty
+string (`chars("")` is refused). A list of strings is one array of codes with a
+separator between the words, and `word_starts` finds where each word begins.
+###
+import seq
+
+SPACE = 32.0
+BAR = 124.0
+
+# ---------------------------------------------------------------- string helpers
+#| Python `s[::-1]`.
+def reversed(s: Arr) -> Arr {
+    n = len(s)
+    out = zeros(n)
+    for i to n {
+        out[i] = s[n - 1.0 - i]
+    }
+    return out
+}
+
+#| Python `str.lower` on ASCII letters.
+def lower(s: Arr) -> Arr {
+    out = copy(s)
+    for i to len(s) {
+        if s[i] >= 65.0 and s[i] <= 90.0 {
+            out[i] = s[i] + 32.0
+        }
+    }
+    return out
+}
+
+def is_alnum(c) -> Bool {
+    return (c >= 48.0 and c <= 57.0) or (c >= 65.0 and c <= 90.0) or (c >= 97.0 and c <= 122.0)
+}
+
+def is_space(c) -> Bool {
+    return c == SPACE or (c >= 9.0 and c <= 13.0)
+}
+
+#| Python `str.strip()`.
+def strip(s: Arr) -> Arr {
+    lo = 0.0
+    hi = len(s)
+    while lo < hi and is_space(s[lo]) {
+        lo += 1.0
+    }
+    while hi > lo and is_space(s[hi - 1.0]) {
+        hi -= 1.0
+    }
+    return s[lo:hi]
+}
+
+#| The entries of s that are not `drop` (Python `s.replace(" ", "")` when drop is a space).
+def without(s: Arr, drop) -> Arr {
+    out = []
+    for i to len(s) {
+        if s[i] != drop {
+            out = append(out, s[i])
+        }
+    }
+    return out
+}
+
+#| Where each word of a `sep`-separated list starts, plus one past the end of the last
+#| word + 1, so word k is words[starts[k]:starts[k + 1] - 1].
+def word_starts(words: Arr, sep) -> Arr {
+    count = 1.0
+    for i to len(words) {
+        if words[i] == sep {
+            count += 1.0
+        }
+    }
+    starts = zeros(count + 1.0)
+    k = 1.0
+    for i to len(words) {
+        if words[i] == sep {
+            starts[k] = i + 1.0
+            k += 1.0
+        }
+    }
+    starts[count] = len(words) + 1.0
+    return starts
+}
+
+def word(words: Arr, starts: Arr, k) -> Arr {
+    return words[starts[k]:starts[k + 1.0] - 1.0]
+}
+
+# ---------------------------------------------------------------- KMP
+#| knuth_morris_pratt.py get_failure_array: failure[j] is the length of the longest
+#| proper prefix of pattern[0..j] that is also a suffix of it.
+def get_failure_array(pattern: Arr) -> Arr {
+    failure = zeros(len(pattern))
+    i = 0.0
+    j = 1.0
+    while j < len(pattern) {
+        if pattern[i] == pattern[j] {
+            i += 1.0
+        }
+        else if i > 0.0 {
+            i = failure[i - 1.0]
+            continue
+        }
+        failure[j] = i
+        j += 1.0
+    }
+    return failure
+}
+
+#| knuth_morris_pratt.py knuth_morris_pratt: the index of the first occurrence of
+#| pattern in text, or -1.
+def knuth_morris_pratt(text: Arr, pattern: Arr) {
+    failure = get_failure_array(pattern)
+    i = 0.0
+    j = 0.0
+    while i < len(text) {
+        if pattern[j] == text[i] {
+            if j == len(pattern) - 1.0 {
+                return i - j
+            }
+            j += 1.0
+        }
+        else if j > 0.0 {
+            j = failure[j - 1.0]
+            continue
+        }
+        i += 1.0
+    }
+    return -1.0
+}
+
+#| Python `str.find`, the brute-force check the KMP tests compare against.
+def find(text: Arr, pattern: Arr) {
+    for i to len(text) - len(pattern) + 1.0 {
+        if all(text[i:i + len(pattern)] == pattern) {
+            return i
+        }
+    }
+    return -1.0
+}
+
+# ---------------------------------------------------------------- palindromes
+#| palindrome.py is_palindrome: two indices walking inward.
+def is_palindrome(s: Arr) -> Bool {
+    start_i = 0.0
+    end_i = len(s) - 1.0
+    while start_i < end_i {
+        if s[start_i] == s[end_i] {
+            start_i += 1.0
+            end_i -= 1.0
+        }
+        else {
+            return false
+        }
+    }
+    return true
+}
+
+#| palindrome.py is_palindrome_traversal: all(s[i] == s[n - i - 1] for i in range(n // 2)).
+def is_palindrome_traversal(s: Arr) -> Bool {
+    n = len(s)
+    for i to floor(n / 2.0) {
+        if s[i] != s[n - i - 1.0] {
+            return false
+        }
+    }
+    return true
+}
+
+#| palindrome.py is_palindrome_recursive: compare the ends, recurse on s[1:-1].
+def is_palindrome_recursive(s: Arr) -> Bool {
+    if len(s) <= 1.0 {
+        return true
+    }
+    if s[0] == s[len(s) - 1.0] {
+        return is_palindrome_recursive(s[1:len(s) - 1])
+    }
+    return false
+}
+
+#| palindrome.py is_palindrome_slice: s == s[::-1].
+def is_palindrome_slice(s: Arr) -> Bool {
+    return all(s == reversed(s))
+}
+
+#| palindrome.py is_palindrome_ignore_case_and_spaces: keep the lowercased
+#| alphanumerics, then compare with the reverse.
+def is_palindrome_ignore_case_and_spaces(s: Arr) -> Bool {
+    kept = []
+    for i to len(s) {
+        if is_alnum(s[i]) {
+            kept = append(kept, s[i])
+        }
+    }
+    kept = lower(kept)
+    return all(kept == reversed(kept))
+}
+
+# ---------------------------------------------------------------- anagrams
+#| check_anagrams.py: lowercase, strip, drop spaces, then count each character up in
+#| one string and down in the other. The defaultdict(int) is an array indexed by code.
+def check_anagrams(first: Arr, second: Arr) -> Bool {
+    a = without(strip(lower(first)), SPACE)
+    b = without(strip(lower(second)), SPACE)
+    if len(a) != len(b) {
+        return false
+    }
+    count = zeros(128)
+    for i to len(a) {
+        count[a[i]] += 1.0
+        count[b[i]] -= 1.0
+    }
+    for c to 128 {
+        if count[c] != 0.0 {
+            return false
+        }
+    }
+    return true
+}
+
+# ---------------------------------------------------------------- runs
+kmp_1 = knuth_morris_pratt(chars("alskfjaldsabc1abc1abc12k23adsfabcabc"), chars("abc1abc12"))
+kmp_2 = knuth_morris_pratt(chars("alskfjaldsk23adsfabcabc"), chars("abc1abc12"))
+kmp_3 = knuth_morris_pratt(chars("ABABZABABYABABX"), chars("ABABX"))
+kmp_4 = knuth_morris_pratt(chars("ABAAAAAB"), chars("AAAB"))
+kmp_5 = knuth_morris_pratt(chars("abcxabcdabxabcdabcdabcy"), chars("abcdabcy"))
+show kmp_1
+show kmp_2
+show kmp_3
+show kmp_4
+show kmp_5
+kmp = chars("knuth_morris_pratt")
+probes = chars("kn|h_m|rr|tt|not there")
+probe_at = word_starts(probes, BAR)
+kmp_finds = zeros(5)
+for k to 5 {
+    kmp_finds[k] = knuth_morris_pratt(kmp, word(probes, probe_at, k))
+}
+show kmp_finds
+failure = get_failure_array(chars("aabaabaaa"))
+show failure
+
+# palindrome.py test_data, in insertion order
+pal_words = chars("MALAYALAM|String|rotor|level|A|BB|ABC|amanaplanacanalpanama|abcdba|AB")
+pal_at = word_starts(pal_words, BAR)
+pal_expected = [1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0]
+palindromes = zeros(10, 4)
+for k to 10 {
+    s = word(pal_words, pal_at, k)
+    if is_palindrome(s) {
+        palindromes[k, 0] = 1.0
+    }
+    if is_palindrome_traversal(s) {
+        palindromes[k, 1] = 1.0
+    }
+    if is_palindrome_recursive(s) {
+        palindromes[k, 2] = 1.0
+    }
+    if is_palindrome_slice(s) {
+        palindromes[k, 3] = 1.0
+    }
+}
+show palindromes
+loose = chars("A man a plan a canal Panama|Was it a car or a cat I saw?|Hello World|Never Odd or Even|")
+loose_at = word_starts(loose, BAR)
+loose_palindromes = zeros(5)
+for k to 5 {
+    if is_palindrome_ignore_case_and_spaces(word(loose, loose_at, k)) {
+        loose_palindromes[k] = 1.0
+    }
+}
+show loose_palindromes
+
+anagram_silent = check_anagrams(chars("Silent"), chars("Listen"))
+anagram_string = check_anagrams(chars("This is a string"), chars("Is this a string"))
+anagram_spaces = check_anagrams(chars("This is    a      string"), chars("Is     this a string"))
+anagram_there = check_anagrams(chars("There"), chars("Their"))
+show anagram_silent
+show anagram_string
+show anagram_spaces
+show anagram_there
+
+test "kmp __main__ asserts" {
+    assert_near(kmp_1, 14.0, 0.0)
+    assert_near(kmp_3, 10.0, 0.0)
+    assert_near(kmp_4, 4.0, 0.0)
+    assert_near(kmp_5, 15.0, 0.0)
+    for k to 5 {
+        assert_near(kmp_finds[k], find(kmp, word(probes, probe_at, k)), 0.0)
+    }
+    assert_true(all(failure == [0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 2.0]))
+}
+
+test "palindrome test_data, four ways" {
+    for k to 10 {
+        for way to 4 {
+            assert_near(palindromes[k, way], pal_expected[k], 0.0)
+        }
+    }
+    assert_true(all(loose_palindromes == [1.0, 1.0, 0.0, 1.0, 1.0]))
+}
+
+test "check_anagrams doctests" {
+    assert_true(anagram_silent)
+    assert_true(anagram_string)
+    assert_true(anagram_spaces)
+    assert_true(not anagram_there)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2016-2022 TheAlgorithms and contributors (TheAlgorithms/Python)
+# SPDX-FileCopyrightText: 2026 The Viv authors

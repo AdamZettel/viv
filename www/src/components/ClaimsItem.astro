@@ -1,0 +1,21 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One number in a post's Claims panel (ClaimsPanel.astro): the number, its
+// status, the sentence it is in, and what establishes it or why nothing does.
+import katex from 'katex';
+import { renderProse } from '../lib/richText.js';
+
+interface Props { n: { raw: string; status: string; line: number; sentence: string; what: string; accepted: string; failing: boolean } }
+const { n } = Astro.props;
+const prose = (s: string) => renderProse(s, katex);
+const num = /[\\^{]/.test(n.raw) ? prose(`$${n.raw.replace(/%$/, '\\%')}$`) : n.raw;
+---
+<li class={`cl-item${n.failing ? ' cl-failing' : ''}`}>
+  <span class="cl-num" set:html={num} />
+  <span class={`cl-chip cl-s-${n.status}`}>{n.status}{n.accepted ? ', accepted' : ''}</span>
+  <span class="cl-line">line {n.line}</span>
+  <p class="cl-sent" set:html={prose(n.sentence)} />
+  {n.what && <p class="cl-what">{n.what}</p>}
+  {n.accepted && <p class="cl-what">Accepted: {n.accepted}</p>}
+</li>

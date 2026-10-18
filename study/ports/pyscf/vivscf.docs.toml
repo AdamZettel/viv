@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference text of vp.scf.run (viv-lang.org/vipyr/scf/run and
+# help(vp.scf.run)), read by python/vipyr/_spec.py. vivscf.export.toml
+# declares the parameters and results; this file adds the prose. Each
+# example runs when `python -m vipyr.docs` writes the pages, and its output
+# is shown as printed.
+
+summary = "Restricted or unrestricted Hartree-Fock for a molecule in a Gaussian basis set, with PySCF's names, shapes and units."
+
+description = """
+The molecule is data: atomic numbers, positions in angstrom, a basis set,
+the charge and the spin. The run builds the one- and two-electron integrals,
+starts from the core-Hamiltonian guess, and iterates the self-consistent
+field with DIIS until both the energy change and the orbital gradient are
+below their tolerances. The defaults are water in STO-3G.
+
+The results use PySCF's conventions: `e_tot` is the total energy in hartree,
+including the nuclear repulsion `e_nuc`; `mo_energy`, `mo_coeff` and `dm`
+have the shapes `pyscf.scf.RHF` and `UHF` give them.
+"""
+
+notes = """
+Hartree-Fock writes the wavefunction as one Slater determinant and makes the
+energy stationary over the orbitals. In a basis of $n$ atomic orbitals with
+overlap matrix $S$, restricted Hartree-Fock solves the Roothaan-Hall
+equations
+
+$$F(D)\\,C = S\\,C\\,\\varepsilon, \\qquad D = 2\\,C_{\\mathrm{occ}} C_{\\mathrm{occ}}^{\\mathsf T},$$
+
+where the Fock matrix $F = h + J(D) - \\tfrac12 K(D)$ depends on the density
+$D$ it determines, so the equations are solved by iteration. Unrestricted
+Hartree-Fock keeps one density per spin (the Pople-Nesbet equations).
+
+Each iteration builds $J$ and $K$ from the electron-repulsion integrals
+(McMurchie-Davidson, lib/hf), in core or direct as `jk` says, then
+diagonalizes $F$ in an orthonormal basis. Canonical orthogonalization drops
+overlap eigenvalues at or below $10^{-8}$, so `nmo` can be smaller than
+`nao` for a near-dependent basis. Pulay's DIIS extrapolates the Fock matrix
+from the last `diis_size` iterations, minimizing the norm of the commutator
+$FDS - SDF$.
+
+The run has converged when the energy changes by less than `e_tol` and the
+largest element of $FDS - SDF$ is below `grad_tol`. With $N$ basis
+functions the two-electron integrals take $O(N^4)$ time per build (in core,
+$O(N^4)$ memory as well).
+
+Limits: atoms H to Ar (the basis tables) and the five basis sets listed;
+no point-group symmetry and no density fitting. lib/hf has a level shift
+and damping, but this function does not expose them.
+"""
+
+see_also = ["dft.pw", "nuclear.skyrme_hf"]
+
+[[references]]
+text = "Q. Sun et al., PySCF: the Python-based simulations of chemistry framework, WIREs Computational Molecular Science 8, e1340 (2018). The upstream code this program is checked against."
+doi = "10.1002/wcms.1340"
+
+[[references]]
+text = "C. C. J. Roothaan, New developments in molecular orbital theory, Reviews of Modern Physics 23, 69 (1951)."
+doi = "10.1103/RevModPhys.23.69"
+
+[[references]]
+text = "J. A. Pople and R. K. Nesbet, Self-consistent orbitals for radicals, Journal of Chemical Physics 22, 571 (1954)."
+doi = "10.1063/1.1740120"
+
+[[references]]
+text = "P. Pulay, Convergence acceleration of iterative sequences. The case of SCF iteration, Chemical Physics Letters 73, 393 (1980)."
+doi = "10.1016/0009-2614(80)80396-4"
+
+[[references]]
+text = "L. E. McMurchie and E. R. Davidson, One- and two-electron integrals over Cartesian Gaussian functions, Journal of Computational Physics 26, 218 (1978)."
+doi = "10.1016/0021-9991(78)90092-X"
+
+[[examples]]
+caption = "An open-shell molecule: the OH radical (one unpaired electron) by UHF."
+code = '''import numpy as np
+import vipyr as vp
+r = vp.scf.run(atoms=[8, 1], coords=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),
+               basis="sto-3g", method="uhf", spin=1)
+print(round(r.e_tot, 8), r.converged, r.mo_energy.shape)'''
+
+[params.atoms]
+range = "1 (H) to 18 (Ar), the elements the basis tables cover; given with coords"
+
+[params.coords]
+units = "angstrom"
+range = "one row of three per atom; given with atoms"
+
+[params.spin]
+range = "2S, the number of unpaired electrons: 0 for RHF; with UHF its parity must match the electron count, or the program stops with a message"
+
+[params.e_tol]
+units = "hartree"
+range = "0 asks for an exact repeat of the energy, which the run may not reach before max_iter"
+
+[params.max_iter]
+range = "a run that reaches it returns converged = False, and the program's test that the run converged fails in check()"

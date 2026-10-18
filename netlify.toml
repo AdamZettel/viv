@@ -1,0 +1,226 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# viv-lang.org
+#
+# The site is built from the compiler sources in this repo: build-wasm.sh
+# produces the browser compiler, and the site's staging scripts generate the
+# programs, the builtin tables and the counts from the repo
+# itself. Netlify has Rust, so the deployed wasm is always built from the
+# commit being deployed.
+
+[build]
+  base = "www"
+  publish = "dist"
+  # then the MCP endpoint's function, from what the site build wrote (server/mcp/README.md)
+  command = "rustup target add wasm32-unknown-unknown && sh ./build-wasm.sh && npm run build && node ../server/mcp/build-function.mjs"
+
+# The MCP endpoint at /mcp is a Netlify Function: build-function.mjs bundles
+# server/mcp into netlify/functions/mcp/ (the interpreter, the modules, the posts
+# and the search index beside the code), and the function reads those files at
+# run time, so they are listed for the bundle. The code is already bundled:
+# zisi packs it as it is, keeping import.meta.url pointing at that directory.
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "zisi"
+
+[functions.mcp]
+  included_files = ["netlify/functions/mcp/**"]
+
+# Node 24: in Active LTS until 2026-10-20, maintained to 2028-04-30. 22 has been
+# in maintenance since 2025-10-21.
+[build.environment]
+  NODE_VERSION = "24"
+  # The public build (www/src/lib/repo.js): no sign-in, composing or
+  # reviewing, and the pages do not probe /api/health.
+  PUBLIC_SITE = "1"
+
+# Astro fingerprints these, so they can be cached forever. The compiler the
+# pages load is here too, as /_astro/viv.<content hash>.wasm (astro.config.mjs,
+# vivWasmAddress; src/lib/vivWasm.js): fetched once per reader per compiler
+# version, and by a page view only when the reader runs something.
+[[headers]]
+  for = "/_astro/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# The compiler at its unhashed address, for the docs, scripts and links that
+# name it. The site's pages do not load it from here.
+[[headers]]
+  for = "/viv/*.wasm"
+  [headers.values]
+    Cache-Control = "public, max-age=86400, must-revalidate"
+
+# The embed is meant for OTHER sites: the script and the wasm must be fetchable
+# cross-origin.
+[[headers]]
+  for = "/embed/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
+    Cache-Control = "public, max-age=3600"
+
+# Programs are served as text so the browser shows them instead of downloading.
+[[headers]]
+  for = "/programs/*"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+    Access-Control-Allow-Origin = "*"
+
+# Security headers on everything. The site is static and same-origin; what the
+# policy allows beyond 'self', and why:
+#   script-src   'wasm-unsafe-eval' to compile viv.wasm; the hashes are the
+#                site's inline scripts (the theme switch, Astro's island
+#                loaders, the lane labels on /posts). `npm run build` fails when a page
+#                has an inline script whose hash is not here, and
+#                `node scripts/csp.mjs --write` updates the list. No
+#                'unsafe-inline': an injected <script> or onerror= does not run.
+#   style-src    'unsafe-inline' for KaTeX's and the figures' style attributes,
+#                and Google Fonts' stylesheet
+#   worker-src   blob: for the editor's workers
+#   img-src      data: and blob: for figures drawn in the page
+#   connect-src  'self': the wasm, the JSON the pages load, and /api
+#   frame-ancestors 'none' (with X-Frame-Options for older browsers): no
+#                site may frame any page (clickjacking). It is set here, on
+#                every path, so a path with no page (the 404) is covered too:
+#                Netlify matches a header rule against the requested path, not
+#                the 404.html it serves. The embed needs no exception: other
+#                sites load /embed/viv-embed.js and viv.wasm as a script and a
+#                fetch, never in a frame. The build (scripts/csp.mjs) fails when
+#                a page, or a path with no page, can be framed.
+# `node scripts/serve-dist.mjs` serves dist/ with these headers, so the site
+# test (npm run sitetest) runs every page under this policy.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Strict-Transport-Security = "max-age=31536000"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"
+    X-Frame-Options = "DENY"
+    Content-Security-Policy = """\
+      default-src 'self'; \
+      script-src 'self' 'wasm-unsafe-eval' \
+        'sha256-9j39ZQM0N1Q4AB+p6vHBUAWH9y1ee/AHlgibZzQUUpk=' \
+        'sha256-Q2BPg90ZMplYY+FSdApNErhpWafg2hcRRbndmvxuL/Q=' \
+        'sha256-QdBcYON/c6BEX5LFtBil0Qq2Hf6y0qVTW24MambcdKk=' \
+        'sha256-QzWFZi+FLIx23tnm9SBU4aEgx4x8DsuASP07mfqol/c=' \
+        'sha256-U7a72oKuFFz8D7GUHLA1NZ0ciymHmDOc9T9aVDg2rWU=' \
+        'sha256-Z4QsRjoE4iUrAHyEy/uhOMnzwN2OwRjXjNUX0WJjJQU=' \
+        'sha256-dAruaugnNBUzIEJycG7BRaGT0zhtmqx4+M9oBBco7+g=' \
+        'sha256-eIXWvAmxkr251LJZkjniEK5LcPF3NkapbJepohwYRIc=' \
+        'sha256-eMJdzDrmM9YIexEe1HIOyaNLzzw/ViV7XnzhnCh6zxY=' \
+        'sha256-xfdMwuEmwieO12A7pC2uP39D1OoLfOxvsErP0gPJRtg=' \
+        'sha256-xk5VQs6FprFK9ABr9KTi2SkQHyWuxgUZ4miwnaRRySI=' \
+      ; \
+      style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+      font-src 'self' https://fonts.gstatic.com data:; \
+      img-src 'self' data: blob:; \
+      connect-src 'self'; \
+      worker-src 'self' blob:; \
+      object-src 'none'; \
+      base-uri 'self'; \
+      frame-ancestors 'none'; \
+      form-action 'self'\
+    """
+
+# what a language model reads (www/scripts/llms-build.mjs): plain text in UTF-8,
+# so the dashes and arrows in it arrive intact
+[[headers]]
+  for = "/llms.txt"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+[[headers]]
+  for = "/llms-full.txt"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+[[headers]]
+  for = "/viv-prompt-pack.md"
+  [headers.values]
+    Content-Type = "text/markdown; charset=utf-8"
+
+# MCP clients reach the read-only tools at /mcp (server/mcp/README.md), answered
+# by the function above.
+[[redirects]]
+  from = "/mcp"
+  to = "/.netlify/functions/mcp"
+  status = 200
+  force = true
+
+# The DFT source index is the file the site runs; the other files have pages
+# of their own under /dft/source/<slug>.
+[[redirects]]
+  from = "/dft/source"
+  to = "/dft/source/pwdft_it"
+  status = 301
+
+# The showcase index became the top of the gallery; /show/<slug> pages stay.
+[[redirects]]
+  from = "/show"
+  to = "/gallery"
+  status = 301
+
+# The findings became claims, which are posts in the claims channel.
+[[redirects]]
+  from = "/findings/:slug"
+  to = "/p/:slug"
+  status = 301
+
+[[redirects]]
+  from = "/vipyr/findings/:slug"
+  to = "/p/:slug"
+  status = 301
+
+# The pages moved when the language docs got their own domain.
+[[redirects]]
+  from = "/viv"
+  to = "/"
+  status = 301
+
+# The Viv side's Applications page became its Gallery.
+[[redirects]]
+  from = "/applications"
+  to = "/gallery"
+  status = 301
+
+# Two near-duplicate doubling-time posts were removed; their fixed version stays.
+[[redirects]]
+  from = "/p/how-long-until-the-money-doubles"
+  to = "/p/doubling-time-fixed-for-tiny-and-negative-rates"
+  status = 301
+
+[[redirects]]
+  from = "/p/doubling-time-compounded-n-times-a-year"
+  to = "/p/doubling-time-fixed-for-tiny-and-negative-rates"
+  status = 301
+
+[[redirects]]
+  from = "/ide"
+  to = "/workbench"
+  status = 301
+
+[[redirects]]
+  from = "/get"
+  to = "/install"
+  status = 301
+
+[[redirects]]
+  from = "/compiler"
+  to = "/internals"
+  status = 301
+
+# The list of posts was called the feed and lived at /feed. A redirect keeps
+# the fragment (/feed#published opens /posts#published). `force`: the build
+# also writes a page at /feed (Astro's redirect, for the dev server), and without
+# it Netlify would serve that page, whose meta refresh drops the fragment.
+# /feed.xml is not redirected: the Atom feed is still served there, the address
+# subscribers already have.
+[[redirects]]
+  from = "/feed"
+  to = "/posts"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/feed/*"
+  to = "/posts"
+  status = 301
+  force = true

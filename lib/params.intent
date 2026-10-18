@@ -1,0 +1,103 @@
+module lib/params
+  A model's parameters as one flat vector, with a small table beside it (the
+  layout) that says where each matrix starts and what shape it has. A
+  gradient, a momentum or any other array of the same layout is one more
+  vector of the same length, so an optimizer is one loop over a vector, or
+  one loop over the table when it needs each matrix whole. A matrix is stored
+  row by row from its offset, and a program names a tensor by the row of the
+  table it took when it was declared.
+
+param_table  @c9b0b351
+  what   An empty layout with room for `count` tensors, each declared in turn by
+         `param_declare`.
+  count  how many tensors the layout will hold
+
+param_declare  @04ad9ae3
+  what    Declare the next tensor as a `rows` by `cols` matrix and return its index,
+          which is the name the program calls it by. It starts where the tensor
+          before it ends, so the vector has no gaps; a row of the table with no
+          rows yet is one not declared.
+  layout  the table, filled in one row at a time
+  rows    the new tensor's rows
+  cols    its columns
+  k       the first row of the table not yet declared: the new tensor's index
+  start   where the new tensor starts in the flat vector
+
+param_tensors  @ee54cec9
+  what    How many tensors the layout has, which is what a loop over them counts to.
+  layout  the table
+
+param_offset  @a01144a4
+  what    Where tensor `k` starts in the flat vector.
+  layout  the table
+  k       the tensor
+
+param_rows  @2740402a
+  what    The number of rows of tensor `k`.
+  layout  the table
+  k       the tensor
+
+param_cols  @10585182
+  what    The number of columns of tensor `k`.
+  layout  the table
+  k       the tensor
+
+param_count  @7b1692e3
+  what    How many numbers the whole model is: where the last tensor ends.
+  layout  the table
+  last    the last tensor's index
+
+param_zeros  @a2d74062
+  what    A vector of zeros with this layout. It is how a parameter set starts, and
+          how a gradient or an optimizer's memory starts too.
+  layout  the table
+
+param_get  @c3c16359
+  what    Tensor `k` of the vector `theta`, copied out as a matrix to compute with.
+  how     One slice per row: row i of the matrix is the `cols` numbers from
+          `start + i cols` on.
+  theta   the flat vector
+  layout  the table
+  k       the tensor
+  start   where it starts in the vector
+  rows    its rows
+  cols    its columns
+  M       the copy, `rows` by `cols`
+  i       a row
+
+param_set  @b7cd2c9a
+  what    Write the matrix `M` into tensor `k` of `theta`, replacing what was there.
+          `M` may be larger than the tensor; its top-left corner is what is used.
+  theta   the flat vector, written into
+  layout  the table
+  k       the tensor
+  M       the matrix to write
+  start   where the tensor starts in the vector
+  cols    its columns
+  i       a row
+  at      where that row starts in the vector
+
+param_add  @54f3a6a8
+  what    Add the matrix `M` into tensor `k` of `theta`. This is how a backward pass
+          hands a weight's gradient to the gradient set.
+  theta   the flat vector, added into
+  layout  the table
+  k       the tensor
+  M       the matrix to add, the tensor's shape
+  start   where the tensor starts in the vector
+  cols    its columns
+  i       a row
+  at      where that row starts in the vector
+
+param_add_row  @97807738
+  what      Add row `from_row` of the matrix `M` into row `row` of tensor `k`. An
+            embedding's gradient arrives this way: only the row of the token that
+            was looked up receives anything.
+  theta     the flat vector, added into
+  layout    the table
+  k         the tensor
+  row       the row of the tensor that receives
+  M         the matrix the row comes from
+  from_row  which of its rows
+  cols      the tensor's columns
+  start     where row `row` starts in the vector

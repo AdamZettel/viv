@@ -1,0 +1,240 @@
+###
+post: The Hartree-Fock options, a record with defaults
+agent: claude
+
+Every choice a Hartree-Fock run makes lives in one record, `ScfOptions`.
+`scf_defaults()` returns the production choices, and a caller changes the
+ones it wants with a record update:
+
+    o = ScfOptions { guess: GS_CORE, max_iter: 200, ..scf_defaults() }
+
+| Field | Default | Meaning |
+|---|---|---|
+| `method` | `SCF_AUTO` | `SCF_RHF`, `SCF_UHF`, `SCF_ROHF`; automatic is RHF for a closed shell and UHF otherwise |
+| `guess` | 0 | the starting density: a member of `gs_methods()` (lib/hf/guess) |
+| `accelerator` | 0 | a member of `accel_methods()`: DIIS, plain iteration, damping |
+| `jk` | 0 | a member of the J/K registry: packed, pair tables, dense, direct |
+| `orthogonalizer` | 0 | a member of `orth_methods()` |
+| `eigensolver` | 0 | a member of `eig_methods()` |
+| `rohf_coupling` | 0 | a member of `rohf_couplings()` (lib/hf/coupling) |
+| `diis_size` | 8 | Fock matrices DIIS mixes |
+| `diis_start` | 1 | iterations whose Fock matrix DIIS leaves out: 1 leaves out the guess's, as PySCF's `diis_start_cycle = 1` does |
+| `max_iter` | 100 | the SCF iteration limit |
+| `e_tol` | 1e-12 | the energy change that counts as converged |
+| `grad_tol` | 1e-9 | the largest commutator element that counts as converged |
+| `level_shift` | 0 | raise the virtual orbitals by this much (Eh) |
+| `damping` | 0.3 | the damping factor of the damping accelerator |
+| `lindep` | 1e-8 | canonical orthogonalization drops overlap eigenvalues at or below this |
+| `screen_tol` | 1e-14 | Schwarz screening threshold of the integral builds, in core and direct |
+| `direct_tol` | 1e-13 | the direct J/K build skips a shell quartet whose Schwarz bound times the largest density element it meets is at or below this (PySCF's `direct_scf_tol`) |
+| `fock_rebuild` | 8 | a direct run builds J and K from the change of density, and from the whole density every this many iterations and on every iteration once the convergence test first passes; 0 builds from the whole density every iteration |
+| `eri_members` | 0 | the ERI members the pipeline runs, a bit mask; 0 means MD (generated kernels) and HGP |
+| `cross_check` | 0 | 0: every integral stage runs its production member; 1: every member, asserting they agree |
+| `stab_hessian` | 0 | the Hessian member stability analysis uses (lib/hf/stab) |
+
+Index 0 of every registry is its production member. `scf_checked()` is the
+defaults with `cross_check` on: the integrals computed by every member and
+held to agree within each stage's tolerance, which is how the lock ladder
+(scf/) and the library's own tests run. A cross-checked stage asserts
+agreement, and an assertion outside a `test` block prints its verdict, so a
+program that cross-checks at its top level prints one line per stage.
+
+**The column array.** A registry member is called through `apply`, which
+passes numbers, functions and arrays, not records. So the members read their
+options from a plain array, `opt_array(o, na, nb, enuc)`, one column per
+field plus the electron counts and the nuclear repulsion. The SCF driver
+builds it once per run; nothing above the registries builds one by hand, and
+the column numbers (`OPT_*` below) are named in this module only.
+`opt_new()` is the array of the defaults, for a member's own tests.
+
+Used with `import hf.opts`.
+###
+
+record ScfOptions {
+    method: Num
+    guess: Num
+    accelerator: Num
+    jk: Num
+    orthogonalizer: Num
+    eigensolver: Num
+    rohf_coupling: Num
+    diis_size: Num
+    diis_start: Num
+    max_iter: Num
+    e_tol: Num
+    grad_tol: Num
+    level_shift: Num
+    damping: Num
+    lindep: Num
+    screen_tol: Num
+    direct_tol: Num
+    fock_rebuild: Num
+    eri_members: Num
+    cross_check: Num
+    stab_hessian: Num
+}
+
+# the SCF methods (ScfOptions.method)
+SCF_AUTO = 0
+SCF_RHF = 1
+SCF_UHF = 2
+SCF_ROHF = 3
+
+# the defaults scf_defaults writes: the SCF iteration limit, the DIIS
+# history length and the first iteration it keeps, the three tolerances, the damping factor and the
+# canonical orthogonalization threshold, and the direct J/K build's density
+# screening threshold and full-rebuild interval
+OPT_MAXIT_DEFAULT = 100
+OPT_DIIS_N_DEFAULT = 8
+OPT_DIIS_START_DEFAULT = 1
+OPT_ETOL_DEFAULT = 1.0e-12
+OPT_GTOL_DEFAULT = 1.0e-9
+OPT_SCREEN_TOL_DEFAULT = 1.0e-14
+OPT_DIRECT_TOL_DEFAULT = 1.0e-13
+OPT_FOCK_REBUILD_DEFAULT = 8
+OPT_DAMP_DEFAULT = 0.3
+OPT_LINDEP_DEFAULT = 1.0e-8
+
+#| The production options: every registry at its production member, DIIS over
+#| `OPT_DIIS_N_DEFAULT` matrices from the second iteration on (the guess's
+#| Fock matrix stays out, as in PySCF), at most `OPT_MAXIT_DEFAULT` iterations,
+#| converged at an energy change below `OPT_ETOL_DEFAULT` and a commutator
+#| below `OPT_GTOL_DEFAULT`, each integral stage by its production member.
+def scf_defaults() -> ScfOptions {
+    return ScfOptions {
+        method: SCF_AUTO,
+        guess: 0,
+        accelerator: 0,
+        jk: 0,
+        orthogonalizer: 0,
+        eigensolver: 0,
+        rohf_coupling: 0,
+        diis_size: OPT_DIIS_N_DEFAULT,
+        diis_start: OPT_DIIS_START_DEFAULT,
+        max_iter: OPT_MAXIT_DEFAULT,
+        e_tol: OPT_ETOL_DEFAULT,
+        grad_tol: OPT_GTOL_DEFAULT,
+        level_shift: 0.0,
+        damping: OPT_DAMP_DEFAULT,
+        lindep: OPT_LINDEP_DEFAULT,
+        screen_tol: OPT_SCREEN_TOL_DEFAULT,
+        direct_tol: OPT_DIRECT_TOL_DEFAULT,
+        fock_rebuild: OPT_FOCK_REBUILD_DEFAULT,
+        eri_members: 0,
+        cross_check: 0,
+        stab_hessian: 0
+    }
+}
+
+#| The defaults with every integral stage cross-checked: all members run and
+#| must agree.
+def scf_checked() -> ScfOptions {
+    return ScfOptions { cross_check: 1, ..scf_defaults() }
+}
+
+# ---- the column array the registry members read ----------------------------------
+
+OPT_LEN = 24
+
+OPT_NALPHA = 0
+OPT_NBETA = 1
+OPT_MAXIT = 2
+OPT_GUESS = 3
+OPT_ACCEL = 4
+OPT_JK = 5
+OPT_ORTH = 6
+OPT_ROHF_COUPLING = 7
+OPT_DIIS_N = 8
+OPT_EIGEN = 9
+OPT_ERI_MASK = 10
+OPT_METHOD = 11
+OPT_PRODUCTION = 12
+OPT_STAB_HESS = 13
+OPT_DIRECT_TOL = 14
+OPT_ENUC = 16
+OPT_ETOL = 17
+OPT_GTOL = 18
+OPT_SHIFT = 19
+OPT_SCREEN_TOL = 20
+OPT_LINDEP = 21
+OPT_DAMP = 22
+
+#| The column array of options `o` for `na` alpha and `nb` beta electrons and
+#| nuclear repulsion `enuc`. `OPT_PRODUCTION` is `1` when `o.cross_check` is `0`.
+def opt_array(o: ScfOptions, na, nb, enuc) {
+    a = zeros(OPT_LEN)
+    a[OPT_NALPHA] = na
+    a[OPT_NBETA] = nb
+    a[OPT_ENUC] = enuc
+    a[OPT_METHOD] = o.method
+    a[OPT_GUESS] = o.guess
+    a[OPT_ACCEL] = o.accelerator
+    a[OPT_JK] = o.jk
+    a[OPT_ORTH] = o.orthogonalizer
+    a[OPT_EIGEN] = o.eigensolver
+    a[OPT_ROHF_COUPLING] = o.rohf_coupling
+    a[OPT_DIIS_N] = o.diis_size
+    a[OPT_MAXIT] = o.max_iter
+    a[OPT_ETOL] = o.e_tol
+    a[OPT_GTOL] = o.grad_tol
+    a[OPT_SHIFT] = o.level_shift
+    a[OPT_DAMP] = o.damping
+    a[OPT_LINDEP] = o.lindep
+    a[OPT_SCREEN_TOL] = o.screen_tol
+    a[OPT_DIRECT_TOL] = o.direct_tol
+    a[OPT_ERI_MASK] = o.eri_members
+    a[OPT_PRODUCTION] = 1 - o.cross_check
+    a[OPT_STAB_HESS] = o.stab_hessian
+    return a
+}
+
+#| The column array of the defaults, with no electrons: what a registry
+#| member's own tests pass it.
+def opt_new() {
+    return opt_array(scf_defaults(), 0, 0, 0.0)
+}
+
+test "the defaults are the ones the table lists" {
+    opt_o = scf_defaults()
+    assert_near(opt_o.max_iter, 100, 0.0)
+    assert_near(opt_o.diis_size, 8, 0.0)
+    assert_near(opt_o.diis_start, 1, 0.0)
+    assert_near(opt_o.e_tol, 1.0e-12, 0.0)
+    assert_near(opt_o.grad_tol, 1.0e-9, 0.0)
+    assert_near(opt_o.screen_tol, 1.0e-14, 0.0)
+    assert_near(opt_o.direct_tol, 1.0e-13, 0.0)
+    assert_near(opt_o.fock_rebuild, 8, 0.0)
+    assert_near(opt_o.damping, 0.3, 0.0)
+    assert_near(opt_o.lindep, 1.0e-8, 0.0)
+    assert_near(opt_o.cross_check, 0, 0.0)
+    assert_near(scf_checked().cross_check, 1, 0.0)
+    # every registry starts at its production member, 0
+    assert_near(opt_o.guess + opt_o.accelerator + opt_o.jk + opt_o.orthogonalizer + opt_o.eigensolver, 0.0, 0.0)
+    assert_near(opt_o.rohf_coupling + opt_o.eri_members + opt_o.stab_hessian + opt_o.level_shift + opt_o.method, 0.0, 0.0)
+}
+
+test "an update changes the fields it names and the column array follows" {
+    opt_o = ScfOptions { guess: 1, level_shift: 0.25, ..scf_defaults() }
+    assert_near(opt_o.guess, 1, 0.0)
+    assert_near(opt_o.max_iter, 100, 0.0)
+    opt_a = opt_array(opt_o, 5, 4, 9.25)
+    assert_near(opt_a[OPT_GUESS], 1, 0.0)
+    assert_near(opt_a[OPT_SHIFT], 0.25, 0.0)
+    assert_near(opt_a[OPT_PRODUCTION], 1, 0.0)
+    assert_near(opt_a[OPT_NALPHA], 5, 0.0)
+    assert_near(opt_a[OPT_NBETA], 4, 0.0)
+    assert_near(opt_a[OPT_ENUC], 9.25, 0.0)
+    assert_near(opt_a[OPT_MAXIT], 100, 0.0)
+}
+
+test "no two columns collide" {
+    opt_cols = [OPT_NALPHA, OPT_NBETA, OPT_MAXIT, OPT_GUESS, OPT_ACCEL, OPT_JK, OPT_ORTH, OPT_ROHF_COUPLING, OPT_DIIS_N, OPT_EIGEN, OPT_ERI_MASK, OPT_METHOD, OPT_PRODUCTION, OPT_STAB_HESS, OPT_ENUC, OPT_ETOL, OPT_GTOL, OPT_SHIFT, OPT_SCREEN_TOL, OPT_DIRECT_TOL, OPT_LINDEP, OPT_DAMP]
+    opt_seen = zeros(OPT_LEN)
+    for opt_i to len(opt_cols) {
+        opt_seen[opt_cols[opt_i]] = opt_seen[opt_cols[opt_i]] + 1
+    }
+    assert_near(max(opt_seen), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

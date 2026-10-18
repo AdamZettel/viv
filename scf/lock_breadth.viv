@@ -1,0 +1,66 @@
+# The breadth set: ammonia, methane and nitrogen in 6-31G*, 6D and 5D.
+#
+# These add nitrogen and carbon to the ladder and, in N2, a molecule with 30
+# Cartesian AOs. Above 19 AOs lib/hfref stores two checksums, the pair
+# diagonal and 256 sampled integrals instead of the full set (half of the
+# samples drawn from quartets that hold a d function), so the computed
+# integrals are held to those, with MD and HGP swept against each other over
+# every integral. The RHF energies on them must match PySCF 2.5.0 within
+# 1e-9:
+#
+#     NH3  6D -56.183883221995956   5D -56.183242048528086
+#     CH4  6D -40.19514034833892    5D -40.194810317717504
+#     N2   6D -108.94266234798268   5D -108.94186885969204
+#
+#     tools/both-engines.sh scf lock_breadth
+from hf.hf import hf_lock_sampled
+from hf.molecule import molecule_packs
+from hfref.breadth_631gs import (
+    BREADTH631GS_SEED_WSUM, ch4_631gs_atoms, CH4_631GS_E_RHF, CH4_631GS_E_RHF_CART,
+    ch4_631gs_eri8_cart_diag, ch4_631gs_eri8_cart_idx, CH4_631GS_ERI8_CART_SUMSQ,
+    ch4_631gs_eri8_cart_val, CH4_631GS_ERI8_CART_WSUM, ch4_631gs_eri8_sph_diag,
+    ch4_631gs_eri8_sph_idx, CH4_631GS_ERI8_SPH_SUMSQ, ch4_631gs_eri8_sph_val,
+    CH4_631GS_ERI8_SPH_WSUM, ch4_631gs_prims, ch4_631gs_s_sph, ch4_631gs_s_unit,
+    ch4_631gs_shells, ch4_631gs_t_sph, ch4_631gs_t_unit, ch4_631gs_v_sph, ch4_631gs_v_unit,
+    n2_631gs_atoms, N2_631GS_E_RHF, N2_631GS_E_RHF_CART, n2_631gs_eri8_cart_diag,
+    n2_631gs_eri8_cart_idx, N2_631GS_ERI8_CART_SUMSQ, n2_631gs_eri8_cart_val,
+    N2_631GS_ERI8_CART_WSUM, n2_631gs_eri8_sph_diag, n2_631gs_eri8_sph_idx,
+    N2_631GS_ERI8_SPH_SUMSQ, n2_631gs_eri8_sph_val, N2_631GS_ERI8_SPH_WSUM, n2_631gs_prims,
+    n2_631gs_s_sph, n2_631gs_s_unit, n2_631gs_shells, n2_631gs_t_sph, n2_631gs_t_unit,
+    n2_631gs_v_sph, n2_631gs_v_unit, nh3_631gs_atoms, NH3_631GS_E_RHF, NH3_631GS_E_RHF_CART,
+    nh3_631gs_eri8_cart_diag, nh3_631gs_eri8_cart_idx, NH3_631GS_ERI8_CART_SUMSQ,
+    nh3_631gs_eri8_cart_val, NH3_631GS_ERI8_CART_WSUM, nh3_631gs_eri8_sph_diag,
+    nh3_631gs_eri8_sph_idx, NH3_631GS_ERI8_SPH_SUMSQ, nh3_631gs_eri8_sph_val,
+    NH3_631GS_ERI8_SPH_WSUM, nh3_631gs_prims, nh3_631gs_s_sph, nh3_631gs_s_unit,
+    nh3_631gs_shells, nh3_631gs_t_sph, nh3_631gs_t_unit, nh3_631gs_v_sph, nh3_631gs_v_unit,
+)
+
+test "ammonia 6-31G*: RHF 6D -56.183883221995956 and 5D -56.183242048528086" {
+    lkb_e6, lkb_e5 = hf_lock_sampled(molecule_packs(nh3_631gs_atoms(), nh3_631gs_shells(), nh3_631gs_prims()),
+        nh3_631gs_eri8_cart_idx(), nh3_631gs_eri8_cart_val(), nh3_631gs_eri8_cart_diag(), [NH3_631GS_ERI8_CART_SUMSQ, NH3_631GS_ERI8_CART_WSUM],
+        nh3_631gs_eri8_sph_idx(), nh3_631gs_eri8_sph_val(), nh3_631gs_eri8_sph_diag(), [NH3_631GS_ERI8_SPH_SUMSQ, NH3_631GS_ERI8_SPH_WSUM], BREADTH631GS_SEED_WSUM,
+        nh3_631gs_s_unit(), nh3_631gs_t_unit() + nh3_631gs_v_unit(), nh3_631gs_s_sph(), nh3_631gs_t_sph() + nh3_631gs_v_sph(), NH3_631GS_E_RHF_CART, NH3_631GS_E_RHF, 1)
+    assert_lt(abs(lkb_e6), 1.0e-9)
+    assert_lt(abs(lkb_e5), 1.0e-9)
+}
+
+test "methane 6-31G*: RHF 6D -40.19514034833892 and 5D -40.194810317717504" {
+    lkb_e6, lkb_e5 = hf_lock_sampled(molecule_packs(ch4_631gs_atoms(), ch4_631gs_shells(), ch4_631gs_prims()),
+        ch4_631gs_eri8_cart_idx(), ch4_631gs_eri8_cart_val(), ch4_631gs_eri8_cart_diag(), [CH4_631GS_ERI8_CART_SUMSQ, CH4_631GS_ERI8_CART_WSUM],
+        ch4_631gs_eri8_sph_idx(), ch4_631gs_eri8_sph_val(), ch4_631gs_eri8_sph_diag(), [CH4_631GS_ERI8_SPH_SUMSQ, CH4_631GS_ERI8_SPH_WSUM], BREADTH631GS_SEED_WSUM,
+        ch4_631gs_s_unit(), ch4_631gs_t_unit() + ch4_631gs_v_unit(), ch4_631gs_s_sph(), ch4_631gs_t_sph() + ch4_631gs_v_sph(), CH4_631GS_E_RHF_CART, CH4_631GS_E_RHF, 1)
+    assert_lt(abs(lkb_e6), 1.0e-9)
+    assert_lt(abs(lkb_e5), 1.0e-9)
+}
+
+test "nitrogen 6-31G*: RHF 6D -108.94266234798268 and 5D -108.94186885969204" {
+    lkb_e6, lkb_e5 = hf_lock_sampled(molecule_packs(n2_631gs_atoms(), n2_631gs_shells(), n2_631gs_prims()),
+        n2_631gs_eri8_cart_idx(), n2_631gs_eri8_cart_val(), n2_631gs_eri8_cart_diag(), [N2_631GS_ERI8_CART_SUMSQ, N2_631GS_ERI8_CART_WSUM],
+        n2_631gs_eri8_sph_idx(), n2_631gs_eri8_sph_val(), n2_631gs_eri8_sph_diag(), [N2_631GS_ERI8_SPH_SUMSQ, N2_631GS_ERI8_SPH_WSUM], BREADTH631GS_SEED_WSUM,
+        n2_631gs_s_unit(), n2_631gs_t_unit() + n2_631gs_v_unit(), n2_631gs_s_sph(), n2_631gs_t_sph() + n2_631gs_v_sph(), N2_631GS_E_RHF_CART, N2_631GS_E_RHF, 1)
+    assert_lt(abs(lkb_e6), 1.0e-9)
+    assert_lt(abs(lkb_e5), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

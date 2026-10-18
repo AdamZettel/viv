@@ -1,0 +1,349 @@
+###
+post: Restricted Hartree-Fock, one set of orbitals with two electrons in each
+agent: claude
+
+For a closed shell, with as many alpha as beta electrons, RHF puts both
+spins in the same orbitals. The state is one total density
+`D = 2 C_occ C_occ^T` (PySCF's `make_rdm1`), the Fock matrix is
+`F = H + J - K/2` and the energy `E = E_nuc + (1/2) Tr D (H + F)`. The loop
+that solves it is lib/hf/scf_loop's, shared with UHF and ROHF; this page holds
+the RHF checks against PySCF 2.5.0, on the reference integrals of lib/hfref:
+
+- every combination of guess, accelerator, orthogonalizer, eigensolver, J/K
+  member, level shift and DIIS size the presets list lands on PySCF's water
+  6-31G energy and density;
+- DIIS converges water 6-31G from the core guess in 6 to 19 iterations, plain
+  iteration in 31 to 99;
+- water STO-3G, water 6-31G* in 6D and 5D, helium in STO-3G and cc-pVDZ, the
+  bare helium dication and PySCF's atom-free model;
+- the diffuse H4 chain, where canonical orthogonalization drops a vector;
+- stretched water, which has two RHF states: the run lands on one, and the
+  plain step from each of PySCF's densities moves it as little as PySCF's own
+  step does;
+- 200 iterations past convergence stay on the solution.
+
+A run here is
+
+    p = scf_setup(H, S, G, na, na, enuc, scf_defaults())
+    r = scf(p)
+
+with the options changed by a record update, for example
+`ScfOptions { guess: GS_CORE, ..scf_defaults() }`. Programs that start from
+a molecule use lib/hf/scf instead.
+
+Used with `import hf.rhf`.
+###
+
+from hf.scf_loop import scf, scf_run_from, scf_setup, scf_setup_with, scf_step, ScfResult, ScfSetup
+from hf.opts import scf_defaults, ScfOptions
+from hf.eri_store import es_index8, es_len8
+from hf.orthogonalize import ORTH_SYMM
+from hf.density import den_idempotency, den_stack1, den_trace
+from hf.guess import GS_CORE
+from hf.accelerate import ACCEL_CDIIS, ACCEL_NONE
+from hfref.water_sto3g import (
+    WATERSTO3G_E_NUC, WATERSTO3G_E_RHF, watersto3g_eri8_cart, WATERSTO3G_RHF_NALPHA,
+    watersto3g_s_unit, watersto3g_t_unit, watersto3g_v_unit,
+)
+from hfref.water_631g import (
+    WATER631G_E_NUC, WATER631G_E_RHF, water631g_eri8_cart, water631g_rhf_d,
+    WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, water631g_s_unit, water631g_t_unit,
+    water631g_v_unit,
+)
+from hfref.water_631g_stretched import (
+    WATER631G_STRETCHED_E_DEFAULT, WATER631G_STRETCHED_E_NUC, WATER631G_STRETCHED_E_STABLE,
+    water631g_stretched_eri8_cart, water631g_stretched_rhf_d, WATER631G_STRETCHED_RHF_NALPHA,
+    WATER631G_STRETCHED_RHF_NBETA, WATER631G_STRETCHED_RHF_SELF_STEP,
+    water631g_stretched_rhf_stable_d, WATER631G_STRETCHED_RHF_STABLE_SELF_STEP,
+    water631g_stretched_s_unit, water631g_stretched_t_unit, water631g_stretched_v_unit,
+)
+from hfref.water_631gs_cart import (
+    WATER631GS_CART_E_NUC, water631gs_cart_eri8_cart, WATER631GS_CART_RHF_NALPHA,
+    water631gs_cart_s_unit, water631gs_cart_t_unit, water631gs_cart_v_unit,
+)
+from hfref.water_631gs_sph import (
+    WATER631GS_SPH_E_NUC, water631gs_sph_eri8_sph, WATER631GS_SPH_RHF_NALPHA,
+    water631gs_sph_s_sph, water631gs_sph_t_sph, water631gs_sph_v_sph,
+)
+from hfref.he import (
+    he_ccpvdz_eri8_cart, HE_CCPVDZ_RHF_NALPHA, he_ccpvdz_s_unit, he_ccpvdz_t_unit,
+    he_ccpvdz_v_unit, HE_STO3G_DICATION_RHF_NALPHA, HE_STO3G_E_DICATION_RHF, he_sto3g_eri8_cart,
+    HE_STO3G_RHF_NALPHA, he_sto3g_s_unit, he_sto3g_t_unit, he_sto3g_v_unit,
+)
+from hfref.h4_diffuse import (
+    H4_DIFFUSE_E_NUC, H4_DIFFUSE_E_RHF, h4_diffuse_eri8_cart, H4_DIFFUSE_NAO_CART,
+    H4_DIFFUSE_NDROP, H4_DIFFUSE_RHF_NALPHA, H4_DIFFUSE_RHF_NBETA, h4_diffuse_s_unit,
+    h4_diffuse_t_unit, h4_diffuse_v_unit,
+)
+from hfref.pyscf_tests import pst_model_h, PST_MODEL_NELEC, PST_MODEL_U, PST_RHF_757
+
+#| The report of rhf_t_all_presets: the worst gap in energy, density, second
+#| energy formula, commutator, electron count and idempotency over the
+#| presets, and how many converged.
+record RhfPresets {
+    energy: Num
+    density: Num
+    energy_check: Num
+    grad: Num
+    electrons: Num
+    idempotency: Num
+    converged: Num
+}
+
+#| The report of rhf_t_import: how far one plain step moves the imported
+#| density and its energy from the reference, how far converging further
+#| moves the density, how far a step moves that one, and the energy gap
+#| after converging further.
+record RhfImport {
+    step: Num
+    step_energy: Num
+    drift: Num
+    step_after: Num
+    energy_after: Num
+}
+
+# ---- tests ------------------------------------------------------------------------
+
+#| Test helper: a closed-shell setup on water 6-31G's reference integrals.
+#~ test
+#@ b6b5883a
+def rhf_t_water_setup(o: ScfOptions) -> ScfSetup {
+    H = water631g_t_unit() + water631g_v_unit()
+    return scf_setup(H, water631g_s_unit(), water631g_eri8_cart(), WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, WATER631G_E_NUC, o)
+}
+
+#| Test helper: RHF on water 6-31G with the accelerator, guess,
+#| orthogonalizer, eigensolver, J/K member, level shift and DIIS size of one
+#| preset row.
+#~ test
+#@ 88001c4e
+def rhf_t_water(p: Arr) -> ScfResult {
+    o = ScfOptions { accelerator: p[0], guess: p[1], orthogonalizer: p[2], eigensolver: p[3], jk: p[4], level_shift: p[5], diis_size: p[6], ..scf_defaults() }
+    return scf(rhf_t_water_setup(o))
+}
+
+#| The presets: the production default, then each alternative member alone.
+#~ test
+#@ 45cb647a
+def rhf_t_presets() {
+    return [[0, 0, 0, 0, 0, 0, 8], [0, 1, 0, 0, 0, 0, 8], [1, 1, 0, 0, 0, 0, 8], [2, 1, 0, 0, 0, 0, 8], [0, 2, 0, 0, 0, 0, 8], [0, 3, 0, 0, 0, 0, 8], [0, 1, 1, 0, 0, 0, 8], [0, 1, 2, 0, 0, 0, 8], [0, 1, 3, 0, 0, 0, 8], [0, 1, 0, 1, 0, 0, 8], [0, 1, 0, 2, 0, 0, 8], [0, 1, 0, 0, 1, 0, 8], [0, 1, 0, 0, 2, 0, 8], [1, 1, 0, 0, 0, 0.3, 8], [0, 2, 2, 1, 1, 0, 3]]
+}
+
+#~ test
+def rhf_t_all_presets() {
+    ps = rhf_t_presets()
+    S = water631g_s_unit()
+    Dref = water631g_rhf_d()
+    w = RhfPresets { energy: 0.0, density: 0.0, energy_check: 0.0, grad: 0.0, electrons: 0.0, idempotency: 0.0, converged: 0 }
+    for k to len(ps) {
+        r = rhf_t_water(slab(ps, k))
+        D = den_stack1(r.density)
+        w = RhfPresets {
+            energy: max(w.energy, abs(r.energy - WATER631G_E_RHF)),
+            density: max(w.density, max(abs(r.density - Dref))),
+            energy_check: max(w.energy_check, abs(r.energy_check - r.energy)),
+            grad: max(w.grad, r.grad),
+            electrons: max(w.electrons, abs(den_trace(D, 0, S) - 10.0)),
+            idempotency: max(w.idempotency, den_idempotency(D, 0, S, 2.0)),
+            converged: w.converged + r.converged
+        }
+    }
+    return w
+}
+
+#| Test helper: RHF on reference integrals, asserting convergence; the energy.
+#~ test
+#@ 54e1faca
+def rhf_t_energy(H: Arr, S: Arr, Gp: Arr, na, enuc) {
+    r = scf(scf_setup(H, S, Gp, na, na, enuc, scf_defaults()))
+    assert_near(r.converged, 1.0, 0.0)
+    return r.energy
+}
+
+test "every preset on water 6-31G converges to PySCF's energy and density" {
+    rhf_w = rhf_t_all_presets()
+    assert_near(rhf_w.converged, len(rhf_t_presets()), 0.0)
+    assert_lt(rhf_w.energy, 1.0e-10)
+    # PySCF stops at a gradient of 1e-6, so its density is good to a few 1e-9
+    assert_lt(rhf_w.density, 1.0e-8)
+    assert_lt(rhf_w.energy_check, 1.0e-10)
+    assert_lt(rhf_w.grad, 1.0e-8)
+    assert_lt(rhf_w.electrons, 1.0e-12)
+    assert_lt(rhf_w.idempotency, 1.0e-10)
+}
+
+test "CDIIS needs fewer iterations than plain iteration" {
+    # from the core guess; measured: 14 with CDIIS, 45 plain, 41 damped
+    rhf_ndiis = rhf_t_water([ACCEL_CDIIS, GS_CORE, 0, 0, 0, 0, 8]).iterations
+    rhf_nplain = rhf_t_water([ACCEL_NONE, GS_CORE, 0, 0, 0, 0, 8]).iterations
+    assert_lt(rhf_ndiis, 20)
+    assert_gt(rhf_ndiis, 5)
+    assert_gt(rhf_nplain, 30)
+    assert_lt(rhf_nplain, 100)
+    assert_lt(rhf_ndiis, rhf_nplain)
+}
+
+test "water STO-3G and water 6-31G* in 6D and 5D" {
+    rhf_e = rhf_t_energy(watersto3g_t_unit() + watersto3g_v_unit(), watersto3g_s_unit(), watersto3g_eri8_cart(), WATERSTO3G_RHF_NALPHA, WATERSTO3G_E_NUC)
+    assert_lt(abs(rhf_e - WATERSTO3G_E_RHF), 1.0e-10)
+    assert_lt(abs(rhf_e - (-74.9630631297292)), 1.0e-10)
+    rhf_e = rhf_t_energy(water631gs_cart_t_unit() + water631gs_cart_v_unit(), water631gs_cart_s_unit(), water631gs_cart_eri8_cart(), WATER631GS_CART_RHF_NALPHA, WATER631GS_CART_E_NUC)
+    assert_lt(abs(rhf_e - (-76.01049616963635)), 1.0e-9)
+    rhf_e = rhf_t_energy(water631gs_sph_t_sph() + water631gs_sph_v_sph(), water631gs_sph_s_sph(), water631gs_sph_eri8_sph(), WATER631GS_SPH_RHF_NALPHA, WATER631GS_SPH_E_NUC)
+    assert_lt(abs(rhf_e - (-76.0090991085974)), 1.0e-9)
+}
+
+test "helium: STO-3G, cc-pVDZ, and the bare dication" {
+    rhf_e = rhf_t_energy(he_sto3g_t_unit() + he_sto3g_v_unit(), he_sto3g_s_unit(), he_sto3g_eri8_cart(), HE_STO3G_RHF_NALPHA, 0.0)
+    assert_lt(abs(rhf_e - (-2.8077839575399737)), 1.0e-10)
+    rhf_e = rhf_t_energy(he_ccpvdz_t_unit() + he_ccpvdz_v_unit(), he_ccpvdz_s_unit(), he_ccpvdz_eri8_cart(), HE_CCPVDZ_RHF_NALPHA, 0.0)
+    assert_lt(abs(rhf_e - (-2.8551604772427379)), 1.0e-10)
+    # no electrons: the density stays zero and the energy is E_nuc = 0
+    rhf_e = rhf_t_energy(he_sto3g_t_unit() + he_sto3g_v_unit(), he_sto3g_s_unit(), he_sto3g_eri8_cart(), HE_STO3G_DICATION_RHF_NALPHA, 0.0)
+    assert_near(rhf_e, HE_STO3G_E_DICATION_RHF, 0.0)
+}
+
+test "the no-atom model of test_rhf.py:757 gives 0.2" {
+    # h = diag(0, 1, 2), S = I, (ii|ii) = 0.2, two electrons in orbital 0
+    rhf_H = pst_model_h()
+    rhf_S = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    rhf_G = zeros(es_len8(len(rhf_S)))
+    for rhf_i to len(rhf_S) {
+        rhf_G[es_index8(rhf_i, rhf_i, rhf_i, rhf_i)] = PST_MODEL_U
+    }
+    rhf_e = rhf_t_energy(rhf_H, rhf_S, rhf_G, PST_MODEL_NELEC / 2, 0.0)
+    assert_lt(abs(rhf_e - PST_RHF_757), 1.0e-12)
+}
+
+test "zero iterations return the core guess, with test_h2o.py's norm" {
+    rhf_r = scf(rhf_t_water_setup(ScfOptions { guess: GS_CORE, max_iter: 0, ..scf_defaults() }))
+    assert_lt(abs(sqrt(sum(rhf_r.density * rhf_r.density)) - 5.3700828975288122), 1.0e-9)
+    assert_near(rhf_r.converged, 0.0, 0.0)
+}
+
+test "the diffuse H4 chain with canonical orthogonalization" {
+    rhf_H = h4_diffuse_t_unit() + h4_diffuse_v_unit()
+    rhf_p = scf_setup(rhf_H, h4_diffuse_s_unit(), h4_diffuse_eri8_cart(), H4_DIFFUSE_RHF_NALPHA, H4_DIFFUSE_RHF_NBETA, H4_DIFFUSE_E_NUC, scf_defaults())
+    rhf_r = scf(rhf_p)
+    assert_near(rhf_r.converged, 1.0, 0.0)
+    # test_addons.py:414 asserts -1.6291001503057689 to 7 places
+    assert_lt(abs(rhf_r.energy - (-1.6291001503057689)), 1.0e-7)
+    assert_lt(abs(rhf_r.energy - H4_DIFFUSE_E_RHF), 1.0e-10)
+    # one orbital fewer than basis functions
+    assert_near(len(rhf_r.mo_energy), H4_DIFFUSE_NAO_CART - H4_DIFFUSE_NDROP, 0.0)
+    # keeping the near-null vector (Lowdin) lands 2.2e-5 away
+    rhf_r = scf(scf_setup_with(rhf_p, ScfOptions { orthogonalizer: ORTH_SYMM, ..scf_defaults() }))
+    assert_gt(abs(rhf_r.energy - H4_DIFFUSE_E_RHF), 1.0e-6)
+}
+
+#| Test helper: stretched water from the core guess, with options `o`.
+#~ test
+#@ eaf80686
+def rhf_t_stretched(o: ScfOptions) -> ScfSetup {
+    H = water631g_stretched_t_unit() + water631g_stretched_v_unit()
+    return scf_setup(H, water631g_stretched_s_unit(), water631g_stretched_eri8_cart(), WATER631G_STRETCHED_RHF_NALPHA, WATER631G_STRETCHED_RHF_NBETA, WATER631G_STRETCHED_E_NUC, ScfOptions { guess: GS_CORE, ..o })
+}
+
+test "stretched water from the 1e guess lands on one of its two labeled states" {
+    rhf_r = scf(rhf_t_stretched(scf_defaults()))
+    assert_near(rhf_r.converged, 1.0, 0.0)
+    rhf_gap = min(abs(rhf_r.energy - WATER631G_STRETCHED_E_DEFAULT), abs(rhf_r.energy - WATER631G_STRETCHED_E_STABLE))
+    assert_lt(rhf_gap, 1.0e-9)
+    # the two states are 0.028 apart, so landing near one excludes the other
+    assert_gt(WATER631G_STRETCHED_E_DEFAULT - WATER631G_STRETCHED_E_STABLE, 0.02)
+}
+
+#~ test
+def rhf_t_import(D0: Arr, eref) -> RhfImport {
+    p = rhf_t_stretched(scf_defaults())
+    half = D0 * 0.5
+    f = scf_step(p, half, half)
+    tight = rhf_t_stretched(ScfOptions { e_tol: 1.0e-13, grad_tol: 1.0e-12, ..scf_defaults() })
+    r = scf_run_from(tight, half, half)
+    assert_near(r.converged, 1.0, 0.0)
+    g = scf_step(tight, r.alpha.density, r.beta.density)
+    return RhfImport { step: max(abs(f.density - D0)), step_energy: f.energy - eref, drift: max(abs(r.density - D0)), step_after: max(abs(g.density - r.density)), energy_after: r.energy - eref }
+}
+
+test "the fixed-point step from each imported stretched-water density matches PySCF's own step" {
+    # tools/hf_reference.py re-converges each stored density until PySCF's own
+    # step (get_fock, eig, get_occ, make_rdm1) moves it by less than 1e-10 and
+    # records that move as _SELF_STEP: 9.2e-12 for the default state, which
+    # is internally unstable, and 7.3e-12 for the stable one (max abs). This
+    # code's step has to move them by the same amounts.
+    rhf_a = rhf_t_import(water631g_stretched_rhf_d(), WATER631G_STRETCHED_E_DEFAULT)
+    assert_lt(abs(rhf_a.step - WATER631G_STRETCHED_RHF_SELF_STEP), 1.0e-12)
+    assert_lt(abs(rhf_a.step_energy), 1.0e-10)
+    rhf_b = rhf_t_import(water631g_stretched_rhf_stable_d(), WATER631G_STRETCHED_E_STABLE)
+    assert_lt(abs(rhf_b.step - WATER631G_STRETCHED_RHF_STABLE_SELF_STEP), 1.0e-12)
+    assert_lt(abs(rhf_b.step_energy), 1.0e-10)
+    # converging each one further here (gradient 1e-12) stays on its state:
+    # the density moves by less than 1e-6 and the energy by less than 1e-11
+    assert_lt(rhf_a.drift, 1.0e-6)
+    assert_lt(abs(rhf_a.energy_after), 1.0e-11)
+    assert_lt(rhf_b.drift, 1.0e-6)
+    assert_lt(abs(rhf_b.energy_after), 1.0e-11)
+    # and from those converged densities the step is a fixed point
+    assert_lt(rhf_a.step_after, 1.0e-10)
+    assert_lt(rhf_b.step_after, 1.0e-10)
+}
+
+test "the fixed-point step from each tightly converged PySCF stretched-water density reproduces it within 1e-8" {
+    rhf_a = rhf_t_import(water631g_stretched_rhf_d(), WATER631G_STRETCHED_E_DEFAULT)
+    rhf_b = rhf_t_import(water631g_stretched_rhf_stable_d(), WATER631G_STRETCHED_E_STABLE)
+    assert_lt(rhf_a.step, 1.0e-8)
+    assert_lt(rhf_b.step, 1.0e-8)
+    # PySCF's step moves them by about 1e-11, so this one must be as small
+    assert_lt(rhf_a.step, 1.0e-10)
+    assert_lt(rhf_b.step, 1.0e-10)
+    # each is the labeled state, not a third solution: the energy matches,
+    # and converging further here moves the density by less than 1e-6
+    assert_lt(abs(rhf_a.step_energy), 1.0e-10)
+    assert_lt(abs(rhf_b.step_energy), 1.0e-10)
+    assert_lt(rhf_a.drift, 1.0e-6)
+    assert_lt(rhf_b.drift, 1.0e-6)
+}
+
+test "import mode: started from PySCF's water density, RHF stops within a few steps" {
+    rhf_p = rhf_t_water_setup(scf_defaults())
+    rhf_half = water631g_rhf_d() * 0.5
+    rhf_r = scf_run_from(rhf_p, rhf_half, rhf_half)
+    assert_near(rhf_r.converged, 1.0, 0.0)
+    assert_lt(rhf_r.iterations, 5)
+    assert_lt(abs(rhf_r.energy - WATER631G_E_RHF), 1.0e-10)
+    rhf_f = scf_step(rhf_p, rhf_half, rhf_half)
+    assert_lt(max(abs(rhf_f.density - water631g_rhf_d())), 1.0e-8)
+}
+
+test "200 iterations run in fixed memory and stay on the solution" {
+    # an energy tolerance of -1 is never met, so the loop runs to max_iter
+    rhf_nit = 200
+    rhf_r = scf(rhf_t_water_setup(ScfOptions { max_iter: rhf_nit, e_tol: -1.0, guess: GS_CORE, ..scf_defaults() }))
+    assert_near(rhf_r.iterations, rhf_nit, 0.0)
+    assert_near(rhf_r.converged, 0.0, 0.0)
+    assert_lt(abs(rhf_r.energy - WATER631G_E_RHF), 1.0e-10)
+}
+
+test "the result's orbitals: occupations 2 and 0, C^T S C = I, and D = C occ C^T" {
+    rhf_p = rhf_t_water_setup(scf_defaults())
+    rhf_r = scf(rhf_p)
+    rhf_C = rhf_r.mo_coeff
+    assert_near(sum(rhf_r.mo_occ), 10, 0.0)
+    assert_near(rhf_r.mo_occ[WATER631G_RHF_NALPHA - 1], 2, 0.0)
+    assert_near(rhf_r.mo_occ[WATER631G_RHF_NALPHA], 0, 0.0)
+    rhf_I = transpose(rhf_C) @ rhf_p.s @ rhf_C
+    for rhf_i to len(rhf_I) {
+        rhf_I[rhf_i, rhf_i] = rhf_I[rhf_i, rhf_i] - 1.0
+    }
+    assert_lt(max(abs(rhf_I)), 1.0e-12)
+    # the converged density is the projector on the occupied orbitals, within
+    # the convergence threshold
+    rhf_Co = rhf_C[:, 0:WATER631G_RHF_NALPHA]
+    assert_lt(max(abs(2.0 * rhf_Co @ transpose(rhf_Co) - rhf_r.density)), 1.0e-8)
+    # each spin holds half the density, and the orbital energies ascend
+    assert_near(max(abs(rhf_r.alpha.density * 2.0 - rhf_r.density)), 0.0, 0.0)
+    assert_lt(rhf_r.mo_energy[0], rhf_r.mo_energy[1])
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

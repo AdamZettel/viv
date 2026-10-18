@@ -1,0 +1,184 @@
+# The tests of lib/hf/md_onebody that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/md_onebody does not load the references.
+from hf.md_onebody import (
+    md1_all, MD1_FIX_ROW, md1_gap, md1_grid, md1_h, md1_pair, MD1_PS_ROWS, MD1_S, md1_s, MD1_T,
+    md1_t, MD1_T_NATOM, MD1_V, md1_v,
+)
+from hf.basis import (
+    AT_CHG, AT_LEN, AT_X, AT_Y, AT_Z, bas_contract, bas_ncart, bas_nsph, PR_COEF, PR_EXP,
+    PR_LEN, SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+)
+from hfref.prims import (
+    prims_charge_at, PRIMS_NCASE, PRIMS_NPICK, prims_picks, prims_s, prims_shells, prims_t,
+    prims_v,
+)
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, WATER631GS_CART_NAO_CART, water631gs_cart_prims,
+    water631gs_cart_s_unit, water631gs_cart_shells, water631gs_cart_t_unit,
+    water631gs_cart_v_unit,
+)
+
+#| Test helper: the worst relative gap over all `PRIMS_NCASE` prims cases and
+#| their `PRIMS_NPICK` picks, for S, T and V, then how many replacements were
+#| used and how many values were tested.
+def md1_prims_worst() {
+    PS = prims_shells()
+    CH = prims_charge_at()
+    PK = prims_picks()
+    RS = prims_s()
+    RT = prims_t()
+    RV = prims_v()
+    FX = md1_prims_fix()
+    ws = 0.0
+    wt = 0.0
+    wv = 0.0
+    nrep = 0
+    ntest = 0
+    for c to PRIMS_NCASE {
+        atoms = zeros(MD1_T_NATOM, AT_LEN)
+        shells = zeros(2, SH_LEN)
+        pr = md1_prims_case(PS, CH, c, atoms, shells)
+        cn = bas_contract(shells, pr)
+        G = md1_grid(shells)
+        B = md1_pair(atoms, shells, pr, cn, G, 0, 1)
+        nb = shells[1, SH_NCART]
+        for k to PRIMS_NPICK {
+            r = c * PRIMS_NPICK + k
+            col = PK[r, 0] * nb + PK[r, 1]
+            rs, hs = md1_prims_ref(FX, c, k, 0, RS[r])
+            rt, ht = md1_prims_ref(FX, c, k, 1, RT[r])
+            rv, hv = md1_prims_ref(FX, c, k, 2, RV[r])
+            ws = max(ws, abs(B[MD1_S, col] - rs) / abs(rs))
+            wt = max(wt, abs(B[MD1_T, col] - rt) / abs(rt))
+            wv = max(wv, abs(B[MD1_V, col] - rv) / abs(rv))
+            nrep = nrep + hs + ht + hv
+            ntest = ntest + 3
+        }
+    }
+    return ws, wt, wv, nrep, ntest
+}
+
+#| Test helper: packs for case `c` of `lib/hfref/prims`: two single-primitive
+#| shells (rows `4c` and `4c + 1` of `prims_shells()`) on ghost atoms `0` and
+#| `1`, and a unit charge as atom `2`. Fills `atoms` and `shells`; returns prims.
+def md1_prims_case(PS: Arr, CH: Arr, c, atoms: Arr, shells: Arr) {
+    pr = zeros(2, PR_LEN)
+    off = 0
+    for k to 2 {
+        row = MD1_PS_ROWS * c + k
+        l = PS[row, 0]
+        atoms[k, AT_CHG] = 0.0
+        atoms[k, AT_X] = PS[row, 2]
+        atoms[k, AT_Y] = PS[row, 3]
+        atoms[k, AT_Z] = PS[row, 4]
+        shells[k, SH_ATOM] = k
+        shells[k, SH_L] = l
+        shells[k, SH_NPRIM] = 1
+        shells[k, SH_P0] = k
+        shells[k, SH_CART0] = off
+        shells[k, SH_NCART] = bas_ncart(l)
+        shells[k, SH_NSPH] = bas_nsph(l)
+        off = off + bas_ncart(l)
+        pr[k, PR_EXP] = PS[row, 1]
+        pr[k, PR_COEF] = 1.0
+    }
+    atoms[2, AT_CHG] = 1.0
+    atoms[2, AT_X] = CH[c, 0]
+    atoms[2, AT_Y] = CH[c, 1]
+    atoms[2, AT_Z] = CH[c, 2]
+    return pr
+}
+
+#| Test helper: replacement references for the prims picks where PySCF
+#| itself is off. Rows are `(case, pick, kind, value)` with kind `0` = S,
+#| `1` = T, `2` = V. Each value was computed with mpmath in high precision
+#| (Boys by quadrature, the E and R recursions in extended arithmetic) for
+#| every prims value; these are the few where PySCF's value strays furthest
+#| from mpmath's. They are small values made of larger terms that cancel. With them, every one of the 1536 values this module computes
+#| is within 1e-12 relative of its reference, and every row is used once
+#| [test "every prims case up to (f|f) matches PySCF, or mpmath where PySCF is off, to 1e-12 relative in S, T and V"].
+def md1_prims_fix() {
+    return [3, 5, 2, -0.001178412597584757,
+        13, 1, 2, -0.0019645294342202327,
+        13, 5, 2, 0.0008374525065711371,
+        28, 1, 2, -2.033110186633131e-05,
+        28, 2, 2, -2.033110186633131e-05,
+        30, 1, 1, 0.0004330453147922223,
+        37, 2, 2, -0.00010472772310702362,
+        37, 6, 2, -0.00010472772310702362,
+        40, 2, 1, 3.9604762005740864e-05,
+        40, 3, 1, 3.9604762005740864e-05,
+        40, 4, 1, 3.9604762005740864e-05,
+        40, 7, 1, 3.9604762005740864e-05,
+        46, 2, 0, -0.00014972976820902087,
+        46, 5, 0, -0.00014972976820902087]
+}
+
+#| Test helper: the reference for `(case, pick, kind)`: the mpmath value when
+#| `md1_prims_fix` lists one, else PySCF's `ref`; and `1` when it was replaced.
+def md1_prims_ref(FX: Arr, c, k, kind, ref) {
+    for r to len(FX) / MD1_FIX_ROW {
+        if FX[MD1_FIX_ROW * r] == c and FX[MD1_FIX_ROW * r + 1] == k and FX[MD1_FIX_ROW * r + 2] == kind {
+            return FX[MD1_FIX_ROW * r + 3], 1
+        }
+    }
+    return ref, 0
+}
+
+test "water 6-31G* S, T and V match PySCF's unit-Cartesian matrices to 1e-12" {
+    md1_at = water631gs_cart_atoms()
+    md1_sh = water631gs_cart_shells()
+    md1_pr = water631gs_cart_prims()
+    md1_M = md1_all(md1_at, md1_sh, md1_pr)
+    assert_lt(md1_gap(md1_M, MD1_S, water631gs_cart_s_unit()), 1.0e-12)
+    assert_lt(md1_gap(md1_M, MD1_T, water631gs_cart_t_unit()), 1.0e-12)
+    assert_lt(md1_gap(md1_M, MD1_V, water631gs_cart_v_unit()), 1.0e-12)
+}
+
+test "every prims case up to (f|f) matches PySCF, or mpmath where PySCF is off, to 1e-12 relative in S, T and V" {
+    md1_ws, md1_wt, md1_wv, md1_nrep, md1_ntest = md1_prims_worst()
+    assert_lt(md1_ws, 1.0e-12)
+    assert_lt(md1_wt, 1.0e-12)
+    assert_lt(md1_wv, 1.0e-12)
+    # every replacement row was used once, and all 1536 values were tested
+    assert_near(md1_nrep, 14, 0.0)
+    assert_near(md1_ntest, 3 * PRIMS_NCASE * PRIMS_NPICK, 0.0)
+}
+
+test "the diagonal of S is 1 and the stage members agree with md1_all" {
+    md1_at = water631gs_cart_atoms()
+    md1_sh = water631gs_cart_shells()
+    md1_pr = water631gs_cart_prims()
+    md1_S = md1_s(md1_at, md1_sh, md1_pr)
+    md1_w = 0.0
+    for md1_i to WATER631GS_CART_NAO_CART {
+        md1_w = max(md1_w, abs(md1_S[md1_i, md1_i] - 1.0))
+    }
+    assert_lt(md1_w, 1.0e-14)
+    md1_H = md1_h(md1_at, md1_sh, md1_pr)
+    md1_T = md1_t(md1_at, md1_sh, md1_pr)
+    md1_V = md1_v(md1_at, md1_sh, md1_pr)
+    assert_lt(max(abs(md1_H - md1_T - md1_V)), 1.0e-13)
+}
+
+test "a doubled charge doubles V and an uncharged ghost atom leaves V unchanged" {
+    md1_at = water631gs_cart_atoms()
+    md1_sh = water631gs_cart_shells()
+    md1_pr = water631gs_cart_prims()
+    md1_V1 = md1_v(md1_at, md1_sh, md1_pr)
+    md1_at2 = copy(md1_at)
+    md1_at2[:, AT_CHG] = 2.0 * md1_at[:, AT_CHG]
+    assert_lt(max(abs(md1_v(md1_at2, md1_sh, md1_pr) - 2.0 * md1_V1)), 1.0e-12)
+    # A ghost atom is a row with charge 0 and no basis functions on it, as in
+    # PySCF. It adds nothing to the nuclear sum, so V must come back unchanged
+    # to the last bit; 1e-300 is far below any rounding difference.
+    # the ghost goes in the row after the last atom
+    md1_ghost = zeros(AT_LEN)
+    md1_ghost[AT_X:AT_Z + 1] = [0.3, -0.2, 1.1]
+    md1_V3 = md1_v(vcat(md1_at, md1_ghost), md1_sh, md1_pr)
+    assert_lt(max(abs(md1_V3 - md1_V1)), 1.0e-300)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

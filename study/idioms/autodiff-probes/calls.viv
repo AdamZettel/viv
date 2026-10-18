@@ -1,0 +1,179 @@
+###
+Reverse mode through branches and calls.
+
+A branch is recorded as the forward sweep takes it, and the reverse sweep
+goes back down the same one. A call whose arguments depend on the
+differentiated value is inlined and differentiated with the caller, however
+deep; a call with constant arguments stays a call. Central differences as in
+`arrays.viv`: h = 1e-5, entries checked to 1e-7 absolute.
+###
+
+H = 1.0e-5
+FD_TOL = 1.0e-7
+
+def fd_grad(f, x: Arr) {
+    g = zeros(numel(x))
+    for i to numel(x) {
+        at = [i]
+        xp = x + 0.0
+        xm = x + 0.0
+        put(xp, at, take(x, at) + H)
+        put(xm, at, take(x, at) - H)
+        g[i] = (f(xp) - f(xm)) / (2.0 * H)
+    }
+    return g
+}
+
+def fd_miss(g: Arr, fd: Arr) {
+    return max(abs(g - fd))
+}
+
+# ---- branches
+
+#| A piecewise function: which piece depends on x.
+def piecewise(x) {
+    if x < 0.0 {
+        y = x * x
+    }
+    else if x < 1.0 {
+        y = sin(x)
+    }
+    else {
+        y = sin(1.0) + cos(1.0) * (x - 1.0) + x * x * x
+    }
+    return 2.0 * y
+}
+
+#| A branch inside a loop, on values the loop computes: a smooth
+#| clipping of each entry, then a sum of squares.
+def clipped(x: Arr) {
+    total = 0.0
+    for i to len(x) {
+        v = x[i] * 1.5
+        if v > 1.0 {
+            w = 1.0 + log(v)
+            total = total + w * w
+        }
+        else {
+            total = total + v * v
+        }
+    }
+    return total
+}
+
+#| Early returns, rewritten into one exit.
+def early(x) {
+    if x > 2.0 {
+        return exp(-x)
+    }
+    if x > 0.0 {
+        return x * exp(-2.0)
+    }
+    return 0.0
+}
+
+test "each piece of a piecewise function gives its own derivative" {
+    assert_near(grad(piecewise, -0.5), 2.0 * 2.0 * -0.5, 1.0e-15)
+    assert_near(grad(piecewise, 0.5), 2.0 * cos(0.5), 1.0e-15)
+    assert_near(grad(piecewise, 1.5), 2.0 * (cos(1.0) + 3.0 * 1.5 * 1.5), 1.0e-14)
+}
+
+test "a branch inside a loop, taken differently by each entry" {
+    x = [0.3, -0.8, 1.1, 2.0, 0.6]
+    assert_lt(fd_miss(grad(clipped, x), fd_grad(clipped, x)), FD_TOL)
+}
+
+test "early returns" {
+    assert_near(grad(early, 3.0), -exp(-3.0), 1.0e-17)
+    assert_near(grad(early, 1.0), exp(-2.0), 1.0e-17)
+    assert_near(grad(early, -1.0), 0.0, 0.0)
+}
+
+# ---- calls
+
+def sq(u) {
+    return u * u
+}
+
+#| A helper that writes into the array it is given, as lib/nn's forward
+#| passes do.
+def scale_into(out: Arr, x: Arr, c) {
+    for i to len(x) {
+        out[i] = c * sq(x[i])
+    }
+}
+
+def layer(W: Arr, x: Arr) {
+    return tanh(W @ x)
+}
+
+def norm2(v: Arr) {
+    return sqrt(sum(v * v))
+}
+
+W1 = [[0.3, -1.2, 0.5], [0.8, 0.1, -0.7]]
+W2 = [[1.1, -0.4], [0.2, 0.9], [-0.6, 0.3]]
+
+#| A small network written with helpers three calls deep.
+def net(x: Arr) {
+    h = layer(W1, x)
+    y = zeros(len(x))
+    scale_into(y, layer(W2, h), 0.5)
+    return norm2(y) + sq(h[0])
+}
+
+#| A helper called with a constant argument stays a call, and one called
+#| with a differentiated argument is inlined; both in one expression.
+def weights(n) {
+    w = zeros(n)
+    for i to n {
+        w[i] = 1.0 / (i + 1.0)
+    }
+    return w
+}
+
+def weighted(x: Arr) {
+    return sum(weights(len(x)) * x * x) + sq(sum(x))
+}
+
+#| A def that is differentiated and also called by another def that is.
+def inner(x: Arr) {
+    return sum(sin(x) * x)
+}
+
+def outer_fn(x: Arr) {
+    return inner(x) * inner(x * 2.0)
+}
+
+test "a network of helpers, three calls deep, one writing into its argument" {
+    x = [0.3, -0.8, 1.1]
+    assert_lt(fd_miss(grad(net, x), fd_grad(net, x)), FD_TOL)
+}
+
+test "a constant call stays a call; a differentiated one is inlined" {
+    x = [0.3, -0.8, 1.1, 0.4]
+    g = grad(weighted, x)
+    s = sum(x)
+    assert_allclose(g, 2.0 * x * weights(len(x)) + 2.0 * s, 1.0e-15)
+}
+
+test "one def differentiated on its own and inside another" {
+    x = [0.3, -0.8, 1.1]
+    assert_lt(fd_miss(grad(inner, x), fd_grad(inner, x)), FD_TOL)
+    assert_lt(fd_miss(grad(outer_fn, x), fd_grad(outer_fn, x)), FD_TOL)
+}
+
+DESCENT_STEPS = 3
+
+test "value_and_grad in a loop of gradient-descent steps" {
+    x = [0.3, -0.8, 1.1]
+    for k to DESCENT_STEPS {
+        v, g = value_and_grad(net, x)
+        assert_near(v, net(x), 0.0)
+        x = x - 0.1 * g
+    }
+    assert_lt(net(x), net([0.3, -0.8, 1.1]))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

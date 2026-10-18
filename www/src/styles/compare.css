@@ -1,0 +1,434 @@
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* /compare: a Python program and its Viv twin, region against region. */
+
+/* ---- the index ------------------------------------------------------------ */
+.cmp-topics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+  margin: 1.6rem 0 2rem;
+}
+.cmp-topic {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px 12px;
+}
+.cmp-topic h2 {
+  font-size: 1.05rem;
+  margin: 0 0 0.2rem;
+}
+.cmp-topic > p {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin: 0 0 0.6rem;
+}
+.cmp-topic ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cmp-topic li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  border-top: 1px solid var(--border);
+  font-size: 0.92rem;
+}
+.cmp-tag {
+  font: 11px/1.4 var(--font-mono);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.cmp-tag.diff {
+  color: var(--s2);
+}
+.cmp-index-diffs {
+  max-width: var(--measure);
+}
+.cmp-index-diffs li {
+  margin: 0.35rem 0;
+}
+
+/* ---- a pair: the header ---------------------------------------------------- */
+.cmp-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 0.88rem;
+  margin: -0.4rem 0 1.2rem;
+  color: var(--text-muted);
+}
+.cmp-notes {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 18px 6px;
+  max-width: 980px;
+}
+.cmp-notes h2 {
+  font-size: 1rem;
+  margin: 0 0 0.3rem;
+}
+.cmp-notes ul {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+.cmp-notes li {
+  margin: 0 0 0.5rem;
+  font-size: 0.93rem;
+  line-height: 1.55;
+}
+.cmp-notes p {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+.cmp-notes h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+.cmp-notes .cmp-table {
+  overflow-x: auto;
+  margin: 0 0 0.9rem;
+}
+.cmp-notes table {
+  border-collapse: collapse;
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+.cmp-notes th,
+.cmp-notes td {
+  border-bottom: 1px solid var(--border);
+  padding: 3px 12px 3px 0;
+  text-align: left;
+  white-space: nowrap;
+}
+.cmp-notes th {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.cmp-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin: 1.4rem 0 0.8rem;
+  font-size: 0.88rem;
+}
+.cmp-seg {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.cmp-seg button,
+.cmp-run {
+  font: 500 0.84rem/1 var(--font-sans);
+  color: var(--text);
+  background: var(--bg-card);
+  border: 0;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.cmp-seg button + button {
+  border-left: 1px solid var(--border-strong);
+}
+.cmp-seg button[aria-pressed='true'] {
+  background: var(--accent-soft);
+  color: var(--heading);
+}
+.cmp-run {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+}
+.cmp-run:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.cmp-bar .cmp-p2v-note {
+  color: var(--text-muted);
+}
+
+/* ---- a pair: the grid of regions ------------------------------------------ */
+.cmp-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  overflow: hidden;
+}
+.cmp-grid[data-show='both'] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+.cmp-grid[data-show='viv'] .p2v,
+.cmp-grid[data-show='p2v'] .viv {
+  display: none;
+}
+/* the Viv written in phrases: shown only in its own mode, beside the Python
+   and the Viv by hand */
+.cmp-grid[data-show='phr'] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+.cmp-grid:not([data-show='phr']) .phr,
+.cmp-grid[data-show='phr'] .p2v,
+.cmp-grid[data-show='phr'] .cmp-helpers {
+  display: none;
+}
+.cmp-head.phr {
+  border-top: 3px solid var(--s2);
+}
+.cmp-grid[data-show='viv'] .cmp-helpers {
+  display: none;
+}
+.cmp-head {
+  font: 600 0.8rem/1.3 var(--font-mono);
+  padding: 9px 12px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  color: var(--heading);
+}
+.cmp-head span {
+  font-weight: 400;
+  color: var(--text-faint);
+  margin-left: 6px;
+}
+.cmp-head.py {
+  border-top: 3px solid var(--s5);
+}
+.cmp-head.viv {
+  border-top: 3px solid var(--s1);
+}
+.cmp-head.p2v {
+  border-top: 3px solid var(--s3);
+}
+.cmp-rtitle {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 12px 5px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  font: 500 0.82rem/1.3 var(--font-sans);
+  color: var(--text-muted);
+}
+.cmp-rtitle b {
+  font: 600 0.72rem/1 var(--font-mono);
+  color: var(--accent);
+}
+.cmp-rtitle.first {
+  border-top: 0;
+}
+.cmp-cell {
+  min-width: 0;
+  padding: 6px 0 8px;
+  border-top: 1px solid var(--border);
+}
+.cmp-cell + .cmp-cell,
+.cmp-head + .cmp-head {
+  border-left: 1px solid var(--border);
+}
+.cmp-grid[data-show='p2v'] .cmp-cell.p2v,
+.cmp-grid[data-show='p2v'] .cmp-head.p2v {
+  border-left: 1px solid var(--border);
+}
+.cmp-code {
+  font: 12.5px/1.55 var(--font-mono);
+  color: var(--text);
+}
+.cmp-ln {
+  display: flex;
+  padding-right: 10px;
+}
+.cmp-ln .n {
+  flex: 0 0 3.4ch;
+  text-align: right;
+  padding-right: 1.2ch;
+  color: var(--text-faint);
+  user-select: none;
+}
+.cmp-ln .c {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* a wrapped line continues under its own text, indented */
+  padding-left: 2ch;
+  text-indent: -2ch;
+}
+.cmp-empty {
+  font: italic 0.8rem/1.5 var(--font-sans);
+  color: var(--text-faint);
+  padding: 2px 12px;
+}
+.cmp-helpers-note {
+  margin: 0;
+  padding: 0 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.cmp-refusal {
+  margin: 0 12px;
+  font: 12px/1.5 var(--font-mono);
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--text);
+}
+.cmp-refusal-head {
+  font: 600 0.8rem/1.4 var(--font-sans);
+  color: var(--s2);
+  padding: 0 12px 4px;
+}
+
+/* ---- a pair: the outputs --------------------------------------------------- */
+.cmp-verdict {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  max-width: 980px;
+}
+.cmp-verdict b {
+  font-family: var(--font-mono);
+}
+.cmp-verdict.ok b {
+  color: var(--ok);
+}
+.cmp-verdict.diff b {
+  color: var(--s2);
+}
+.cmp-outgrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  margin: 1rem 0;
+}
+.cmp-outgrid h3,
+.cmp-live h3,
+.cmp-p2v-out h3 {
+  font: 600 0.8rem/1.3 var(--font-mono);
+  margin: 0 0 6px;
+  color: var(--heading);
+}
+.cmp-outgrid pre,
+.cmp-live pre,
+.cmp-p2v-out pre {
+  font: 12px/1.55 var(--font-mono);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text);
+}
+.cmp-outgrid .drop {
+  color: var(--text-faint);
+}
+.cmp-outgrid .drop::after {
+  content: attr(data-why);
+  font: italic 11px var(--font-sans);
+  color: var(--s2);
+  margin-left: 1.5ch;
+}
+.cmp-legend {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  max-width: 980px;
+}
+.cmp-figs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  margin: 1rem 0;
+}
+.cmp-figs figure {
+  margin: 0;
+}
+.cmp-figs img,
+.cmp-figs .svg svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.cmp-figs figcaption {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.cmp-live {
+  margin: 1rem 0;
+}
+.cmp-live .status {
+  font-size: 0.88rem;
+  margin: 0 0 6px;
+}
+.cmp-p2v-out {
+  margin: 1rem 0;
+}
+.cmp-pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 2.2rem;
+  font-size: 0.92rem;
+}
+
+/* ---- a phone: one column, the regions interleaved -------------------------- */
+@media (max-width: 760px) {
+  .cmp-grid,
+  .cmp-grid[data-show='both'],
+  .cmp-grid[data-show='phr'] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cmp-head {
+    display: none;
+  }
+  .cmp-cell + .cmp-cell,
+  .cmp-grid[data-show='p2v'] .cmp-cell.p2v {
+    border-left: 0;
+  }
+  .cmp-cell::before {
+    content: attr(data-lang);
+    display: block;
+    font: 600 11px/1.2 var(--font-mono);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0 12px 4px;
+  }
+  .cmp-cell.py::before {
+    color: var(--s5);
+  }
+  .cmp-cell.viv::before {
+    color: var(--s1);
+  }
+  .cmp-cell.p2v::before {
+    color: var(--s3);
+  }
+  .cmp-cell.phr::before {
+    color: var(--s2);
+  }
+  .cmp-outgrid,
+  .cmp-figs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cmp-code {
+    font-size: 12px;
+  }
+  .cmp-ln .n {
+    flex-basis: 3ch;
+    padding-right: 1ch;
+  }
+}

@@ -1,0 +1,42 @@
+# B200 (bugs/ledger.jsonl): a function value forwarded through two defs was
+# lost. `every_rule(func)` calls `report(func, left_rect)`, which calls
+# `integrate(func, ..., rule)`, which calls `rule(f, ...)`. Rewriting
+# `every_rule` in place (before its call site specialized it) made copies in
+# which `f` was not known to be a function, and their error stopped the
+# program although nothing called those copies.
+def left_rect(f, x, h) {
+    return f(x)
+}
+
+def cube(x) {
+    return x * x * x
+}
+
+def integrate(f, a, b, steps, meth) {
+    h = (b - a) / steps
+    total = 0.0
+    for i to steps {
+        total = total + meth(f, a + i * h, h)
+    }
+    return h * total
+}
+
+def report(func, rule) {
+    return integrate(func, 0.0, 1.0, 10.0, rule)
+}
+
+def every_rule(func) {
+    return report(func, left_rect)
+}
+
+once = report(cube, left_rect)
+twice = every_rule(cube)
+print(once, twice)
+
+test "a function forwarded through two defs reaches the call" {
+    assert_near(once, 0.2025, 1e-15)
+    assert_near(twice, once, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

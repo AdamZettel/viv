@@ -1,0 +1,303 @@
+###
+post: NPB CG, conjugate gradient on a random sparse matrix
+agent: claude
+
+A port of NPB3.4's CG (CG/cg.f90). CG estimates the smallest eigenvalue of a
+large sparse symmetric positive definite matrix by inverse power iteration:
+each outer iteration solves `A z = x` with 25 steps of unpreconditioned
+conjugate gradient, then `zeta = shift + 1 / (x . z)` and `x = z / |z|`. The
+matrix is a sum of random sparse outer products with geometrically falling
+weights (`makea`, `sparse`), so its spectrum is known only through this run;
+NPB checks zeta after the last iteration against its value for the class.
+
+The matrix is stored in CSR form and multiplied by lib/sparse's
+`csr_matvec`, which sums each row left to right as cg.f90 does. Indices are
+0-based here and 1-based in the Fortran; the notes in `sparse_assemble` say
+where that shows.
+
+Run a class with `--set CLASS='"W"'` (S, W, A).
+###
+
+from randlc import randlc
+from sparse import csr_matvec
+
+CLASS = "S"
+RCOND = 0.1
+CGITMAX = 25
+EPSILON = 1.0e-10
+AMULT: Int = 1220703125
+
+# cg.f90 (and sys/setparams.c): na, nonzer, niter, shift and the reference zeta
+private def cg_class(cls) {
+    if cls == "S" {
+        return 1400, 7, 15, 10.0, 8.5971775078648
+    }
+    if cls == "W" {
+        return 7000, 8, 15, 12.0, 10.362595087124
+    }
+    if cls == "A" {
+        return 14000, 11, 15, 20.0, 17.130235054029
+    }
+    if cls == "B" {
+        return 75000, 13, 75, 60.0, 22.712745482631
+    }
+    stop("CG: unknown class " + cls)
+    return 0, 0, 0, 0.0, 0.0
+}
+
+# sprnvc: nz distinct random indices in [0, n) with random values; an index
+# is a uniform scaled to the power of two nn1 >= n, redrawn when it lands past
+# n or repeats. Returns the generator state and the count.
+def sprnvc(tran: Int, n: Int, nz: Int, nn1: Int, v: Arr, iv: [Int]) {
+    nzv: Int = 0
+    while nzv < nz {
+        tran, vecelt = randlc(tran, AMULT)
+        tran, vecloc = randlc(tran, AMULT)
+        i: Int = int(float(nn1) * vecloc)
+        if i >= n {
+            continue
+        }
+        seen = false
+        for ii to nzv {
+            if iv[ii] == i {
+                seen = true
+            }
+        }
+        if not seen {
+            v[nzv] = vecelt
+            iv[nzv] = i
+            nzv += 1
+        }
+    }
+    return tran, nzv
+}
+
+# vecset: set entry i to val, appending it when absent
+def vecset(v: Arr, iv: [Int], nzv: Int, i: Int, val) -> Int {
+    set = false
+    for k to nzv {
+        if iv[k] == i {
+            v[k] = val
+            set = true
+        }
+    }
+    if not set {
+        v[nzv] = val
+        iv[nzv] = i
+        nzv += 1
+    }
+    return nzv
+}
+
+# sparse: assemble sum_i size_i * (row i's vector)(row i's vector)^T, plus
+# (rcond - shift) on the diagonal, into CSR. iv holds 1-based columns while
+# assembling, as the Fortran does, so that 0 can mark an empty slot.
+def sparse_assemble(n: Int, nzmax: Int, arow: [Int], acol: [Int], aelt, shift) {
+    w: Int = int(shape(aelt)[1])
+    rowstr = int_zeros(n + 1)
+    for i to n {
+        for nza to arow[i] {
+            j = acol[i * w + nza]
+            rowstr[j + 1] += arow[i]
+        }
+    }
+    for j from 1 to n + 1 {
+        rowstr[j] += rowstr[j - 1]
+    }
+    if rowstr[n] > nzmax {
+        stop("Space for matrix elements exceeded in sparse")
+    }
+    v = zeros(nzmax)
+    iv = int_zeros(nzmax)
+    nzloc = int_zeros(n)
+    size = 1.0
+    ratio = RCOND ^ (1.0 / float(n))
+    for i to n {
+        for nza to arow[i] {
+            j = acol[i * w + nza]
+            scale = size * aelt[i, nza]
+            for nzrow to arow[i] {
+                jcol = acol[i * w + nzrow]
+                jc1: Int = jcol + 1
+                va = aelt[i, nzrow] * scale
+                if jcol == j and j == i {
+                    va = va + RCOND - shift
+                }
+                placed = false
+                k: Int = rowstr[j]
+                while k < rowstr[j + 1] and not placed {
+                    if iv[k] > jc1 {
+                        # shift the row's tail right by one to make room
+                        for kk from k to rowstr[j + 1] - 1 reversed {
+                            if iv[kk] > 0 {
+                                v[kk + 1] = v[kk]
+                                iv[kk + 1] = iv[kk]
+                            }
+                        }
+                        iv[k] = jc1
+                        v[k] = 0.0
+                        placed = true
+                    }
+                    else if iv[k] == 0 {
+                        iv[k] = jc1
+                        placed = true
+                    }
+                    else if iv[k] == jc1 {
+                        nzloc[j] += 1
+                        placed = true
+                    }
+                    else {
+                        k += 1
+                    }
+                }
+                if not placed {
+                    stop(f"internal error in sparse: i={i}")
+                }
+                v[k] += va
+            }
+        }
+        size = size * ratio
+    }
+    for j from 1 to n {
+        nzloc[j] += nzloc[j - 1]
+    }
+    # squeeze out the slots duplicates left empty
+    nnz: Int = rowstr[n] - nzloc[n - 1]
+    a = zeros(nnz)
+    colidx = int_zeros(nnz)
+    for j to n {
+        j1: Int = rowstr[j]
+        if j > 0 {
+            j1 = rowstr[j] - nzloc[j - 1]
+        }
+        j2: Int = rowstr[j + 1] - nzloc[j]
+        nza: Int = rowstr[j]
+        for k from j1 to j2 {
+            a[k] = v[nza]
+            colidx[k] = iv[nza] - 1
+            nza += 1
+        }
+    }
+    for j from 1 to n + 1 {
+        rowstr[j] -= nzloc[j - 1]
+    }
+    return rowstr, colidx, a
+}
+
+def makea(tran: Int, n: Int, nonzer: Int, shift) {
+    nn1: Int = 1
+    while nn1 < n {
+        nn1 = 2 * nn1
+    }
+    w: Int = nonzer + 1
+    arow = int_zeros(n)
+    acol = int_zeros(n * w)
+    aelt = zeros(n, w)
+    vc = zeros(w)
+    ivc = int_zeros(w)
+    for iouter to n {
+        tran, nzv = sprnvc(tran, n, nonzer, nn1, vc, ivc)
+        nzv = vecset(vc, ivc, nzv, iouter, 0.5)
+        arow[iouter] = nzv
+        for ivelt to nzv {
+            acol[iouter * w + ivelt] = ivc[ivelt]
+            aelt[iouter, ivelt] = vc[ivelt]
+        }
+    }
+    rowstr, colidx, a = sparse_assemble(n, n * w * w, arow, acol, aelt, shift)
+    return rowstr, colidx, a
+}
+
+# conj_grad: 25 CG steps on A z = x from z = 0; returns |x - A z|
+def conj_grad(rowstr: [Int], colidx: [Int], a: Arr, x: Arr, z: Arr, p: Arr, q: Arr, r: Arr) {
+    n = len(x)
+    for j to n {
+        q[j] = 0.0
+        z[j] = 0.0
+        r[j] = x[j]
+        p[j] = r[j]
+    }
+    rho = dot(r, r)
+    for cgit to CGITMAX {
+        rho0 = rho
+        csr_matvec(rowstr, colidx, a, p, q)
+        d = dot(p, q)
+        alpha = rho0 / d
+        rho = 0.0
+        for j to n {
+            z[j] = z[j] + alpha * p[j]
+            r[j] = r[j] - alpha * q[j]
+            rho += r[j] * r[j]
+        }
+        beta = rho / rho0
+        for j to n {
+            p[j] = r[j] + beta * p[j]
+        }
+    }
+    csr_matvec(rowstr, colidx, a, z, r)
+    s = 0.0
+    for j to n {
+        d = x[j] - r[j]
+        s += d * d
+    }
+    return sqrt(s)
+}
+
+# one step of the power method: x . z gives zeta, and x becomes z / |z|
+def power_step(x: Arr, z: Arr) {
+    norm_temp1 = 0.0
+    norm_temp2 = 0.0
+    for j to len(x) {
+        norm_temp1 += x[j] * z[j]
+        norm_temp2 += z[j] * z[j]
+    }
+    norm_temp3 = 1.0 / sqrt(norm_temp2)
+    x[:] = norm_temp3 * z
+    return norm_temp1
+}
+
+def cg_run(cls) {
+    na_num, nonzer_num, niter, shift, zeta_ref = cg_class(cls)
+    na: Int = int(na_num)
+    nonzer: Int = int(nonzer_num)
+    tran: Int = 314159265
+    tran, _ = randlc(tran, AMULT)
+    rowstr, colidx, a = makea(tran, na, nonzer, shift)
+
+    x = zeros(na)
+    z = zeros(na)
+    p = zeros(na)
+    q = zeros(na)
+    r = zeros(na)
+    # one untimed iteration first, as NPB does, then start again from x = 1
+    x[:] = 1.0
+    rnorm = conj_grad(rowstr, colidx, a, x, z, p, q, r)
+    _ = power_step(x, z)
+    x[:] = 1.0
+    zeta = 0.0
+    print("   iteration           ||r||                 zeta")
+    for it from 1 to niter + 1 {
+        rnorm = conj_grad(rowstr, colidx, a, x, z, p, q, r)
+        xz = power_step(x, z)
+        if it == 1 or it == niter or it % 5 == 0 {
+            zeta = shift + 1.0 / xz
+            print(f"    {it:5d}      {rnorm:21.14e} {zeta:20.13f}")
+        }
+    }
+    return na, zeta, zeta_ref
+}
+
+n_cg, zeta_cg, zeta_ref = cg_run(CLASS)
+zeta_err = abs(zeta_cg - zeta_ref) / zeta_ref
+verified = zeta_err <= EPSILON
+print(f"CG class {CLASS}: na = {n_cg}")
+print(f"Zeta = {zeta_cg:.13e}  error = {zeta_err:.3e}")
+status = "SUCCESSFUL" if verified else "UNSUCCESSFUL"
+print(f"Verification = {status}")
+
+test "CG's zeta matches NPB's value for the class" {
+    assert_true(verified)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

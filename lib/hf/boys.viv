@@ -1,0 +1,328 @@
+###
+post: The Boys function, four ways, held against mpmath
+agent: claude
+
+Every Gaussian integral with a `1/r` in it, nuclear attraction and electron
+repulsion alike, ends in the Boys function
+
+    F_n(x) = int_0^1 t^(2n) exp(-x t^2) dt
+
+at orders `n = 0` up to the total angular momentum of the integral, and at an
+argument `x` that grows with the exponents and the distance between centers.
+This module covers `n <= 16` (an (gg|gg) quartet) and `0 <= x <= 200`.
+
+It uses `exp`, `sqrt`, `cos` and arithmetic, and no `erf` or `gamma`. Those two
+differ between the interpreter and C in the last bits, and a function called
+once per primitive quartet should not be where the two engines part.
+
+Every member has the signature `(nmax, x) -> F[0..nmax]`, because an integral
+wants all orders at once and they come cheaply from one another through
+
+    F_(n-1)(x) = (2x F_n(x) + e^-x) / (2n - 1)       (downward)
+    F_(n+1)(x) = ((2n + 1) F_n(x) - e^-x) / (2x)     (upward)
+
+Downward adds two positive numbers, so it never loses digits. Upward subtracts,
+and loses digits when `e^-x` is close to `(2n + 1) F_n`, which is small `x`.
+
+**The members of `boys_methods()`:**
+
+- `boys_series_down`: the series `F_n = e^-x sum_k (2x)^k / ((2n+1)(2n+3)...(2n+2k+1))`
+  at the top order, then downward. Every term is positive. The terms grow until
+  `k` is near `x`, so at `x = 200` the sum needs about 330 of them.
+- `boys_asym_up`: at or above the switch `x_n = boys_switch(nmax)`,
+  `F_0 = sqrt(pi/x)/2` (the `erfc` tail it drops is at most `2^-53` of `F_0`
+  there) and then upward, keeping the `e^-x` term. Below the switch it is the series.
+- `boys_quadrature`: 20-point Gauss-Legendre on `[0, 1]`, with the panel count
+  doubled until two passes agree. This is the only member that shares no code
+  with the series, so it is the one that can catch a bug in it.
+- `boys_taylor`: a Taylor step from the nearest node of a grid with spacing 0.1.
+  Production callers build the grid once with `boys_grid_new` inside their own
+  integral def (so it is freed when that def returns) and call `boys_grid_eval`.
+  The registry member builds a one-node grid on the spot, which is slow but
+  runs the same evaluation code. The node values come from the series, so this
+  member is not independent of `boys_series_down`.
+
+`boys_values` is the production entry: the series below the switch and the
+asymptotic form above it, which is `boys_asym_up`.
+
+**Where the switch goes.** The old code in lib/gto_md switched at 50 to the pure
+asymptotic form `F_n = (2n-1)!!/2^(n+1) sqrt(pi/x^(2n+1))`, which drops every
+term carrying `e^-x`. Relative to `F_n` those terms grow with `n`, so the error
+does too: 6.27e-11 relative at
+`n = 12` and 1.15e-8 at `n = 16`, both at `x = 50`. A per-order switch would
+fix that, but keeping `e^-x` in the upward recursion fixes it better. Then the
+only thing dropped is the `erfc` tail of `F_0`, and upward recursion carries a
+relative error in `F_0` into every order unchanged while `2x > 2n + 1`, which
+holds for `n <= 16` above 16.5. The largest relative error against mpmath,
+over orders 0 to 16 for `sqrt(pi/x)/2` plus upward recursion, and at `n = 16`
+for the pure closed form:
+
+    x                25        30        33.3      36        50        70
+    upward, e^-x     1.6e-12   9.8e-15   5.8e-16   8.5e-16   2.0e-16   2.2e-16
+    closed form      3.0e-2    2.8e-3    4.7e-4    1.0e-4    1.1e-8    3.9e-15
+
+The closed form would need a switch near 70 at `n = 16`.
+
+**The switch per order.** `boys_switch(n)` gives `x_n` for each order, and
+`boys_asym_up` uses the one for its top order, since it returns every order up
+to it. `x_n` is the smallest multiple of 0.1 at which two things hold for every
+order `m <= n`: the dropped `erfc` tail, carried up to `F_m` by the recursion,
+is at most `2^-53` of `F_m`, and `2x > 2m + 1`, so the upward step does not
+amplify rounding. `tools/boys_reference.py` recomputes each `x_n` from mpmath
+and refuses to write the table if the list in `boys_switch` differs. The tail's
+share of `F_m` is `erfc(sqrt(x))` times a factor that moves only in the fourth
+digit between `m = 0` and `m = 16` (at `x = 30`, 9.4857e-15 against
+9.5121e-15), and the second condition only binds below 16.5. So the tail
+criterion gives `x_n = 34.4` for every order up to 16. The switch is per order in
+its interface and in the test that fixes it, and constant in value over this
+range.
+
+Worst relative error against the table, over every tabulated `x` and every top
+order up to 16: `boys_values` 1.7e-15, `boys_series_down` 3.4e-15,
+`boys_quadrature` 2.4e-15, `boys_taylor` and a caller's grid 1.6e-15.
+
+The mpmath table in lib/hfref/boys (written by `tools/boys_reference.py`) has
+points at `x_n` and 0.1 either side of it for every order, and on both sides of
+the old switch at 50. The tests below hold every member against it.
+
+Used with `import hf.boys`.
+###
+
+BOYS_PI = 3.141592653589793
+BOYS_GRID_H = 0.1
+BOYS_TAYLOR_K = 8
+BOYS_GL_M = 20
+# boys_series_one: the most terms it sums, and its stop (a term under this
+# share of the running total)
+BOYS_SERIES_MAXTERMS = 2000
+BOYS_SERIES_STOP = 1.0e-17
+# boys_quadrature: the most panels it doubles to, and the relative change
+# between passes at which it stops
+BOYS_QUAD_MAXPAN = 1024
+BOYS_QUAD_TOL = 1.0e-13
+# the header row of a Taylor grid: [h, i0, npts, ncap]
+BOYS_GRID_HDR = 4
+# Newton steps per Gauss-Legendre node (boys_gl_nodes)
+BOYS_GL_NEWTON_IT = 12
+# boys_worst_grid's grid limit: past every order's switch, so the grid
+# covers every x the series side uses
+BOYS_T_GRID_XMAX = 200.0
+
+#| `F_n(x)` at one order from its series. The terms grow while `2x > 2n + 2k + 3`
+#| and shrink after, so the stop test only fires past the peak, and a fixed term
+#| count would be wrong at the top of the range.
+def boys_series_one(n, x) {
+    term = 1.0 / (2.0 * n + 1.0)
+    total = term
+    k = 0
+    while k < BOYS_SERIES_MAXTERMS {
+        term = term * 2.0 * x / (2.0 * n + 2.0 * k + 3.0)
+        total = total + term
+        if term < BOYS_SERIES_STOP * total {
+            break
+        }
+        k = k + 1
+    }
+    return exp(-x) * total
+}
+
+#| The switch `x_n` for order `n`: at or above it `boys_asym_up` is exact to
+#| rounding in every order up to `n`. The list is checked, value by value,
+#| against mpmath by `tools/boys_reference.py` (see the header for the rule).
+def boys_switch(n) {
+    xs = [34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4, 34.4]
+    return xs[round(n)]
+}
+
+#| `F_0 .. F_nmax` from `F_nmax = top`, by the downward step.
+def boys_down(top, nmax, x) {
+    out = zeros(nmax + 1)
+    out[nmax] = top
+    ex = exp(-x)
+    for k to nmax {
+        n = nmax - k
+        out[n - 1] = (2.0 * x * out[n] + ex) / (2.0 * n - 1.0)
+    }
+    return out
+}
+
+#| Every order from `0` to `nmax`: the series at `nmax`, then downward.
+def boys_series_down(nmax: Num, x: Num) -> Arr {
+    return boys_down(boys_series_one(nmax, x), nmax, x)
+}
+
+#| `F_0 = sqrt(pi/x)/2` and upward with the `e^-x` term kept, at or above
+#| `boys_switch(nmax)`; the series below it.
+def boys_asym_up(nmax: Num, x: Num) -> Arr {
+    if x < boys_switch(nmax) {
+        return boys_series_down(nmax, x)
+    }
+    out = zeros(nmax + 1)
+    ex = exp(-x)
+    out[0] = 0.5 * sqrt(BOYS_PI / x)
+    for n to nmax {
+        out[n + 1] = ((2.0 * n + 1.0) * out[n] - ex) / (2.0 * x)
+    }
+    return out
+}
+
+#| The production entry: whichever member is most accurate at this `x`.
+def boys_values(nmax: Num, x: Num) -> Arr {
+    return boys_asym_up(nmax, x)
+}
+
+#| Gauss-Legendre nodes and weights on `[-1, 1]`: `GL[0, i]` is a node and
+#| `GL[1, i]` its weight. Newton's method on `P_m` from the usual cosine guess;
+#| it converges quadratically, so a fixed `BOYS_GL_NEWTON_IT` steps is past
+#| the point where the nodes stop moving.
+def boys_gl_nodes(m) {
+    GL = zeros(2, m)
+    for i to m {
+        #: Newton on P_m from the cosine estimate
+        z = cos(BOYS_PI * (i + 0.75) / (m + 0.5))
+        dp = 1.0
+        for it to BOYS_GL_NEWTON_IT {
+            p1 = 1.0
+            p2 = 0.0
+            for j to m {
+                p3 = p2
+                p2 = p1
+                p1 = ((2.0 * j + 1.0) * z * p2 - j * p3) / (j + 1.0)
+            }
+            dp = m * (z * p1 - p2) / (z * z - 1.0)
+            z = z - p1 / dp
+        }
+        #: weight 2 / ((1 - z^2) P_m'(z)^2)
+        GL[0, i] = z
+        GL[1, i] = 2.0 / ((1.0 - z * z) * dp * dp)
+    }
+    return GL
+}
+
+#| All orders at once on `npan` equal panels: one `exp` per node, then the
+#| powers `t^(2n)` by repeated multiplication.
+def boys_gl_pass(nmax, x, npan, GL: Arr) {
+    out = zeros(nmax + 1)
+    width = 1.0 / npan
+    #: all orders at once: w t^(2n) exp(-x t^2)
+    for p to npan {
+        mid = (p + 0.5) * width
+        for i to BOYS_GL_M {
+            t = mid + 0.5 * width * GL[0, i]
+            t2 = t * t
+            w = 0.5 * width * GL[1, i] * exp(-x * t2)
+            for n to nmax + 1 {
+                out[n] = out[n] + w
+                w = w * t2
+            }
+        }
+    }
+    return out
+}
+
+#| Gauss-Legendre with the panel count doubled until every order agrees with
+#| the previous pass to `BOYS_QUAD_TOL` relative. At large `x` the integrand is
+#| a spike of width about `1/sqrt(x)` next to `t = 0` (for `n = 0`) or near
+#| `sqrt(n/x)`, which one panel cannot resolve; halving the panels resolves it
+#| within a few passes, and Gauss-Legendre converges fast once it is resolved,
+#| so the pass that meets the stop is at least as accurate as the stop
+#| [test "the series, the quadrature and the Taylor step each match mpmath to 1e-13"].
+#| A stop at the size of the rounding noise between passes never fires: the
+#| doubling runs to `BOYS_QUAD_MAXPAN` panels, and the rounding of the long
+#| sum grows past the stop.
+def boys_quadrature(nmax: Num, x: Num) -> Arr {
+    GL = boys_gl_nodes(BOYS_GL_M)
+    prev = boys_gl_pass(nmax, x, 1, GL)
+    cur = prev
+    npan = 2
+    while npan <= BOYS_QUAD_MAXPAN {
+        cur = boys_gl_pass(nmax, x, npan, GL)
+        change = max(abs(cur - prev) / cur)
+        prev = cur
+        if change < BOYS_QUAD_TOL {
+            break
+        }
+        npan = 2 * npan
+    }
+    return cur
+}
+
+#| A Taylor grid for orders up to `ncap`, holding `npts` nodes from node index
+#| `i0` (node `i` sits at `x = i h`). Row `0` is a header `[h, i0, npts, ncap]`;
+#| row `r >= 1` holds `F_0 .. F_(ncap+K)` at node `i0 + r - 1`, the `K` extra
+#| orders being what the Taylor step needs.
+def boys_grid_range(ncap, i0, npts) {
+    ncol = max(BOYS_GRID_HDR, ncap + BOYS_TAYLOR_K + 1)
+    G = zeros(npts + 1, ncol)
+    G[0, 0] = BOYS_GRID_H
+    G[0, 1] = i0
+    G[0, 2] = npts
+    G[0, 3] = ncap
+    #: 8 extra orders for the Taylor step: dF_n/dx = -F_(n+1)
+    for r to npts {
+        G[r + 1, 0:ncap + BOYS_TAYLOR_K + 1] = boys_series_down(ncap + BOYS_TAYLOR_K, (i0 + r) * BOYS_GRID_H)
+    }
+    return G
+}
+
+#| The grid a caller builds once, for orders up to `nmax` and arguments up to
+#| `xmax`. It stops at the switch, because above it `boys_grid_eval` uses the
+#| asymptotic form, which is exact there and needs no table. The switch is taken
+#| at the highest order and over all orders below; the generator checks that
+#| `boys_switch` never falls with `n`, so that is the largest one.
+def boys_grid_new(nmax, xmax) {
+    top = min(xmax, boys_switch(nmax))
+    return boys_grid_range(nmax, 0, round(top / BOYS_GRID_H) + 2)
+}
+
+#| `F_0 .. F_nmax` at `x` from grid `G`. With `d = x - x0` for the nearest node
+#| `x0`, `F_nmax(x) = sum_k F_(nmax+k)(x0) (-d)^k / k!`, since `dF_n/dx = -F_(n+1)`.
+#| `|d| <= 0.05` and `F_(n+k) <= F_n`, so stopping at `k = 8` leaves at most
+#| `0.05^9 / 9! = 5.4e-18` of `F_nmax`. The lower orders then come downward.
+#| An `x` outside the grid, or an order above the one it was built for, falls
+#| back to the series, so a short grid is slow rather than wrong.
+def boys_grid_eval(G: Arr, nmax, x) {
+    if x >= boys_switch(nmax) {
+        return boys_asym_up(nmax, x)
+    }
+    i = round(x / G[0, 0])
+    r = i - G[0, 1] + 1
+    if r < 1 {
+        return boys_series_down(nmax, x)
+    }
+    if r > G[0, 2] {
+        return boys_series_down(nmax, x)
+    }
+    if nmax > G[0, 3] {
+        return boys_series_down(nmax, x)
+    }
+    #: Taylor step from the nearest grid point, then recur down
+    d = x - i * G[0, 0]
+    total = 0.0
+    fac = 1.0
+    for k to BOYS_TAYLOR_K + 1 {
+        total = total + G[r, nmax + k] * fac
+        fac = -fac * d / (k + 1.0)
+    }
+    return boys_down(total, nmax, x)
+}
+
+#| The Taylor grid as a registry member: a one-node grid at the node nearest
+#| `x`, built on the spot. Slow, since it runs the series anyway, but it is the
+#| same evaluation code the per-caller grid uses.
+def boys_taylor(nmax: Num, x: Num) -> Arr {
+    G = boys_grid_range(nmax, round(x / BOYS_GRID_H), 1)
+    return boys_grid_eval(G, nmax, x)
+}
+
+#| The registry, production member first. Every member takes `(nmax, x)` and
+#| returns `F[0..nmax]`. Both parameters are numbers, as the frozen stage
+#| signature `(nmax, x) -> Arr` has them, and every member annotates them
+#| `: Num` and its result `-> Arr`, so the kinds are fixed in the member itself
+#| and not inferred from whichever call a program happens to make.
+def boys_methods() {
+    return [boys_asym_up, boys_series_down, boys_quadrature, boys_taylor]
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

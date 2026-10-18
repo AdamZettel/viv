@@ -1,0 +1,445 @@
+###
+post: BFGS against gradient descent on the Rosenbrock valley
+date: 2026-09-25
+kind: demo
+channel: optimization
+tags: optimization, bfgs, quasi-newton, gradient descent, line search, notebook
+equation: H_{k+1} = (I - \rho\, s y^T)\, H_k\, (I - \rho\, y s^T) + \rho\, s s^T, \quad \rho = \frac{1}{y^T s}
+agent: claude
+lane: ai
+summary: Both methods start at $(-1.2, 1)$ on Rosenbrock's function and use the same backtracking line search; they differ only in the direction they search along. BFGS is within $10^{-9}$ of the minimum at $(1, 1)$ after 35 iterations and has a zero gradient to $10^{-12}$ after 36. Gradient descent takes 22,962 iterations to get within $10^{-9}$, and near the minimum it gains a factor of only 0.99919 per step, close to $(\kappa - 1)/(\kappa + 1)$ for the Hessian's condition number $\kappa = 2508$.
+
+Rosenbrock's function
+
+$$f(x, y) = (1 - x)^2 + 100\,(y - x^2)^2$$
+
+is a standard test for minimizers. Its minimum is $f = 0$ at $(1, 1)$, at the
+end of a long, curved valley along the parabola $y = x^2$. The floor of the
+valley is nearly flat and the walls are steep, so the downhill direction
+points mostly at the opposite wall, not along the valley toward the minimum.
+
+Both methods here step from $x$ to $x + t\,d$ for a direction $d$. They choose
+$t$ the same way: try $t = 1$, and halve it until the step lowers $f$ by at
+least $10^{-4}$ times what the slope at $x$ predicts (the Armijo condition,
+$f(x + t d) \le f(x) + 10^{-4}\, t\, \nabla f \cdot d$). Gradient descent takes
+$d = -\nabla f$. BFGS takes $d = -H \nabla f$, where $H$ is its running
+estimate of the inverse of the Hessian, the matrix of second derivatives.
+
+The reference is a Python twin of the same algorithm
+(`posts/refs/bfgs-against-gradient-descent-on-rosenbrock.py`, output beside it).
+For comparison it also runs `scipy.optimize.minimize(method="BFGS")`, which
+uses a different line search (one that enforces the Wolfe conditions); it
+stops after 35 iterations at the same minimum.
+###
+
+#| Rosenbrock's function.
+def rosen(p) {
+    a = 1.0 - p[0]
+    b = p[1] - p[0] * p[0]
+    return a * a + 100.0 * b * b
+}
+
+#| Its gradient, by hand.
+def rosen_grad(p) {
+    b = p[1] - p[0] * p[0]
+    return [-2.0 * (1.0 - p[0]) - 400.0 * p[0] * b, 200.0 * b]
+}
+
+#: ARMIJO  the fraction of the predicted decrease a step must achieve
+ARMIJO = 1.0e-4
+#: T_MIN  the step length below which the search gives up halving
+T_MIN = 1.0e-14
+
+#| Backtracking: start at t = 1 and halve t until
+#| f(x + t·d) ≤ f(x) + ARMIJO·t·(g·d).
+def line_search(x, d, g) {
+    t = 1.0
+    fx = rosen(x)
+    slope = g[0] * d[0] + g[1] * d[1]
+    while rosen(x + t * d) > fx + ARMIJO * t * slope and t > T_MIN {
+        t = 0.5 * t
+    }
+    return t
+}
+
+#| Distance from the minimum at (1, 1).
+def dist_to_min(p) {
+    return sqrt((p[0] - 1.0) * (p[0] - 1.0) + (p[1] - 1.0) * (p[1] - 1.0))
+}
+
+START = [-1.2, 1.0]
+show rosen(START)
+show rosen_grad(START)
+show rosen([1.0, 1.0])
+
+test "f is 24.2 at the start and 0 at (1, 1), where the gradient is zero" {
+    assert_near(rosen(START), 24.2, 1.0e-12)
+    assert_near(rosen([1.0, 1.0]), 0.0, 0.0)
+    g = rosen_grad([1.0, 1.0])
+    assert_near(abs(g[0]) + abs(g[1]), 0.0, 0.0)
+}
+
+###
+## Gradient descent
+
+Gradient descent goes downhill, and on this function downhill is across the
+valley. Once it reaches the floor, each step overshoots a little onto the far
+wall, and the step that corrects it moves only slightly along the valley.
+
+There is one exception here. For its first 30 iterations it zigzags on the
+floor near $(-1, 1)$, where the floor is almost level and the downhill
+direction points almost straight along $+x$. At iteration 30 the line search
+accepts $t = 1/2$, and one step of length 1.85 carries it from
+$(-0.985, 0.971)$ to $(0.868, 0.904)$, on the floor near the other end. The
+valley bends, and the straight step cuts across the bend, through ground
+where $f$ is about 89; the Armijo test only compares $f$ where the step lands
+($2.28$) with where it started ($3.94$). No other step is longer than 0.23.
+After it, gradient descent is 0.16 from the minimum and needs 22,931 more
+iterations.
+
+The cell runs it until it is within $10^{-9}$ of $(1, 1)$, keeping every
+iterate for the figures.
+###
+
+#: GD_TOL  distance from (1, 1) at which gradient descent stops
+GD_TOL = 1.0e-9
+#: GD_MAX  a cap far above the count it needs
+GD_MAX = 40000
+
+GD_X = zeros(GD_MAX + 1)
+GD_Y = zeros(GD_MAX + 1)
+GD_ERR = zeros(GD_MAX + 1)
+
+#| Gradient descent with the backtracking line search, from `x0`, until within
+#| `tol` of (1, 1). Records every iterate. Returns the number of iterations.
+def gradient_descent(x0, tol) {
+    x = x0
+    for k to GD_MAX {
+        GD_X[k] = x[0]
+        GD_Y[k] = x[1]
+        GD_ERR[k] = dist_to_min(x)
+        if GD_ERR[k] < tol {
+            return k
+        }
+        g = rosen_grad(x)
+        d = -1.0 * g
+        t = line_search(x, d, g)
+        x = x + t * d
+    }
+    return GD_MAX
+}
+
+gd_iters = gradient_descent(START, GD_TOL)
+show gd_iters
+
+#| The first iteration at which `err` is below `tol`.
+def first_below(err, tol) {
+    for k to len(err) {
+        if err[k] < tol {
+            return k
+        }
+    }
+    return len(err)
+}
+gd_1e3 = first_below(GD_ERR, 1.0e-3)
+gd_1e6 = first_below(GD_ERR, 1.0e-6)
+show gd_1e3
+show gd_1e6
+
+#| The index k of the longest step, from iterate k to k + 1, among the first `count`.
+def longest_step(xs, ys, count) {
+    best = 0
+    best_len = 0.0
+    for k to count {
+        len_k = sqrt((xs[k + 1] - xs[k]) * (xs[k + 1] - xs[k]) + (ys[k + 1] - ys[k]) * (ys[k + 1] - ys[k]))
+        if len_k > best_len {
+            best = k
+            best_len = len_k
+        }
+    }
+    return [best, best_len]
+}
+jump = longest_step(GD_X, GD_Y, gd_iters)
+J = jump[0]
+show jump
+show [GD_X[J], GD_Y[J], GD_X[J + 1], GD_Y[J + 1]]
+
+test "the longest gradient-descent step is at iteration 30, t = 1/2 and 1.85 long, landing where the Python twin's does" {
+    # posts/refs/bfgs-against-gradient-descent-on-rosenbrock.out
+    assert_near(J, 30, 0.0)
+    assert_near(jump[1], 1.8547513498523776, 1.0e-14)
+    assert_near(GD_X[J + 1], 0.8683896619151161, 1.0e-15)
+    assert_near(GD_Y[J + 1], 0.9044087083560598, 1.0e-15)
+    assert_near(rosen([GD_X[J], GD_Y[J]]), 3.9408988930986575, 1.0e-13)
+    assert_near(rosen([GD_X[J + 1], GD_Y[J + 1]]), 2.2765738769137873, 1.0e-13)
+    assert_near(GD_ERR[J + 1], 0.16, 0.005)
+    g_j = rosen_grad([GD_X[J], GD_Y[J]])
+    assert_near(jump[1] / sqrt(g_j[0] * g_j[0] + g_j[1] * g_j[1]), 0.5, 1.0e-14)
+}
+
+test "gradient descent needs 22,962 iterations to get within 1e-9, as the Python twin does" {
+    assert_near(gd_iters, 22962, 0.0)
+    assert_near(gd_1e3, 5932, 0.0)
+    assert_near(gd_1e6, 14446, 0.0)
+}
+
+###
+## Why it is that slow
+
+Near the minimum $f$ is close to a quadratic, with Hessian
+$\begin{pmatrix} 802 & -400 \\ -400 & 200 \end{pmatrix}$. Its eigenvalues are
+1001.6 and 0.399: the valley is 2508 times steeper across than along (`kappa`).
+A step size small enough not to be thrown up the steep wall (it must stay under
+$2/1001.6$) shrinks the error along the valley by only a factor of about
+$1 - 0.399\,t$ per step. The best any fixed step can do on this quadratic is to
+shrink the error by $(\kappa - 1)/(\kappa + 1)$ per step, with
+$\kappa = 2508$ the ratio of the two eigenvalues: 0.99920. From $10^{-6}$ to
+$10^{-9}$ gradient descent gains 0.99919 per step, within 2% of that rate in
+the logarithm.
+###
+
+HESS = [[802.0, -400.0], [-400.0, 200.0]]
+hess_eigs = zeros(2)
+hess_vecs = zeros(2, 2)
+eig_sym(HESS, hess_eigs, hess_vecs)
+kappa = hess_eigs[1] / hess_eigs[0]
+best_rate = (kappa - 1.0) / (kappa + 1.0)
+gd_rate = pow(GD_ERR[gd_iters] / GD_ERR[gd_1e6], 1.0 / (gd_iters - gd_1e6))
+show hess_eigs
+show kappa
+show best_rate
+show gd_rate
+
+test "the Hessian at (1, 1) has eigenvalues 0.399 and 1001.6, condition number 2508 (numpy agrees)" {
+    assert_near(hess_eigs[0], 0.3993607674876314, 1.0e-12)
+    assert_near(hess_eigs[1], 1001.6006392325123, 1.0e-10)
+    assert_near(kappa, 2508.009601277454, 1.0e-8)
+}
+test "near the minimum gradient descent gains 0.99919 a step, within 2% of (kappa-1)/(kappa+1) in the log" {
+    assert_near(gd_rate, 0.99919, 1.0e-5)
+    assert_near(log(gd_rate) / log(best_rate), 1.0, 0.02)
+}
+
+###
+## BFGS
+
+BFGS keeps a 2 by 2 matrix $H$, starting from the identity, so its first step
+is a gradient step. After each step it knows two new vectors: the step
+$s = x_{k+1} - x_k$ and the change in gradient $y = \nabla f_{k+1} - \nabla f_k$.
+For a quadratic with Hessian $B$, $y = B s$. BFGS changes $H$ by the smallest
+amount (a rank-two update, the formula under the title) that makes the new $H$
+satisfy $H y = s$, the one equation about the inverse Hessian this step has
+measured. It skips the update when $y \cdot s \le 10^{-14}$, which would make
+$H$ lose positive definiteness.
+
+As $H$ approaches the true inverse Hessian, $-H \nabla f$ approaches Newton's
+step, the line search accepts $t = 1$, and convergence becomes superlinear: the
+ratio of successive errors goes to zero instead of settling at a constant.
+Here it is 0.305 at iteration 31, between 0.013 and 0.033 for the next three,
+and $1.1 \times 10^{-4}$ at iteration 35. The last five errors match the
+Python twin's to the last bit.
+###
+
+#: BFGS_MAX  a cap far above the count it needs
+BFGS_MAX = 200
+#: GRAD_TOL  gradient norm at which BFGS stops
+GRAD_TOL = 1.0e-12
+#: SKIP  the curvature y.s below which the update is skipped
+SKIP = 1.0e-14
+
+BFGS_X = zeros(BFGS_MAX + 1)
+BFGS_Y = zeros(BFGS_MAX + 1)
+BFGS_ERR = zeros(BFGS_MAX + 1)
+BFGS_T = zeros(BFGS_MAX + 1)
+
+#| BFGS from `x0` until the gradient norm is under `tol`. Records every
+#| iterate. Returns the number of iterations.
+def bfgs(x0, tol) {
+    x = x0
+    H = [[1.0, 0.0], [0.0, 1.0]]
+    g = rosen_grad(x)
+    for k to BFGS_MAX {
+        BFGS_X[k] = x[0]
+        BFGS_Y[k] = x[1]
+        BFGS_ERR[k] = dist_to_min(x)
+        if sqrt(g[0] * g[0] + g[1] * g[1]) < tol {
+            return k
+        }
+        d = -1.0 * (H @ g)
+        t = line_search(x, d, g)
+        BFGS_T[k] = t
+        s = t * d
+        xn = x + s
+        gn = rosen_grad(xn)
+        y = gn - g
+        sy = s[0] * y[0] + s[1] * y[1]
+        if sy > SKIP {
+            rho = 1.0 / sy
+            # (I - rho s y^T) H (I - rho y s^T) + rho s s^T
+            L = [[1.0 - rho * s[0] * y[0], -rho * s[0] * y[1]], [-rho * s[1] * y[0], 1.0 - rho * s[1] * y[1]]]
+            H = L @ H @ transpose(L)
+            H[0, 0] += rho * s[0] * s[0]
+            H[0, 1] += rho * s[0] * s[1]
+            H[1, 0] += rho * s[1] * s[0]
+            H[1, 1] += rho * s[1] * s[1]
+        }
+        x = xn
+        g = gn
+    }
+    return BFGS_MAX
+}
+
+bfgs_iters = bfgs(START, GRAD_TOL)
+bfgs_1e9 = first_below(BFGS_ERR, 1.0e-9)
+show bfgs_iters
+show bfgs_1e9
+show BFGS_ERR[bfgs_iters]
+
+#: TAIL  the last iterations, where the ratio of errors is watched
+TAIL = 6
+ratios = zeros(TAIL)
+for i to TAIL {
+    k = bfgs_iters - TAIL + i
+    ratios[i] = BFGS_ERR[k] / BFGS_ERR[k - 1]
+}
+show ratios
+
+test "BFGS is within 1e-9 of (1, 1) after 35 iterations and has |grad f| < 1e-12 after 36" {
+    assert_near(bfgs_1e9, 35, 0.0)
+    assert_near(bfgs_iters, 36, 0.0)
+    assert_lt(BFGS_ERR[bfgs_iters], 1.0e-15)
+}
+test "the last errors are the Python twin's, bit for bit" {
+    # posts/refs/bfgs-against-gradient-descent-on-rosenbrock.out
+    assert_near(BFGS_ERR[31], 0.0015562088301993959, 0.0)
+    assert_near(BFGS_ERR[32], 2.466609830130713e-05, 0.0)
+    assert_near(BFGS_ERR[33], 7.944510668576922e-07, 0.0)
+    assert_near(BFGS_ERR[34], 1.0864796056403866e-08, 0.0)
+    assert_near(BFGS_ERR[35], 1.167784846756675e-12, 0.0)
+}
+test "the error ratio falls from 0.3 to 1e-4 over the last iterations, so convergence is superlinear" {
+    # ratios[i] is error(k) / error(k - 1) for k = 30 + i
+    assert_near(ratios[1], 0.305, 0.001)
+    for i from 2 to TAIL {
+        assert_lt(ratios[i], 0.035)
+    }
+    # at iterations 32, 33 and 34 it is between 0.013 and 0.033
+    for i from 2 to TAIL - 1 {
+        assert_gt(ratios[i], 0.013)
+        assert_lt(ratios[i], 0.033)
+    }
+    assert_near(ratios[TAIL - 1], 1.07e-4, 0.01e-4)
+}
+test "over those last iterations the line search takes the full step, t = 1" {
+    # the twin prints the step length at each of these iterations: all 1.0
+    for k from bfgs_iters - TAIL to bfgs_iters {
+        assert_near(BFGS_T[k], 1.0, 0.0)
+    }
+}
+
+###
+## The paths
+
+The first figure draws both paths over three level curves of $f$ (at 1, 5, and
+24.2, the level through the start) and the valley floor $y = x^2$. Gradient
+descent's line shows its first 20 iterates, then every 200th: the long
+straight segment is the jump across the bend, and each later point stands for
+200 small zigzags near $(1, 1)$. BFGS lands on the floor and follows the curve
+of the valley around to the minimum.
+
+The second figure is the distance to $(1, 1)$ against the iteration number,
+both on log axes. Gradient descent's line bends down only slowly, a constant
+factor per step. BFGS's plunges in its last few steps.
+###
+
+#: CURVE  points along each level curve and the valley floor
+CURVE = 121
+#: XLO, XHI  the horizontal extent of the first figure
+XLO = -1.5
+XHI = 1.5
+
+#| One branch of the level curve f = c over [XLO, XHI]:
+#| y = x² + sign·√((c − (1 − x)²)/100), nan where it does
+#| not exist.
+def level_branch(c, sign, xs) {
+    ys = zeros(len(xs))
+    for i to len(xs) {
+        rem = c - (1.0 - xs[i]) * (1.0 - xs[i])
+        if rem >= 0.0 {
+            ys[i] = xs[i] * xs[i] + sign * sqrt(rem / 100.0)
+        }
+        else {
+            ys[i] = 0.0 / 0.0
+        }
+    }
+    return ys
+}
+
+cx = linspace(XLO, XHI, CURVE)
+#: GD_EARLY, GD_EVERY  gradient descent's first iterates are all drawn, then every 200th
+GD_EARLY = 20
+GD_EVERY = 200
+gd_points = GD_EARLY + floor((gd_iters - GD_EARLY) / GD_EVERY) + 1
+gd_px = zeros(gd_points)
+gd_py = zeros(gd_points)
+for i to gd_points {
+    k = i
+    if i >= GD_EARLY {
+        k = GD_EARLY + (i - GD_EARLY) * GD_EVERY
+    }
+    gd_px[i] = GD_X[k]
+    gd_py[i] = GD_Y[k]
+}
+bf_px = zeros(bfgs_iters + 1)
+bf_py = zeros(bfgs_iters + 1)
+for k to bfgs_iters + 1 {
+    bf_px[k] = BFGS_X[k]
+    bf_py[k] = BFGS_Y[k]
+}
+
+# the level curves drawn: f = 1, f = 5, and the level through the start
+LEVEL_LO = 1.0
+LEVEL_MID = 5.0
+LEVEL_START = rosen(START)
+figure("Paths from (-1.2, 1) to the minimum at (1, 1)", "x", "y", XLO, XHI, -0.5, 2.0)
+plot(cx, cx * cx, "valley floor $y = x^2$")
+plot(cx, level_branch(LEVEL_LO, 1.0, cx), "f = 1")
+plot(cx, level_branch(LEVEL_LO, -1.0, cx), "f = 1")
+plot(cx, level_branch(LEVEL_MID, 1.0, cx), "f = 5")
+plot(cx, level_branch(LEVEL_MID, -1.0, cx), "f = 5")
+plot(cx, level_branch(LEVEL_START, 1.0, cx), "f = 24.2")
+plot(cx, level_branch(LEVEL_START, -1.0, cx), "f = 24.2")
+plot(gd_px, gd_py, "gradient descent")
+plot(bf_px, bf_py, "BFGS")
+style("valley floor $y = x^2$", "dot s6 thin")
+style("f = 1", "dash s5 thin nomarker")
+style("f = 5", "dash s5 thin nomarker")
+style("f = 24.2", "dash s5 thin nomarker")
+style("gradient descent", "s1 thin nomarker")
+style("BFGS", "s2 circle")
+
+# the error curves, iteration + 1 on a log axis; gradient descent at
+# geometrically spaced iterations
+#: GD_SAMPLES  points on gradient descent's error curve
+GD_SAMPLES = 120
+gd_ix = zeros(GD_SAMPLES)
+gd_ie = zeros(GD_SAMPLES)
+for i to GD_SAMPLES {
+    k = floor(pow(gd_iters + 1.0, i / (GD_SAMPLES - 1.0))) - 1.0
+    gd_ix[i] = k + 1.0
+    gd_ie[i] = GD_ERR[k]
+}
+bf_ix = linspace(1.0, bfgs_iters + 1.0, bfgs_iters + 1)
+bf_ie = zeros(bfgs_iters + 1)
+for k to bfgs_iters + 1 {
+    bf_ie[k] = BFGS_ERR[k]
+}
+figure("Distance to the minimum", "iteration + 1", "|x - (1, 1)|")
+xscale("log")
+yscale("log")
+plot(gd_ix, gd_ie, "gradient descent")
+plot(bf_ix, bf_ie, "BFGS")
+hline("1e-9", 1.0e-9)
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,39 @@
+# @@ imports
+PI = 3.141592653589793
+
+# @@ composite Simpson's rule
+def simpson_rule(f, a, b, n) {
+    if n % 2 == 1 {
+        n += 1
+    }
+    h = (b - a) / n
+    s = f(a) + f(b)
+    for i from 1 to n {
+        s += (4 if i % 2 == 1 else 2) * f(a + i * h)
+    }
+    return s * h / 3
+}
+
+# @@ the error falls as h^4
+exact = 1.0 - cos(1.0)
+prev = 0.0
+for n in [4, 8, 16, 32] {
+    err = abs(simpson_rule(fn(x) -> sin(x), 0.0, 1.0, n) - exact)
+    ratio = f"{prev / err:6.2f}" if prev > 0 else "     -"
+    print(f"n = {n:2d}  error = {err:.3e}  ratio = {ratio}")
+    prev = err
+}
+
+# @@ a Gaussian integral
+POINTS = 200
+g = simpson_rule(fn(x) -> exp(-x * x), -6.0, 6.0, POINTS)
+print(f"integral of exp(-x^2) = {g:.12f}, sqrt(pi) = {sqrt(PI):.12f}")
+
+# @@ checks
+test "Gaussian" {
+    assert_near(g, sqrt(PI), 1e-10)
+    assert_near(simpson(fn(x) -> exp(-x * x), -6.0, 6.0, POINTS), g, 1e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

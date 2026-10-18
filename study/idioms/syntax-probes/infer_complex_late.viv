@@ -1,0 +1,68 @@
+###
+The typing bugs lib/lobpcg ran into, each a type fixed
+too early by a default:
+
+- `r * factor`, in a def reached only through a function parameter, with
+  `factor` a real array and `r` a complex array known only once the call
+  through the parameter was specialized: it was typed a real array.
+- `g = conj(v) @ transpose(v)` with `v` from a def: transpose of a value not
+  typed yet answered "a real array", so g was a real array.
+- `linspace(0.0, STEPS, n)` with STEPS set from a def's result: linspace's
+  arguments were taken to be arrays, so STEPS became one.
+- A def nothing calls, whose parameters nothing typed (a test-only helper in
+  an imported module), is typed with guessed parameters; when it does not
+  type with the guess it is left out, as the interpreter never runs it.
+###
+
+def damp(r, x) {
+    factor = 1.0 / (1.0 + abs(x))
+    return r * factor
+}
+
+def drive(pre, r, x) {
+    return pre(r, x)
+}
+
+def wave(n) {
+    return complex(linspace(0.0, 1.0, n), linspace(1.0, 2.0, n))
+}
+
+def block() {
+    return transpose(complex([[1.0, 0.0]], [[0.0, 1.0]]))
+}
+
+def nsteps() {
+    return 4
+}
+
+def unused_overlap_error(x) {
+    g = conj(x) @ transpose(x)
+    return max(abs(g))
+}
+
+z = drive(damp, wave(3), linspace(0.0, 2.0, 3))
+print(re(z))
+print(im(z))
+
+w = wave(2)
+
+STEPS = nsteps()
+t = linspace(0.0, STEPS, 5)
+print(t)
+
+test "each is typed by the value it will hold" {
+    assert_near(re(z[2]), 1.0 / 3.0, 1e-15)
+    assert_near(im(z[2]), 2.0 / 3.0, 1e-15)
+    assert_near(t[4], 4.0, 0)
+    assert_near(len(w), 2, 0)
+}
+
+test "conj(v) @ transpose(v) of a complex block from a def is complex" {
+    v = block()
+    g = conj(v) @ transpose(v)
+    assert_near(re(g[1, 0]), 0.0, 0)
+    assert_near(im(g[0, 1]), 1.0, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

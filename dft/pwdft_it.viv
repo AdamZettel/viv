@@ -1,0 +1,432 @@
+# pwdft_it: the ITERATIVE engine. H is never built -- it is applied.
+#
+#     dft/run.sh cu it          (compile deck + engine + checks to C, and run)
+#
+# The dense engine (dft/pwdft.viv) builds H(k) and diagonalizes it: npw^3 work
+# per k-point, fine for silicon's ~200 plane waves and impossible for copper's
+# ~1500. This is what every production plane-wave code does instead.
+#
+#   * Kinetic energy is diagonal in G. The local potential is diagonal in r, so
+#     applying it is FFT, multiply, FFT back. The nonlocal pseudopotential is
+#     a sum of projectors, sum_IJ |beta_I> D_IJ <beta_J|. None of that needs H.
+#   * Only the wanted bands are solved for, by LOBPCG (locally optimal block
+#     preconditioned conjugate gradient, in lib/lobpcg), warm-started from the
+#     previous SCF iteration's wavefunctions.
+#
+# Per k-point the cost falls from npw^3 to (bands) x (npw log npw).
+#
+# Vectors are ROWS of a [bands, NPWMAX] complex matrix, padded past each
+# k-point's own plane-wave count and masked. Every heavy line is a whole-array
+# operation -- @, slab, take/put, fft3, elementwise arithmetic -- so the
+# interpreter runs the same kernels the compiled program does. The only
+# Viv-level loops are over bands and over subspace matrices a few dozen wide.
+#
+# Mirrors dft/ref/pwdft_iter.py step for step, down to the MINSTD stream the
+# starting vectors come from, so the two can be compared iteration by iteration.
+
+# ================================================ 8. projectors, per k-point
+
+# Real spherical harmonics S_lm at a unit vector, m = 0 .. 2l.
+# They satisfy sum_m S_lm(a) S_lm(b) = (2l+1)/(4 pi) P_l(a.b): that identity
+# is what makes this separable form equal the Legendre form the dense engine
+# uses, and the two engines agreeing is the test of it.
+def real_ylm(l, m, x, y, z) {
+    if l == 0.0 { return sqrt(1.0 / (4.0 * PI)) }
+    if l == 1.0 {
+        c = sqrt(3.0 / (4.0 * PI))
+        if m == 0.0 { return c * x }
+        if m == 1.0 { return c * y }
+        return c * z
+    }
+    c = sqrt(15.0 / (4.0 * PI))
+    if m == 0.0 { return c * x * y }
+    if m == 1.0 { return c * y * z }
+    if m == 2.0 { return c * z * x }
+    if m == 3.0 { return sqrt(5.0 / (16.0 * PI)) * (3.0 * z * z - 1.0) }
+    return sqrt(15.0 / (16.0 * PI)) * (x * x - y * y)
+}
+
+#: YLM_NL  the channels real_ylm has harmonics for, l = 0, 1, 2 (s, p, d):
+#:         projectors are built for these, and no deck here has an f channel
+YLM_NL = 3
+
+#: NPROJ  projector functions per k-point: every atom's every (l, m, i)
+NPROJ = 0.0
+for a to NAT {
+    for l to YLM_NL {
+        NPROJ = NPROJ + (2.0 * l + 1.0) * NPRJ[ATSPEC[a], l]
+    }
+}
+
+# The coupling matrix D: block diagonal, one h^l block per (atom, l, m).
+DMAT = czeros(NPROJ, NPROJ)
+PROW = 0.0
+for a to NAT {
+    for l to YLM_NL {
+        np = NPRJ[ATSPEC[a], l]
+        for m to 2.0 * l + 1.0 {
+            for i to np {
+                for j to np {
+                    DMAT[PROW + i, PROW + j] = HPRJ[ATSPEC[a], l, i, j]
+                }
+            }
+            PROW = PROW + np
+        }
+    }
+}
+
+NSLOT = NKPT + 1.0
+SCRATCH = NKPT
+NPW = zeros(NSLOT)
+TK = zeros(NSLOT, NPWMAX)             #: TK  kinetic energy |k+G|^2 / 2 of each plane wave
+IDX = zeros(NSLOT, NPWMAX)            #: IDX  its flat index in the FFT box
+MASK = zeros(NSLOT, NPWMAX)           #: MASK  1 for a real plane wave, 0 for padding
+BETA = czeros(NSLOT, NPROJ, NPWMAX)   #: BETA  the projectors, one per ROW
+PSI = czeros(NSLOT, NBANDS, NPWMAX)   #: PSI  the wavefunctions, one band per ROW
+EIG = zeros(NSLOT, NBANDS)
+FOCC = zeros(NKPT, NBANDS)
+
+#: PADIDX  where padding points in the FFT box: the Nyquist corner, which no
+#:         plane wave inside the cutoff can occupy, so a `put` of padding zeros
+#:         can never overwrite a real coefficient
+NYQ = floor(NG / 2.0)
+PADIDX = (NYQ * NG + NYQ) * NG + NYQ
+
+# Fill one slot: basis, kinetic energies, FFT indices, mask, projectors.
+def setup_k(slot, k1, k2, k3) {
+    n = 0.0
+    TK[slot, :] = 0.0
+    IDX[slot, :] = PADIDX
+    MASK[slot, :] = 0.0
+    for i1 to NM {
+        for i2 to NM {
+            for i3 to NM {
+                m1 = i1 - MM
+                m2 = i2 - MM
+                m3 = i3 - MM
+                f1 = m1 + k1
+                f2 = m2 + k2
+                f3 = m3 + k3
+                gx = f1 * B[0, 0] + f2 * B[1, 0] + f3 * B[2, 0]
+                gy = f1 * B[0, 1] + f2 * B[1, 1] + f3 * B[2, 1]
+                gz = f1 * B[0, 2] + f2 * B[1, 2] + f3 * B[2, 2]
+                g2 = gx * gx + gy * gy + gz * gz
+                if 0.5 * g2 <= ECUT {
+                    TK[slot, n] = 0.5 * g2
+                    IDX[slot, n] = (wrap(m1) * NG + wrap(m2)) * NG + wrap(m3)
+                    MASK[slot, n] = 1.0
+                    kn = sqrt(g2)
+                    ux = 0.0
+                    uy = 0.0
+                    uz = 0.0
+                    if kn > 1.0e-12 {
+                        ux = gx / kn
+                        uy = gy / kn
+                        uz = gz / kn
+                    }
+                    # the phase uses G alone, not k + G: it is the structure factor
+                    px = m1 * B[0, 0] + m2 * B[1, 0] + m3 * B[2, 0]
+                    py = m1 * B[0, 1] + m2 * B[1, 1] + m3 * B[2, 1]
+                    pz = m1 * B[0, 2] + m2 * B[1, 2] + m3 * B[2, 2]
+                    row = 0.0
+                    for a to NAT {
+                        s = ATSPEC[a]
+                        ph = px * TAU[a, 0] + py * TAU[a, 1] + pz * TAU[a, 2]
+                        phase = complex(cos(ph), 0.0 - sin(ph))
+                        for l to YLM_NL {
+                            np = NPRJ[s, l]
+                            for m to 2.0 * l + 1.0 {
+                                y = real_ylm(l, m, ux, uy, uz)
+                                for i to np {
+                                    BETA[slot, row, n] = phase * (y * gth_proj(l, i, RPRJ[s, l], kn))
+                                    row = row + 1.0
+                                }
+                            }
+                        }
+                    }
+                    n = n + 1.0
+                }
+            }
+        }
+    }
+    BETA[slot, :, n:NPWMAX] = complex(0.0, 0.0)
+    NPW[slot] = n
+    return n
+}
+
+# ======================================================== 9. applying H
+
+VR = zeros(NG, NG, NG)                #: VR  the total local potential, in REAL space
+BOX = czeros(NG, NG, NG)
+
+# H applied to the rows of x. H itself is never formed.
+#: x     [nrow, NPWMAX] complex, one vector per row
+def hpsi(slot, x) {
+    tk = slab(TK, slot)
+    idx = slab(IDX, slot)
+    mask = slab(MASK, slot)
+    out = czeros(len(x), NPWMAX)
+    for b to len(x) {
+        xb = slab(x, b)
+        # local potential: to the grid, multiply in real space, back
+        fill(BOX, 0.0)
+        put(BOX, idx, xb)
+        ifft3(BOX)
+        w = BOX * VR
+        fft3(w)
+        setslab(out, b, take(w, idx) * mask + tk * xb)
+    }
+    # nonlocal: sum_IJ |beta_I> D_IJ <beta_J|x>, for every row at once
+    beta = slab(BETA, slot)
+    pr = x @ transpose(conj(beta))
+    return out + (pr @ DMAT) @ beta
+}
+
+# ======================================================== 10. the eigensolver
+#
+# LOBPCG, from lib/lobpcg: the lowest eigenpairs of an operator it is handed as
+# a function. It sees H only through h_at_kpoint and its preconditioner only
+# through teter_payne_allan; both work at the k-point in KPOINT.
+
+from lobpcg import lobpcg
+
+#: KPOINT  the slot the eigensolver is working at, in KPOINT[0]. An array of one
+#:         because a def may write an element of a global but not rebind one
+KPOINT = zeros(1)
+
+# H at the current k-point, applied to each row of x: the operator LOBPCG is
+# handed.
+def h_at_kpoint(x) {
+    return hpsi(KPOINT[0], x)
+}
+
+# The Teter-Payne-Allan preconditioner: an approximation to (H - eps)^-1
+# applied to the residual r of the band x, built from kinetic energy alone.
+# At large G, H is nearly its kinetic part T_G, so the residual's component
+# there should be divided by about T_G. With q = T_G / (1.5 T_x), T_x the
+# band's own kinetic energy, the factor below is about 1 / (2q) for large q
+# and stays above 0.8 for q under 1, so the low plane waves are left nearly
+# alone.
+def teter_payne_allan(r, x) {
+    tk = slab(TK, KPOINT[0])
+    ekin = sum(abs(x) * abs(x) * tk)
+    if ekin < 1.0e-8 {
+        ekin = 1.0e-8
+    }
+    q = tk / (1.5 * ekin)
+    num = 27.0 + q * (18.0 + q * (12.0 + q * 8.0))
+    factor = num / (num + 16.0 * q * q * q * q)
+    # r * factor, written part by part: this def reaches LOBPCG as an argument,
+    # and the compiler then types r * (a real array) as real and refuses it
+    return complex(re(r) * factor, im(r) * factor)
+}
+
+# Up to nit LOBPCG steps on slot's wavefunctions, warm-started from them and
+# written back, with the eigenvalues into EIG[slot]. Returns the largest
+# residual norm among the lowest nconv bands.
+def solve_bands(slot, nit, nconv, tol) {
+    KPOINT[0] = slot
+    x = slab(PSI, slot)
+    eig = zeros(NBANDS)
+    worst = lobpcg(h_at_kpoint, teter_payne_allan, x, eig, nit, nconv, tol)
+    setslab(PSI, slot, x)
+    setslab(EIG, slot, eig)
+    return worst
+}
+
+# Starting vectors: the NBANDS lowest-kinetic plane waves, plus a little noise
+# so no eigenvector is orthogonal to the starting subspace by symmetry.
+# The noise is Viv's rand() -- MINSTD -- which the numpy reference reproduces
+# bit for bit, so both start from the same vectors.
+def start_vectors(slot) {
+    n = NPW[slot]
+    used = zeros(NPWMAX)
+    for b to NBANDS {
+        best = -1.0
+        tbest = 1.0e300
+        for i to n {
+            if used[i] == 0.0 and TK[slot, i] < tbest {
+                tbest = TK[slot, i]
+                best = i
+            }
+        }
+        used[best] = 1.0
+        PSI[slot, b, :] = complex(0.0, 0.0)
+        PSI[slot, b, best] = 1.0
+    }
+    for b to NBANDS {
+        for i to n {
+            PSI[slot, b, i] = PSI[slot, b, i] + 0.02 * (rand() - 0.5) / (1.0 + TK[slot, i])
+        }
+    }
+}
+
+# ======================================================== 11. the SCF loop
+
+narrate "plane-wave bases, projectors, starting vectors"
+srand(1.0)
+for k to NKPT {
+    setup_k(k, KFRAC[k, 0], KFRAC[k, 1], KFRAC[k, 2])
+    start_vectors(k)
+}
+
+VG = czeros(NG, NG, NG)               #: VG  V_ps(G) + V_H(G), rebuilt every SCF step
+
+# V_ps(G) + V_H(G) on the grid; returns the Hartree energy. The caller brings
+# it to real space and adds v_xc there.
+def build_vg(rg) {
+    eh = 0.0
+    for i1 to NG {
+        for i2 to NG {
+            for i3 to NG {
+                g2 = G2[i1, i2, i3]
+                v = VPS[i1, i2, i3]
+                if g2 > 1.0e-12 {
+                    r = rg[i1, i2, i3] / NGRID
+                    v = v + 4.0 * PI * r / g2
+                    eh = eh + 4.0 * PI * abs(r) * abs(r) / g2
+                }
+                VG[i1, i2, i3] = v
+            }
+        }
+    }
+    return 0.5 * OMEGA * eh
+}
+
+# Add one k-point's occupied bands to the density accumulator.
+def add_density(slot, acc) {
+    idx = slab(IDX, slot)
+    x = slab(PSI, slot)
+    out = acc
+    for b to NBANDS {
+        if FOCC[slot, b] > 1.0e-14 {
+            fill(BOX, 0.0)
+            put(BOX, idx, slab(x, b))
+            ifft3(BOX)
+            mag = abs(BOX)
+            out = out + (KWT[slot] * FOCC[slot, b] * NGRID * NGRID / OMEGA) * mag * mag
+        }
+    }
+    return out
+}
+
+# The density of the current occupations: every k-point's occupied bands.
+def new_density() {
+    acc = ZERO3 * 0.0
+    for k to NKPT {
+        acc = add_density(k, acc)
+    }
+    return acc
+}
+
+# The local potential in real space for a density, and the Hartree energy.
+def local_potential(rho, vxc) {
+    rg = complex(rho, ZERO3)
+    fft3(rg)
+    eh = build_vg(rg)
+    ifft3(VG)
+    return re(VG) * NGRID + vxc, eh
+}
+
+# sum_k w_k sum_b f_kb eps_kb
+def band_energy() {
+    e = 0.0
+    for k to NKPT {
+        for b to NBANDS {
+            e = e + KWT[k] * FOCC[k, b] * EIG[k, b]
+        }
+    }
+    return e
+}
+
+# integral of f(r) g(r) over the cell
+def cell_integral(f, g) {
+    return sum(f * g) * DV
+}
+
+narrate "self-consistent field"
+RHO = zeros(NG, NG, NG) + NELEC / OMEGA
+ETOT = 0.0
+EOLD = 0.0
+EFERMI = 0.0
+DRHO = 1.0
+EIGRES = 0.0
+ITER = 0.0
+DONE = false
+NHIST = 0.0
+NCONV = NBANDS                        #: NCONV  how many bands LOBPCG must converge; all of them until occupations exist
+while not DONE and ITER < MAXIT {
+    exc, vxc = lda_xc(RHO)
+    VR, EH = local_potential(RHO, vxc)
+
+    EIGRES = 0.0
+    for k to NKPT {
+        res = solve_bands(k, NITER, NCONV, 0.1 * EIG_TOL)
+        if res > EIGRES { EIGRES = res }
+    }
+    if SMEAR > 0.0 { EFERMI = fermi_level() }
+    ENT = fill_occupations(EFERMI)
+    # the bands the density depends on: up to the highest one occupied anywhere
+    NCONV = 1.0
+    for k to NKPT {
+        for b to NBANDS {
+            if FOCC[k, b] > 1.0e-10 and b + 1.0 > NCONV { NCONV = b + 1.0 }
+        }
+    }
+
+    rhonew = new_density()
+    EBAND = band_energy()
+
+    ETOT = EBAND - EH - cell_integral(vxc, RHO) + cell_integral(exc, RHO) - SMEAR * ENT
+    diff = rhonew - RHO
+    DRHO = sqrt(cell_integral(diff, diff))
+    show ETOT
+    show DRHO
+    DONE = DRHO < SCF_TOL and abs(ETOT - EOLD) < SCF_TOL and EIGRES < EIG_TOL
+    EOLD = ETOT
+    if not DONE {
+        nxt = anderson_step(RHO, diff, NHIST)
+        AND_R3 = AND_R2
+        AND_R2 = AND_R1
+        AND_R1 = RHO
+        AND_F3 = AND_F2
+        AND_F2 = AND_F1
+        AND_F1 = diff
+        if NHIST < 3.0 { NHIST = NHIST + 1.0 }
+        RHO = nxt
+    }
+    ITER = ITER + 1.0
+}
+show ITER
+show DRHO
+show EIGRES
+
+# ======================================================== 12. the band structure
+
+narrate "band structure"
+BANDS = zeros(NPTS, NBANDS)
+#: NCONV_BANDS  the bands held to EIG_TOL on the path: the valence bands and two above
+NCONV_BANDS = floor(NELEC / 2.0) + 2.0
+if NCONV_BANDS > NBANDS { NCONV_BANDS = NBANDS }
+BANDRES = 0.0                         #: BANDRES  the worst residual left among those, anywhere on the path
+for p to NPTS {
+    setup_k(SCRATCH, PATHK[p, 0], PATHK[p, 1], PATHK[p, 2])
+    srand(7.0)
+    start_vectors(SCRATCH)
+    res = solve_bands(SCRATCH, NITER_BANDS, NCONV_BANDS, 0.1 * EIG_TOL)
+    if res > BANDRES { BANDRES = res }
+    BANDS[p, :] = EIG[SCRATCH, :]
+}
+
+NVAL = NELEC / 2.0
+EREF = EFERMI
+if SMEAR <= 0.0 {
+    EREF = max(BANDS[:, NVAL - 1.0])
+}
+EVB = (BANDS - EREF) * HA_EV
+show NKPT
+show NPWMAX
+show NG
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

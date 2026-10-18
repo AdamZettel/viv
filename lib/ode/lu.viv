@@ -1,0 +1,95 @@
+###
+post: Dense LU with partial pivoting, factored once and solved many times
+agent: claude
+
+The implicit integrators (lib/ode/radau.viv, lib/ode/bdf.viv) solve with the
+same Newton matrix for several iterations and often for several steps, so the
+factorization is kept: `lu_factor` overwrites a copy of the matrix with its
+L and U factors and records the row swaps; `lu_solve` then costs n^2 per
+right-hand side instead of n^3.
+
+Used with `from ode.lu import lu_factor, lu_solve`.
+###
+
+#| Overwrite `A` (n by n) with its LU factors, L unit lower and U upper, and
+#| record in `piv` the row swapped into place at each column (LAPACK's getrf
+#| convention). Returns false when a pivot is exactly zero (the matrix is
+#| singular); the factors are then unusable.
+def lu_factor(A: Arr, piv: [Int]) -> Bool {
+    n = shape(A)[0]
+    ok = true
+    for k to n {
+        #: the largest entry of column k on or below the diagonal becomes the pivot
+        p = k
+        big = abs(A[k, k])
+        for i from k + 1 to n {
+            if abs(A[i, k]) > big {
+                big = abs(A[i, k])
+                p = i
+            }
+        }
+        piv[k] = int(p)
+        if big == 0.0 {
+            ok = false
+        }
+        else {
+            if p != k {
+                for j to n {
+                    A[k, j], A[p, j] = A[p, j], A[k, j]
+                }
+            }
+            #: eliminate below the pivot, keeping the multipliers in L's place
+            for i from k + 1 to n {
+                m = A[i, k] / A[k, k]
+                A[i, k] = m
+                for j from k + 1 to n {
+                    A[i, j] -= m * A[k, j]
+                }
+            }
+        }
+    }
+    return ok
+}
+
+#| Solve `A x = b` from the factors `lu_factor` left in `LU` and `piv`.
+def lu_solve(LU: Arr, piv: [Int], b: Arr) -> Arr {
+    n = len(b)
+    x = copy(b)
+    for k to n {
+        p = piv[k]
+        if p != k {
+            x[k], x[p] = x[p], x[k]
+        }
+    }
+    #: forward substitution with the unit lower factor
+    for i from 1 to n {
+        acc = x[i]
+        for j to i {
+            acc -= LU[i, j] * x[j]
+        }
+        x[i] = acc
+    }
+    #: back substitution with the upper factor
+    for i to n reversed {
+        acc = x[i]
+        for j from i + 1 to n {
+            acc -= LU[i, j] * x[j]
+        }
+        x[i] = acc / LU[i, i]
+    }
+    return x
+}
+
+test "LU solves a pivoting system to roundoff" {
+    A = [[0.0, 2.0, 1.0], [1.0, 1.0, 0.0], [3.0, 0.0, 4.0]]
+    b = [3.0, 2.0, 7.0]
+    LU = copy(A)
+    piv = int_zeros(3)
+    ok = lu_factor(LU, piv)
+    x = lu_solve(LU, piv, b)
+    assert_true(ok)
+    assert_allclose(A @ x, b, 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

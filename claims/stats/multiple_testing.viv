@@ -1,0 +1,82 @@
+###
+title: Twenty tests on pure noise find something 64.7% of the time
+line: At least one of 20 $z$-tests is significant in 64.7% of 10,000 studies, as $1 - 0.95^{20} = 0.6415$ predicts; Bonferroni brings it to 5%.
+claim: Running 20 independent $z$-tests at the 5% level on pure noise (each on 10 standard normal draws), at least one comes out significant in 64.7% of 10,000 simulated studies (between 62.7% and 65.7%), as $1 - 0.95^{20} = 0.6415$ predicts, while the Bonferroni level $0.05/20$ brings the rate down to between 4% and 6%.
+topic: stats
+section: hypothesis testing
+reference: $1 - (1 - \alpha)^m$ for $m$ independent tests at level $\alpha$; the Bonferroni bound $\alpha$ for the family-wise error (Dunn, "Multiple comparisons among means", JASA 56 (1961) 52-64). The p-values use the normal tail $\operatorname{erfc}(|z|/\sqrt{2})$ of lib/stats/special.
+scope: Fixed seed; the band is the expected rate plus or minus 3 binomial standard deviations (0.0048 at 10,000 studies). Independent tests only: correlated tests inflate the rate less.
+lane: ai
+by: claude
+cost: fast
+###
+
+from stats.special import erfc
+
+N_STUDIES: Int = 10000
+N_TESTS: Int = 20
+N_DRAWS: Int = 10
+ALPHA = 0.05
+SEED: Int = 2026
+
+srand(SEED)
+any_uncorrected: Int = 0
+any_bonferroni: Int = 0
+for st to N_STUDIES {
+    hit = false
+    hit_b = false
+    for tt to N_TESTS {
+        m = 0.0
+        for dd to N_DRAWS {
+            m = m + randn()
+        }
+        z = m / sqrt(N_DRAWS * 1.0)
+        pval = erfc(abs(z) / sqrt(2.0))
+        if pval < ALPHA {
+            hit = true
+        }
+        if pval < ALPHA / N_TESTS {
+            hit_b = true
+        }
+    }
+    if hit {
+        any_uncorrected = any_uncorrected + 1
+    }
+    if hit_b {
+        any_bonferroni = any_bonferroni + 1
+    }
+}
+rate = any_uncorrected / (N_STUDIES * 1.0)
+rate_bonferroni = any_bonferroni / (N_STUDIES * 1.0)
+expected = 1.0 - pow(1.0 - ALPHA, N_TESTS)
+show rate
+show rate_bonferroni
+show expected
+
+#: the figure: 1 - 0.95^m against m, with the simulated rates at m = 20
+fg_m = zeros(N_TESTS)
+fg_p = zeros(N_TESTS)
+for fg_k to N_TESTS {
+    fg_m[fg_k] = fg_k + 1.0
+    fg_p[fg_k] = 1.0 - pow(1.0 - ALPHA, fg_k + 1.0)
+}
+figure("Chance of at least one false positive", "number of tests m", "probability")
+plot(fg_m, fg_p, "1 - 0.95^m")
+style("1 - 0.95^m", "s6 nomarker")
+scatter([N_TESTS * 1.0], [rate], "simulated, 5% level")
+style("simulated, 5% level", "s2 circle")
+scatter([N_TESTS * 1.0], [rate_bonferroni], "simulated, Bonferroni")
+style("simulated, Bonferroni", "s1 square")
+
+test "at least one of 20 is significant in 62.7% to 65.7% of the studies" {
+    assert_gt(rate, 0.627)
+    assert_lt(rate, 0.657)
+    assert_near(expected, 0.6415, 0.00005)
+}
+test "with Bonferroni's 0.05 / 20 the rate is between 4% and 6%" {
+    assert_gt(rate_bonferroni, 0.04)
+    assert_lt(rate_bonferroni, 0.06)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

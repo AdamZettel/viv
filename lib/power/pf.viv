@@ -1,0 +1,870 @@
+###
+post: AC and DC power flow by Newton-Raphson, fast-decoupled and DC
+agent: claude
+
+A power flow finds the bus voltages V = Vm e^(j Va) at which the power
+each bus injects into the network, S = V conj(Y V), equals what its
+generators produce minus what its loads draw. Each bus fixes two of its
+four quantities (P, Q, Vm, Va) by its type:
+
+  - PQ (a load bus): P and Q are given, Vm and Va are unknown;
+  - PV (a generator bus): P and Vm are given, Va is unknown;
+  - REF (the slack bus): Vm and Va are given; its P and Q make up the
+    losses and are known only after the solve.
+
+`runpf(c, method, enforce_q, tol, max_it)` solves a case by one of three
+methods, the three of MATPOWER's runpf (R. D. Zimmerman, C. E.
+Murillo-Sanchez and R. J. Thomas, "MATPOWER: steady-state operations,
+planning and analysis tools for power systems research and education",
+IEEE Trans. Power Systems 26 (2011) 12-19; the MATPOWER manual, chapter 4):
+
+  - NR: Newton's method on the real and imaginary mismatches in polar
+    coordinates, with the Jacobian dS/dVa, dS/dVm in closed form,
+    factored by the sparse LU of power.splu each iteration;
+  - FDXB: the fast-decoupled method of Stott and Alsac (IEEE Trans. PAS
+    93 (1974) 859-869) in the XB form of van Amerongen (IEEE Trans. Power
+    Systems 4 (1989) 760-770): two constant real matrices B' and B'',
+    factored once, half-steps in Va and in Vm;
+  - DC: the linear model with Vm = 1, no resistance and sin(dVa) = dVa,
+    one sparse solve for the angles.
+
+The result reports the largest mismatch left, per unit (for the
+fast-decoupled method, divided by Vm as that method measures it). A flow
+that does not converge in `max_it` iterations reports its last iterate
+with `success` false.
+
+With `enforce_q` a generator whose reactive output leaves [Qmin, Qmax]
+is held at the limit, its bus becomes a PQ bus, and the flow is solved
+again until no limit is violated (MATPOWER's ENFORCE_Q_LIMS = 1).
+
+The result has MATPOWER's columns filled: bus Vm and Va (degrees),
+generator Pg and Qg (MW, MVAr) and the four branch flow columns (power
+entering each end, MW and MVAr).
+###
+
+from power.case import (
+    BR_STATUS, BR_X, BRANCH_COLS, BUS_I, BUS_TYPE, Case, F_BUS, GEN_BUS, GEN_STATUS, GS, NONE, PD, PF, PG, PQ, PT,
+    PV, QD, QF, QG, QMAX, QMIN, QT, REF, SHIFT, T_BUS, TAP, VA, VG, VM,
+)
+from power.ybus import DEG, Ybus, YbusOpts, full_network, make_ybus, ybus_mul
+from power.splu import SpLU, lu_solve, mindeg_order, splu
+
+#: methods
+NR: Int = 1
+FDXB: Int = 2
+DC: Int = 3
+
+#: the diagonal is kept as pivot when within this factor of the column's largest entry
+PIVOT_TOL: Num = 0.001
+#: MATLAB's eps, in MATPOWER's splitting of Q between generators at one bus
+MACHINE_EPS: Num = 2.220446049250313e-16
+#: a generator's Q may exceed its limit by this much, in MVAr (MATPOWER's opf.violation)
+QLIM_TOL: Num = 5e-6
+
+record Net {
+    nb: Int
+    base: Num
+    bus: Arr
+    gen: Arr
+    branch: Arr
+    gbus: [Int]
+    fbus: [Int]
+    tbus: [Int]
+}
+
+record PFResult {
+    bus: Arr
+    gen: Arr
+    branch: Arr
+    success: Bool
+    iterations: Int
+    method: Int
+    mismatch: Num
+}
+
+record Newton {
+    v: CArr
+    converged: Bool
+    iterations: Int
+    mismatch: Num
+}
+
+#| The case with every bus, generator end and branch end numbered 0..nb-1
+#| in bus order, and the branch matrix widened to hold the flow columns.
+def internal(c: Case) -> Net {
+    nb: Int = int(shape(c.bus)[0])
+    ng: Int = int(shape(c.gen)[0])
+    nl: Int = int(shape(c.branch)[0])
+    idx = map()
+    for i to nb {
+        idx[c.bus[i, BUS_I]] = i
+    }
+    gbus: [Int] = [int(idx[c.gen[g, GEN_BUS]]) for g to ng]
+    fbus = int_zeros(nl)
+    tbus = int_zeros(nl)
+    br = zeros(nl, BRANCH_COLS)
+    ncol: Int = int(shape(c.branch)[1])
+    for k to nl {
+        fbus[k] = int(idx[c.branch[k, F_BUS]])
+        tbus[k] = int(idx[c.branch[k, T_BUS]])
+        for j to min(ncol, BRANCH_COLS) {
+            br[k, j] = c.branch[k, j]
+        }
+    }
+    return Net { nb: nb, base: c.base_mva, bus: copy(c.bus), gen: copy(c.gen), branch: br, gbus: gbus,
+                 fbus: fbus, tbus: tbus }
+}
+
+#| The REF, PV and PQ buses as MATPOWER's bustypes finds them: a PV or REF
+#| bus with no generator in service counts as PQ; with no REF bus left,
+#| the first PV bus is the reference.
+def bus_types(net: Net) {
+    ngen = int_zeros(net.nb)
+    for g to len(net.gbus) {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            ngen[net.gbus[g]] += 1
+        }
+    }
+    ref: [Int] = []
+    pv: [Int] = []
+    pq: [Int] = []
+    for i to net.nb {
+        t: Int = int(net.bus[i, BUS_TYPE])
+        if t == REF and ngen[i] > 0 {
+            ref = append(ref, i)
+        }
+        else if t == PV and ngen[i] > 0 {
+            pv = append(pv, i)
+        }
+        else if t != NONE {
+            pq = append(pq, i)
+        }
+    }
+    if len(ref) == 0 {
+        if len(pv) == 0 {
+            stop("runpf: no bus can be the reference: no REF or PV bus has a generator in service")
+        }
+        ref = append(ref, pv[0])
+        rest: [Int] = []
+        for k from 1 to len(pv) {
+            rest = append(rest, pv[k])
+        }
+        pv = rest
+    }
+    return ref, pv, pq
+}
+
+#| The scheduled injections S = (generation - load) / baseMVA, per unit.
+def make_sbus(net: Net) -> CArr {
+    s = czeros(net.nb)
+    #: complex arrays do not broadcast, so the loads are stored one by one
+    for i to net.nb {
+        s[i] = -(net.bus[i, PD] + net.bus[i, QD] * 1.0i) / net.base
+    }
+    for g to len(net.gbus) {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            s[net.gbus[g]] += (net.gen[g, PG] + net.gen[g, QG] * 1.0i) / net.base
+        }
+    }
+    return s
+}
+
+#| The starting voltages: the case's Vm and Va, with each generator bus at
+#| its generator's set point.
+def initial_v(net: Net) -> CArr {
+    v = czeros(net.nb)
+    vm = net.bus[:, VM]
+    for g to len(net.gbus) {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            vm[net.gbus[g]] = net.gen[g, VG]
+        }
+    }
+    for i to net.nb {
+        a = net.bus[i, VA] * DEG
+        v[i] = vm[i] * (cos(a) + sin(a) * 1.0i)
+    }
+    return v
+}
+
+#| The mismatch vector F = [Re dS(pv, pq); Im dS(pq)] with dS = V conj(Y V) - S.
+def mismatch(y: Ybus, v: CArr, sbus: CArr, pv: [Int], pq: [Int]) -> Arr {
+    cur = ybus_mul(y, v)
+    npv: Int = len(pv)
+    npq: Int = len(pq)
+    f = zeros(npv + 2 * npq)
+    for k to npv {
+        b = pv[k]
+        f[k] = re(v[b] * conj(cur[b]) - sbus[b])
+    }
+    for k to npq {
+        b = pq[k]
+        d = v[b] * conj(cur[b]) - sbus[b]
+        f[npv + k] = re(d)
+        f[npv + npq + k] = im(d)
+    }
+    return f
+}
+
+#| The Newton Jacobian in compressed sparse column form: columns Va(pv),
+#| Va(pq), Vm(pq); rows P(pv), P(pq), Q(pq).
+def jacobian(y: Ybus, v: CArr, pv: [Int], pq: [Int]) {
+    nb = y.n
+    npv: Int = len(pv)
+    npq: Int = len(pq)
+    #: ang[b], mag[b]: the row and column of bus b's P and Va, Q and Vm (-1: none)
+    ang = int_zeros(nb)
+    mag = int_zeros(nb)
+    for b to nb {
+        ang[b] = -1
+        mag[b] = -1
+    }
+    for k to npv {
+        ang[pv[k]] = k
+    }
+    for k to npq {
+        ang[pq[k]] = npv + k
+        mag[pq[k]] = npv + npq + k
+    }
+    cur = ybus_mul(y, v)
+    n: Int = npv + 2 * npq
+    colptr = int_zeros(n + 1)
+    #: the columns of bus k: Va_k first, then Vm_k
+    nnz: Int = 0
+    for kb to nb {
+        if ang[kb] >= 0 {
+            for p from y.colptr[kb] to y.colptr[kb + 1] {
+                i = y.rowind[p]
+                if ang[i] >= 0 {
+                    nnz += 1
+                }
+                if mag[i] >= 0 {
+                    nnz += 1
+                }
+            }
+        }
+    }
+    total: Int = 2 * nnz
+    rowind = int_zeros(total)
+    vals = zeros(total)
+    cnt = int_zeros(n)
+    for kb to nb {
+        if ang[kb] >= 0 {
+            for p from y.colptr[kb] to y.colptr[kb + 1] {
+                i = y.rowind[p]
+                if ang[i] >= 0 {
+                    cnt[ang[kb]] += 1
+                }
+                if mag[i] >= 0 {
+                    cnt[ang[kb]] += 1
+                }
+                if mag[kb] >= 0 {
+                    if ang[i] >= 0 {
+                        cnt[mag[kb]] += 1
+                    }
+                    if mag[i] >= 0 {
+                        cnt[mag[kb]] += 1
+                    }
+                }
+            }
+        }
+    }
+    for c to n {
+        colptr[c + 1] = colptr[c] + cnt[c]
+    }
+    put: [Int] = [colptr[c] for c to n]
+    for kb to nb {
+        ca = ang[kb]
+        cm = mag[kb]
+        if ca >= 0 {
+            vk = v[kb]
+            vn = vk / abs(vk)
+            for p from y.colptr[kb] to y.colptr[kb + 1] {
+                i = y.rowind[p]
+                yv = y.vals[p]
+                #: dS_i/dVa_k = j V_i conj(d_ik I_i - Y_ik V_k); dS_i/dVm_k = V_i conj(Y_ik Vn_k) + d_ik conj(I_i) Vn_i
+                da = -1.0i * v[i] * conj(yv * vk)
+                dm = v[i] * conj(yv * vn)
+                if i == kb {
+                    da += 1.0i * v[i] * conj(cur[i])
+                    dm += conj(cur[i]) * vn
+                }
+                if ang[i] >= 0 {
+                    rowind[put[ca]] = ang[i]
+                    vals[put[ca]] = re(da)
+                    put[ca] += 1
+                }
+                if mag[i] >= 0 {
+                    rowind[put[ca]] = mag[i]
+                    vals[put[ca]] = im(da)
+                    put[ca] += 1
+                }
+                if cm >= 0 {
+                    if ang[i] >= 0 {
+                        rowind[put[cm]] = ang[i]
+                        vals[put[cm]] = re(dm)
+                        put[cm] += 1
+                    }
+                    if mag[i] >= 0 {
+                        rowind[put[cm]] = mag[i]
+                        vals[put[cm]] = im(dm)
+                        put[cm] += 1
+                    }
+                }
+            }
+        }
+    }
+    return colptr, rowind, vals
+}
+
+def _maxabs(f: Arr) -> Num {
+    if len(f) == 0 {
+        return 0.0
+    }
+    return amax(abs(f))
+}
+
+def _polar(vm: Num, va: Num) -> Complex {
+    return vm * (cos(va) + sin(va) * 1.0i)
+}
+
+#| Newton's method in polar coordinates (MATPOWER's newtonpf): stop when
+#| the largest mismatch is below tol, per unit.
+def newton_pf(y: Ybus, sbus: CArr, v0: CArr, pv: [Int], pq: [Int], tol: Num, max_it: Int) -> Newton {
+    v = copy(v0)
+    nb = y.n
+    vm = zeros(nb)
+    va = zeros(nb)
+    for b to nb {
+        vm[b] = abs(v[b])
+        va[b] = atan2(im(v[b]), re(v[b]))
+    }
+    npv: Int = len(pv)
+    npq: Int = len(pq)
+    n: Int = npv + 2 * npq
+    f = mismatch(y, v, sbus, pv, pq)
+    converged = _maxabs(f) < tol
+    it: Int = 0
+    q: [Int] = []
+    while not converged and it < max_it {
+        it += 1
+        colptr, rowind, vals = jacobian(y, v, pv, pq)
+        if it == 1 {
+            q = mindeg_order(n, colptr, rowind)
+        }
+        lu = splu(n, colptr, rowind, vals, q, PIVOT_TOL)
+        dx = lu_solve(lu, f)
+        #: x <- x - J^-1 F
+        for k to npv {
+            va[pv[k]] -= dx[k]
+        }
+        for k to npq {
+            va[pq[k]] -= dx[npv + k]
+            vm[pq[k]] -= dx[npv + npq + k]
+        }
+        for b to nb {
+            v[b] = _polar(vm[b], va[b])
+        }
+        f = mismatch(y, v, sbus, pv, pq)
+        converged = _maxabs(f) < tol
+    }
+    return Newton { v: v, converged: converged, iterations: it, mismatch: _maxabs(f) }
+}
+
+#| The fast-decoupled method, XB version (MATPOWER's fdpf): B' and B''
+#| factored once, then alternate Va and Vm half-iterations; one iteration
+#| counts both halves.
+def fd_pf(y: Ybus, net: Net, sbus: CArr, v0: CArr, pv: [Int], pq: [Int], tol: Num, max_it: Int) -> Newton {
+    nb = y.n
+    npv: Int = len(pv)
+    npq: Int = len(pq)
+    #: B': no bus shunts, no charging, unit taps, no resistance; B'': no phase shifts
+    bp_opts = YbusOpts { no_bus_shunt: true, no_charging: true, unit_tap: true, no_resistance: true, no_shift: false }
+    bpp_opts = YbusOpts { no_bus_shunt: false, no_charging: false, unit_tap: false, no_resistance: false,
+                          no_shift: true }
+    yp = make_ybus(nb, net.fbus, net.tbus, net.bus, net.branch, net.base, bp_opts)
+    ypp = make_ybus(nb, net.fbus, net.tbus, net.bus, net.branch, net.base, bpp_opts)
+    sel_a = int_zeros(nb)
+    sel_m = int_zeros(nb)
+    for b to nb {
+        sel_a[b] = -1
+        sel_m[b] = -1
+    }
+    for k to npv {
+        sel_a[pv[k]] = k
+    }
+    for k to npq {
+        sel_a[pq[k]] = npv + k
+        sel_m[pq[k]] = k
+    }
+    #: B' rows and columns in the [pv; pq] order, B'' in the pq order
+    na: Int = npv + npq
+    bpc, bpr, bpv = _sub_in_order(yp, sel_a, na)
+    bppc, bppr, bppv = _sub_in_order(ypp, sel_m, npq)
+    lup = splu(na, bpc, bpr, bpv, mindeg_order(na, bpc, bpr), PIVOT_TOL)
+    lupp = splu(npq, bppc, bppr, bppv, mindeg_order(npq, bppc, bppr), PIVOT_TOL)
+
+    v = copy(v0)
+    vm = zeros(nb)
+    va = zeros(nb)
+    for b to nb {
+        vm[b] = abs(v[b])
+        va[b] = atan2(im(v[b]), re(v[b]))
+    }
+    p_mis, q_mis = _fd_mismatch(y, v, vm, sbus, pv, pq)
+    converged = _maxabs(p_mis) < tol and _maxabs(q_mis) < tol
+    it: Int = 0
+    while not converged and it < max_it {
+        it += 1
+        #: P half-iteration: B' dVa = -P/Vm
+        dva = lu_solve(lup, p_mis)
+        for k to npv {
+            va[pv[k]] -= dva[k]
+        }
+        for k to npq {
+            va[pq[k]] -= dva[npv + k]
+        }
+        for b to nb {
+            v[b] = _polar(vm[b], va[b])
+        }
+        p_mis, q_mis = _fd_mismatch(y, v, vm, sbus, pv, pq)
+        converged = _maxabs(p_mis) < tol and _maxabs(q_mis) < tol
+        if converged {
+            break
+        }
+        #: Q half-iteration: B'' dVm = -Q/Vm
+        dvm = lu_solve(lupp, q_mis)
+        for k to npq {
+            vm[pq[k]] -= dvm[k]
+        }
+        for b to nb {
+            v[b] = _polar(vm[b], va[b])
+        }
+        p_mis, q_mis = _fd_mismatch(y, v, vm, sbus, pv, pq)
+        converged = _maxabs(p_mis) < tol and _maxabs(q_mis) < tol
+    }
+    return Newton { v: v, converged: converged, iterations: it, mismatch: max(_maxabs(p_mis), _maxabs(q_mis)) }
+}
+
+#| -Im Y on the selected buses, rows and columns numbered by sel.
+def _sub_in_order(y: Ybus, sel: [Int], m: Int) {
+    #: gather column by column in sel's numbering
+    owner = int_zeros(m)
+    for b to y.n {
+        if sel[b] >= 0 {
+            owner[sel[b]] = b
+        }
+    }
+    colptr = int_zeros(m + 1)
+    rowind: [Int] = []
+    vals = []
+    for c to m {
+        colptr[c] = len(rowind)
+        j = owner[c]
+        for p from y.colptr[j] to y.colptr[j + 1] {
+            i = y.rowind[p]
+            if sel[i] >= 0 {
+                rowind = append(rowind, sel[i])
+                vals = append(vals, -im(y.vals[p]))
+            }
+        }
+    }
+    colptr[m] = len(rowind)
+    return colptr, rowind, vals
+}
+
+def _fd_mismatch(y: Ybus, v: CArr, vm: Arr, sbus: CArr, pv: [Int], pq: [Int]) {
+    cur = ybus_mul(y, v)
+    npv: Int = len(pv)
+    npq: Int = len(pq)
+    p = zeros(npv + npq)
+    q = zeros(npq)
+    for k to npv {
+        b = pv[k]
+        p[k] = re(v[b] * conj(cur[b]) - sbus[b]) / vm[b]
+    }
+    for k to npq {
+        b = pq[k]
+        d = (v[b] * conj(cur[b]) - sbus[b]) / vm[b]
+        p[npv + k] = re(d)
+        q[k] = im(d)
+    }
+    return p, q
+}
+
+#| Generator Q and the reference generators' P from the solved voltages,
+#| and the branch flows (MATPOWER's pfsoln).
+def pf_solution(net: Net, y: Ybus, v: CArr, ref: [Int]) {
+    nb = net.nb
+    ng: Int = len(net.gbus)
+    cur = ybus_mul(y, v)
+    sinj = czeros(nb)
+    for b to nb {
+        sinj[b] = v[b] * conj(cur[b])
+        net.bus[b, VM] = abs(v[b])
+        net.bus[b, VA] = atan2(im(v[b]), re(v[b])) / DEG
+    }
+    #: each generator first gets its bus's whole Q, then an equal share
+    ngg = int_zeros(nb)
+    non: Int = 0
+    for g to ng {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            b = net.gbus[g]
+            net.gen[g, QG] = im(sinj[b]) * net.base + net.bus[b, QD]
+            ngg[b] += 1
+            non += 1
+        }
+    }
+    if non > 1 {
+        _split_q(net, ngg)
+    }
+    #: the reference bus's first generator takes up the slack in P
+    for r in ref {
+        first: Int = -1
+        others = 0.0
+        for g to ng {
+            if net.gen[g, GEN_STATUS] > 0.0 and net.gbus[g] == r {
+                if first < 0 {
+                    first = g
+                }
+                else {
+                    others += net.gen[g, PG]
+                }
+            }
+        }
+        net.gen[first, PG] = re(sinj[r]) * net.base + net.bus[r, PD] - others
+    }
+    branch_flows(net, y, v)
+}
+
+#| Q split among the generators of one bus in proportion to their Q
+#| ranges (MATPOWER's pfsoln; an infinite limit is replaced by a finite
+#| proxy, the sum of |Qg| and of the finite limits' magnitudes).
+def _split_q(net: Net, ngg: [Int]) {
+    nb = net.nb
+    ng: Int = len(net.gbus)
+    big = 0.0
+    for g to ng {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            net.gen[g, QG] = net.gen[g, QG] / ngg[net.gbus[g]]
+            big += abs(net.gen[g, QG])
+            if abs(net.gen[g, QMAX]) < inf {
+                big += abs(net.gen[g, QMAX])
+            }
+            if abs(net.gen[g, QMIN]) < inf {
+                big += abs(net.gen[g, QMIN])
+            }
+        }
+    }
+    qmin = zeros(ng)
+    qmax = zeros(ng)
+    tot = zeros(nb)
+    tmin = zeros(nb)
+    tmax = zeros(nb)
+    for g to ng {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            qmin[g] = max(net.gen[g, QMIN], -big)
+            qmax[g] = min(net.gen[g, QMAX], big)
+            b = net.gbus[g]
+            tot[b] += net.gen[g, QG]
+            tmin[b] += qmin[g]
+            tmax[b] += qmax[g]
+        }
+    }
+    for g to ng {
+        if net.gen[g, GEN_STATUS] > 0.0 {
+            b = net.gbus[g]
+            if abs(tmax[b] - tmin[b]) < 10.0 * MACHINE_EPS {
+                net.gen[g, QG] = qmin[g] + (tot[b] - tmin[b]) / ngg[b]
+            }
+            else {
+                net.gen[g, QG] = qmin[g] + (tot[b] - tmin[b]) / (tmax[b] - tmin[b] + MACHINE_EPS) * (qmax[g] - qmin[g])
+            }
+        }
+    }
+}
+
+#| The power entering each end of each branch, MW and MVAr.
+def branch_flows(net: Net, y: Ybus, v: CArr) {
+    for k to len(net.fbus) {
+        if net.branch[k, BR_STATUS] > 0.0 {
+            vf = v[net.fbus[k]]
+            vt = v[net.tbus[k]]
+            sf = vf * conj(y.yff[k] * vf + y.yft[k] * vt) * net.base
+            st = vt * conj(y.ytf[k] * vf + y.ytt[k] * vt) * net.base
+            net.branch[k, PF] = re(sf)
+            net.branch[k, QF] = im(sf)
+            net.branch[k, PT] = re(st)
+            net.branch[k, QT] = im(st)
+        }
+        else {
+            net.branch[k, PF] = 0.0
+            net.branch[k, QF] = 0.0
+            net.branch[k, PT] = 0.0
+            net.branch[k, QT] = 0.0
+        }
+    }
+}
+
+#| The DC power flow (MATPOWER's makeBdc and dcpf): B Va = P - Pshift - Gs,
+#| with the reference angle fixed; Vm = 1, no Q.
+def dc_pf(net: Net) -> Newton {
+    nb = net.nb
+    nl: Int = len(net.fbus)
+    ref, pv, pq = bus_types(net)
+    bsus = zeros(nl)
+    pfinj = zeros(nl)
+    for k to nl {
+        if net.branch[k, BR_STATUS] > 0.0 {
+            ratio = net.branch[k, TAP]
+            if ratio == 0.0 {
+                ratio = 1.0
+            }
+            bsus[k] = 1.0 / net.branch[k, BR_X] / ratio
+            pfinj[k] = -bsus[k] * net.branch[k, SHIFT] * DEG
+        }
+    }
+    #: P = generation - load - shift injection - shunt conductance, per unit
+    sbus = make_sbus(net)
+    pbus = re(sbus) - net.bus[:, GS] / net.base
+    for k to nl {
+        pbus[net.fbus[k]] -= pfinj[k]
+        pbus[net.tbus[k]] += pfinj[k]
+    }
+    #: B on the non-reference buses, [pv; pq] order
+    sel = int_zeros(nb)
+    for b to nb {
+        sel[b] = -1
+    }
+    m: Int = 0
+    for b in pv {
+        sel[b] = m
+        m += 1
+    }
+    for b in pq {
+        sel[b] = m
+        m += 1
+    }
+    va = net.bus[:, VA] * DEG
+    rhs = zeros(m)
+    for b to nb {
+        if sel[b] >= 0 {
+            rhs[sel[b]] = pbus[b]
+        }
+    }
+    #: the matrix as triplets; columns of the reference move to the right side
+    cnt = int_zeros(m)
+    for k to nl {
+        if bsus[k] != 0.0 {
+            for e to 2 {
+                j = net.fbus[k] if e == 0 else net.tbus[k]
+                if sel[j] >= 0 {
+                    cnt[sel[j]] += 2
+                }
+            }
+        }
+    }
+    colptr = int_zeros(m + 1)
+    for c to m {
+        colptr[c + 1] = colptr[c] + cnt[c]
+    }
+    put: [Int] = [colptr[c] for c to m]
+    rowind = int_zeros(colptr[m])
+    vals = zeros(colptr[m])
+    for k to nl {
+        if bsus[k] != 0.0 {
+            f = net.fbus[k]
+            t = net.tbus[k]
+            #: column f gets +b at row f and -b at row t; column t the mirror
+            for e to 2 {
+                j = f if e == 0 else t
+                o = t if e == 0 else f
+                if sel[j] >= 0 {
+                    rowind[put[sel[j]]] = sel[j]
+                    vals[put[sel[j]]] = bsus[k]
+                    put[sel[j]] += 1
+                    if sel[o] >= 0 {
+                        rowind[put[sel[j]]] = sel[o]
+                        vals[put[sel[j]]] = -bsus[k]
+                        put[sel[j]] += 1
+                    }
+                    else {
+                        #: o is the reference: its known angle moves to the right side
+                        rhs[sel[j]] += bsus[k] * va[o]
+                        cnt[sel[j]] -= 1
+                    }
+                }
+            }
+        }
+    }
+    cc, cr, cv = _compact_csc(m, colptr, put, rowind, vals)
+    lu = splu(m, cc, cr, cv, mindeg_order(m, cc, cr), PIVOT_TOL)
+    x = lu_solve(lu, rhs)
+    v = czeros(nb)
+    for b to nb {
+        if sel[b] >= 0 {
+            va[b] = x[sel[b]]
+        }
+        v[b] = _polar(1.0, va[b])
+    }
+
+    #: results: Vm = 1, angles, flows b (Va_f - Va_t) + Pfinj, the reference's P
+    for b to nb {
+        net.bus[b, VM] = 1.0
+        net.bus[b, VA] = va[b] / DEG
+    }
+    for k to nl {
+        pf = (bsus[k] * (va[net.fbus[k]] - va[net.tbus[k]]) + pfinj[k]) * net.base
+        net.branch[k, PF] = pf
+        net.branch[k, PT] = -pf
+        net.branch[k, QF] = 0.0
+        net.branch[k, QT] = 0.0
+    }
+    ng: Int = len(net.gbus)
+    for g to ng {
+        net.gen[g, QG] = 0.0
+    }
+    for r in ref {
+        #: the reference injection B(ref, :) Va + its shift injection, minus the others' P
+        inj = 0.0
+        for k to nl {
+            if net.fbus[k] == r {
+                inj += net.branch[k, PF] / net.base
+            }
+            if net.tbus[k] == r {
+                inj += net.branch[k, PT] / net.base
+            }
+        }
+        inj += net.bus[r, GS] / net.base
+        first: Int = -1
+        others = 0.0
+        for g to ng {
+            if net.gen[g, GEN_STATUS] > 0.0 and net.gbus[g] == r {
+                if first < 0 {
+                    first = g
+                }
+                else {
+                    others += net.gen[g, PG]
+                }
+            }
+        }
+        net.gen[first, PG] = inj * net.base + net.bus[r, PD] - others
+    }
+    return Newton { v: v, converged: true, iterations: 1, mismatch: 0.0 }
+}
+
+#| Drop the slots left unused in each column.
+def _compact_csc(m: Int, colptr: [Int], put: [Int], rowind: [Int], vals: Arr) {
+    cc = int_zeros(m + 1)
+    cr: [Int] = []
+    cv = []
+    for c to m {
+        cc[c] = len(cr)
+        for p from colptr[c] to put[c] {
+            cr = append(cr, rowind[p])
+            cv = append(cv, vals[p])
+        }
+    }
+    cc[m] = len(cr)
+    return cc, cr, cv
+}
+
+#| Solve the case by NR, FDXB or DC; with enforce_q, hold generators at
+#| their Q limits and solve again until none is violated.
+def runpf(c: Case, method: Int, enforce_q: Bool, tol: Num, max_it: Int) -> PFResult {
+    net = internal(c)
+    if method == DC {
+        r = dc_pf(net)
+        return PFResult { bus: net.bus, gen: net.gen, branch: net.branch, success: r.converged,
+                          iterations: r.iterations, method: method, mismatch: 0.0 }
+    }
+    y = make_ybus(net.nb, net.fbus, net.tbus, net.bus, net.branch, net.base, full_network())
+    ng: Int = len(net.gbus)
+    ref0, pv0, pq0 = bus_types(net)
+    va_ref0 = net.bus[ref0[0], VA]
+    ref_changed = false
+    fixed = int_zeros(ng)
+    types0 = zeros(net.nb)
+    pd0 = zeros(net.nb)
+    qd0 = zeros(net.nb)
+    for b to net.nb {
+        types0[b] = net.bus[b, BUS_TYPE]
+        pd0[b] = net.bus[b, PD]
+        qd0[b] = net.bus[b, QD]
+    }
+    total_it: Int = 0
+    ok = false
+    last = 0.0
+    while true {
+        ref, pv, pq = bus_types(net)
+        sbus = make_sbus(net)
+        v0 = initial_v(net)
+        r = newton_pf(y, sbus, v0, pv, pq, tol, max_it) if method == NR else fd_pf(y, net, sbus, v0, pv, pq, tol, max_it)
+        total_it += r.iterations
+        ok = r.converged
+        last = r.mismatch
+        #: a flow that did not converge still reports its last iterate
+        pf_solution(net, y, r.v, ref)
+        if not ok {
+            break
+        }
+        if not enforce_q {
+            break
+        }
+        #: generators outside their Q limits, held at the limit from here on
+        nviol: Int = 0
+        for g to ng {
+            if net.gen[g, GEN_STATUS] > 0.0 {
+                hi = net.gen[g, QG] > net.gen[g, QMAX] + QLIM_TOL
+                lo = net.gen[g, QG] < net.gen[g, QMIN] - QLIM_TOL
+                if hi or lo {
+                    lim = net.gen[g, QMAX] if hi else net.gen[g, QMIN]
+                    net.gen[g, QG] = lim
+                    net.gen[g, GEN_STATUS] = 0.0
+                    fixed[g] = 1
+                    b = net.gbus[g]
+                    #: the held generator becomes a negative load; its bus a PQ bus
+                    net.bus[b, PD] -= net.gen[g, PG]
+                    net.bus[b, QD] -= lim
+                    if int(net.bus[b, BUS_TYPE]) == REF {
+                        ref_changed = true
+                    }
+                    net.bus[b, BUS_TYPE] = 1.0 * PQ
+                    nviol += 1
+                }
+            }
+        }
+        if nviol == 0 {
+            break
+        }
+        if ref_changed {
+            #: the first remaining PV bus becomes the reference
+            _, pvn, _ = bus_types(net)
+            if len(pvn) == 0 {
+                stop("runpf: every generator is at a reactive limit; the case is infeasible")
+            }
+        }
+    }
+    #: restore the case's loads, generator status and bus types
+    for g to ng {
+        if fixed[g] == 1 {
+            net.gen[g, GEN_STATUS] = 1.0
+        }
+    }
+    for b to net.nb {
+        net.bus[b, BUS_TYPE] = types0[b]
+        net.bus[b, PD] = pd0[b]
+        net.bus[b, QD] = qd0[b]
+    }
+    if ref_changed {
+        #: shift all angles so the original reference keeps its angle
+        shift = va_ref0 - net.bus[ref0[0], VA]
+        for b to net.nb {
+            net.bus[b, VA] += shift
+        }
+    }
+    return PFResult { bus: net.bus, gen: net.gen, branch: net.branch, success: ok, iterations: total_it,
+                      method: method, mismatch: last }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

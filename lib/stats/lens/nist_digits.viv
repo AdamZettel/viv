@@ -1,0 +1,72 @@
+###
+post: NIST's certified linear regressions under the digits lens
+agent: claude
+
+Fits one NIST StRD linear least-squares dataset (lib/stats/data/) with the
+solver slot of lib/stats/linmod.viv and prints the coefficients, for
+`viv digits` to perturb:
+
+    viv digits --set 'DATASET="Longley"' --set METHOD=0 lib/stats/lens/nist_digits.viv
+
+METHOD 0 is pivoted QR with Bjorck's refinement, 1 the same QR without it,
+2 the normal equations by Cholesky. The model is NIST's: Longley's six
+predictors and an intercept, a polynomial in x of degree DEGREE otherwise
+(10 for Filip, 5 for Wampler1-5).
+
+Used as a program.
+###
+
+from stats.linmod import lstsq, LSTSQ_QR, LSTSQ_CHOL
+
+DATASET = "Filip"
+DEGREE = 10
+METHOD = 0
+RANK_TOL = 1e-10
+METHOD_QR_PLAIN = 1
+METHOD_CHOL = 2
+
+text = read_text("lib/stats/data/" + DATASET + ".dat")
+lines = splitlines(text)
+start = 0
+for i to len(lines) {
+    if startswith(strip(lines[i]), "Data:") {
+        start = i + 1
+    }
+}
+rows = []
+for i from start to len(lines) {
+    if len(strip(lines[i])) > 0 {
+        rows = append(rows, i)
+    }
+}
+n = len(rows)
+first = split(strip(lines[rows[0]]))
+ncols = len(first)
+y = zeros(n)
+cols = DEGREE + 1 if DATASET != "Longley" else ncols
+X = zeros(n, cols)
+for r to n {
+    f = split(strip(lines[rows[r]]))
+    y[r] = float(f[0])
+    X[r, 0] = 1.0
+    if DATASET == "Longley" {
+        for j from 1 to ncols {
+            X[r, j] = float(f[j])
+        }
+    }
+    else {
+        x = float(f[1])
+        for j from 1 to cols {
+            X[r, j] = X[r, j - 1] * x
+        }
+    }
+}
+method = LSTSQ_CHOL if METHOD == METHOD_CHOL else LSTSQ_QR
+refine = 0.0 if METHOD == METHOD_QR_PLAIN else 1.0
+b, rank, piv, C = lstsq(X, y, method, RANK_TOL, refine)
+for j to cols {
+    print(fmt(b[j], ".15e"))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,333 @@
+###
+post: micrograd in Viv: a scalar autograd engine and a small MLP on the moons
+agent: claude
+
+A port of karpathy/micrograd (engine.py, nn.py and the moons demo). In
+micrograd every number is a `Value` object that remembers its parents and a
+closure that pushes its gradient back to them; `backward()` sorts the graph
+by depth-first search and calls the closures in reverse.
+
+Viv has no objects and no closures with statements, so the graph here is a
+tape: one `Tape` record of six parallel arrays, one entry per node, appended
+in the order the forward pass creates them. A node's parents
+are always created before it, so the tape order is already a topological
+order and backward is one reverse loop over the tape with one rule per op.
+
+The MLP's parameters are the first entries of the tape on every step, so the
+node id of a parameter is its index in the flat parameter vector, and after
+`backward` its gradient is `tape.grad[i]`.
+###
+
+from params import param_cols, param_count, param_declare, param_offset, param_rows, param_table
+from moons import (
+    HIDDEN, N, P0, REF_ACC, REF_GRAD0, REF_LOSS, REF_PFINAL, STEPS, TORCH_MORE, TORCH_SANITY, X,
+    Y,
+)
+
+# ---------------------------------------------------------------- the engine
+
+#| The ops a node can be. micrograd has four primitives; -, / and negation are
+#| built from them exactly as engine.py builds them.
+LEAF = 0
+ADD = 1
+MUL = 2
+POW = 3
+RELU = 4
+
+#| Room for one training step's graph: about 650 nodes per sample at 16 hidden
+#| units, plus the loss.
+CAPACITY = 80000
+
+#| The tape: six parallel arrays with one entry per node, and `n[0]`, the
+#| number of nodes on it (a function cannot rebind a global number, so the
+#| count lives in a one-element array).
+record Tape { op: Arr, left: Arr, right: Arr, data: Arr, grad: Arr, expo: Arr, n: Arr }
+
+tape = Tape {
+    op: zeros(CAPACITY),
+    left: zeros(CAPACITY),
+    right: zeros(CAPACITY),
+    data: zeros(CAPACITY),
+    grad: zeros(CAPACITY),
+    expo: zeros(CAPACITY),
+    n: zeros(1),
+}
+
+def clear_tape() {
+    tape.n[0] = 0.0
+}
+
+def node(kind, a, b, value, k) {
+    i = tape.n[0]
+    tape.op[i] = kind
+    tape.left[i] = a
+    tape.right[i] = b
+    tape.data[i] = value
+    tape.grad[i] = 0.0
+    tape.expo[i] = k
+    tape.n[0] = i + 1.0
+    return i
+}
+
+def value(x) {
+    return node(LEAF, 0.0, 0.0, x, 0.0)
+}
+
+def add(a, b) {
+    return node(ADD, a, b, tape.data[a] + tape.data[b], 0.0)
+}
+
+def mul(a, b) {
+    return node(MUL, a, b, tape.data[a] * tape.data[b], 0.0)
+}
+
+def power(a, k) {
+    return node(POW, a, 0.0, pow(tape.data[a], k), k)
+}
+
+def relu(a) {
+    return node(RELU, a, 0.0, max(tape.data[a], 0.0), 0.0)
+}
+
+def neg(a) {
+    return mul(a, value(-1.0))
+}
+
+def sub(a, b) {
+    return add(a, neg(b))
+}
+
+def div(a, b) {
+    return mul(a, power(b, -1.0))
+}
+
+#| The chain rule, once per node, from the output back to the leaves.
+def backward(out) {
+    tape.grad[out] = 1.0
+    i = out
+    while i >= 0 {
+        g = tape.grad[i]
+        a = tape.left[i]
+        b = tape.right[i]
+        if tape.op[i] == ADD {
+            tape.grad[a] = tape.grad[a] + g
+            tape.grad[b] = tape.grad[b] + g
+        }
+        else if tape.op[i] == MUL {
+            tape.grad[a] = tape.grad[a] + tape.data[b] * g
+            tape.grad[b] = tape.grad[b] + tape.data[a] * g
+        }
+        else if tape.op[i] == POW {
+            k = tape.expo[i]
+            tape.grad[a] = tape.grad[a] + k * pow(tape.data[a], k - 1.0) * g
+        }
+        else if tape.op[i] == RELU {
+            if tape.data[i] > 0.0 {
+                tape.grad[a] = tape.grad[a] + g
+            }
+        }
+        i = i - 1
+    }
+}
+
+#| micrograd's own ordering, for comparison: depth-first from the output,
+#| each node after its parents. The tape does not need it (creation order is
+#| already topological); the test below checks the two orders agree on that.
+topo = zeros(CAPACITY)
+topo_len = zeros(1)
+visited = zeros(CAPACITY)
+
+def build_topo(v) {
+    if visited[v] == 0.0 {
+        visited[v] = 1.0
+        if tape.op[v] != LEAF {
+            build_topo(tape.left[v])
+            if tape.op[v] == ADD or tape.op[v] == MUL {
+                build_topo(tape.right[v])
+            }
+        }
+        topo[topo_len[0]] = v
+        topo_len[0] = topo_len[0] + 1.0
+    }
+    return 0.0
+}
+
+# ------------------------------------------- engine tests (test_engine.py)
+
+test "sanity check: value and dy/dx match torch" {
+    clear_tape()
+    x = value(-4.0)
+    z = add(add(mul(value(2.0), x), value(2.0)), x)
+    q = add(relu(z), mul(z, x))
+    h = relu(mul(z, z))
+    y = add(add(h, q), mul(q, x))
+    backward(y)
+    assert_near(tape.data[y], TORCH_SANITY[0], 0.0)
+    assert_near(tape.grad[x], TORCH_SANITY[1], 0.0)
+    fill(visited, 0.0)
+    topo_len[0] = 0.0
+    build_topo(y)
+    position = zeros(tape.n[0])
+    for j to topo_len[0] {
+        position[topo[j]] = j
+    }
+    for v to tape.n[0] {
+        if tape.op[v] != LEAF {
+            assert_lt(position[tape.left[v]], position[v])
+        }
+    }
+    assert_near(topo_len[0], tape.n[0], 0.0)
+}
+
+test "more ops: value and both gradients match torch" {
+    clear_tape()
+    a = value(-4.0)
+    b = value(2.0)
+    c = add(a, b)
+    d = add(mul(a, b), power(b, 3.0))
+    c = add(c, add(c, value(1.0)))
+    c = add(c, add(add(value(1.0), c), neg(a)))
+    d = add(d, add(mul(d, value(2.0)), relu(add(b, a))))
+    d = add(d, add(mul(value(3.0), d), relu(sub(b, a))))
+    e = sub(c, d)
+    f = power(e, 2.0)
+    g = div(f, value(2.0))
+    g = add(g, div(value(10.0), f))
+    backward(g)
+    assert_near(tape.data[g], TORCH_MORE[0], 1.0e-12 * abs(TORCH_MORE[0]))
+    assert_near(tape.grad[a], TORCH_MORE[1], 1.0e-12 * abs(TORCH_MORE[1]))
+    assert_near(tape.grad[b], TORCH_MORE[2], 1.0e-12 * abs(TORCH_MORE[2]))
+}
+
+# ----------------------------------------------------------- the MLP (nn.py)
+
+#| MLP(2, [HIDDEN, HIDDEN, 1]). Layer l is a matrix with one row per neuron:
+#| the row holds the neuron's weights, then its bias, as nn.py orders
+#| parameters().
+model = param_table(3)
+L1 = param_declare(model, HIDDEN, 3)
+L2 = param_declare(model, HIDDEN, HIDDEN + 1)
+L3 = param_declare(model, 1, HIDDEN + 1)
+NPARAM = param_count(model)
+theta = P0
+
+#| One neuron: bias plus the weighted inputs, summed left to right the way
+#| Python's sum(..., start) does, then ReLU unless it is the output layer.
+def neuron(w, x: Arr, nonlin: Bool) {
+    nin = len(x)
+    act = w + nin
+    for i to nin {
+        act = add(act, mul(w + i, x[i]))
+    }
+    if nonlin {
+        return relu(act)
+    }
+    return act
+}
+
+def layer(k, x: Arr, nonlin: Bool) {
+    rows = param_rows(model, k)
+    cols = param_cols(model, k)
+    out = zeros(rows)
+    for r to rows {
+        out[r] = neuron(param_offset(model, k) + r * cols, x, nonlin)
+    }
+    return out
+}
+
+def mlp(x: Arr) {
+    h = layer(L1, x, true)
+    h = layer(L2, h, true)
+    return layer(L3, h, false)[0]
+}
+
+# ------------------------------------------------------ the loss (demo cell)
+
+#| Put the parameters on the tape as its first NPARAM leaves, run the model on
+#| every sample, and return the loss node. The accuracy goes in acc[0].
+def loss(acc: Arr) {
+    clear_tape()
+    for i to NPARAM {
+        value(theta[i])
+    }
+    losses = zeros(N)
+    hits = 0.0
+    for s to N {
+        xs = zeros(2)
+        xs[0] = value(X[s, 0])
+        xs[1] = value(X[s, 1])
+        score = mlp(xs)
+        losses[s] = relu(add(value(1.0), mul(score, value(-Y[s]))))
+        if (Y[s] > 0.0) == (tape.data[score] > 0.0) {
+            hits = hits + 1.0
+        }
+    }
+    data_loss = value(0.0)
+    for s to N {
+        data_loss = add(data_loss, losses[s])
+    }
+    data_loss = mul(data_loss, value(1.0 / N))
+    reg = value(0.0)
+    for i to NPARAM {
+        reg = add(reg, mul(i, i))
+    }
+    acc[0] = hits / N
+    return add(data_loss, mul(value(1.0e-4), reg))
+}
+
+# ------------------------------------------------------ training (demo cell)
+
+loss_at = zeros(STEPS)
+acc_at = zeros(STEPS)
+grad0 = zeros(NPARAM)
+acc = zeros(1)
+for k to STEPS {
+    total = loss(acc)
+    backward(total)
+    if k == 0 {
+        for i to NPARAM {
+            grad0[i] = tape.grad[i]
+        }
+    }
+    lr = 1.0 - 0.9 * k / 100.0
+    for i to NPARAM {
+        theta[i] = theta[i] - lr * tape.grad[i]
+    }
+    loss_at[k] = tape.data[total]
+    acc_at[k] = acc[0]
+    if mod(k, 10) == 0 or k == STEPS - 1 {
+        print(k)
+        print(loss_at[k])
+        print(acc_at[k])
+    }
+}
+nodes_per_step = tape.n[0]
+show NPARAM
+show nodes_per_step
+loss_miss = max(abs(loss_at - REF_LOSS) / REF_LOSS)
+grad_miss = max(abs(grad0 - REF_GRAD0))
+theta_miss = max(abs(theta - REF_PFINAL))
+show loss_miss
+show grad_miss
+show theta_miss
+
+test "first-step gradient matches micrograd" {
+    assert_allclose(grad0, REF_GRAD0, 1.0e-12)
+}
+
+test "loss and accuracy match micrograd at every step" {
+    assert_allclose(loss_at, REF_LOSS, 1.0e-12)
+    assert_allclose(acc_at, REF_ACC, 0.0)
+}
+
+test "final parameters match micrograd" {
+    assert_allclose(theta, REF_PFINAL, 1.0e-10)
+}
+
+test "the trained model separates the moons" {
+    assert_near(acc_at[STEPS - 1], 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2020 Andrej Karpathy (karpathy/micrograd)
+# SPDX-FileCopyrightText: 2026 The Viv authors

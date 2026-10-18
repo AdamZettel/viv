@@ -1,0 +1,136 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/gallery/<slug>: one worked example, rendered from src/data/gallery.json:
+// the script's text, its code cell by cell, what each cell printed, and its
+// figures (drawn by `viv plot`, recolored by the theme).
+import RepoLink from '../../../components/RepoLink.astro';
+import DocPage from '../../../layouts/DocPage.astro';
+import Code from '../../../components/Code.astro';
+import gallery from '../../../data/gallery.json';
+import vivgallery from '../../../data/vivgallery.json';
+import { atlasHref } from '../../../lib/atlasLink.js';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
+import { renderMarkdown, renderProse, texToPlain } from '../../../lib/richText.js';
+import { vipyrTree, TOPICS } from '../../../lib/site';
+import MapLink from '../../../components/MapLink.astro';
+import codemap from '../../../data/codemap.json';
+import { creditsForCode } from '../../../data/vipyrCredits.mjs';
+
+export function getStaticPaths() {
+  return (gallery as any).entries.map((e: any) => ({ params: { slug: e.slug }, props: { e } }));
+}
+const { e } = Astro.props as any;
+const topic = TOPICS.find((t) => t.id === e.topic)!;
+const section = (topic.sections as readonly { id: string; title: string }[]).find((s) => s.id === e.section)!;
+const md = (s: string) => (s ? renderMarkdown(s, katex) : '');
+const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+// a cell whose text opens with "## Heading" starts a section of the page
+const cells = e.cells.map((c: any) => {
+  const m = c.md.match(/^## (.+)\n?([\s\S]*)$/);
+  return m ? { ...c, h: m[1], id: slugify(m[1]), md: m[2].trim() } : c;
+});
+const toc = cells.filter((c: any) => c.h).map((c: any) => [c.id, texToPlain(c.h)] as [string, string]);
+const all = (gallery as any).entries;
+const i = all.findIndex((x: any) => x.slug === e.slug);
+// the Viv program this example calls, when the Viv gallery names it (its atlas)
+const twin = (vivgallery as any).entries.find((v: any) => (v.vipyr || []).some((x: any) => x.href === `/vipyr/gallery/${e.slug}`));
+const twinOpen = twin && /^\/workbench\?open=/.test(twin.workbench || '') ? twin.workbench.slice('/workbench?open='.length) : null;
+const credits: string[] = creditsForCode(e.cells.map((c: any) => c.code).join('\n'));
+---
+
+<DocPage
+  title={`${e.title} · vipyr gallery`}
+  icon="/brand/vipyr/vipyr-icon.svg"
+  description={texToPlain(e.summary)}
+  tree={vipyrTree(Astro.url.pathname)}
+  toc={[...toc, ...(credits.length ? [['credits', 'Credits'] as [string, string]] : []), ['source', 'Source']]}
+  crumbs={[
+    ['/vipyr/gallery', 'Gallery'],
+    [`/vipyr/gallery#${topic.id}`, topic.title],
+    [`/vipyr/gallery#${topic.id}-${section.id}`, section.title],
+  ]}>
+  <h1>{e.title}</h1>
+  <div class="g-intro" set:html={md(e.intro)} />
+  <MapLink fns={(codemap as any).gallery[e.slug] || []} />
+  {
+    cells.map((c: any) => (
+      <>
+        {c.h && <h2 id={c.id} set:html={renderProse(c.h, katex)} />}
+        {c.md && <div class="g-md" set:html={md(c.md)} />}
+        {c.code && <Code lang="python" code={c.code} />}
+        {c.out && (
+          <pre class="dump out g-out" aria-label="Output"><code>{c.out}</code></pre>
+        )}
+        {c.figs.map((svg: string) => (
+          <figure class="vfig" set:html={svg} />
+        ))}
+      </>
+    ))
+  }
+  {
+    credits.length > 0 && (
+      <>
+        <h2 id="credits">Credits</h2>
+        <ul>
+          {credits.map((t) => (
+            <li>{t}</li>
+          ))}
+        </ul>
+      </>
+    )
+  }
+  <h2 id="source">Source</h2>
+  <p class="g-src">
+    <RepoLink path={e.file}><code>{e.file}</code></RepoLink>, run as written when these pages were built. The output
+    and the figures above are from that run.
+  </p>
+  {twinOpen && (
+    <p class="g-src">
+      The Viv program it calls is <code>{twinOpen}</code>: <a href={atlasHref(twinOpen)}>its atlas</a>, the defs and the calls between them, or <a href={twin.workbench}>open it in the workbench</a>.
+    </p>
+  )}
+  <nav class="nextprev g-np" aria-label="More examples">
+    {i > 0 && <a href={`/vipyr/gallery/${all[i - 1].slug}`}>← {all[i - 1].title}</a>}
+    {i < all.length - 1 && <a class="g-next" href={`/vipyr/gallery/${all[i + 1].slug}`}>{all[i + 1].title} →</a>}
+  </nav>
+</DocPage>
+
+<style>
+  .g-intro :global(p:first-child) {
+    font-size: 1.12rem;
+    line-height: 1.6;
+  }
+  /* a long file name or call in the text wraps rather than widening the page */
+  .g-intro :global(code),
+  .g-md :global(code),
+  .g-src code {
+    overflow-wrap: anywhere;
+  }
+  .g-out {
+    margin-top: -0.4rem;
+    overflow-x: auto;
+    max-width: 100%;
+    white-space: pre;
+    text-indent: 0;
+    padding-left: 15px;
+  }
+  .g-out code {
+    background: none;
+    border: 0;
+    padding: 0;
+  }
+  .g-np {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+  }
+  .g-next {
+    margin-left: auto;
+  }
+</style>

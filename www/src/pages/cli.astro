@@ -1,0 +1,68 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Base from '../layouts/Base.astro';
+import VivTerm from '../components/VivTerm.jsx';
+import programs from '../data/programs.json';
+
+const files = [
+  ...programs.programs.map((p) => ({ name: p.file, url: `/programs/examples/${p.file}` })),
+  ...programs.std.map((f) => ({ name: f, url: `/programs/examples/${f}` })),
+];
+---
+
+<Base
+  title="Terminal · Viv"
+  description="The Viv CLI in your browser: run, c, wasm, features, doc, whatis, lsfunc, lsvar, src, deps, canon, hash, diff — the same functions the installed binary calls, on the example programs from the repo."
+  eyebrow="Terminal"
+  heading="The CLI, with nothing installed">
+  <p class="lede">
+    Each command here calls the same library function as the installed <code>viv</code> binary:
+    <code>main.rs</code> only parses the command line, and the wasm module exports the functions it
+    calls. So <code>hash</code>, <code>diff</code>, <code>canon</code> and the rest print byte for
+    byte what the installed compiler prints on the same file. The terminal has
+    {programs.programs.length + programs.std.length} files loaded: the
+    {programs.programs.length} <a href="/examples">example programs</a> and the
+    {programs.std.length} files of the standard library.
+  </p>
+
+  <div class="cellhost cellhost-wide">
+    <VivTerm client:load files={files} />
+  </div>
+
+  <h2>Four commands to try first</h2>
+  <dl class="deflist">
+    <dt>hash control.viv</dt>
+    <dd>
+      Per-definition content addresses: a node hash (name included) and a body hash (the code
+      alone). Reformat a definition and neither moves; rename it and only the node hash does.
+      Because the body hash ignores the name, a diff can report a rename without guessing.
+    </dd>
+    <dt>canon scf_water.viv</dt>
+    <dd>
+      The program reordered into canonical dependency order, which is idempotent — run it on its
+      own output and nothing moves. Try it on this 400-line Hartree–Fock program.
+    </dd>
+    <dt>features</dt>
+    <dd>
+      What Viv can do, by area: syntax, types, arrays, autodiff, correctness, the lenses, tools,
+      performance, libraries, and the builtins, phrases and modules generated from the compiler's
+      own tables. <code>features value-and-grad</code> shows one entry: what it does, when to use
+      it, and a minimal example and its output; <code>features --search sort</code>
+      finds entries by words. The installed binary adds <code>viv features --usage</code>, which
+      counts how often a corpus uses each feature and lists code that does by hand what a feature
+      does.
+    </dd>
+    <dt>doc fem_poisson.viv</dt>
+    <dd>
+      The structured annotations as JSON: per-definition what/how/why, tags, and the variable
+      glossary. It is the JSON a code browser
+      renders.
+    </dd>
+  </dl>
+
+  <p class="note">
+    <code>wasm &lt;file&gt;</code> compiles the file with the direct wasm backend, without C, and
+    runs the module in your browser. It prints what <code>run</code> prints.
+  </p>
+</Base>

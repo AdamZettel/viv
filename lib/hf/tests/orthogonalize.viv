@@ -1,0 +1,124 @@
+# The tests of lib/hf/orthogonalize that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/orthogonalize does not load the references.
+from hf.orthogonalize import (
+    orth_canon, orth_check_all, ORTH_CHOL, orth_chol, orth_defect, orth_gs, orth_inverse_defect,
+    orth_methods, orth_of, orth_rank,
+)
+from hf.opts import opt_array, OPT_LINDEP_DEFAULT, opt_new, scf_defaults, ScfOptions
+from hf.eigen import eig_agreement, eig_ql, eig_values, eig_vectors
+from hfref.h4_diffuse import (
+    H4_DIFFUSE_NAO_CART, H4_DIFFUSE_NDROP, H4_DIFFUSE_S_MIN_EIG, h4_diffuse_s_unit,
+)
+from hfref.he import he_ccpvdz_s_unit
+from hfref.water_631g import water631g_s_unit
+from hfref.water_631gs_sph import (
+    WATER631GS_SPH_RHF_NALPHA, water631gs_sph_s_sph, water631gs_sph_t_sph, water631gs_sph_v_sph,
+)
+
+#| For one orthogonalizer k: diagonalize X^T H X with every eigensolver and
+#| return how far the solvers are apart (eig_agreement), then the eigenvalues
+#| and the AO projector X V_occ V_occ^T X^T from `eig_ql`.
+def orth_t_core(H: Arr, S: Arr, k, nocc) {
+    o = orth_t_opts(k)
+    X = orth_of(S, o)
+    Xm = X[:, 0:orth_rank(X)]
+    Hp = transpose(Xm) @ H @ Xm
+    R = eig_ql(Hp, Hp, o)
+    C = Xm @ eig_vectors(R)[:, 0:nocc]
+    return eig_agreement(Hp, nocc), eig_values(R), C @ transpose(C)
+}
+
+#| The options array with orthogonalizer `k` and everything else the default.
+def orth_t_opts(k) {
+    return opt_array(ScfOptions { orthogonalizer: k, ..scf_defaults() }, 0, 0, 0.0)
+}
+
+test "every member gives X^T S X = I to 1e-12 on water 6-31G, water 6-31G* (5D) and He cc-pVDZ" {
+    orth_w, orth_nbad = orth_check_all(water631g_s_unit(), 13)
+    assert_lt(orth_w, 1.0e-12)
+    assert_near(orth_nbad, 0, 0.0)
+    orth_w, orth_nbad = orth_check_all(water631gs_sph_s_sph(), 18)
+    assert_lt(orth_w, 1.0e-12)
+    assert_near(orth_nbad, 0, 0.0)
+    orth_w, orth_nbad = orth_check_all(he_ccpvdz_s_unit(), 5)
+    assert_lt(orth_w, 1.0e-12)
+    assert_near(orth_nbad, 0, 0.0)
+}
+
+test "with full rank every member's X X^T is S^-1" {
+    orth_S = water631gs_sph_s_sph()
+    orth_ms = orth_methods()
+    orth_o = opt_new()
+    for orth_k to len(orth_ms) {
+        orth_X = apply(orth_ms[orth_k], orth_S, orth_S, orth_o)
+        assert_lt(orth_inverse_defect(orth_S, orth_X), 1.0e-12)
+    }
+}
+
+test "Cholesky and Gram-Schmidt build the same triangular X by different operations" {
+    orth_S = water631g_s_unit()
+    orth_o = opt_new()
+    orth_Xc = orth_chol(orth_S, orth_S, orth_o)
+    orth_Xg = orth_gs(orth_S, orth_S, orth_o)
+    assert_lt(max(abs(orth_Xc - orth_Xg)), 1.0e-12)
+    # zero below the diagonal
+    orth_low = 0.0
+    for orth_i from 1 to len(orth_S) {
+        orth_low = max(orth_low, max(abs(orth_Xc[orth_i, 0:orth_i]) + abs(orth_Xg[orth_i, 0:orth_i])))
+    }
+    assert_near(orth_low, 0.0, 0.0)
+}
+
+test "orth_canon drops exactly one vector on the diffuse H4 chain" {
+    orth_S = h4_diffuse_s_unit()
+    orth_o = opt_new()
+    orth_X = orth_canon(orth_S, orth_S, orth_o)
+    assert_near(orth_rank(orth_X), H4_DIFFUSE_NAO_CART - H4_DIFFUSE_NDROP, 0.0)
+    assert_near(H4_DIFFUSE_NDROP, 1, 0.0)
+    # the smallest overlap eigenvalue is the one PySCF reports, and it sits
+    # between the default threshold and PySCF's lindep cut, 1e-9
+    orth_R = eig_ql(orth_S, orth_S, orth_o)
+    assert_lt(abs(orth_R[0, 0] - H4_DIFFUSE_S_MIN_EIG) / H4_DIFFUSE_S_MIN_EIG, 1.0e-6)
+    assert_lt(orth_R[0, 0], OPT_LINDEP_DEFAULT)
+    assert_gt(orth_R[0, 1], OPT_LINDEP_DEFAULT)
+    # The next eigenvalue is 6.3e-6. Without orth_polish the eigensolver's
+    # rounding, divided by sqrt(6.3e-6), leaves X^T S X off by about 5e-11;
+    # with it the defect meets the same 1e-12 as on the other bases.
+    assert_lt(orth_defect(orth_S, orth_X, orth_rank(orth_X)), 1.0e-12)
+    # a threshold under the smallest eigenvalue keeps everything
+    orth_o = opt_array(ScfOptions { lindep: 1.0e-9, ..scf_defaults() }, 0, 0, 0.0)
+    assert_near(orth_rank(orth_of(orth_S, orth_o)), 8, 0.0)
+}
+
+test "orth_of follows the orthogonalizer option, and orth_rank counts the kept columns" {
+    orth_S = water631g_s_unit()
+    for orth_k to len(orth_methods()) {
+        orth_X = orth_of(orth_S, orth_t_opts(orth_k))
+        assert_near(orth_rank(orth_X), 13, 0.0)
+        assert_lt(orth_defect(orth_S, orth_X, len(orth_S)), 1.0e-12)
+    }
+    # the Cholesky member is the triangular one: the last row is zero past its first entry
+    orth_X = orth_of(orth_S, orth_t_opts(ORTH_CHOL))
+    assert_near(orth_X[len(orth_S) - 1, 0], 0.0, 0.0)
+}
+
+test "on water's core Hamiltonian the eigensolvers agree, and so do the orthogonalizers" {
+    orth_H = water631gs_sph_t_sph() + water631gs_sph_v_sph()
+    orth_S = water631gs_sph_s_sph()
+    orth_nocc = WATER631GS_SPH_RHF_NALPHA
+    orth_g0, orth_e0, orth_P0 = orth_t_core(orth_H, orth_S, 0, orth_nocc)
+    for orth_k to len(orth_methods()) {
+        orth_g, orth_e, orth_P = orth_t_core(orth_H, orth_S, orth_k, orth_nocc)
+        # three eigensolvers on one orthonormal-basis matrix
+        assert_lt(orth_g.values, 1.0e-12)
+        assert_lt(orth_g.projector, 1.0e-10)
+        # generalized eigenvalues and the AO occupied projector do not
+        # depend on which X was used
+        assert_lt(max(abs(orth_e - orth_e0) / (1.0 + abs(orth_e0))), 1.0e-10)
+        assert_lt(max(abs(orth_P - orth_P0) / (1.0 + abs(orth_P0))), 1.0e-10)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

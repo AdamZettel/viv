@@ -1,0 +1,46 @@
+# riscv-tests rv32ui/auipc.S, preprocessed by tools/rv32/riscv_tests.py
+# (riscv-tests commit 7b68f7b91f82; BSD-3-Clause, The Regents of the
+# University of California). Generated: do not edit.
+
+from rv32.system import run_asm, STEP_LIMIT
+
+SOURCE = """
+.text
+_start:
+test_2: li gp, 2
+.align 3
+lla a0, 1f + 10000
+jal a1, 1f
+1: sub a0, a0, a1
+li x7, 10000
+bne a0, x7, fail
+test_3: li gp, 3
+.align 3
+lla a0, 1f - 10000
+jal a1, 1f
+1: sub a0, a0, a1
+li x7, 4294957296
+bne a0, x7, fail
+bne x0, gp, pass
+fail: mv a0, gp
+li a7, 93
+ecall
+pass: li gp, 1
+li a7, 93
+li a0, 0
+ecall
+.data
+.data
+"""
+
+result = run_asm(SOURCE, STEP_LIMIT)
+show "rv32ui-auipc", result.exit_code, result.steps
+
+test "rv32ui-auipc passes every case" {
+    assert_true(result.halted)
+    assert_true(result.exit_code == 0)
+}
+
+# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-FileCopyrightText: 2012-2015 The Regents of the University of California (Regents)
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,26 @@
+###
+`show` writes a number the same way in every engine. The C runtime used to
+hand it to the C library's `%g`, and macOS's printf writes 7890305.0 as
+`7.89030e+06`: the six-digit rounding is a tie, and the trailing zero it
+leaves is kept. The interpreter, the wasm runtime and every other C library
+write `7.8903e+06`. The C runtime now writes every `%g` number (show, one-
+argument print, a chart's short arrays, figure bounds, assert messages) with
+Viv's own formatter, built from `%e` as printfmt.rs builds it.
+###
+
+x = 7890305.0
+show x
+print(x)
+a = [x, -0.0, 1234565.0, 0.0001234565]
+show a
+z = complex(x, -2.5)
+show z
+m = [[x, 1.0], [2.0, 3.0]]
+show m
+
+test "a tie is written without the trailing zero" {
+    assert_near(x, 7890305.0, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

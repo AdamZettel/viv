@@ -1,0 +1,721 @@
+#|| The two-dimensional Ising model on an L by L square lattice with periodic
+#|| edges: Monte Carlo by Metropolis (checkerboard order) or by Wolff
+#|| clusters, the measurements and their error bars, and the exact results
+#|| the runs are checked against.
+#||
+#|| The energy of an arrangement of spins s_i = +1 or -1 is
+#||     E = -J sum_<ij> s_i s_j - h sum_i s_i,
+#|| the first sum over the 2 N neighboring pairs of N = L * L sites, and an
+#|| arrangement occurs with probability proportional to exp(-E / T)
+#|| (Boltzmann's constant is 1, so T is in units of J when J = 1).
+#||
+#|| Every random number is a Philox4x32-10 word (Salmon, Moraes, Dror and
+#|| Shaw, SC11) of a counter fixed by where it is used: the sweep, the
+#|| row, the sublattice and the site for Metropolis; the cluster and the
+#|| draw's position in it for Wolff. The key is (seed, a tag per use). So a
+#|| run does not depend on the order the engine visits anything in, and the
+#|| interpreter, the native build and the exported library give the same
+#|| bits.
+#||
+#|| Exact references: Onsager's critical temperature and energy per site of
+#|| the infinite lattice, Yang's spontaneous magnetization, and Kaufman's
+#|| partition function of the finite periodic lattice (Ferdinand and Fisher,
+#|| Phys. Rev. 185, 832 (1969), eq. 2.1), which gives the energy and the
+#|| specific heat of an L by L lattice at h = 0 with no Monte Carlo at all.
+#|| `exact_moments` enumerates all 2^N states of a small lattice (N <= 20).
+
+TWO32 = 4294967296.0
+PI = 3.141592653589793
+
+# the key's second word: which use a Philox counter belongs to
+TAG_METROPOLIS: Int = 1
+TAG_WOLFF: Int = 2
+TAG_HOT_START: Int = 3
+
+# the window factor of the automatic windowing for the autocorrelation time:
+# sum rho(t) out to the first W with W >= WINDOW_C * tau(W) (Sokal 1997)
+WINDOW_C = 6.0
+
+#| Philox4x32-10: the four 32-bit words the counter (c0, c1, c2, c3) maps to
+#| under the key (k0, k1), as Random123's philox4x32 computes them (the
+#| same code as examples/options/mc.viv).
+def philox4x32(c0: Int, c1: Int, c2: Int, c3: Int, k0: Int, k1: Int) {
+    x0 = c0
+    x1 = c1
+    x2 = c2
+    x3 = c3
+    ka = k0
+    kb = k1
+    for round to 10 {
+        if round > 0 {
+            ka = (ka + 2654435769) % 4294967296
+            kb = (kb + 3144134277) % 4294967296
+        }
+        p0 = wrap_mul(3528531795, x0)
+        l0 = p0 % 4294967296
+        h0 = (p0 - l0) // 4294967296
+        if h0 < 0 {
+            h0 = h0 + 4294967296
+        }
+        p1 = wrap_mul(3449720151, x2)
+        l1 = p1 % 4294967296
+        h1 = (p1 - l1) // 4294967296
+        if h1 < 0 {
+            h1 = h1 + 4294967296
+        }
+        y0 = int(bxor(bxor(float(h1), float(x1)), float(ka)))
+        y2 = int(bxor(bxor(float(h0), float(x3)), float(kb)))
+        x0 = y0
+        x1 = l1
+        x2 = y2
+        x3 = l0
+    }
+    return x0, x1, x2, x3
+}
+
+#| A uniform number in (0, 1) from one 32-bit word, offset by half a step so
+#| that neither 0 nor 1 comes out.
+def unit_from_word(w: Int) -> Num {
+    return (float(w) + 0.5) / TWO32
+}
+
+#| Word k (0 to 3) of a Philox block.
+def pick_word(k: Int, w0: Int, w1: Int, w2: Int, w3: Int) -> Int {
+    if k == 0 {
+        return w0
+    }
+    if k == 1 {
+        return w1
+    }
+    if k == 2 {
+        return w2
+    }
+    return w3
+}
+
+#| The four neighbors of each site of an L by L periodic lattice, site
+#| i * L + j at row i and column j: up, down, left, right.
+def neighbor_tables(L: Int) {
+    n = L * L
+    up = int_zeros(n)
+    down = int_zeros(n)
+    left = int_zeros(n)
+    right = int_zeros(n)
+    for i to L {
+        for j to L {
+            site = i * L + j
+            up[site] = ((i + L - 1) % L) * L + j
+            down[site] = ((i + 1) % L) * L + j
+            left[site] = i * L + (j + L - 1) % L
+            right[site] = i * L + (j + 1) % L
+        }
+    }
+    return up, down, left, right
+}
+
+#| The starting arrangement: every spin up ("cold"), or each spin up or down
+#| with probability one half ("hot"), from the seed's own Philox stream.
+def start_spins(L: Int, hot: Bool, seed: Int) -> Arr {
+    n = L * L
+    s = zeros(n) + 1.0
+    if hot {
+        for site to n {
+            w0, w1, w2, w3 = philox4x32(site, 0, 0, 0, seed, TAG_HOT_START)
+            if w0 < 2147483648 {
+                s[site] = -1.0
+            }
+        }
+    }
+    return s
+}
+
+#| The acceptance probability of flipping a spin, by the spin and the sum of
+#| its four neighbors: entry 5 * (s + 1) / 2 + (nn + 4) / 2. A flip changes
+#| the energy by 2 s (J nn + h) and is accepted with probability
+#| min(1, exp(-beta dE)).
+def flip_table(beta: Num, J: Num, h: Num) -> Arr {
+    acc = zeros(10)
+    for a to 2 {
+        sv = 2.0 * a - 1.0
+        for b to 5 {
+            nn = 2.0 * b - 4.0
+            dE = 2.0 * sv * (J * nn + h)
+            if dE <= 0.0 {
+                acc[5 * a + b] = 1.0
+            }
+            else {
+                acc[5 * a + b] = exp(-beta * dE)
+            }
+        }
+    }
+    return acc
+}
+
+#| One Metropolis sweep in checkerboard order: the sites with i + j even,
+#| then the odd ones. Sites of one color do not touch, so the order inside a
+#| color does not matter. Site (i, j) of color c is the q-th of its row
+#| (j = 2 q + (i + c) mod 2) and draws word q mod 4 of the Philox block
+#| (q div 4, i, 2 sweep + c, 0) under the key (seed, TAG_METROPOLIS).
+#| Returns the number of flips accepted.
+def metropolis_sweep(s: Arr, L: Int, up: [Int], down: [Int], left: [Int], right: [Int], acc: Arr, sweep: Int, seed: Int) -> Int {
+    half = L // 2
+    flips: Int = 0
+    w0: Int = 0
+    w1: Int = 0
+    w2: Int = 0
+    w3: Int = 0
+    colors: Int = 2
+    #: Philox words refilled every fourth site of a row
+    for color to colors {
+        for i to L {
+            off = (i + color) % 2
+            for q to half {
+                if q % 4 == 0 {
+                    w0, w1, w2, w3 = philox4x32(q // 4, i, 2 * sweep + color, 0, seed, TAG_METROPOLIS)
+                }
+                site = i * L + 2 * q + off
+                sv = s[site]
+                nn = s[up[site]] + s[down[site]] + s[left[site]] + s[right[site]]
+                k = 0
+                if sv > 0.0 {
+                    k = 5
+                }
+                k = k + int(round((nn + 4.0) / 2.0))
+                p = acc[k]
+                if p >= 1.0 {
+                    s[site] = -sv
+                    flips += 1
+                }
+                else {
+                    u = unit_from_word(pick_word(q % 4, w0, w1, w2, w3))
+                    if u < p {
+                        s[site] = -sv
+                        flips += 1
+                    }
+                }
+            }
+        }
+    }
+    return flips
+}
+
+#| One Wolff cluster update. The cluster grows from a random seed site,
+#| adding each aligned neighbor with probability padd = 1 - exp(-2 beta J);
+#| the whole cluster then flips, with probability min(1, exp(-2 beta h S))
+#| when the field is on (S: the cluster's summed spin), which is the
+#| Metropolis test of the field's energy change. Draw k of cluster number
+#| `cluster` is word k mod 4 of the Philox block (k div 4, cluster mod 2^32,
+#| cluster div 2^32, 0) under the key (seed, TAG_WOLFF). `stack` and `mark`
+#| are work arrays of N entries, `mark` all zero on entry and on exit.
+#| Returns the cluster's size, and whether it flipped.
+def wolff_cluster(s: Arr, up: [Int], down: [Int], left: [Int], right: [Int], padd: Num, beta: Num, h: Num, cluster: Int, seed: Int, stack: [Int], mark: [Int]) {
+    n: Int = len(s)
+    c1 = cluster % 4294967296
+    c2 = cluster // 4294967296
+    w0, w1, w2, w3 = philox4x32(0, c1, c2, 0, seed, TAG_WOLFF)
+    k: Int = 1
+    seed_site: Int = int(floor(unit_from_word(w0) * n))
+    if seed_site >= n {
+        seed_site = n - 1
+    }
+    sv = s[seed_site]
+    mark[seed_site] = 1
+    stack[0] = seed_site
+    size: Int = 1
+    head: Int = 0
+    #: add each aligned neighbor with probability padd
+    while head < size {
+        x = stack[head]
+        head += 1
+        for d to 4 {
+            nb = up[x]
+            if d == 1 {
+                nb = down[x]
+            }
+            else if d == 2 {
+                nb = left[x]
+            }
+            else if d == 3 {
+                nb = right[x]
+            }
+            if mark[nb] == 0 and s[nb] == sv {
+                if k % 4 == 0 {
+                    w0, w1, w2, w3 = philox4x32(k // 4, c1, c2, 0, seed, TAG_WOLFF)
+                }
+                u = unit_from_word(pick_word(k % 4, w0, w1, w2, w3))
+                k += 1
+                if u < padd {
+                    mark[nb] = 1
+                    stack[size] = nb
+                    size += 1
+                }
+            }
+        }
+    }
+    #: with a field on, the flip must pass a Metropolis test on 2 h S
+    flip = true
+    if h != 0.0 {
+        dE = 2.0 * h * sv * size
+        if dE > 0.0 {
+            if k % 4 == 0 {
+                w0, w1, w2, w3 = philox4x32(k // 4, c1, c2, 0, seed, TAG_WOLFF)
+            }
+            u = unit_from_word(pick_word(k % 4, w0, w1, w2, w3))
+            flip = u < exp(-beta * dE)
+        }
+    }
+    for t to size {
+        x = stack[t]
+        mark[x] = 0
+        if flip {
+            s[x] = -sv
+        }
+    }
+    return size, flip
+}
+
+#| The energy per site and the magnetization per site of the arrangement s.
+def energy_and_mag(s: Arr, right: [Int], down: [Int], J: Num, h: Num) {
+    n = len(s)
+    bonds = 0.0
+    total = 0.0
+    for site to n {
+        sv = s[site]
+        bonds += sv * (s[right[site]] + s[down[site]])
+        total += sv
+    }
+    return (-J * bonds - h * total) / n, total / n
+}
+
+#| The integrated autocorrelation time of the series x, in sweeps:
+#| tau = 1/2 + sum_{t=1}^{W} rho(t), with the window W the first one at
+#| which W >= WINDOW_C tau(W) (Sokal's automatic windowing), at most n / 4.
+#| A constant series has tau = 1/2.
+def autocorr_time(x: Arr) -> Num {
+    n = len(x)
+    mean = sum(x) / n
+    dx = x - mean
+    c0 = sum(dx * dx) / n
+    if c0 <= 0.0 {
+        return 0.5
+    }
+    #: Sokal's window: stop once w >= WINDOW_C tau
+    tau = 0.5
+    wmax = n // 4
+    for w from 1 to wmax + 1 {
+        ct = dot(dx[0:n - w], dx[w:n])
+        tau += ct / (n - w) / c0
+        if w >= WINDOW_C * tau {
+            return tau
+        }
+    }
+    return tau
+}
+
+#| The estimates from the five averages <e>, <e^2>, <|m|>, <m^2>, <m^4>
+#| over some set of sweeps: the specific heat per site
+#| beta^2 N (<e^2> - <e>^2), the susceptibility beta N (<m^2> - <|m|>^2)
+#| and Binder's cumulant 1 - <m^4> / (3 <m^2>^2).
+def derived(e1: Num, e2: Num, ma: Num, m2: Num, m4: Num, beta: Num, n: Int) {
+    heat = beta * beta * n * (e2 - e1 * e1)
+    chi = beta * n * (m2 - ma * ma)
+    binder = 0.0
+    if m2 > 0.0 {
+        binder = 1.0 - m4 / (3.0 * m2 * m2)
+    }
+    return heat, chi, binder
+}
+
+record IsingStats {
+    energy: Num
+    energy_err: Num
+    mag_abs: Num
+    mag_abs_err: Num
+    mag: Num
+    mag_err: Num
+    heat: Num
+    heat_err: Num
+    chi: Num
+    chi_err: Num
+    binder: Num
+    binder_err: Num
+    tau_energy: Num
+    tau_mag: Num
+}
+
+#| The measurements of the series es (energy per site) and ms
+#| (magnetization per site), one entry per sweep, with error bars from
+#| `bins` equal bins (the last n mod bins sweeps are left out of the
+#| errors only): the standard error of the bin means for the averages, and
+#| the jackknife over bins for the specific heat, the susceptibility and
+#| Binder's cumulant, whose central values use every sweep.
+def analyze(es: Arr, ms: Arr, beta: Num, n_sites: Int, bins: Int) -> IsingStats {
+    n = len(es)
+    e1 = 0.0
+    e2 = 0.0
+    ma = 0.0
+    m1 = 0.0
+    m2 = 0.0
+    m4 = 0.0
+    for t to n {
+        e1 += es[t]
+        e2 += es[t] * es[t]
+        ma += abs(ms[t])
+        m1 += ms[t]
+        m2 += ms[t] * ms[t]
+        m4 += ms[t] * ms[t] * ms[t] * ms[t]
+    }
+    heat, chi, binder = derived(e1 / n, e2 / n, ma / n, m2 / n, m4 / n, beta, n_sites)
+
+    # the bins' sums of e, e^2, |m|, m, m^2, m^4
+    blen = n // bins
+    be1 = zeros(bins)
+    be2 = zeros(bins)
+    bma = zeros(bins)
+    bm1 = zeros(bins)
+    bm2 = zeros(bins)
+    bm4 = zeros(bins)
+    for b to bins {
+        for t from b * blen to (b + 1) * blen {
+            be1[b] += es[t]
+            be2[b] += es[t] * es[t]
+            bma[b] += abs(ms[t])
+            bm1[b] += ms[t]
+            bm2[b] += ms[t] * ms[t]
+            bm4[b] += ms[t] * ms[t] * ms[t] * ms[t]
+        }
+    }
+    s_e1 = 0.0
+    s_e2 = 0.0
+    s_ma = 0.0
+    s_m1 = 0.0
+    s_m2 = 0.0
+    s_m4 = 0.0
+    for b to bins {
+        s_e1 += be1[b]
+        s_e2 += be2[b]
+        s_ma += bma[b]
+        s_m1 += bm1[b]
+        s_m2 += bm2[b]
+        s_m4 += bm4[b]
+    }
+    # standard errors of the means, from the scatter of the bin means
+    mean_e = s_e1 / (bins * blen)
+    mean_ma = s_ma / (bins * blen)
+    mean_m = s_m1 / (bins * blen)
+    v_e = 0.0
+    v_ma = 0.0
+    v_m = 0.0
+    for b to bins {
+        v_e += (be1[b] / blen - mean_e) ^ 2
+        v_ma += (bma[b] / blen - mean_ma) ^ 2
+        v_m += (bm1[b] / blen - mean_m) ^ 2
+    }
+    norm = bins * (bins - 1.0)
+    # the jackknife: each estimate again without bin b
+    jh = zeros(bins)
+    jc = zeros(bins)
+    jb = zeros(bins)
+    rest = (bins - 1.0) * blen
+    for b to bins {
+        h_b, c_b, u_b = derived((s_e1 - be1[b]) / rest, (s_e2 - be2[b]) / rest, (s_ma - bma[b]) / rest, (s_m2 - bm2[b]) / rest, (s_m4 - bm4[b]) / rest, beta, n_sites)
+        jh[b] = h_b
+        jc[b] = c_b
+        jb[b] = u_b
+    }
+    #: jackknife variance: (bins - 1)/bins times the leave-one-out scatter
+    jh_mean = 0.0
+    jc_mean = 0.0
+    jb_mean = 0.0
+    for b to bins {
+        jh_mean += jh[b] / bins
+        jc_mean += jc[b] / bins
+        jb_mean += jb[b] / bins
+    }
+    vh = 0.0
+    vc = 0.0
+    vb = 0.0
+    for b to bins {
+        vh += (jh[b] - jh_mean) ^ 2
+        vc += (jc[b] - jc_mean) ^ 2
+        vb += (jb[b] - jb_mean) ^ 2
+    }
+    jk = (bins - 1.0) / bins
+    abs_ms = abs(ms)
+    return IsingStats {
+        energy: e1 / n, energy_err: sqrt(v_e / norm),
+        mag_abs: ma / n, mag_abs_err: sqrt(v_ma / norm),
+        mag: m1 / n, mag_err: sqrt(v_m / norm),
+        heat: heat, heat_err: sqrt(jk * vh),
+        chi: chi, chi_err: sqrt(jk * vc),
+        binder: binder, binder_err: sqrt(jk * vb),
+        tau_energy: autocorr_time(es), tau_mag: autocorr_time(abs_ms)
+    }
+}
+
+record IsingRun {
+    es: Arr
+    ms: Arr
+    spins: Arr
+    accept: Num
+    stats: IsingStats
+}
+
+#| A whole run: `therm` sweeps discarded, then `sweeps` sweeps measured,
+#| by Metropolis (wolff false) or by Wolff clusters (wolff true).
+#|
+#| A Wolff sweep during thermalization is as many clusters as it takes for
+#| their sizes to add up to N or more. A measured sweep is a fixed number of
+#| clusters, N over the mean cluster size of the thermalization (rounded,
+#| at least 1; 1 when there is no thermalization). The number must be
+#| fixed: stopping each sweep when the sizes reach N makes the measurement
+#| times depend on the clusters drawn, and that biases the averages (by 8
+#| standard errors in the energy at L = 16, T = 2.0, before this rule).
+#|
+#| `accept` is the fraction of proposed flips accepted (Metropolis) or the
+#| mean cluster size over N (Wolff), over the measured sweeps.
+def simulate(L: Int, beta: Num, J: Num, h: Num, wolff: Bool, sweeps: Int, therm: Int, seed: Int, hot: Bool, bins: Int) -> IsingRun {
+    n = L * L
+    up, down, left, right = neighbor_tables(L)
+    s = start_spins(L, hot, seed)
+    acc = flip_table(beta, J, h)
+    padd = 1.0 - exp(-2.0 * beta * J)
+    stack = int_zeros(n)
+    mark = int_zeros(n)
+    es = zeros(sweeps)
+    ms = zeros(sweeps)
+    cluster: Int = 0
+    touched = 0.0
+    clusters_measured = 0.0
+    flips = 0.0
+    therm_sizes = 0.0
+    per_sweep: Int = 1
+    #: Wolff thermalization fixes the cluster count of a measured sweep
+    for sweep to therm + sweeps {
+        if wolff and sweep < therm {
+            total = 0
+            while total < n {
+                size, flipped = wolff_cluster(s, up, down, left, right, padd, beta, h, cluster, seed, stack, mark)
+                cluster += 1
+                total += size
+                therm_sizes += size
+            }
+            if sweep == therm - 1 {
+                per_sweep = int(max(1.0, round(n * cluster / therm_sizes)))
+            }
+        }
+        else if wolff {
+            for c to per_sweep {
+                size, flipped = wolff_cluster(s, up, down, left, right, padd, beta, h, cluster, seed, stack, mark)
+                cluster += 1
+                touched += size
+                clusters_measured += 1.0
+            }
+        }
+        else {
+            f = metropolis_sweep(s, L, up, down, left, right, acc, sweep, seed)
+            if sweep >= therm {
+                flips += f
+            }
+        }
+        if sweep >= therm {
+            e_site, m_site = energy_and_mag(s, right, down, J, h)
+            es[sweep - therm] = e_site
+            ms[sweep - therm] = m_site
+        }
+    }
+    accept = flips / (1.0 * n * sweeps)
+    if wolff {
+        accept = touched / clusters_measured / n
+    }
+    return IsingRun { es: es, ms: ms, spins: reshape(s, L, L), accept: accept, stats: analyze(es, ms, beta, n, bins) }
+}
+
+# ---------------------------------------------------------------- exact results
+
+#| Onsager's critical temperature, 2 J / ln(1 + sqrt 2).
+def critical_temperature(J: Num) -> Num {
+    return 2.0 * J / log(1.0 + sqrt(2.0))
+}
+
+#| Yang's spontaneous magnetization of the infinite lattice,
+#| (1 - sinh(2 beta J)^-4)^(1/8) below T_c and 0 at or above it.
+def yang_magnetization(beta: Num, J: Num) -> Num {
+    sh = sinh(2.0 * beta * J)
+    if sh <= 1.0 {
+        return 0.0
+    }
+    return pow(1.0 - pow(sh, -4.0), 0.125)
+}
+
+#| The complete elliptic integral of the first kind K(k), by the
+#| arithmetic-geometric mean: pi / (2 agm(1, sqrt(1 - k^2))).
+def elliptic_k(k: Num) -> Num {
+    a = 1.0
+    b = sqrt(1.0 - k * k)
+    for it to 60 {
+        if abs(a - b) <= 1.0e-16 * a {
+            break
+        }
+        an = 0.5 * (a + b)
+        b = sqrt(a * b)
+        a = an
+    }
+    return PI / (2.0 * a)
+}
+
+#| Onsager's energy per site of the infinite lattice at h = 0:
+#| -J coth(2K) [1 + (2 / pi) (2 tanh(2K)^2 - 1) K(k)], K = beta J,
+#| k = 2 sinh(2K) / cosh(2K)^2. Not defined at T_c itself (k = 1).
+def onsager_energy(beta: Num, J: Num) -> Num {
+    K = beta * J
+    k = 2.0 * sinh(2.0 * K) / (cosh(2.0 * K) ^ 2)
+    th = tanh(2.0 * K)
+    return -J / th * (1.0 + 2.0 / PI * (2.0 * th * th - 1.0) * elliptic_k(k))
+}
+
+#| log Z of the L by L periodic lattice at h = 0, from Kaufman's exact
+#| partition function as Ferdinand and Fisher write it:
+#| Z = (1/2) (2 sinh 2K)^(N/2) (Z1 + Z2 + Z3 + Z4), Z1 = prod_r
+#| 2 cosh(L g_{2r+1} / 2), Z2 the same with sinh, Z3 and Z4 the same over
+#| g_{2r}, r = 0 .. L-1; cosh g_l = cosh 2K coth 2K - cos(l pi / L) with
+#| g_l > 0, except g_0 = 2K + ln tanh K, which changes sign at T_c.
+#| Each product is summed as a log and a sign.
+def kaufman_lnz(L: Int, beta: Num, J: Num) -> Num {
+    K = beta * J
+    c = cosh(2.0 * K) / tanh(2.0 * K)
+    lz = zeros(4)
+    sg = zeros(4) + 1.0
+    #: odd l feeds Z1 and Z2, even l Z3 and Z4; g_0 changes sign at T_c
+    for r to L {
+        for par to 2 {
+            l = 2 * r + 1 - par
+            g = 0.0
+            if l == 0 {
+                g = 2.0 * K + log(tanh(K))
+            }
+            else {
+                x = c - cos(l * PI / L)
+                g = log(x + sqrt(x * x - 1.0))
+            }
+            a = 0.5 * L * g
+            ch = 2.0 * cosh(a)
+            sh = 2.0 * sinh(a)
+            lz[2 * par] += log(ch)
+            lz[2 * par + 1] += log(abs(sh))
+            if sh < 0.0 {
+                sg[2 * par + 1] = -sg[2 * par + 1]
+            }
+            if sh == 0.0 {
+                sg[2 * par + 1] = 0.0
+            }
+        }
+    }
+    #: summed against the largest log, so none overflows
+    top = max(lz)
+    total = sum(sg * exp(lz - top))
+    return log(0.5) + 0.5 * L * L * log(2.0 * sinh(2.0 * K)) + top + log(total)
+}
+
+#| The exact energy per site and specific heat per site of the L by L
+#| periodic lattice at h = 0: u = -(1/N) d lnZ / d beta and
+#| c = (beta^2 / N) d^2 lnZ / d beta^2, by five-point differences of
+#| kaufman_lnz with step 1e-3 beta (truncation of order 1e-12 relative).
+def kaufman_energy_heat(L: Int, beta: Num, J: Num) {
+    n = L * L
+    d = 1.0e-3 * beta
+    fm2 = kaufman_lnz(L, beta - 2.0 * d, J)
+    fm1 = kaufman_lnz(L, beta - d, J)
+    f0 = kaufman_lnz(L, beta, J)
+    fp1 = kaufman_lnz(L, beta + d, J)
+    fp2 = kaufman_lnz(L, beta + 2.0 * d, J)
+    d1 = (fm2 - 8.0 * fm1 + 8.0 * fp1 - fp2) / (12.0 * d)
+    d2 = (-fm2 + 16.0 * fm1 - 30.0 * f0 + 16.0 * fp1 - fp2) / (12.0 * d * d)
+    return -d1 / n, beta * beta * d2 / n
+}
+
+#| The exact averages over all 2^N states of a small L by L periodic
+#| lattice (N = L * L <= 20): energy per site, specific heat per site,
+#| <|m|>, susceptibility and Binder's cumulant, each defined as `derived`
+#| defines it, so a run's estimates can be held to them.
+def exact_moments(L: Int, beta: Num, J: Num, h: Num) {
+    n = L * L
+    if n > 20 {
+        stop(f"exact_moments enumerates 2^N states; N = {n} is more than 20")
+    }
+    up, down, left, right = neighbor_tables(L)
+    pw = int_zeros(n)
+    pw[0] = 1
+    for k from 1 to n {
+        pw[k] = 2 * pw[k - 1]
+    }
+    nstates = 2 * pw[n - 1]
+    s = zeros(n)
+    # energies are measured from the lowest possible, -2 |J| N - |h| N
+    e0 = -2.0 * abs(J) * n - abs(h) * n
+    z = 0.0
+    e1 = 0.0
+    e2 = 0.0
+    ma = 0.0
+    m2 = 0.0
+    m4 = 0.0
+    #: weights exp(-beta (E - E_min)), so none overflows
+    for state to nstates {
+        for k to n {
+            s[k] = 2.0 * ((state // pw[k]) % 2) - 1.0
+        }
+        es, ms = energy_and_mag(s, right, down, J, h)
+        w = exp(-beta * (es * n - e0))
+        z += w
+        e1 += w * es
+        e2 += w * es * es
+        ma += w * abs(ms)
+        m2 += w * ms * ms
+        m4 += w * ms * ms * ms * ms
+    }
+    heat, chi, binder = derived(e1 / z, e2 / z, ma / z, m2 / z, m4 / z, beta, n)
+    return e1 / z, heat, ma / z, chi, binder
+}
+
+test "Philox4x32-10's known-answer vectors (Random123, kat_vectors)" {
+    a0, a1, a2, a3 = philox4x32(0, 0, 0, 0, 0, 0)
+    assert_true(a0 == 1713891541 and a1 == 3781805453 and a2 == 3159862348 and a3 == 2600524760)
+    c0, c1, c2, c3 = philox4x32(608135816, 2242054355, 320440878, 57701188, 2752067618, 698298832)
+    assert_true(c0 == 3513581065 and c1 == 2499661035 and c2 == 1342301216 and c3 == 605187745)
+}
+
+test "T_c = 2 / ln(1 + sqrt 2) = 2.269185314213022, where Yang's magnetization reaches 0" {
+    # mpmath, 50 digits (posts/refs/metropolis-ising-against-onsager.out)
+    assert_near(critical_temperature(1.0), 2.269185314213022, 1.0e-14)
+    assert_near(yang_magnetization(1.0 / critical_temperature(1.0), 1.0), 0.0, 0.0)
+    assert_near(yang_magnetization(1.0 / 1.8, 1.0), 0.9568570172474184, 1.0e-12)
+}
+
+test "Kaufman's 4 by 4 partition function is the sum over all 65536 states, to 1e-12" {
+    # the enumeration's energy and specific heat, against Kaufman's
+    # derivatives (five-point differences: about 1e-10 here)
+    betas = [0.2, 0.4406868, 0.8]
+    for t to len(betas) {
+        beta = betas[t]
+        e_x, c_x, ma_x, chi_x, u_x = exact_moments(4, beta, 1.0, 0.0)
+        e_k, c_k = kaufman_energy_heat(4, beta, 1.0)
+        assert_near(e_k, e_x, 1.0e-10)
+        assert_near(c_k, c_x, 1.0e-7)
+    }
+    # lnZ itself, against a numpy sum over the 65536 states (itertools.product)
+    assert_near(kaufman_lnz(4, 0.6, 1.0), 20.056532884346808, 1.0e-12)
+}
+
+test "Kaufman's energy at L = 128 is Onsager's infinite-lattice energy, away from T_c" {
+    # the finite-size correction falls off as exp(-L / xi); xi < 2 at these T
+    u_lo, c_lo = kaufman_energy_heat(128, 1.0 / 1.8, 1.0)
+    u_hi, c_hi = kaufman_energy_heat(128, 1.0 / 3.0, 1.0)
+    assert_near(u_lo, onsager_energy(1.0 / 1.8, 1.0), 1.0e-9)
+    assert_near(u_hi, onsager_energy(1.0 / 3.0, 1.0), 1.0e-9)
+    # at infinite temperature the energy is 0; at T -> 0 it is -2
+    assert_near(onsager_energy(1.0e-6, 1.0), 0.0, 1.0e-5)
+    assert_near(onsager_energy(20.0, 1.0), -2.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

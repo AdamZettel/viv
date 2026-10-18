@@ -1,0 +1,29 @@
+module dft/kmesh
+  The k-points the SCF loop samples, and their weights, for an fcc crystal.
+
+  The density is an average over the Brillouin zone: every k contributes its
+  occupied bands. The integral is replaced by a sum over a regular mesh,
+  `k = (i + s) / NKMESH` in units of the reciprocal vectors, for
+  `i = 0 .. NKMESH-1` along each direction, and a shift s. The deck sets
+  NKMESH; this file sets NKPT, KFRAC (each k as fractions of the reciprocal
+  vectors) and KWT (weights that add up to one).
+
+  The mesh uses four shifts, `(1/2 1/2 1/2)`, `(1/2 0 0)`, `(0 1/2 0)` and
+  `(0 0 1/2)`, not one. The engine never symmetrizes the density, so the
+  density has the crystal's symmetry only if the mesh does. A rotation of the
+  crystal acts on these fractional coordinates as an integer matrix, and it
+  sends the shift `(1/2 1/2 1/2)` to one of the other three. The four
+  together are closed under every rotation, and silicon's valence-band top
+  comes out as the triplet it should be
+  [test "the valence-band top at Gamma is a TRIPLET: the density has the crystal's full symmetry"].
+
+  Time reversal gives k and -k the same density, so each such pair is kept
+  once with twice the weight: the loop looks for the partner of each new
+  point among the points already kept. A point that is its own partner (k
+  and -k differ by a reciprocal lattice vector) is kept with single weight.
+  The run prints how many points are left as NKPT.
+
+kwrap  @e4627950
+  what  A fractional coordinate moved into the interval from minus one half
+        (excluded) to one half (included), so that k and a copy of it shifted
+        by a reciprocal lattice vector compare equal.

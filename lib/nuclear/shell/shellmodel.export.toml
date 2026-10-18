@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2017 Lawrence Livermore National Security and San Diego State University Research Foundation
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The nuclear shell model as one C file and a Python wrapper:
+# `viv export lib/nuclear/shell/shellmodel.export.toml`.
+# A parameter left out of a run keeps the program's value (neon-20 in the sd
+# shell with USDB, the lowest 10 states); each parameter's meaning is the
+# `#:` line above it in lib/nuclear/shell/shellmodel.viv.
+#
+# Derived in design from BIGSTICK (github.com/cwjsdsu/BigstickPublick, MIT
+# license, Copyright (c) 2017 Lawrence Livermore National Security and San
+# Diego State University Research Foundation); lib/nuclear/shell/shell.viv
+# carries the notice.
+name = "shellmodel"
+about = "lib/nuclear/shell/shellmodel.viv"
+files = ["lib/nuclear/shell/shellmodel.viv"]
+# runs that tools/export/check.py holds to the same bits in three engines
+cases = "lib/nuclear/shell/shellmodel.cases.json"
+
+[params]
+interaction = { type = "Interaction", labels = { "usdb" = "Usdb", "ckpot" = "Ckpot" }, normalize = "lower" }
+sps_file = { type = "Str" }
+int_file = { type = "Str" }
+z = { type = "Int", min = 0, max = 20 }
+n = { type = "Int", min = 0, max = 20 }
+twice_m = { type = "Int", min = -1, max = 200 }
+nstates = { type = "Int", min = 1, max = 200 }
+tol = { type = "Num", min_exclusive = 0.0 }
+max_iter = { type = "Int", min = 1, max = 100000 }
+krylov = { type = "Int", min = 3, max = 2000 }
+eigensolver = { type = "LowestEigenpairs", labels = { "lanczos" = "Lanczos", "householder_ql" = "HouseholderQl", "jacobi" = "Jacobi", "every" = "Every", "every iterative" = "EveryIterative", "every dense" = "EveryDense" }, normalize = "lower", contract = "lowest_eigenpairs" }
+
+[results]
+ENERGIES = "Arr"
+J = "Arr"
+EXCITATION = "Arr"
+OCC_P = { type = "Arr", rank = 2 }
+OCC_N = { type = "Arr", rank = 2 }
+DIM = "Int"
+ITERATIONS = "Int"
+CONVERGED = "Bool"
+RUN_ID = "Str"
+
+[reference]
+oracle = "BIGSTICK 8.0.0 (github.com/cwjsdsu/BigstickPublick @ 63e16b5), run by lib/nuclear/shell/bigstick_compare.py"
+usdb = "B. A. Brown and W. A. Richter, Phys. Rev. C 74, 034315 (2006)"
+ckpot = "S. Cohen and D. Kurath, Nucl. Phys. 73, 1 (1965)"

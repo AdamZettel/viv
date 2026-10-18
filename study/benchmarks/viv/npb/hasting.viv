@@ -1,0 +1,131 @@
+###
+Translated from driver.py by py2viv 0.2.0 (numeric Python -> Viv).
+Python source sha256: 3134670bfa798e69bd5fe9882313b7ba1cdecc2f861a151238f724528a27570a
+Each print(...) is one print(...) line; fmt(x) writes a float as Python's repr does.
+A `raise`, a failed assert and every guard `stop` with Python's exception line.
+###
+
+#| 0, 1, ..., n - 1.
+def py_iota(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+
+#| Every entry of a real array, row-major, as a vector (a copy).
+def py_flat(a: Arr) {
+    return take(a, py_iota(numel(a)))
+}
+
+#| An int result, as Python's int: a -0.0 becomes 0 (an int has no sign on zero), and the run
+#| stops at 2^53, past which a double no longer holds every integer (Python's int does).
+def py_int(x) {
+    if abs(x) >= 9007199254740992 {
+        stop("py2viv: an integer reached 2^53; Python's int is exact there and a double is not")
+    }
+    return x + 0.0
+}
+
+#| a / b with a float: ZeroDivisionError on a zero divisor.
+def py_div_f(a, b) {
+    if b == 0 {
+        stop("ZeroDivisionError: float division by zero")
+    }
+    return a / b
+}
+
+#| NumPy's pairwise sum of f[lo], ..., f[lo + n - 1] (numpy/core/src/umath/loops_utils.h):
+#| below 8 terms left to right from 0; to 128, eight running sums combined as a tree, then
+#| the rest; above, the two halves (the first a multiple of 8 long) summed apart.
+def py_pw(f: Arr, lo, n) {
+    if n < 8 {
+        s = 0.0
+        for i to n {
+            s += f[lo + i]
+        }
+        return s
+    }
+    if n <= 128 {
+        r = zeros(8)
+        for j to 8 {
+            r[j] = f[lo + j]
+        }
+        i = 8
+        while i < n - n % 8 {
+            for j to 8 {
+                r[j] += f[lo + i + j]
+            }
+            i += 8
+        }
+        s = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+        while i < n {
+            s += f[lo + i]
+            i += 1
+        }
+        return s
+    }
+    n2 = floor(n / 2)
+    n2 = n2 - n2 % 8
+    return py_pw(f, lo, n2) + py_pw(f, lo + n2, n - n2)
+}
+
+#| NumPy's sum of f[lo], ..., f[lo + n - 1] along one axis: from 0.0, a pairwise sum of each
+#| block of NumPy's buffer size (8192 entries), added in order.
+def py_blk(f: Arr, lo, n) {
+    bufsize = 8192
+    s = 0.0
+    b = 0
+    while b < n {
+        s = s + py_pw(f, lo + b, min(bufsize, n - b))
+        b += bufsize
+    }
+    return s
+}
+
+#| np.sum(a), a.sum() of a float array: NumPy's sum over the entries in row-major order (py_blk).
+def py_npsum(a: Arr) {
+    f = py_flat(a)
+    return py_blk(f, 0, len(f))
+}
+
+#from: http://wiki.scipy.org/Cookbook/Theoretical_Ecology/Hastings_and_Powell
+#setup: import numpy as np ; np.random.seed(0); y = np.random.rand(3) ; args = np.random.rand(7)
+#run: hasting(y, *args)
+#pythran export hasting(float [], float, float, float, float, float, float, float)
+def hasting(y: Arr, t, a1, a2, b1, b2, d1, d2) {
+    yprime = zeros(3)
+    yprime[0] = y[0] * (1.0 - y[0]) - py_div_f(a1 * y[0] * y[1], 1.0 + b1 * y[0])
+    yprime[1] = py_div_f(a1 * y[0] * y[1], 1.0 + b1 * y[0]) - py_div_f(a2 * y[1] * y[2], 1.0 + b2 * y[1]) - d1 * y[1]
+    yprime[2] = py_div_f(a2 * y[1] * y[2], 1.0 + b2 * y[1]) - d2 * y[2]
+    return yprime
+}
+# ---- harness ----
+py_s2 = split(read_text("in0.txt"))
+py_l1 = zeros(len(py_s2))
+for py_i3 to len(py_s2) {
+    py_t4 = py_s2[py_i3]
+    py_l1[py_i3] = float(py_t4)
+}
+_a0 = py_l1
+_s1 = float(read_text("s1.txt"))
+_s2 = float(read_text("s2.txt"))
+_s3 = float(read_text("s3.txt"))
+_s4 = float(read_text("s4.txt"))
+_s5 = float(read_text("s5.txt"))
+_s6 = float(read_text("s6.txt"))
+_s7 = float(read_text("s7.txt"))
+reps = py_int(int(read_text("reps.txt")))
+res = hasting(_a0, _s1, _s2, _s3, _s4, _s5, _s6, _s7)
+print(fmt(py_npsum(res)))
+print(fmt(py_npsum(res * res)))
+_chk = 0.0
+for _i to reps {
+    res = hasting(_a0, _s1, _s2, _s3, _s4, _s5, _s6, _s7)
+    _chk = _chk + res[0]
+}
+print(fmt(_chk))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

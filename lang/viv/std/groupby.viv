@@ -1,0 +1,568 @@
+# Group-by on Int keys, written in Viv so that every engine runs the same
+# program (lang/viv/src/stdlib.rs, `provide_groupby`, brings these defs into
+# a program that calls them and does not define them).
+#
+# `uniq, ids = factorize(keys)`: the distinct keys in the order they first
+# appear, and for each row the position of its key in `uniq`, so
+# `uniq[ids[i]] == keys[i]`. A group-by is then a dense loop:
+# `s[ids[i]] += v[i]` into `zeros(len(uniq))`.
+#
+# The table is open addressing with linear probing, a power of two long and
+# at most half full. A slot is two adjacent Ints, the key and its group id
+# plus one (0 marks an empty slot), so a probe reads one cache line, not a
+# slot and then a key somewhere else. The slot of a key is the top bits of
+# the key times 2^64 / golden ratio (Fibonacci hashing): one multiply, and
+# every bit of the key reaches the top bits. Any Int is a key, INT64_MIN and
+# INT64_MAX included. The hash decides only where a key is looked for, never
+# the order of `uniq` or the ids.
+
+#| The smallest and the largest of `keys` (0 and 0 for no keys): one pass
+#| with no branch to mispredict.
+def key_range(keys: [Int]) {
+    if len(keys) == 0 {
+        none: Int = 0
+        return none, none
+    }
+    lo = keys[0]
+    hi = keys[0]
+    for i to len(keys) {
+        k = keys[i]
+        if k < lo {
+            lo = k
+        }
+        if k > hi {
+            hi = k
+        }
+    }
+    return lo, hi
+}
+
+# The direct path. When the keys of n rows span fewer than
+# dense_span(n) values, a key's slot is `key - lo` in a table of that span,
+# found by one subtraction and one load instead of a hash and a probe. The
+# span is found inside the call (`key_range`, one pass); a table larger than
+# a few times the rows, or than 2^22 slots (32 MB), is not worth zeroing.
+def dense_span(n: Int) -> Int {
+    lim: Int = 4194304
+    s = 2 * n + 1024
+    if s < lim {
+        return s
+    }
+    return lim
+}
+
+#| `factorize` over keys spanning `r` values from `lo`: a key's slot is
+#| `key - lo`, and the table holds its group id plus one.
+def factorize_dense(keys: [Int], lo: Int, r: Int) {
+    n = int(len(keys))
+    pos = int_zeros(r)
+    ids = int_zeros(n)
+    ng: Int = 0
+    for i to n {
+        k = wrap_sub(keys[i], lo)
+        g = pos[k]
+        if g == 0 {
+            ng += 1
+            pos[k] = ng
+            g = ng
+        }
+        ids[i] = g - 1
+    }
+    uniq = int_zeros(ng)
+    for t to r {
+        g = pos[t]
+        if g > 0 {
+            uniq[g - 1] = wrap_add(lo, int(t))
+        }
+    }
+    return uniq, ids
+}
+
+#| The distinct Ints of `keys` in first-appearance order, and each row's
+#| position in that list.
+def factorize(keys: [Int]) {
+    # 2^64 / golden ratio, 0x9E3779B97F4A7C15
+    fib: Int = -7046029254386353131
+    n = int(len(keys))
+    if n > 0 {
+        lo, hi = key_range(keys)
+        span = wrap_sub(hi, lo)
+        if ult(span, dense_span(n)) {
+            du, dg = factorize_dense(keys, lo, span + 1)
+            return du, dg
+        }
+    }
+    bits: Int = 4
+    cap: Int = 16
+    mask = cap - 1
+    shift = 64 - bits
+    tab = int_zeros(2 * cap)
+    ids = int_zeros(n)
+    ng: Int = 0
+    i: Int = 0
+    while i < n {
+        # the rows up to the next growth: this loop allocates nothing, so it
+        # carries none of the arena's per-pass work
+        while i < n and 2 * ng <= cap {
+            k = keys[i]
+            s = shr(wrap_mul(k, fib), shift)
+            while true {
+                g = tab[2 * s + 1]
+                if g == 0 {
+                    tab[2 * s] = k
+                    tab[2 * s + 1] = ng + 1
+                    ids[i] = ng
+                    ng += 1
+                    break
+                }
+                if tab[2 * s] == k {
+                    ids[i] = g - 1
+                    break
+                }
+                s = band(s + 1, mask)
+            }
+            i += 1
+        }
+        # more than half full: twice the slots, every key placed again
+        if 2 * ng > cap {
+            old = tab
+            bits += 1
+            cap = 2 * cap
+            mask = cap - 1
+            shift = 64 - bits
+            tab = int_zeros(2 * cap)
+            for j to len(old) / 2 {
+                gj = old[2 * j + 1]
+                if gj != 0 {
+                    kj = old[2 * j]
+                    t = shr(wrap_mul(kj, fib), shift)
+                    while tab[2 * t + 1] != 0 {
+                        t = band(t + 1, mask)
+                    }
+                    tab[2 * t] = kj
+                    tab[2 * t + 1] = gj
+                }
+            }
+        }
+    }
+    # the keys in first-appearance order: a row whose id is the next new one
+    uniq = int_zeros(ng)
+    seen: Int = 0
+    for r to n {
+        if ids[r] == seen {
+            uniq[seen] = keys[r]
+            seen += 1
+        }
+    }
+    return uniq, ids
+}
+
+#| Two key columns as one: the distinct pairs (a[i], b[i]) in first-appearance
+#| order, as two columns, and each row's position in them. Each column is
+#| factorized, the pair of ids becomes one Int (ia * len(ub) + ib, below
+#| len(a)^2), and that is factorized. (One table holding both keys measured
+#| slower: 194 ms against 132 ms for 10^7 rows and 10^4 pairs.) Three
+#| columns: pass the ids of factorize2 and the third column to factorize2.
+def factorize2(a: [Int], b: [Int]) {
+    if len(a) != len(b) {
+        stop("factorize2: the key columns differ in length")
+    }
+    ua, ia = factorize(a)
+    ub, ib = factorize(b)
+    nb = int(len(ub))
+    # a loop, not the comprehension `[ia[i] * nb + ib[i] for i to len(a)]`,
+    # which took q2 of study/dataframe from 126 to 212 ms (it grows its array)
+    code = int_zeros(len(a))
+    for i to len(a) {
+        c = ia[i] * nb + ib[i]
+        code[i] = c
+    }
+    uc, ids = factorize(code)
+    ka = int_zeros(len(uc))
+    kb = int_zeros(len(uc))
+    for g to len(uc) {
+        ka[g] = ua[uc[g] // nb]
+        kb[g] = ub[uc[g] % nb]
+    }
+    return ka, kb, ids
+}
+
+#| A hash join's probe: for each row of `probe`, the first row of `build`
+#| holding the same key, or -1 when no row does. `build` goes into a table
+#| of the same layout as `factorize`'s, sized once (at least twice its rows),
+#| and each probe key is looked for there.
+def match_rows(build: [Int], probe: [Int]) -> [Int] {
+    fib: Int = -7046029254386353131
+    nb = len(build)
+    bits: Int = 4
+    cap: Int = 16
+    while cap < 2 * nb {
+        bits += 1
+        cap = 2 * cap
+    }
+    mask = cap - 1
+    shift = 64 - bits
+    tab = int_zeros(2 * cap)
+    for j to nb {
+        k = build[j]
+        s = shr(wrap_mul(k, fib), shift)
+        while true {
+            if tab[2 * s + 1] == 0 {
+                tab[2 * s] = k
+                tab[2 * s + 1] = int(j) + 1
+                break
+            }
+            if tab[2 * s] == k {
+                break
+            }
+            s = band(s + 1, mask)
+        }
+    }
+    out = int_zeros(len(probe))
+    for i to len(probe) {
+        k = probe[i]
+        s = shr(wrap_mul(k, fib), shift)
+        while true {
+            r = tab[2 * s + 1]
+            if r == 0 {
+                out[i] = -1
+                break
+            }
+            if tab[2 * s] == k {
+                out[i] = r - 1
+                break
+            }
+            s = band(s + 1, mask)
+        }
+    }
+    return out
+}
+
+# ---- fused group-by: the aggregate computed where the key is found
+#
+# `factorize` then a loop over its ids is two passes and an id column (8
+# bytes a row) written and read back. These compute the per-group sums in
+# the pass that finds the groups: by `key - lo` when the keys span few
+# values (`dense_span`), otherwise in the hash probe loop itself, the
+# accumulators indexed by the group id the probe finds. The groups come out
+# in first-appearance order, as `factorize`'s do.
+
+#| The order of first appearance of the `ng` occupied slots of a direct
+#| table: `cnt[key - lo] > 0` marks a key present. Returns the keys in that
+#| order and each slot's group id (meaningful where the slot is occupied).
+#| Stops reading rows once every group has been seen.
+def dense_order(keys: [Int], lo: Int, cnt: [Int], ng: Int) {
+    gid = int_zeros(len(cnt))
+    uniq = int_zeros(ng)
+    seen: Int = 0
+    i: Int = 0
+    n = int(len(keys))
+    while seen < ng and i < n {
+        k = wrap_sub(keys[i], lo)
+        if gid[k] == 0 {
+            seen += 1
+            gid[k] = seen
+            uniq[seen - 1] = keys[i]
+        }
+        i += 1
+    }
+    return uniq, gid
+}
+
+#| Per-group sum and row count of an Int column, keyed by an Int column, in
+#| one pass: `uniq, s, c = group_sum(keys, v)`, with `s[g]` the sum of `v`
+#| over the rows whose key is `uniq[g]` and `c[g]` their count.
+def group_sum(keys: [Int], v: [Int]) {
+    if len(keys) != len(v) {
+        stop("group_sum: the key and value columns differ in length")
+    }
+    n = int(len(keys))
+    lo, hi = key_range(keys)
+    span = wrap_sub(hi, lo)
+    if n > 0 and ult(span, dense_span(n)) {
+        r = span + 1
+        acc = int_zeros(r)
+        cnt = int_zeros(r)
+        for i to n {
+            k = wrap_sub(keys[i], lo)
+            acc[k] += v[i]
+            cnt[k] += 1
+        }
+        ng: Int = 0
+        # the occupied slots (a count is never negative)
+        for t to r {
+            ng += min(cnt[t], 1)
+        }
+        uniq, gid = dense_order(keys, lo, cnt, ng)
+        s = int_zeros(ng)
+        c = int_zeros(ng)
+        for t to r {
+            g = gid[t]
+            if g > 0 {
+                s[g - 1] = acc[t]
+                c[g - 1] = cnt[t]
+            }
+        }
+        return uniq, s, c
+    }
+    # the hash path: `factorize`'s table, the sums beside it
+    fib: Int = -7046029254386353131
+    bits: Int = 4
+    cap: Int = 16
+    mask = cap - 1
+    shift = 64 - bits
+    tab = int_zeros(2 * cap)
+    acc = int_zeros(cap)
+    cnt = int_zeros(cap)
+    ng: Int = 0
+    i: Int = 0
+    while i < n {
+        while i < n and 2 * ng <= cap {
+            k = keys[i]
+            p = shr(wrap_mul(k, fib), shift)
+            while true {
+                g = tab[2 * p + 1]
+                if g == 0 {
+                    tab[2 * p] = k
+                    tab[2 * p + 1] = ng + 1
+                    acc[ng] += v[i]
+                    cnt[ng] += 1
+                    ng += 1
+                    break
+                }
+                if tab[2 * p] == k {
+                    acc[g - 1] += v[i]
+                    cnt[g - 1] += 1
+                    break
+                }
+                p = band(p + 1, mask)
+            }
+            i += 1
+        }
+        if 2 * ng > cap {
+            old = tab
+            bits += 1
+            cap = 2 * cap
+            mask = cap - 1
+            shift = 64 - bits
+            tab = int_zeros(2 * cap)
+            for j to len(old) / 2 {
+                gj = old[2 * j + 1]
+                if gj != 0 {
+                    kj = old[2 * j]
+                    t = shr(wrap_mul(kj, fib), shift)
+                    while tab[2 * t + 1] != 0 {
+                        t = band(t + 1, mask)
+                    }
+                    tab[2 * t] = kj
+                    tab[2 * t + 1] = gj
+                }
+            }
+            acc2 = int_zeros(cap)
+            cnt2 = int_zeros(cap)
+            for g to ng {
+                acc2[g] = acc[g]
+                cnt2[g] = cnt[g]
+            }
+            acc = acc2
+            cnt = cnt2
+        }
+    }
+    uniq = int_zeros(ng)
+    s = int_zeros(ng)
+    c = int_zeros(ng)
+    for j to len(tab) / 2 {
+        g = tab[2 * j + 1]
+        if g != 0 {
+            uniq[g - 1] = tab[2 * j]
+        }
+    }
+    for g to ng {
+        s[g] = acc[g]
+        c[g] = cnt[g]
+    }
+    return uniq, s, c
+}
+
+#| `group_sum` of a number column: the sums are numbers, added in row order
+#| within each group (so each equals the loop `s[g] += v[i]`'s).
+def group_sum_num(keys: [Int], v: Arr) {
+    if len(keys) != len(v) {
+        stop("group_sum_num: the key and value columns differ in length")
+    }
+    n = int(len(keys))
+    lo, hi = key_range(keys)
+    span = wrap_sub(hi, lo)
+    if n > 0 and ult(span, dense_span(n)) {
+        r = span + 1
+        acc = zeros(r)
+        cnt = int_zeros(r)
+        for i to n {
+            k = wrap_sub(keys[i], lo)
+            acc[k] += v[i]
+            cnt[k] += 1
+        }
+        ng: Int = 0
+        # the occupied slots (a count is never negative)
+        for t to r {
+            ng += min(cnt[t], 1)
+        }
+        uniq, gid = dense_order(keys, lo, cnt, ng)
+        s = zeros(ng)
+        c = int_zeros(ng)
+        for t to r {
+            g = gid[t]
+            if g > 0 {
+                s[g - 1] = acc[t]
+                c[g - 1] = cnt[t]
+            }
+        }
+        return uniq, s, c
+    }
+    fib: Int = -7046029254386353131
+    bits: Int = 4
+    cap: Int = 16
+    mask = cap - 1
+    shift = 64 - bits
+    tab = int_zeros(2 * cap)
+    acc = zeros(cap)
+    cnt = int_zeros(cap)
+    ng: Int = 0
+    i: Int = 0
+    while i < n {
+        while i < n and 2 * ng <= cap {
+            k = keys[i]
+            p = shr(wrap_mul(k, fib), shift)
+            while true {
+                g = tab[2 * p + 1]
+                if g == 0 {
+                    tab[2 * p] = k
+                    tab[2 * p + 1] = ng + 1
+                    acc[ng] += v[i]
+                    cnt[ng] += 1
+                    ng += 1
+                    break
+                }
+                if tab[2 * p] == k {
+                    acc[g - 1] += v[i]
+                    cnt[g - 1] += 1
+                    break
+                }
+                p = band(p + 1, mask)
+            }
+            i += 1
+        }
+        if 2 * ng > cap {
+            old = tab
+            bits += 1
+            cap = 2 * cap
+            mask = cap - 1
+            shift = 64 - bits
+            tab = int_zeros(2 * cap)
+            for j to len(old) / 2 {
+                gj = old[2 * j + 1]
+                if gj != 0 {
+                    kj = old[2 * j]
+                    t = shr(wrap_mul(kj, fib), shift)
+                    while tab[2 * t + 1] != 0 {
+                        t = band(t + 1, mask)
+                    }
+                    tab[2 * t] = kj
+                    tab[2 * t + 1] = gj
+                }
+            }
+            acc2 = zeros(cap)
+            cnt2 = int_zeros(cap)
+            for g to ng {
+                acc2[g] = acc[g]
+                cnt2[g] = cnt[g]
+            }
+            acc = acc2
+            cnt = cnt2
+        }
+    }
+    uniq = int_zeros(ng)
+    s = zeros(ng)
+    c = int_zeros(ng)
+    for j to len(tab) / 2 {
+        g = tab[2 * j + 1]
+        if g != 0 {
+            uniq[g - 1] = tab[2 * j]
+        }
+    }
+    for g to ng {
+        s[g] = acc[g]
+        c[g] = cnt[g]
+    }
+    return uniq, s, c
+}
+
+#| `group_sum` keyed by two Int columns: `ka, kb, s, c = group_sum2(a, b, v)`.
+#| When both columns span few values and the pairs do too, a pair's slot is
+#| `(a - lo_a) * span_b + (b - lo_b)` and one pass sums; otherwise the pairs
+#| are numbered by `factorize2` and summed by their ids.
+def group_sum2(a: [Int], b: [Int], v: [Int]) {
+    if len(a) != len(b) or len(a) != len(v) {
+        stop("group_sum2: the key and value columns differ in length")
+    }
+    n = int(len(a))
+    loa, hia = key_range(a)
+    lob, hib = key_range(b)
+    sa = wrap_sub(hia, loa)
+    sb = wrap_sub(hib, lob)
+    lim = dense_span(n)
+    if n > 0 and ult(sa, lim) and ult(sb, lim) and (sa + 1) * (sb + 1) < lim {
+        rb = sb + 1
+        r = (sa + 1) * rb
+        acc = int_zeros(r)
+        cnt = int_zeros(r)
+        for i to n {
+            k = wrap_add(wrap_mul(wrap_sub(a[i], loa), rb), wrap_sub(b[i], lob))
+            acc[k] += v[i]
+            cnt[k] += 1
+        }
+        ng: Int = 0
+        # the occupied slots (a count is never negative)
+        for t to r {
+            ng += min(cnt[t], 1)
+        }
+        # first-appearance order of the pairs, as factorize2's
+        gid = int_zeros(r)
+        ka = int_zeros(ng)
+        kb = int_zeros(ng)
+        seen: Int = 0
+        i: Int = 0
+        while seen < ng and i < n {
+            k = wrap_add(wrap_mul(wrap_sub(a[i], loa), rb), wrap_sub(b[i], lob))
+            if gid[k] == 0 {
+                seen += 1
+                gid[k] = seen
+                ka[seen - 1] = a[i]
+                kb[seen - 1] = b[i]
+            }
+            i += 1
+        }
+        s = int_zeros(ng)
+        c = int_zeros(ng)
+        for t to r {
+            g = gid[t]
+            if g > 0 {
+                s[g - 1] = acc[t]
+                c[g - 1] = cnt[t]
+            }
+        }
+        return ka, kb, s, c
+    }
+    fa, fb, ids = factorize2(a, b)
+    s = int_zeros(len(fa))
+    c = int_zeros(len(fa))
+    for i to n {
+        g = ids[i]
+        s[g] += v[i]
+        c[g] += 1
+    }
+    return fa, fb, s, c
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,332 @@
+# Libraries: the Viv modules under lib/ and lang/viv/std/, brought in with
+# `#! use <path>`. Each module's own `###` header says what it holds.
+
+== lib-nn
+title: Transformer pieces (lib/nn)
+what: The forward pass of each piece a transformer is made of, as whole-array expressions
+  over the last axis, so each works on a sequence (T by D) or a batch (B by T by D):
+  `rmsnorm`, `relu2` (ReLU squared), `softmax_rows`, causal `attention` (returning the
+  output and the weights), `cross_entropy`, `embedding`. The backward passes come from
+  `value_and_grad` over these defs; the tests hold the generated gradient of each piece to
+  central differences. The hand-written adjoints are kept in lib/nn_adjoints as references.
+when: Building a neural network: use these instead of writing softmax or cross-entropy
+  loops, and differentiate them with `value_and_grad` instead of writing a backward pass.
+example: lib-nn
+doc: lib/nn.viv
+see: lib-gpt, lib-optim, value-and-grad, batched-matmul
+keywords: neural network transformer softmax rmsnorm relu attention cross entropy embedding nn
+usage: use:lib/nn
+module: lib/nn
+
+== lib-optim
+title: Optimizers (lib/optim)
+what: SGD, SGD with momentum, Adam and Muon. For a model held as records of matrices,
+  `adam_update` and `muon_update` update one matrix and its memories in place with the
+  settings in an `AdamSettings` or `MuonSettings` record, and `for_leaves` applies them to
+  every matrix of the model, as `opt.step()` does in PyTorch. The older flat form keeps
+  the parameters in one vector with a lib/params layout and steps with `optim_step`; a
+  test holds the two forms to the same bits.
+when: Training anything by gradient: write `for_leaves(adam_update, model, g, m, v, t + 1,
+  1.0, settings)` instead of an update loop per matrix.
+example: lib-optim
+doc: lib/optim.viv
+see: for-leaves, value-and-grad-over-records, lib-params, lib-gpt
+keywords: optimizer adam sgd momentum muon step training learning rate opt.step
+usage: use:lib/optim
+module: lib/optim
+
+== lib-gpt
+title: A small GPT (lib/gpt)
+what: A GPT in the shape of nanoGPT and the modded-nanogpt speedrun: token and position
+  embeddings, blocks of RMSNorm, multi-head causal attention and a ReLU-squared MLP with
+  residuals, and an output map. The model is a `Gpt` record holding an array of `Block`
+  records; `train` runs the batch at once, takes the gradient with `value_and_grad` with
+  respect to the whole model, and updates it with Muon on the blocks and Adam on the rest
+  through `for_leaves`. A `GptConfig` record holds the sizes. lib/gpt/story_gpt trains one
+  on a sentence and continues a prompt.
+when: As the reference for a model written as records, batched `@` and autodiff over
+  records, and as a starting point for a language-model experiment.
+example: lib-gpt
+doc: lib/gpt/gpt.viv
+see: lib-nn, lib-optim, arrays-of-records, value-and-grad-over-records, batched-matmul
+keywords: gpt transformer language model nanogpt speedrun train attention records
+usage: use:lib/gpt
+module: lib/gpt/gpt
+
+== lib-params
+title: A model's parameters as one vector (lib/params)
+what: Keeps all of a model's matrices in one flat vector with a layout table beside it (the
+  offset, rows and columns of each matrix): `param_table`, `param_declare`,
+  `param_zeros`, `param_get`, `param_set`, `param_add`. It exists because `grad` once
+  took only one flat array.
+when: Rarely, for new code: `value_and_grad` differentiates a record of arrays, so a model
+  held as records (lib/gpt) needs no layout table. Read it to understand older programs
+  and lib/optim's flat form.
+example: lib-params
+doc: lib/params.viv
+see: records, value-and-grad-over-records, lib-optim
+keywords: params parameters flat vector layout offset theta table
+usage: use:lib/params
+module: lib/params
+
+== lib-hf
+title: Hartree-Fock quantum chemistry (lib/hf)
+what: Restricted, unrestricted and restricted-open Hartree-Fock on Gaussian basis sets,
+  held against PySCF. `molecule("O 0 0 0; H ...", "6-31g")` (lib/hf/mole) builds a
+  `Molecule` from text and a basis name, as PySCF's `gto.M` does; `rhf(mol)` (lib/hf/scf)
+  runs the SCF and gives a record with the energy. lib/hf/hf runs the same pipeline with
+  every integral stage cross-checked by its registry of methods (McMurchie-Davidson,
+  Head-Gordon-Pople, Rys, Obara-Saika, Gauss-Hermite). It also has direct J/K, DIIS, stability
+  analysis and Casida TDHF.
+when: For an SCF energy or the matrices of a molecule, or as the example of a production
+  path beside a verification path that runs every method.
+example: lib-hf
+doc: lib/hf/hf.viv; lib/hf/mole.viv
+see: lib-xyz-basis, method-registries, contracts
+keywords: hartree fock scf rhf uhf rohf pyscf molecule basis integrals eri quantum chemistry
+usage: use:lib/hf
+module: lib/hf/hf
+
+== lib-xyz-basis
+title: Atoms and basis sets (lib/xyz, lib/basis)
+what: `parse_xyz(text)` reads an XYZ file, or atoms written as PySCF's `atom=` string, into
+  a `Geometry` record: the symbols as a `[Str]`, the atomic numbers and an n by 3 array
+  of positions. lib/basis holds the basis sets STO-3G, 6-31G, 6-31G*, 6-31G**,
+  cc-pVDZ, cc-pVTZ, def2-SVP and def2-TZVP as `Basis` records, looked up by PySCF's
+  names through lib/basis/named.
+when: To read a molecule from text instead of writing coordinate arrays by hand.
+example: lib-xyz-basis
+doc: lib/xyz.viv; lib/basis/basis.viv
+see: lib-hf, strings, records
+keywords: xyz atoms molecule geometry basis set sto-3g 6-31g cc-pvdz def2 parse
+usage: use:lib/xyz, use:lib/basis
+module: lib/xyz
+
+== lib-cas
+title: Computer algebra (lib/cas)
+what: A computer algebra system written in Viv: `cas("x^2 - 1")` parses text into a
+  hash-consed expression store with exact rationals; `cas_diff`, `cas_expand`,
+  `cas_definite` (a definite integral with a certificate verdict), `cas_text` (Viv source)
+  and `cas_tex` (LaTeX). The compiler carries it, so `#! use lib/cas/cas` works from any
+  directory, and `viv check --phrases` uses it to hold phrases to exact values.
+when: For an exact derivative, integral or simplification inside a program, or to print a
+  formula as LaTeX.
+example: lib-cas
+doc: lib/cas/cas.viv
+see: check-phrases-certificates, cas-derivs, phrases
+keywords: cas computer algebra symbolic exact rational derivative integral latex simplify
+usage: use:lib/cas
+module: lib/cas/cas
+
+== lib-minpack
+title: MINPACK least squares (lib/minpack)
+what: A port of netlib MINPACK's Levenberg-Marquardt solver with a trust region: `lmder1`
+  and `lmder`, with `lmpar`, `qrfac`, `qrsolv` and `enorm`, keeping the Fortran's
+  arithmetic in its order so the iterates match a gfortran build of the original to the
+  last bit (checked on the Moré-Garbow-Hillstrom problems by lib/minpack/mgh_check.viv).
+  The residual function is a def `fcn(data, x, fvec, fjac, iflag)` that fills `fvec` or
+  `fjac`. Every trial step writes a row of `hist`.
+when: Fitting a model to data by nonlinear least squares, instead of writing Gauss-Newton
+  with a hand-tuned damping.
+example: lib-minpack
+doc: lib/minpack/lmder.viv; lib/minpack/README.md
+see: function-values, lib-linalg
+keywords: minpack levenberg marquardt least squares fit lmder trust region nonlinear
+usage: use:lib/minpack
+module: lib/minpack/lmder
+
+== lib-randla
+title: Randomized linear algebra (lib/randla)
+what: Sketching operators generated on the fly from Philox4x32-10 keyed by (seed, stream),
+  so a sketch is the same in every engine (Gaussian, Rademacher, sparse sign SASO,
+  subsampled randomized Hadamard), and the drivers built on them: the randomized range
+  finder, QB and SVD with power iterations, Nystrom for PSD matrices, randomly pivoted
+  Cholesky, sketch-and-precondition least squares (LSQR on A R^-1, to full accuracy), and
+  the Hutchinson and Hutch++ trace estimators over an operator passed as a def.
+when: A low-rank approximation of a large matrix with a decaying spectrum, a tall
+  least-squares problem, or the trace of an operator you can only apply. For a small
+  dense matrix, use `svd` and `trace`.
+example: lib-randla
+doc: lib/randla/README.md
+see: lib-linalg, function-values
+keywords: randomized svd sketch nystrom cholesky hutchinson hutch++ trace least squares blendenpik philox
+usage: use:lib/randla
+module: lib/randla/lowrank
+
+== lib-random
+title: Random draws over rand() (lib/random)
+what: Draws that are plain Viv over the one generator `rand()` (Park-Miller MINSTD, seeded
+  by `srand`), so every engine draws the same stream: `randn` (Box-Muller),
+  `randn_matrix`, `randint(lo, hi)`, `shuffle` (Fisher-Yates in place), `randperm`,
+  `choice(p)`. Each is documented as the formula it computes, so tools/random_replay.py
+  replays it in Python.
+when: For a permutation, a shuffle, an integer draw or a draw from a discrete distribution.
+  For NumPy's exact streams, use lib/nprandom.
+example: lib-random
+doc: lib/random.viv
+see: lib-nprandom
+keywords: random rand srand randn randint shuffle permutation choice seed
+usage: use:lib/random
+module: lib/random
+
+== lib-nprandom
+title: NumPy's random generators (lib/nprandom)
+what: NumPy's generators, word for word: PCG64 behind `default_rng(seed)` with its
+  SeedSequence (lib/nprandom/pcg64, seedseq, generator), and the legacy Mersenne Twister
+  behind `np.random.seed` (lib/nprandom/mt19937, legacy), with uniform, integer, normal
+  (ziggurat), shuffle and choice draws. lib/nprandom/selftest compares every value with
+  NumPy 1.24.4's draws exactly.
+when: When a port must draw the same numbers as a NumPy program, so the two can be
+  compared bit for bit.
+example: lib-nprandom
+doc: lib/nprandom/generator.viv; lib/nprandom/selftest.viv
+see: lib-random, py2viv, int-type
+keywords: numpy random default_rng pcg64 mersenne twister mt19937 seed seedsequence
+usage: use:lib/nprandom
+module: lib/nprandom/generator
+
+== lib-linalg
+title: Dense linear algebra (lib/schur, lib/svd, lib/polar, lib/lobpcg, lib/linalg)
+what: lib/schur: the real Schur form `A = Q T Q^T` by Householder reduction and
+  Francis's double-shift QR, with a Sylvester solver for its blocks. lib/svd: the SVD by
+  one-sided Jacobi (the algorithm of the `svd` builtin). lib/polar: Newton-Schulz
+  orthogonalization, which Muon uses. lib/lobpcg: the lowest eigenpairs of an operator
+  given as a def that applies it. lib/linalg: an inverse and a reproducible test matrix.
+  Each has residual checks (`schur_residual`, `orthogonality`, `svd_residual`).
+when: For a decomposition the builtins do not give (Schur, polar, iterative eigenpairs of a
+  matrix you never form). For a solve, an inverse, `eig_sym` or `svd`, use the builtins.
+example: lib-linalg
+doc: lib/schur.viv; lib/svd.viv; lib/polar.viv; lib/lobpcg.viv
+see: solvers-returning-tuples, lib-control, numpy-vocabulary
+keywords: schur svd polar newton-schulz lobpcg eigenvalues decomposition householder francis jacobi
+usage: use:lib/schur, use:lib/svd, use:lib/polar, use:lib/lobpcg, use:lib/linalg
+module: lib/schur
+
+== lib-control
+title: Control: LQR, Riccati, Lyapunov, balanced truncation (lib/lqr and others)
+what: lib/are solves the algebraic Riccati equation by the Schur method; lib/lqr is its
+  front end for one input (`lqr_riccati`, `lqr_gains`, `lqr_residual`); lib/lyap solves
+  the Lyapunov equation by Bartels and Stewart and gives controllability and
+  observability Gramians and the H2 norm; lib/balance does balanced truncation. lib/cartpole
+  and lib/chain are the plants: a cart-pole and a planar chain of rigid links (recursive
+  Newton-Euler).
+when: Designing a controller or reducing a linear model, instead of integrating a Riccati
+  ODE until it stops changing (lib/lqr keeps that method only to show how it fails).
+example: lib-control
+doc: lib/lqr.viv; lib/are.viv; lib/lyap.viv; lib/balance.viv
+see: lib-linalg
+keywords: control lqr riccati lyapunov gramian h2 balanced truncation cartpole robotics slicot
+usage: use:lib/lqr, use:lib/are, use:lib/lyap, use:lib/balance, use:lib/cartpole, use:lib/chain
+module: lib/lqr
+
+== lib-ode
+title: Initial value problems, stiff and non-stiff (lib/ode)
+what: `ode_solve(rhs, jac, events, t0, t1, y0, p, cfg, t_eval, dirs, term)` integrates
+  y' = rhs(t, y, p) by Dormand-Prince 5(4) (`DOPRI5`), Radau IIA of order 5 (`RADAU`),
+  variable-order BDF (`BDF`), or `AUTO` (Dormand-Prince until Hairer's stiffness test
+  fires, then Radau). Step-size control on rtol and atol as SciPy's solve_ivp does it
+  (the same steps), dense output, events located on the dense output with direction and
+  terminal flags, and `ode_batch` for many parameter sets on one grid. The rhs, its
+  Jacobian and the events are defs passed as function values; an exact Jacobian is a def
+  of `grad` rows (lib/ode/problems.viv), or `JAC_FD` takes forward differences.
+  Python calls it as vp.ode.solve and vp.ode.batch.
+when: Instead of a hand-written RK4 loop with a fixed step, or a stiff problem stepped by
+  an explicit method at the step its fastest mode allows.
+example: lib-ode
+doc: lib/ode/solve.viv; lib/ode/radau.viv; lib/ode/bdf.viv; lib/ode/dopri5.viv; lib/ode/ode.docs.toml
+see: grad, function-values, lib-linalg
+keywords: ode ivp stiff radau bdf dormand prince dopri5 runge kutta events dense output robertson van der pol
+usage: use:lib/ode/solve, use:lib/ode/core, use:lib/ode/problems
+module: lib/ode/solve
+
+== lib-graphdraw
+title: Drawing graphs (lib/graphdraw, lib/graphlayout)
+what: lib/graphlayout lays out a directed graph in layers: cycle breaking, longest-path
+  ranks, crossing reduction by weighted medians, placement without overlaps.
+  lib/graphdraw draws a whole program as a graph with it, from the `ProgramGraph`
+  record (lib/proggraph); `viv graph f.viv --svg` runs it in the interpreter and writes
+  the SVG.
+when: To draw a program (`viv graph --svg`) or any layered graph with nodes and edges.
+example: none: it draws a whole program; run viv graph f.viv --svg
+doc: lib/graphlayout.viv
+see: explorer, plot
+keywords: graph drawing layout layered sugiyama crossings svg program graph
+usage: use:lib/graphdraw, use:lib/graphlayout, use:lib/proggraph
+module: lib/graphdraw
+
+== lib-gates
+title: Logic gate schematics (lib/gates)
+what: The outlines of AND, OR, XOR and NOT gates and orthogonal wires between them, as
+  point lists for the figure builtins, for drawing a schematic of a circuit built from
+  the bit builtins.
+when: Drawing a logic circuit next to a simulation of it.
+example: none: it returns point lists for a figure
+doc: lib/gates.viv
+see: plot
+keywords: gates logic schematic and or xor not wire circuit
+usage: use:lib/gates
+module: lib/gates
+
+== lib-stats
+title: Mean and standard deviation written with sum (lib/stats)
+what: `mean(a)` and `std(a)` (population, divides by n) written with `sum`, which adds in
+  NumPy's pairwise order (left to right below 8 entries, so tools/random_replay.py
+  reproduces its six-sample test in Python). A program that uses it replaces the
+  builtins `mean` and `std`, which add in the same order.
+when: Only to keep an existing program's output; new code calls the builtins `mean` and
+  `std`, which agree with NumPy to the bit.
+example: none: the builtins mean and std replace it
+doc: lib/stats.viv
+see: axis-reductions
+keywords: mean std standard deviation statistics
+usage: use:lib/stats
+module: lib/stats
+
+== lib-algo
+title: The algorithms library, in design (lib/algo)
+what: lib/algo is the planned counterpart of C++'s `<algorithm>`: sorting, selection,
+  binary search, set operations, permutations, gcd, then heaps, union-find and graph
+  searches. What exists is the specification (lib/algo/algo.spec: each algorithm's
+  postconditions, stability and complexity bound), the property checks
+  (lib/algo/props.viv), the case generator and the corpus's hand-written versions for
+  testing (lib/algo/legacy); there is no module of algorithms to `#! use` yet.
+when: Before writing a sort or a search: check the builtins (`sort`, `argsort`, `sorted`
+  with `key=`) and the spec, and run a hand-written one through tools/algo/check.py.
+example: none: no module to use yet; the harness is tools/algo/check.py
+doc: lib/algo/algo.spec
+see: algo-harness, sorting
+keywords: algorithms stl sort search binary search heap union find set permutation gcd
+
+== std-contracts
+title: Contracts and their registries (std/contracts)
+what: lang/viv/std/contracts.viv holds `integrate(f, a, b)` and `find_root(f, a, b)`: each
+  runs every method in its registry (three quadratures: Gauss-Legendre, adaptive
+  Simpson, Romberg; three bracketing root finders: bisection, Illinois, a safeguarded
+  secant) and stops the run when two disagree, while `viv run --release` runs one. The
+  methods are ordinary defs, a registry is an array of them (`[r_bisect, r_illinois,
+  r_safe]`), and `sweep(methods, f, a, b)` cross-checks any registry. Bring it in with
+  `#! use lang/viv/std/contracts` or `--use lang/viv/std/contracts.viv`; a phrase that needs one
+  of these defs gets it added.
+when: For an integral or a root whose answer you want checked by methods from different
+  families, and as the pattern for a registry of your own methods.
+example: std-contracts
+doc: lang/viv/std/contracts.viv
+see: contracts, method-registries, release-mode, phrases
+keywords: contracts integrate find_root sweep registry methods quadrature root bisection romberg gauss
+usage: call:integrate, call:find_root, call:sweep
+module: lang/viv/std/contracts
+
+== std-phrases
+title: The defs phrases call (std/phrases)
+what: lang/viv/std/phrases.viv holds the defs a phrase can turn into that are neither
+  builtins nor contracts: `r_newton` (Newton's method with the exact forward-mode
+  derivative), `softmax`, `softmax_rows`, `cross_entropy`. The compiler adds the ones a
+  program's phrases need before any engine sees it; a program with no phrase is not
+  changed.
+when: Nothing to call by hand: write the phrase (`solve x^2 = c starting at 1 using newton`)
+  and the def comes with it.
+example: std-phrases
+doc: lang/viv/std/phrases.viv
+see: phrases, std-contracts
+keywords: phrases newton r_newton softmax cross entropy std
+module: lang/viv/std/phrases

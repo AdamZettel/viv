@@ -1,0 +1,454 @@
+###
+post: Overlap, kinetic and nuclear attraction by the Obara-Saika recurrences
+agent: claude
+
+This module computes the three one-electron matrices an SCF needs, `S`, `T`
+and `V`, over unit-normalized Cartesian Gaussians, by the recurrences of
+Obara and Saika (J. Chem. Phys. 84, 3963, 1986). It is the second of the
+library's one-electron families. It shares no code with the
+McMurchie-Davidson family (`hermite.viv`, `md_*`), so when the two agree to
+1e-12 the agreement says something about both.
+
+**The idea.** A Cartesian Gaussian on center A is `x_A^i y_A^j z_A^k
+exp(-a r_A^2)`, with `x_A = x - A_x`. Raising the power `i` by one is
+multiplying by `x_A`, and the product of two Gaussians on A and B is one
+Gaussian on `P = (aA + bB)/p`, `p = a + b`. So `x_A = (x - P_x) + (P_x - A_x)`,
+and one integration by parts turns the `(x - P_x)` piece into lower powers.
+For the overlap along one axis that gives
+
+    S(i+1, j) = PA S(i, j) + (i S(i-1, j) + j S(i, j-1)) / (2p)
+    S(i, j+1) = PB S(i, j) + (i S(i-1, j) + j S(i, j-1)) / (2p)
+
+starting from `S(0, 0) = sqrt(pi/p) exp(-mu AB^2)` with `mu = ab/p`. The 3-D
+overlap is the product of the three axes.
+
+**Kinetic energy.** `T = -1/2 <a|d^2/dx^2 + d^2/dy^2 + d^2/dz^2|b>`, which is
+`Tx Sy Sz + Sx Ty Sz + Sx Sy Tz`. Along one axis the same argument gives
+
+    T(0, 0)   = mu (1 - 2 mu AB^2) S(0, 0)
+    T(i+1, j) = PA T(i, j) + (i T(i-1, j) + j T(i, j-1)) / (2p)
+                + (b/p) (2a S(i+1, j) - i S(i-1, j))
+    T(i, j+1) = PB T(i, j) + (i T(i-1, j) + j T(i, j-1)) / (2p)
+                + (a/p) (2b S(i, j+1) - j S(i, j-1))
+
+(Helgaker, Jorgensen and Olsen, section 9.3.4).
+
+**Nuclear attraction** does not factor by axis, because `1/r_C` couples
+them. Obara and Saika carry an auxiliary index `m`: the integral
+`Theta(e)^(m)` over the Gaussian product with `e` on A is built from
+
+    Theta(0)^(m)    = (2 pi / p) exp(-mu AB^2) F_m(p PC^2)
+    Theta(e+1_i)^(m) = PA_i Theta(e)^(m) - PC_i Theta(e)^(m+1)
+                       + e_i/(2p) (Theta(e-1_i)^(m) - Theta(e-1_i)^(m+1))
+
+where `F_m` is the Boys function and only `m = 0` is kept at the end. Rather
+than recur on both centers, the recurrence builds every power on A up to
+`la + lb` and the horizontal step
+
+    (a, b+1_i) = (a+1_i, b) + AB_i (a, b)
+
+moves powers from A to B. That step holds for any operator that does not
+depend on the basis centers, and it is applied once per shell pair after the
+primitives and nuclei are summed, since it is linear.
+
+**Components.** Every Cartesian component up to total power `L` gets one
+index: `l(l+1)(l+2)/6` for the components below `l`, then PySCF's order within
+the shell (`lx` counting down, then `ly`). `os_ctab(L)` tabulates the powers
+and the neighbor one step up and down along each axis, so the recurrences
+look up indices instead of computing them.
+
+**Normalization.** `bas_contract` gives `cn[p]`, which carries the radial norm
+of each primitive and the shell's contraction scale; each component then gets
+`bas_nc(lx, ly, lz)` (see `lib/hf/basis.viv`). The result is PySCF's
+`int1e_*_cart` divided by `F F^T`.
+
+The stage members `os_overlap`, `os_kinetic` and `os_nuclear` take
+`(atoms, shells, prims)` and return `[nao_cart, nao_cart]`. The per-pair
+blocks (`os_overlap_block` and the others) take shell indices, for tests that
+look at one pair.
+
+Used with `import hf.os_onebody`.
+###
+
+from hf.basis import (
+    AT_CHG, AT_X, AT_Y, AT_Z, bas_contract, bas_nao_cart, bas_nc, bas_ncart, bas_powers, PR_EXP,
+    SH_ATOM, SH_CART0, SH_L, SH_NPRIM, SH_P0,
+)
+from hf.boys import boys_values
+
+OS_PI = 3.141592653589793
+
+OS_CT_LX = 0
+OS_CT_LY = 1
+OS_CT_LZ = 2
+OS_CT_L = 3
+OS_CT_DN = 4
+OS_CT_UP = 7
+OS_CT_PIV = 10
+OS_CT_LEN = 11
+# rows of lib/hfref/prims' shell table per case: four single-primitive shells
+OS_PS_ROWS = 4
+
+#| Components with total power below `l`.
+def os_ncum(l) {
+    return l * (l + 1) * (l + 2) / 6
+}
+
+#| Index of component (lx, ly, lz) in the table of `os_ctab`.
+def os_cidx(lx, ly, lz) {
+    l = lx + ly + lz
+    a = l - lx
+    return os_ncum(l) + a * (a + 1) / 2 + lz
+}
+
+#| One row per Cartesian component with total power up to `L`: the powers,
+#| `l`, the index one step down along x, y, z (-1 where that power is 0), one
+#| step up (-1 at `l = L`), and the pivot, the first axis with a nonzero power
+#| (-1 for s). The recurrences lower the pivot.
+def os_ctab(L) {
+    T = zeros(os_ncum(L + 1), OS_CT_LEN)
+    for l to L + 1 {
+        for a to l + 1 {
+            lx = l - a
+            for lz to a + 1 {
+                ly = a - lz
+                r = os_cidx(lx, ly, lz)
+                T[r, OS_CT_LX] = lx
+                T[r, OS_CT_LY] = ly
+                T[r, OS_CT_LZ] = lz
+                T[r, OS_CT_L] = l
+                T[r, OS_CT_DN] = -1
+                T[r, OS_CT_DN + 1] = -1
+                T[r, OS_CT_DN + 2] = -1
+                T[r, OS_CT_UP] = -1
+                T[r, OS_CT_UP + 1] = -1
+                T[r, OS_CT_UP + 2] = -1
+                T[r, OS_CT_PIV] = -1
+                if lx > 0 {
+                    T[r, OS_CT_DN] = os_cidx(lx - 1, ly, lz)
+                }
+                if ly > 0 {
+                    T[r, OS_CT_DN + 1] = os_cidx(lx, ly - 1, lz)
+                }
+                if lz > 0 {
+                    T[r, OS_CT_DN + 2] = os_cidx(lx, ly, lz - 1)
+                }
+                if l < L {
+                    T[r, OS_CT_UP] = os_cidx(lx + 1, ly, lz)
+                    T[r, OS_CT_UP + 1] = os_cidx(lx, ly + 1, lz)
+                    T[r, OS_CT_UP + 2] = os_cidx(lx, ly, lz + 1)
+                }
+                if lz > 0 {
+                    T[r, OS_CT_PIV] = 2
+                }
+                if ly > 0 {
+                    T[r, OS_CT_PIV] = 1
+                }
+                if lx > 0 {
+                    T[r, OS_CT_PIV] = 0
+                }
+            }
+        }
+    }
+    return T
+}
+
+#| The 1-D overlap table `S[i, j]`, `i <= la`, `j <= lb`, for exponents `a`
+#| and `b` on centers `A` and `B` along one axis. The table is written into
+#| `S` (at least `[la+1, lb+1]`).
+def os_s1d(a, b, A, B, la, lb, S: Arr) {
+    p = a + b
+    P = (a * A + b * B) / p
+    PA = P - A
+    PB = P - B
+    h = 0.5 / p
+    S[0, 0] = sqrt(OS_PI / p) * exp(-a * b / p * (A - B) * (A - B))
+    for i to la {
+        v = PA * S[i, 0]
+        if i > 0 {
+            v = v + h * i * S[i - 1, 0]
+        }
+        S[i + 1, 0] = v
+    }
+    for j to lb {
+        for i to la + 1 {
+            v = PB * S[i, j]
+            if i > 0 {
+                v = v + h * i * S[i - 1, j]
+            }
+            if j > 0 {
+                v = v + h * j * S[i, j - 1]
+            }
+            S[i, j + 1] = v
+        }
+    }
+    return 0.0
+}
+
+#| The 1-D kinetic table `T[i, j]` from the overlap table `S` of the same
+#| pair (filled by `os_s1d`). Written into `T`.
+def os_t1d(a, b, A, B, la, lb, S: Arr, T: Arr) {
+    p = a + b
+    P = (a * A + b * B) / p
+    PA = P - A
+    PB = P - B
+    h = 0.5 / p
+    mu = a * b / p
+    T[0, 0] = mu * (1.0 - 2.0 * mu * (A - B) * (A - B)) * S[0, 0]
+    for i to la {
+        v = PA * T[i, 0] + b / p * 2.0 * a * S[i + 1, 0]
+        if i > 0 {
+            v = v + h * i * T[i - 1, 0] - b / p * i * S[i - 1, 0]
+        }
+        T[i + 1, 0] = v
+    }
+    for j to lb {
+        for i to la + 1 {
+            v = PB * T[i, j] + a / p * 2.0 * b * S[i, j + 1]
+            if i > 0 {
+                v = v + h * i * T[i - 1, j]
+            }
+            if j > 0 {
+                v = v + h * j * T[i, j - 1] - a / p * j * S[i, j - 1]
+            }
+            T[i, j + 1] = v
+        }
+    }
+    return 0.0
+}
+
+#| Overlap (`kind` 0) or kinetic (`kind` 1) block of shells `sa`, `sb`,
+#| `[ncart(la), ncart(lb)]`, unit-Cartesian.
+def os_st_block(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, sa, sb, kind) {
+    la = shells[sa, SH_L]
+    lb = shells[sb, SH_L]
+    ia = shells[sa, SH_ATOM]
+    ib = shells[sb, SH_ATOM]
+    pa0 = shells[sa, SH_P0]
+    pb0 = shells[sb, SH_P0]
+    Pa = bas_powers(la)
+    Pb = bas_powers(lb)
+    na = len(Pa)
+    nb = len(Pb)
+    out = zeros(na, nb)
+    Sx = zeros(la + 2, lb + 2)
+    Sy = zeros(la + 2, lb + 2)
+    Sz = zeros(la + 2, lb + 2)
+    Tx = zeros(la + 2, lb + 2)
+    Ty = zeros(la + 2, lb + 2)
+    Tz = zeros(la + 2, lb + 2)
+    for u to shells[sa, SH_NPRIM] {
+        a = prims[pa0 + u, PR_EXP]
+        for v to shells[sb, SH_NPRIM] {
+            b = prims[pb0 + v, PR_EXP]
+            cc = cn[pa0 + u] * cn[pb0 + v]
+            os_s1d(a, b, atoms[ia, AT_X], atoms[ib, AT_X], la, lb, Sx)
+            os_s1d(a, b, atoms[ia, AT_Y], atoms[ib, AT_Y], la, lb, Sy)
+            os_s1d(a, b, atoms[ia, AT_Z], atoms[ib, AT_Z], la, lb, Sz)
+            if kind == 1 {
+                os_t1d(a, b, atoms[ia, AT_X], atoms[ib, AT_X], la, lb, Sx, Tx)
+                os_t1d(a, b, atoms[ia, AT_Y], atoms[ib, AT_Y], la, lb, Sy, Ty)
+                os_t1d(a, b, atoms[ia, AT_Z], atoms[ib, AT_Z], la, lb, Sz, Tz)
+            }
+            for r to na {
+                x1 = Pa[r, 0]
+                y1 = Pa[r, 1]
+                z1 = Pa[r, 2]
+                for c to nb {
+                    x2 = Pb[c, 0]
+                    y2 = Pb[c, 1]
+                    z2 = Pb[c, 2]
+                    if kind == 1 {
+                        val = Tx[x1, x2] * Sy[y1, y2] * Sz[z1, z2] + Sx[x1, x2] * Ty[y1, y2] * Sz[z1, z2] + Sx[x1, x2] * Sy[y1, y2] * Tz[z1, z2]
+                    } else {
+                        val = Sx[x1, x2] * Sy[y1, y2] * Sz[z1, z2]
+                    }
+                    out[r, c] = out[r, c] + cc * val
+                }
+            }
+        }
+    }
+    for r to na {
+        for c to nb {
+            out[r, c] = out[r, c] * bas_nc(Pa[r, 0], Pa[r, 1], Pa[r, 2]) * bas_nc(Pb[c, 0], Pb[c, 1], Pb[c, 2])
+        }
+    }
+    return out
+}
+
+#| Overlap block of shells `sa`, `sb`.
+def os_overlap_block(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, sa, sb) {
+    return os_st_block(atoms, shells, prims, cn, sa, sb, 0)
+}
+
+#| Kinetic block of shells `sa`, `sb`.
+def os_kinetic_block(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, sa, sb) {
+    return os_st_block(atoms, shells, prims, cn, sa, sb, 1)
+}
+
+#| Nuclear attraction block of shells `sa`, `sb`: `-sum_C Z_C <a|1/r_C|b>`
+#| over every row of `atoms`. The vertical recurrence builds `Theta(e)^(m)`
+#| for every `e` up to `la + lb` on A; primitives and nuclei are summed into
+#| `acc[e]` for `la <= l_e <= la + lb`, and the horizontal step then moves
+#| `lb` units of power to B.
+def os_nuclear_block(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, sa, sb) {
+    la = shells[sa, SH_L]
+    lb = shells[sb, SH_L]
+    L = la + lb
+    CT = os_ctab(L)
+    ne = os_ncum(L + 1)
+    A = atoms[shells[sa, SH_ATOM], AT_X:AT_Z + 1]
+    B = atoms[shells[sb, SH_ATOM], AT_X:AT_Z + 1]
+    AB2 = sum((A - B) * (A - B))
+    pa0 = shells[sa, SH_P0]
+    pb0 = shells[sb, SH_P0]
+    TH = zeros(ne, L + 1)
+    acc = zeros(ne)
+    for u to shells[sa, SH_NPRIM] {
+        a = prims[pa0 + u, PR_EXP]
+        for v to shells[sb, SH_NPRIM] {
+            b = prims[pb0 + v, PR_EXP]
+            p = a + b
+            h = 0.5 / p
+            P = (a * A + b * B) / p
+            PA = P - A
+            pref = 2.0 * OS_PI / p * exp(-a * b / p * AB2) * cn[pa0 + u] * cn[pb0 + v]
+            for C to len(atoms) {
+                Z = atoms[C, AT_CHG]
+                if Z != 0.0 {
+                    PC = P - atoms[C, AT_X:AT_Z + 1]
+                    TH[0, 0:L + 1] = pref * boys_values(L, p * sum(PC * PC))
+                    for q to ne - 1 {
+                        e = q + 1
+                        i = CT[e, OS_CT_PIV]
+                        e1 = CT[e, OS_CT_DN + i]
+                        e2 = CT[e1, OS_CT_DN + i]
+                        ni = CT[e1, i]
+                        for m to L + 1 - CT[e, OS_CT_L] {
+                            w = PA[i] * TH[e1, m] - PC[i] * TH[e1, m + 1]
+                            if ni > 0 {
+                                w = w + h * ni * (TH[e2, m] - TH[e2, m + 1])
+                            }
+                            TH[e, m] = w
+                        }
+                    }
+                    acc[os_ncum(la):ne] = acc[os_ncum(la):ne] - Z * TH[os_ncum(la):ne, 0]
+                }
+            }
+        }
+    }
+    return os_hrr_pair(acc, CT, la, lb, A - B)
+}
+
+#| The horizontal step on a one-electron pair: from `acc[e]` (every `e` with
+#| `la <= l_e <= la + lb`, on A) to the block `[ncart(la), ncart(lb)]`,
+#| times the component factors. `(a, b+1_i) = (a+1_i, b) + AB_i (a, b)`.
+def os_hrr_pair(acc: Arr, CT: Arr, la, lb, AB: Arr) {
+    L = la + lb
+    ne = os_ncum(L + 1)
+    nbc = os_ncum(lb + 1)
+    # H[e, f]: e on A, f on B (f indexed from 0 over all powers up to lb)
+    H = zeros(ne, nbc)
+    for q to ne - os_ncum(la) {
+        e = os_ncum(la) + q
+        H[e, 0] = acc[e]
+    }
+    for q to nbc - 1 {
+        f = q + 1
+        i = CT[f, OS_CT_PIV]
+        f1 = CT[f, OS_CT_DN + i]
+        lf = CT[f, OS_CT_L]
+        for t to os_ncum(L - lf + 1) - os_ncum(la) {
+            e = os_ncum(la) + t
+            H[e, f] = H[CT[e, OS_CT_UP + i], f1] + AB[i] * H[e, f1]
+        }
+    }
+    na = bas_ncart(la)
+    nb = bas_ncart(lb)
+    out = zeros(na, nb)
+    for r to na {
+        e = os_ncum(la) + r
+        for c to nb {
+            f = os_ncum(lb) + c
+            out[r, c] = H[e, f] * bas_nc(CT[e, 0], CT[e, 1], CT[e, 2]) * bas_nc(CT[f, 0], CT[f, 1], CT[f, 2])
+        }
+    }
+    return out
+}
+
+#| Fill a whole matrix from per-pair blocks: `kind` 0 overlap, 1 kinetic,
+#| 2 nuclear attraction. Only `sa >= sb` is computed; the other triangle is
+#| the transpose.
+def os_matrix(atoms: Arr, shells: Arr, prims: Arr, kind) {
+    cn = bas_contract(shells, prims)
+    n = bas_nao_cart(shells)
+    M = zeros(n, n)
+    for sa to len(shells) {
+        for sb to sa + 1 {
+            if kind == 2 {
+                blk = os_nuclear_block(atoms, shells, prims, cn, sa, sb)
+            } else {
+                blk = os_st_block(atoms, shells, prims, cn, sa, sb, kind)
+            }
+            a0 = shells[sa, SH_CART0]
+            b0 = shells[sb, SH_CART0]
+            for r to len(blk) {
+                for c to bas_ncart(shells[sb, SH_L]) {
+                    M[a0 + r, b0 + c] = blk[r, c]
+                    M[b0 + c, a0 + r] = blk[r, c]
+                }
+            }
+        }
+    }
+    return M
+}
+
+#| Stage member: the overlap matrix, `[nao_cart, nao_cart]`.
+def os_overlap(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return os_matrix(atoms, shells, prims, 0)
+}
+
+#| Stage member: the kinetic energy matrix.
+def os_kinetic(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return os_matrix(atoms, shells, prims, 1)
+}
+
+#| Stage member: the nuclear attraction matrix, over every atom's charge.
+def os_nuclear(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return os_matrix(atoms, shells, prims, 2)
+}
+
+# ---- tests ----------------------------------------------------------------------
+# The reference modules used above exist for these tests. An import cannot sit
+# inside a test block, so a program that uses this module also compiles their
+# literal-returning defs; nothing calls them, and the measured cost of two of
+# them (water_631gs_cart and water_tzvp) is 0.55 s of cc -O2.
+
+test "the component table lists every power once, in PySCF's order within a shell" {
+    # every shell up to l = 6 (i)
+    os_lmax = 6
+    os_ct = os_ctab(os_lmax)
+    assert_near(len(os_ct), os_ncum(os_lmax + 1), 0.0)
+    os_bad = 0
+    for os_l to os_lmax + 1 {
+        os_pw = bas_powers(os_l)
+        for os_c to len(os_pw) {
+            os_r = os_ncum(os_l) + os_c
+            if os_ct[os_r, OS_CT_LX] != os_pw[os_c, 0] or os_ct[os_r, OS_CT_LY] != os_pw[os_c, 1] or os_ct[os_r, OS_CT_LZ] != os_pw[os_c, 2] {
+                os_bad = os_bad + 1
+            }
+            # one step down and back up along the pivot returns to the same row
+            if os_l > 0 {
+                os_i = os_ct[os_r, OS_CT_PIV]
+                os_dn = os_ct[os_r, OS_CT_DN + os_i]
+                if os_ct[os_dn, OS_CT_UP + os_i] != os_r {
+                    os_bad = os_bad + 1
+                }
+            }
+        }
+    }
+    assert_near(os_bad, 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

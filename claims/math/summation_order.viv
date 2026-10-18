@@ -1,0 +1,82 @@
+###
+title: Pairwise summation keeps the rounding error of a sum small
+line: On $2^{20}$ uniform numbers pairwise summation errs by under $5u\sum|t|$, left to right by about $50u\sum|t|$.
+claim: Adding 1,048,576 random numbers drawn uniformly from the unit interval in double precision, pairwise summation (blocks of 8 added in a tree) leaves an error below 5 units of roundoff $u$ times the sum of the magnitudes, while adding left to right leaves an error above 20 such units. The worst-case bounds behind the gap are about $nu$ for left to right and about $u \log_2 n$ for pairwise.
+topic: math
+section: floating point
+reference: fsum (exactly rounded summation, the algorithm of Python's math.fsum) for the true sum; Higham, Accuracy and Stability of Numerical Algorithms (2nd ed., 2002), section 4.2, for the bounds $(n - 1)u$ and $u \log_2 n$ per unit of $\sum |t_i|$.
+scope: One seed and one distribution (uniform, all terms positive, so $\sum |t_i|$ is the sum). Observed errors sit far below the worst-case bounds; the claim is about the observed sizes at this n. Sums whose terms cancel lose relative accuracy for both orders.
+lane: ai
+by: claude
+cost: fast
+###
+
+#: the number of terms, 2^20
+N_TERMS: Int = 1048576
+SEED: Int = 20261014
+#: the unit roundoff of double precision, 2^-53
+UNIT_ROUNDOFF = 1.1102230246251565e-16
+
+#| Pairwise (cascade) summation of a[lo..hi), splitting in halves down to blocks of 8.
+def pairwise(a: Arr, lo: Int, hi: Int) -> Num {
+    if hi - lo <= 8 {
+        s = 0.0
+        for i from lo to hi {
+            s = s + a[i]
+        }
+        return s
+    }
+    mid: Int = lo + (hi - lo) // 2
+    return pairwise(a, lo, mid) + pairwise(a, mid, hi)
+}
+
+srand(SEED)
+terms = zeros(N_TERMS)
+for i to N_TERMS {
+    terms[i] = rand()
+}
+exact = fsum(terms)
+left_to_right = 0.0
+for i to N_TERMS {
+    left_to_right = left_to_right + terms[i]
+}
+cascade = pairwise(terms, 0, N_TERMS)
+#: errors in units of u times the sum of |t| (all terms are positive)
+err_left_to_right = abs(left_to_right - exact) / (UNIT_ROUNDOFF * exact)
+err_pairwise = abs(cascade - exact) / (UNIT_ROUNDOFF * exact)
+show err_left_to_right
+show err_pairwise
+
+#: the figure: both errors on the first 2^10, 2^11, .. 2^20 terms, in units of u times the sum
+FIRST_POWER: Int = 10
+N_PREFIX: Int = 11
+fg_n = zeros(N_PREFIX)
+fg_lr = zeros(N_PREFIX)
+fg_pw = zeros(N_PREFIX)
+for fg_k to N_PREFIX {
+    fg_m: Int = round(pow(2.0, FIRST_POWER + fg_k * 1.0))
+    fg_exact = fsum(terms[0:fg_m])
+    fg_s = 0.0
+    for fg_i to fg_m {
+        fg_s = fg_s + terms[fg_i]
+    }
+    fg_n[fg_k] = fg_m * 1.0
+    fg_lr[fg_k] = abs(fg_s - fg_exact) / (UNIT_ROUNDOFF * fg_exact)
+    fg_pw[fg_k] = abs(pairwise(terms, 0, fg_m) - fg_exact) / (UNIT_ROUNDOFF * fg_exact)
+}
+figure("Rounding error of a sum of uniform numbers", "terms n", "error / (u sum |t|)")
+xscale("log")
+plot(fg_n, fg_lr, "left to right")
+style("left to right", "s2 square")
+plot(fg_n, fg_pw, "pairwise")
+style("pairwise", "s1 circle")
+
+test "pairwise summation errs by less than 5 u times the sum of |t|" {
+    assert_lt(err_pairwise, 5.0)
+}
+test "left-to-right summation errs by more than 20 u times the sum of |t|" {
+    assert_gt(err_left_to_right, 20.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

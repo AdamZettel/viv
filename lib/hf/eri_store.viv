@@ -1,0 +1,294 @@
+###
+post: Storing electron repulsion integrals once per symmetry class
+agent: claude
+
+The two-electron integral over real orbitals, in chemist's notation,
+
+    (ij|kl) = double integral phi_i(1) phi_j(1) (1/r12) phi_k(2) phi_l(2)
+
+is unchanged when `i` and `j` swap (they sit in the same product), when `k`
+and `l` swap, and when the pair `ij` trades places with the pair `kl` (the
+Coulomb operator is symmetric in electrons 1 and 2). Those three swaps
+generate 8 index orders with one value, so a dense `n^4` tensor stores most
+values 8 times.
+
+Packed-8 storage keeps one copy. Number the pairs `i >= j` as
+
+    ij = i(i+1)/2 + j
+
+and the pairs of pairs `ij >= kl` the same way:
+
+    ijkl = ij(ij+1)/2 + kl
+
+With `npair = n(n+1)/2` pairs there are `npair(npair+1)/2` stored values:
+18145 for water 6-31G* in Cartesian d (19 AOs) instead of 130321, and 4186
+for water 6-31G (13 AOs) instead of 28561.
+
+Reference data for bases larger than 19 AOs is too big to ship in full, so
+the generator emits two checksums and a set of seeded samples instead. The
+checksum weights and the sample indices come from the Park-Miller generator
+(`x -> 16807 x mod 2147483647`), which is exact in doubles and just as easy to
+reproduce in Python; the formula is frozen.
+
+Used with `import hf.eri_store`.
+###
+
+ES_MINSTD_A = 16807.0
+ES_MINSTD_M = 2147483647.0
+
+#| Index of the pair (i, j), in either order.
+def es_pair(i, j) {
+    if i >= j {
+        return i * (i + 1) / 2 + j
+    }
+    return j * (j + 1) / 2 + i
+}
+
+#| Pairs of `n` orbitals.
+def es_npair(n) {
+    return n * (n + 1) / 2
+}
+
+#| Packed-8 index of (ij|kl), for any of its eight index orders.
+def es_index8(i, j, k, l) {
+    ij = es_pair(i, j)
+    kl = es_pair(k, l)
+    return es_pair(ij, kl)
+}
+
+#| Length of the packed-8 vector for `n` orbitals.
+def es_len8(n) {
+    np = es_npair(n)
+    return np * (np + 1) / 2
+}
+
+#| (ij|kl) read from the packed vector.
+def es_get(Gp: Arr, i, j, k, l) {
+    return Gp[es_index8(i, j, k, l)]
+}
+
+#| Pack a dense, 8-fold-symmetric `[n, n, n, n]` tensor. Only entries with
+#| i >= j, k >= l and ij >= kl are read.
+def es_pack8(G: Arr, n) {
+    Gp = zeros(es_len8(n))
+    for i to n {
+        for j to i + 1 {
+            ij = i * (i + 1) / 2 + j
+            for k to i + 1 {
+                for l to k + 1 {
+                    kl = k * (k + 1) / 2 + l
+                    if kl <= ij {
+                        Gp[ij * (ij + 1) / 2 + kl] = G[i, j, k, l]
+                    }
+                }
+            }
+        }
+    }
+    return Gp
+}
+
+#| The dense `[n, n, n, n]` view of a packed vector. Meant for small `n`:
+#| the view holds $n^4$ doubles.
+def es_unpack8(Gp: Arr, n) {
+    G = zeros(n, n, n, n)
+    for i to n {
+        for j to n {
+            ij = es_pair(i, j)
+            for k to n {
+                for l to n {
+                    G[i, j, k, l] = Gp[es_pair(ij, es_pair(k, l))]
+                }
+            }
+        }
+    }
+    return G
+}
+
+#| One Park-Miller step on the state in `st[0]`; returns the new weight in
+#| $(0, 1)$. The state must start in `1 .. ES_MINSTD_M - 1`.
+def es_rng(st: Arr) {
+    st[0] = mod(ES_MINSTD_A * st[0], ES_MINSTD_M)
+    return st[0] / ES_MINSTD_M
+}
+
+#| `[sum Gp^2, sum w_k Gp_k]`, summed in index order, with w_k the k-th
+#| Park-Miller weight from `seed`. The seeded sum catches errors that a sum
+#| of squares misses, such as two values swapped.
+def es_checksums(Gp: Arr, seed) {
+    st = zeros(1)
+    st[0] = seed
+    w = zeros(len(Gp))
+    for k to len(Gp) {
+        w[k] = es_rng(st)
+    }
+    return [sum(Gp * Gp), sum(w * Gp)]
+}
+
+#| `m` packed indices drawn with the same generator: floor(w_k * len).
+#| Indices can repeat.
+def es_sample_index(len8, seed, m) {
+    st = zeros(1)
+    st[0] = seed
+    idx = zeros(m)
+    for k to m {
+        idx[k] = floor(es_rng(st) * len8)
+    }
+    return idx
+}
+
+#| The largest abs(Gp[idx[k]] - vals[k]) over the samples.
+def es_sample_gap(Gp: Arr, idx: Arr, vals: Arr) {
+    return max(abs(take(Gp, idx) - vals))
+}
+
+#| Test helper: a dense tensor that is 8-fold symmetric bit for bit. Addition
+#| and multiplication of two doubles commute exactly, so building every entry
+#| from commutative pieces of (i, j) and of (k, l) makes all eight orders equal
+#| without relying on the packing code under test.
+def es_sym_tensor(n, seed) {
+    st = zeros(1)
+    st[0] = seed
+    x = zeros(n)
+    y = zeros(n)
+    for i to n {
+        x[i] = es_rng(st) - 0.5
+        y[i] = es_rng(st) - 0.5
+    }
+    #: a symmetric p(i, j) gives G all eight index symmetries
+    G = zeros(n, n, n, n)
+    for i to n {
+        for j to n {
+            p = (x[i] + x[j]) + y[i] * y[j]
+            for k to n {
+                for l to n {
+                    q = (x[k] + x[l]) + y[k] * y[l]
+                    G[i, j, k, l] = p * q + (sin(p) + sin(q))
+                }
+            }
+        }
+    }
+    return G
+}
+
+#| Test helper: the largest disagreement among the eight orders of any entry.
+def es_sym_defect(G: Arr, n) {
+    worst = 0.0
+    for i to n {
+        for j to n {
+            for k to n {
+                for l to n {
+                    v = G[i, j, k, l]
+                    worst = max(worst, abs(v - G[j, i, k, l]))
+                    worst = max(worst, abs(v - G[i, j, l, k]))
+                    worst = max(worst, abs(v - G[j, i, l, k]))
+                    worst = max(worst, abs(v - G[k, l, i, j]))
+                    worst = max(worst, abs(v - G[l, k, i, j]))
+                    worst = max(worst, abs(v - G[k, l, j, i]))
+                    worst = max(worst, abs(v - G[l, k, j, i]))
+                }
+            }
+        }
+    }
+    return worst
+}
+
+test "the packed lengths for 19 and 13 orbitals are 18145 and 4186" {
+    assert_near(es_len8(19), 18145, 0.0)
+    assert_near(es_len8(13), 4186, 0.0)
+    assert_near(es_len8(1), 1, 0.0)
+    assert_near(es_len8(7), 406, 0.0)
+}
+
+test "the 8 index orders share one slot, and the slots cover 0 .. len-1 once" {
+    es_n = 5
+    es_hits = zeros(es_len8(es_n))
+    for es_i to es_n {
+        for es_j to es_i + 1 {
+            for es_k to es_i + 1 {
+                for es_l to es_k + 1 {
+                    if es_pair(es_k, es_l) <= es_pair(es_i, es_j) {
+                        es_q = es_index8(es_i, es_j, es_k, es_l)
+                        es_hits[es_q] = es_hits[es_q] + 1
+                        assert_near(es_index8(es_j, es_i, es_k, es_l), es_q, 0.0)
+                        assert_near(es_index8(es_l, es_k, es_j, es_i), es_q, 0.0)
+                        assert_near(es_index8(es_k, es_l, es_i, es_j), es_q, 0.0)
+                    }
+                }
+            }
+        }
+    }
+    assert_near(min(es_hits), 1.0, 0.0)
+    assert_near(max(es_hits), 1.0, 0.0)
+    # the last slot is (44|44)
+    assert_near(es_index8(4, 4, 4, 4), es_len8(es_n) - 1, 0.0)
+}
+
+test "pack and unpack round-trip exactly on a random 8-fold-symmetric tensor, n = 7" {
+    es_n = 7
+    es_g = es_sym_tensor(es_n, 4242)
+    # the tensor really is symmetric, bit for bit
+    assert_near(es_sym_defect(es_g, es_n), 0.0, 0.0)
+    es_gp = es_pack8(es_g, es_n)
+    assert_near(len(es_gp), 406, 0.0)
+    es_back = es_unpack8(es_gp, es_n)
+    assert_near(max(abs(es_back - es_g)), 0.0, 0.0)
+    es_worst = 0.0
+    for es_i to es_n {
+        for es_j to es_n {
+            for es_k to es_n {
+                for es_l to es_n {
+                    es_worst = max(es_worst, abs(es_get(es_gp, es_i, es_j, es_k, es_l) - es_g[es_i, es_j, es_k, es_l]))
+                }
+            }
+        }
+    }
+    assert_near(es_worst, 0.0, 0.0)
+    # and the other way round: packing the unpacked view gives the same vector
+    assert_near(max(abs(es_pack8(es_back, es_n) - es_gp)), 0.0, 0.0)
+}
+
+test "checksums and sample indices match the Python reproduction of the generator" {
+    # Python: x = seed; x = 16807*x % 2147483647; w = x/2147483647, summed in order
+    es_c = es_checksums([1.0, 2.0, 3.0, 4.0], 7)
+    assert_near(es_c[0], 30.0, 0.0)
+    assert_near(es_c[1], 3.551499278541421, 1.0e-15)
+    # Python: [int(w*406) for the first five weights from seed 12345]
+    es_want = [39, 338, 384, 14, 4]
+    es_tlen = 406
+    es_ix = es_sample_index(es_tlen, 12345, len(es_want))
+    for es_k to len(es_want) {
+        assert_near(es_ix[es_k], es_want[es_k], 0.0)
+    }
+}
+
+test "the seeded checksum sees a swap that the sum of squares cannot" {
+    es_n = 7
+    es_gp = es_pack8(es_sym_tensor(es_n, 99), es_n)
+    es_c = es_checksums(es_gp, 2026)
+    es_sw = copy(es_gp)
+    es_t = es_sw[10]
+    es_sw[10] = es_sw[300]
+    es_sw[300] = es_t
+    es_c2 = es_checksums(es_sw, 2026)
+    assert_lt(abs(es_c2[0] - es_c[0]), 1.0e-12 * es_c[0])
+    assert_gt(abs(es_c2[1] - es_c[1]), 1.0e-6)
+}
+
+test "sample gaps are zero on the source and see a planted error" {
+    es_n = 7
+    es_gp = es_pack8(es_sym_tensor(es_n, 5), es_n)
+
+    es_m = 32
+    es_ix = es_sample_index(len(es_gp), 31337, es_m)
+    es_vals = take(es_gp, es_ix)
+    assert_near(es_sample_gap(es_gp, es_ix, es_vals), 0.0, 0.0)
+    es_vals[17] = es_vals[17] + 2.5e-11
+    # the gap is the planted error as rounded into es_vals[17]
+    assert_near(es_sample_gap(es_gp, es_ix, es_vals), es_vals[17] - es_gp[es_ix[17]], 0.0)
+    assert_near(es_sample_gap(es_gp, es_ix, es_vals), 2.5e-11, 1.0e-17)
+    # every drawn index is inside the vector
+    assert_lt(max(es_ix), len(es_gp))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

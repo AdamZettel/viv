@@ -1,0 +1,46 @@
+###
+Sequence helpers the algorithm ports share. Each one is a line or two of Python
+or Julia (`sorted(key=...)`) that Viv does not have as a builtin; they are
+listed in NOTES.md as friction. Slices (`a[lo:hi]`), `copy` and `concat` were
+here until Viv had them (gap R3).
+
+Used with `import seq`.
+###
+
+#| The indices that sort `keys` ascending, ties kept in input order
+#| (Python `sorted(range(n), key=keys.__getitem__)`): a bottom-up merge sort.
+def argsort(keys: Arr) -> Arr {
+    n = len(keys)
+    idx = zeros(n)
+    tmp = zeros(n)
+    for i to n {
+        idx[i] = i
+    }
+    width = 1.0
+    while width < n {
+        lo = 0.0
+        while lo < n {
+            mid = min(lo + width, n)
+            hi = min(lo + 2.0 * width, n)
+            i = lo
+            j = mid
+            for k to hi - lo {
+                if i < mid and (j >= hi or keys[idx[i]] <= keys[idx[j]]) {
+                    tmp[lo + k] = idx[i]
+                    i = i + 1.0
+                }
+                else {
+                    tmp[lo + k] = idx[j]
+                    j = j + 1.0
+                }
+            }
+            lo = hi
+        }
+        idx[:] = tmp
+        width = 2.0 * width
+    }
+    return idx
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

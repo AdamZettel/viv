@@ -1,0 +1,29 @@
+# Microbenchmarks: matrix_multiply. Reference: upstream/Microbenchmarks/julia/perf.jl
+#   @timeit rand(1000, 1000) * rand(1000, 1000) "matrix_multiply"
+# (The Python version asserts C[0,0] >= 0; that is the check here.)
+# Julia and NumPy call OpenBLAS dgemm; Viv's @ is its own i-p-j loop in the
+# C runtime (lang/viv/src/lower.rs, viv_matmul), with no BLAS.
+
+def randmat(n, m) {
+    A = zeros(n, m)
+    for i to n {
+        for j to m {
+            A[i, j] = rand()
+        }
+    }
+    return A
+}
+
+reps = int(strip(read_text("reps.txt")))
+acc = 0.0
+for r to reps {
+    C = randmat(1000, 1000) @ randmat(1000, 1000)
+    if C[0, 0] < 0 {
+        stop("C[0,0] < 0")
+    }
+    acc = acc + C[0, 0]
+}
+print("rand_mat_mul ok")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

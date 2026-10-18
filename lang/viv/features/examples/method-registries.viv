@@ -1,0 +1,34 @@
+from lang.viv.std.contracts import q_gauss, q_romberg, sweep, sweep_spread
+# A registry is an array of function values; `sweep` runs every method in it
+# and stops the run if they disagree.
+def q_midpoint(f, a, b) {
+    n = 2000.0
+    h = (b - a) / n
+    s = 0.0
+    for k to n {
+        s = s + f(a + (k + 0.5) * h)
+    }
+    return s * h
+}
+
+def loose_methods() {
+    return [q_gauss, q_romberg, q_midpoint]
+}
+
+methods = [q_gauss, q_romberg]
+area = sweep(methods, fn(x) -> exp(x), 0.0, 1.0)
+out = zeros(3)
+worst = sweep_spread(loose_methods(), fn(x) -> exp(x), 0.0, 1.0, out)
+show area, worst
+A = [[2.0, 1.0], [1.0, 2.0]]
+vals = zeros(2)
+spectrum_sym(A, vals)
+show vals
+test "the registry agrees on the integral of exp from 0 to 1" {
+    assert_near(area, exp(1.0) - 1.0, 1.0e-12)
+    assert_lt(worst, 1.0e-6)
+    assert_allclose(vals, [1.0, 3.0], 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

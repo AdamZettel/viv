@@ -1,0 +1,389 @@
+###
+The speedrun port's hand-written backward pass, kept verbatim from `gpt.viv`
+so that `gpt_ad.viv` can check its generated gradient against it: the
+adjoint helpers (`norm_rows_bwd`, `gelu_grad`, `scatter_rows`, `dot_all`,
+`qk_norm_rope_bwd`) and `sequence`, the forward and backward passes of one
+sequence, renamed `hand_sequence`.
+
+Used with `import hand.backward`, from `gpt_ad.viv`.
+###
+
+#| Its adjoint, from lib/nn.
+def norm_rows_bwd(X: Arr, r: Arr, dY: Arr) {
+    return rmsnorm_bwd(X, r, dY)
+}
+
+def gelu_grad(x) {
+    return 0.5 * (1.0 + erf(x / sqrt(2.0))) + x * exp(-0.5 * x * x) / sqrt(2.0 * 3.141592653589793)
+}
+
+#| The adjoint of `gather_rows`: row t of `dX` added into row `idx[t]` of tensor `k`.
+def scatter_rows(grad: Arr, k, idx: Arr, dX: Arr) {
+    for t to len(idx) {
+        param_add_row(grad, model, k, idx[t], dX, t)
+    }
+}
+
+#| The sum of the entrywise product, which is the gradient of a scalar that multiplies a matrix.
+def dot_all(A: Arr, B: Arr) {
+    return sum(A * B)
+}
+
+#| Its adjoint: the gradient with respect to the raw `R`, given the gradient `dY`.
+def qk_norm_rope_bwd(R: Arr, offset, N: Arr, r: Arr, dY: Arr) {
+    dN = zeros(T, 2 * H * QK)
+    for t to T {
+        for h to 2 * H {
+            c = h * QK
+            for d to QK {
+                e = d + 1 - 2 * mod(d, 2)
+                shifted = offset > 0.0 and t > 0 and h >= H and d >= ROT
+                if not shifted {
+                    dN[t, c + d] += F1[t, d] * dY[t, c + d]
+                    dN[t, c + e] += F2[t, d] * dY[t, c + d]
+                }
+                if shifted {
+                    dN[t - 1, c + d] += dY[t, c + d]
+                }
+            }
+        }
+    }
+    dR = zeros(T, 2 * H * QK)
+    for t to T {
+        for h to 2 * H {
+            c = h * QK
+            dot = 0.0
+            for d to QK {
+                dot = dot + dN[t, c + d] * R[t, c + d]
+            }
+            r3 = r[t, h] * r[t, h] * r[t, h]
+            for d to QK {
+                dR[t, c + d] = dN[t, c + d] / r[t, h] - R[t, c + d] * dot / (QK * r3)
+            }
+        }
+    }
+    return dR
+}
+
+#| The summed cross-entropy of one sequence `idx` against `tgt`. With `want_grad`,
+#| its gradient is added into `grad`.
+def hand_sequence(theta: Arr, grad: Arr, idx: Arr, tgt: Arr, want_grad: Bool) {
+    # -- embedding and smear gate --
+    X = gather_rows(param_get(theta, model, EMB), idx)
+    smear_w = param_get(theta, model, SMEAR)
+    lam = scalar(theta, SMEAR_LAMBDA)
+    smear_sig = zeros(T)
+    XS = 1.0 * X
+    for t to T - 1 {
+        a = 0.0
+        for c to 12 {
+            a = a + X[t + 1, c] * smear_w[0, c]
+        }
+        smear_sig[t + 1] = sigmoid(a)
+        for d to D {
+            XS[t + 1, d] = X[t + 1, d] + lam * smear_sig[t + 1] * X[t, d]
+        }
+    }
+    r0 = zeros(T)
+    X0 = norm_rows(XS, r0)
+
+    # -- the x0 gates: (gelu(x0 W1^T) W2^T + b2) * scale, one column per layer --
+    W1 = param_get(theta, model, GW1)
+    W2 = param_get(theta, model, GW2)
+    b2 = param_get(theta, model, GB2)
+    gscale = theta[param_offset(model, GSCALE)]
+    HPRE = X0 @ transpose(W1)
+    HG = gelu(HPRE)
+    GRAW = HG @ transpose(W2)
+    for t to T {
+        for l to L {
+            GRAW[t, l] += b2[0, l]
+        }
+    }
+    GATE = gscale * GRAW
+    VEROWS = gather_rows(param_get(theta, model, VE), idx)
+    VEGW = param_get(theta, model, VEG)
+
+    # -- what the backward pass needs from each layer --
+    XIN = zeros(L, T, D)
+    XN = zeros(L, T, D)
+    RN = zeros(L, T)
+    QKR = zeros(L, T, 2 * H * QK)
+    QKN = zeros(L, T, 2 * H * QK)
+    QKRR = zeros(L, T, 2 * H)
+    QKY = zeros(L, T, 2 * H * QK)
+    VV = zeros(L, T, D)
+    GIN = zeros(T, 12)
+    VEGS = zeros(T, H)
+    PATT = zeros(L, H, T, T)
+    YATT = zeros(L, T, D)
+    AOUT = zeros(L, T, D)
+    XMID = zeros(L, T, D)
+    XN2 = zeros(L, T, D)
+    RN2 = zeros(L, T)
+    PRE = zeros(L, T, M)
+    MOUT = zeros(L, T, D)
+
+    x = 1.0 * X0
+    for l to L {
+        sa0 = scalar(theta, 2 * l)
+        sa1 = scalar(theta, 2 * l + 1)
+        setslab(XIN, l, x)
+        r = zeros(T)
+        xn = norm_rows(x, r)
+        setslab(XN, l, xn)
+        setslab(RN, l, r)
+        raw = xn @ transpose(sa0 * param_get(theta, model, WQK[l]))
+        nq = zeros(T, 2 * H * QK)
+        rq = zeros(T, 2 * H)
+        y = qk_norm_rope(raw, KEY_OFFSET[l], nq, rq)
+        setslab(QKR, l, raw)
+        setslab(QKN, l, nq)
+        setslab(QKRR, l, rq)
+        setslab(QKY, l, y)
+        v = xn @ transpose(sa0 * param_get(theta, model, WV[l]))
+        if HAS_VE[l] > 0.0 {
+            # gate pattern 2 sigmoid(W [x[:6], ve[:6]]), one number per head
+            for t to T {
+                for c to 6 {
+                    GIN[t, c] = xn[t, c]
+                    GIN[t, 6 + c] = VEROWS[t, c]
+                }
+            }
+            VEGS = 2.0 * sigmoids(GIN @ transpose(VEGW))
+            for t to T {
+                for h to H {
+                    for d to HD {
+                        v[t, h * HD + d] += VEGS[t, h] * VEROWS[t, h * HD + d]
+                    }
+                }
+            }
+        }
+        setslab(VV, l, v)
+        # causal attention in a sliding window, one head at a time
+        ya = zeros(T, D)
+        for h to H {
+            S = zeros(T, T)
+            for i to T {
+                for j to T {
+                    S[i, j] = MASKED
+                    if j <= i and j >= i - WINDOW[l] {
+                        total = 0.0
+                        for d to QK {
+                            total = total + y[i, h * QK + d] * y[j, (H + h) * QK + d]
+                        }
+                        S[i, j] = ATTN_SCALE * total
+                    }
+                }
+            }
+            Pr = softmax_rows(S)
+            for i to T {
+                for j to T {
+                    PATT[l, h, i, j] = Pr[i, j]
+                    for d to HD {
+                        ya[i, h * HD + d] += Pr[i, j] * v[j, h * HD + d]
+                    }
+                }
+            }
+        }
+        setslab(YATT, l, ya)
+        out = ya @ (sa1 * param_get(theta, model, WO[l]))
+        setslab(AOUT, l, out)
+        ra = theta[param_offset(model, RESID) + 2 * l]
+        pa = theta[param_offset(model, POST) + 2 * l]
+        xm = ra * x + pa * out
+        for t to T {
+            for d to D {
+                xm[t, d] += X0[t, d] * GATE[t, l]
+            }
+        }
+        setslab(XMID, l, xm)
+        r2 = zeros(T)
+        xn2 = norm_rows(xm, r2)
+        setslab(XN2, l, xn2)
+        setslab(RN2, l, r2)
+        pre = xn2 @ transpose(param_get(theta, model, WFC[l]))
+        setslab(PRE, l, pre)
+        mo = relu2(pre) @ param_get(theta, model, WPROJ[l])
+        setslab(MOUT, l, mo)
+        rm = theta[param_offset(model, RESID) + 2 * l + 1]
+        pm = theta[param_offset(model, POST) + 2 * l + 1]
+        x = rm * xm + pm * mo
+    }
+
+    # -- head, softcap, cross-entropy --
+    rf = zeros(T)
+    XF = norm_rows(x, rf)
+    LMW = param_get(theta, model, LM)
+    U = (XF @ LMW + 5.0) / 7.5
+    SIG = sigmoids(U)
+    LOGITS = 23.0 * SIG
+    loss = T * cross_entropy(LOGITS, tgt)
+    if not want_grad {
+        return loss
+    }
+
+    # ================= backward =================
+    dlogits = cross_entropy_bwd(LOGITS, tgt)
+    # cross_entropy_bwd is for the mean; the loss here is the sum
+    dZ = (T * 23.0 / 7.5) * dlogits * SIG * (1.0 - SIG)
+    param_add(grad, model, LM, transpose(XF) @ dZ)
+    dx = norm_rows_bwd(x, rf, dZ @ transpose(LMW))
+
+    dX0 = zeros(T, D)
+    dGATE = zeros(T, L)
+    dSCAL = zeros(1, 2 * L + 1)
+    dRESID = zeros(L, 2)
+    dPOST = zeros(L, 2)
+    dVEROWS = zeros(T, D)
+    for k to L {
+        l = L - 1 - k
+        sa0 = scalar(theta, 2 * l)
+        sa1 = scalar(theta, 2 * l + 1)
+        xm = slab(XMID, l)
+        # x = rm * xm + pm * mo
+        dRESID[l, 1] = dot_all(dx, xm)
+        dPOST[l, 1] = dot_all(dx, slab(MOUT, l))
+        dmo = theta[param_offset(model, POST) + 2 * l + 1] * dx
+        dxm = theta[param_offset(model, RESID) + 2 * l + 1] * dx
+        # mo = relu2(pre) @ Wproj ; pre = xn2 @ Wfc^T
+        pre = slab(PRE, l)
+        Wproj = param_get(theta, model, WPROJ[l])
+        param_add(grad, model, WPROJ[l], transpose(relu2(pre)) @ dmo)
+        dpre = relu2_bwd(pre, dmo @ transpose(Wproj))
+        param_add(grad, model, WFC[l], transpose(dpre) @ slab(XN2, l))
+        dxn2 = dpre @ param_get(theta, model, WFC[l])
+        dxm = dxm + norm_rows_bwd(xm, slab(RN2, l), dxn2)
+        # xm = ra * x + pa * out + x0 * gate[:, l]
+        xin = slab(XIN, l)
+        out = slab(AOUT, l)
+        dRESID[l, 0] = dot_all(dxm, xin)
+        dPOST[l, 0] = dot_all(dxm, out)
+        dout = theta[param_offset(model, POST) + 2 * l] * dxm
+        dx = theta[param_offset(model, RESID) + 2 * l] * dxm
+        for t to T {
+            for d to D {
+                dX0[t, d] += dxm[t, d] * GATE[t, l]
+                dGATE[t, l] += dxm[t, d] * X0[t, d]
+            }
+        }
+        # out = ya @ (sa1 Wo)
+        Wo = param_get(theta, model, WO[l])
+        ya = slab(YATT, l)
+        dWo_eff = transpose(ya) @ dout
+        param_add(grad, model, WO[l], sa1 * dWo_eff)
+        dSCAL[0, 2 * l + 1] = dot_all(dWo_eff, Wo)
+        dya = dout @ transpose(sa1 * Wo)
+        # attention, head by head
+        y = slab(QKY, l)
+        v = slab(VV, l)
+        dy = zeros(T, 2 * H * QK)
+        dv = zeros(T, D)
+        for h to H {
+            Pr = zeros(T, T)
+            dP = zeros(T, T)
+            for i to T {
+                for j to T {
+                    Pr[i, j] = PATT[l, h, i, j]
+                    total = 0.0
+                    for d to HD {
+                        total = total + dya[i, h * HD + d] * v[j, h * HD + d]
+                        dv[j, h * HD + d] += Pr[i, j] * dya[i, h * HD + d]
+                    }
+                    dP[i, j] = total
+                }
+            }
+            dS = softmax_bwd(Pr, dP)
+            for i to T {
+                for j to T {
+                    g = ATTN_SCALE * dS[i, j]
+                    for d to QK {
+                        dy[i, h * QK + d] += g * y[j, (H + h) * QK + d]
+                        dy[j, (H + h) * QK + d] += g * y[i, h * QK + d]
+                    }
+                }
+            }
+        }
+        xn = slab(XN, l)
+        dxn = zeros(T, D)
+        if HAS_VE[l] > 0.0 {
+            # v += vegs * ve ; vegs = 2 sigmoid(gin W^T)
+            dglogit = zeros(T, H)
+            for t to T {
+                for h to H {
+                    total = 0.0
+                    for d to HD {
+                        total = total + dv[t, h * HD + d] * VEROWS[t, h * HD + d]
+                        dVEROWS[t, h * HD + d] += VEGS[t, h] * dv[t, h * HD + d]
+                    }
+                    s = VEGS[t, h] / 2.0
+                    dglogit[t, h] = total * 2.0 * s * (1.0 - s)
+                }
+            }
+            param_add(grad, model, VEG, transpose(dglogit) @ GIN)
+            dgin = dglogit @ VEGW
+            for t to T {
+                for c to 6 {
+                    dxn[t, c] += dgin[t, c]
+                    dVEROWS[t, c] += dgin[t, 6 + c]
+                }
+            }
+        }
+        draw = qk_norm_rope_bwd(slab(QKR, l), KEY_OFFSET[l], slab(QKN, l), slab(QKRR, l), dy)
+        Wqk = param_get(theta, model, WQK[l])
+        Wv = param_get(theta, model, WV[l])
+        dWqk_eff = transpose(draw) @ xn
+        dWv_eff = transpose(dv) @ xn
+        param_add(grad, model, WQK[l], sa0 * dWqk_eff)
+        param_add(grad, model, WV[l], sa0 * dWv_eff)
+        dSCAL[0, 2 * l] = dot_all(dWqk_eff, Wqk) + dot_all(dWv_eff, Wv)
+        dxn = dxn + draw @ (sa0 * Wqk) + dv @ (sa0 * Wv)
+        dx = dx + norm_rows_bwd(xin, slab(RN, l), dxn)
+    }
+    dX0 = dX0 + dx
+
+    # -- the x0 gates --
+    dGRAW = gscale * dGATE
+    # GRAW already includes b2, so it is d(gate)/d(scale)
+    grad[param_offset(model, GSCALE)] += dot_all(dGATE, GRAW)
+    param_add(grad, model, GW2, transpose(dGRAW) @ HG)
+    dB2 = zeros(1, L)
+    for t to T {
+        for l to L {
+            dB2[0, l] += dGRAW[t, l]
+        }
+    }
+    param_add(grad, model, GB2, dB2)
+    dHPRE = (dGRAW @ W2) * gelu_grad(HPRE)
+    param_add(grad, model, GW1, transpose(dHPRE) @ X0)
+    dX0 = dX0 + dHPRE @ W1
+
+    # -- norm, smear gate, embedding --
+    dXS = norm_rows_bwd(XS, r0, dX0)
+    dX = 1.0 * dXS
+    dsmear = zeros(1, 12)
+    for t to T - 1 {
+        g = lam * smear_sig[t + 1]
+        dg = 0.0
+        for d to D {
+            dX[t, d] += g * dXS[t + 1, d]
+            dg = dg + dXS[t + 1, d] * X[t, d]
+        }
+        dSCAL[0, SMEAR_LAMBDA] += dg * smear_sig[t + 1]
+        da = dg * lam * smear_sig[t + 1] * (1.0 - smear_sig[t + 1])
+        for c to 12 {
+            dsmear[0, c] += da * X[t + 1, c]
+            dX[t + 1, c] += da * smear_w[0, c]
+        }
+    }
+    param_add(grad, model, SMEAR, dsmear)
+    param_add(grad, model, SCAL, dSCAL)
+    param_add(grad, model, RESID, dRESID)
+    param_add(grad, model, POST, dPOST)
+    scatter_rows(grad, EMB, idx, dX)
+    scatter_rows(grad, VE, idx, dVEROWS)
+    return loss
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

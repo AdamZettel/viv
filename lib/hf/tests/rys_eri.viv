@@ -1,0 +1,148 @@
+# The tests of lib/hf/rys_eri that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/rys_eri does not load the references.
+from hf.rys_eri import (
+    rys_applicable, rys_eri, RYS_J_ROWS, RYS_NCENTER, RYS_NROOT_MAX, rys_shell_quartet,
+    RYS_T_BLK_MAX, rys_work_new,
+)
+from hf.basis import (
+    AT_LEN, AT_X, AT_Z, bas_contract, bas_ncart, BAS_NDIM, bas_nsph, PR_COEF, PR_EXP, PR_LEN,
+    SH_ATOM, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+)
+from hfref.prims import prims_eri, PRIMS_NCASE, PRIMS_NPICK, prims_picks, prims_shells
+from hfref.water_631g import water631g_atoms, water631g_eri8_cart, water631g_prims, water631g_shells
+
+#| Test helper: the largest absolute gap between Rys and PySCF over the eight
+#| picks of prims case `k`, or -1 when Rys is not validated for its class.
+def rys_t_prims_gap(k, S: Arr, picks: Arr, ref: Arr) {
+    blk = zeros(RYS_T_BLK_MAX)
+    dims = zeros(RYS_NCENTER)
+    ltot = rys_t_prims_block(k, S, blk, dims)
+    if rys_applicable(ltot) == 0 {
+        return -1.0
+    }
+    w = 0.0
+    for q to PRIMS_NPICK {
+        pk = k * PRIMS_NPICK + q
+        v = blk[((picks[pk, 0] * dims[1] + picks[pk, 1]) * dims[2] + picks[pk, 2]) * dims[3] + picks[pk, 3]]
+        w = max(w, abs(v - ref[pk]))
+    }
+    return w
+}
+
+#| Test helper: the largest absolute gap between Rys and PySCF over all 4186
+#| packed water 6-31G ERIs.
+def rys_t_water_gap() {
+    G = rys_eri(water631g_atoms(), water631g_shells(), water631g_prims())
+    ref = water631g_eri8_cart()
+    assert_near(len(G), len(ref), 0.0)
+    return max(abs(G - ref))
+}
+
+#| Test helper: builds prims case `k` with its shells listed in the order
+#| `ord` and returns the largest gap between that block, read back through
+#| the permutation, and the block in the natural order. Swapping inside a
+#| pair or swapping the pairs leaves (ab|cd) alone, but runs the recurrences
+#| from the other center.
+def rys_t_perm_gap(k, S: Arr, ord: Arr) {
+    blk = zeros(RYS_T_BLK_MAX)
+    dims = zeros(RYS_NCENTER)
+    rys_t_prims_block(k, S, blk, dims)
+    S2 = copy(S)
+    for r to len(ord) {
+        S2[RYS_NCENTER * k + r, :] = S[RYS_NCENTER * k + round(ord[r]), :]
+    }
+    blk2 = zeros(RYS_T_BLK_MAX)
+    dims2 = zeros(RYS_NCENTER)
+    rys_t_prims_block(k, S2, blk2, dims2)
+    w = 0.0
+    ix = zeros(RYS_NCENTER)
+    for a to dims[0] {
+        for b to dims[1] {
+            for c to dims[2] {
+                for d to dims[3] {
+                    ix[0] = a
+                    ix[1] = b
+                    ix[2] = c
+                    ix[3] = d
+                    j = ((ix[round(ord[0])] * dims2[1] + ix[round(ord[1])]) * dims2[2] + ix[round(ord[2])]) * dims2[3] + ix[round(ord[3])]
+                    w = max(w, abs(blk[((a * dims[1] + b) * dims[2] + c) * dims[3] + d] - blk2[j]))
+                }
+            }
+        }
+    }
+    return w
+}
+
+#| Test helper: the packs of prims.viv case `k` (four single-primitive
+#| shells, raw coefficient 1), then its Rys block into `blk`. Returns the
+#| case's total angular momentum.
+def rys_t_prims_block(k, S: Arr, blk: Arr, dims: Arr) {
+    atoms = zeros(RYS_NCENTER, AT_LEN)
+    shells = zeros(RYS_NCENTER, SH_LEN)
+    prims = zeros(RYS_NCENTER, PR_LEN)
+    for r to RYS_NCENTER {
+        row = RYS_NCENTER * k + r
+        atoms[r, AT_X:AT_Z + 1] = S[row, 2:2 + BAS_NDIM]
+        shells[r, SH_ATOM] = r
+        shells[r, SH_L] = S[row, 0]
+        shells[r, SH_NPRIM] = 1
+        shells[r, SH_P0] = r
+        shells[r, SH_NCART] = bas_ncart(S[row, 0])
+        shells[r, SH_NSPH] = bas_nsph(S[row, 0])
+        prims[r, PR_EXP] = S[row, 1]
+        prims[r, PR_COEF] = 1.0
+        dims[r] = bas_ncart(S[row, 0])
+    }
+    cn = bas_contract(shells, prims)
+    W = rys_work_new()
+    J = zeros(RYS_J_ROWS, RYS_NROOT_MAX)
+    R = zeros(2, RYS_NROOT_MAX)
+    rys_shell_quartet(atoms, shells, prims, cn, 0, 1, 2, 3, W, J, R, blk)
+    return S[RYS_NCENTER * k, 0] + S[RYS_NCENTER * k + 1, 0] + S[RYS_NCENTER * k + 2, 0] + S[RYS_NCENTER * k + 3, 0]
+}
+
+test "every prims case agrees with PySCF to 1e-12, (ss|ss) through (ff|ff)" {
+    rys_sh = prims_shells()
+    rys_pk = prims_picks()
+    rys_ref = prims_eri()
+    rys_worst = 0.0
+    rys_ncase = 0
+    rys_top = 0
+    for rys_k to PRIMS_NCASE {
+        rys_g = rys_t_prims_gap(rys_k, rys_sh, rys_pk, rys_ref)
+        if rys_g >= 0.0 {
+            rys_worst = max(rys_worst, rys_g)
+            rys_ncase = rys_ncase + 1
+            rys_top = max(rys_top, rys_sh[RYS_NCENTER * rys_k, 0] + rys_sh[RYS_NCENTER * rys_k + 1, 0] + rys_sh[RYS_NCENTER * rys_k + 2, 0] + rys_sh[RYS_NCENTER * rys_k + 3, 0])
+        }
+    }
+    assert_lt(rys_worst, 1.0e-12)
+    assert_near(rys_ncase, PRIMS_NCASE, 0.0)
+    assert_near(rys_top, 12.0, 0.0)
+}
+
+test "swapping shells within a pair and swapping the pairs leave the block unchanged" {
+    rys_sh = prims_shells()
+    rys_worst = 0.0
+    # case 39 is (fp|dd), 57 is (pd|ff) and 27 is (fd|pp): unequal l in a pair
+    rys_cases = [39, 57, 27]
+    rys_ords = [[1, 0, 2, 3], [0, 1, 3, 2], [2, 3, 0, 1], [3, 2, 1, 0]]
+    for rys_i to len(rys_cases) {
+        for rys_o to len(rys_ords) {
+            rys_ord = zeros(RYS_NCENTER)
+            for rys_c to RYS_NCENTER {
+                rys_ord[rys_c] = rys_ords[rys_o, rys_c]
+            }
+            rys_worst = max(rys_worst, rys_t_perm_gap(rys_cases[rys_i], rys_sh, rys_ord))
+        }
+    }
+    assert_lt(rys_worst, 1.0e-13)
+}
+
+test "all 4186 packed water 6-31G ERIs agree with PySCF to 1e-12" {
+    assert_lt(rys_t_water_gap(), 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,339 @@
+###
+Translated from driver.py by py2viv 0.2.0 (numeric Python -> Viv).
+Python source sha256: aa990e78a4ac4ba9b27bf66e37ea292d548c9e237cbfadee13379ff7d10cb658
+Each print(...) is one print(...) line; fmt(x) writes a float as Python's repr does.
+A `raise`, a failed assert and every guard `stop` with Python's exception line.
+###
+
+#| 0, 1, ..., n - 1.
+def py_iota(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+
+#| Every entry of a real array, row-major, as a vector (a copy).
+def py_flat(a: Arr) {
+    return take(a, py_iota(numel(a)))
+}
+
+#| An int result, as Python's int: a -0.0 becomes 0 (an int has no sign on zero), and the run
+#| stops at 2^53, past which a double no longer holds every integer (Python's int does).
+def py_int(x) {
+    if abs(x) >= 9007199254740992 {
+        stop("py2viv: an integer reached 2^53; Python's int is exact there and a double is not")
+    }
+    return x + 0.0
+}
+
+#| NumPy's pairwise sum of f[lo], ..., f[lo + n - 1] (numpy/core/src/umath/loops_utils.h):
+#| below 8 terms left to right from 0; to 128, eight running sums combined as a tree, then
+#| the rest; above, the two halves (the first a multiple of 8 long) summed apart.
+def py_pw(f: Arr, lo, n) {
+    if n < 8 {
+        s = 0.0
+        for i to n {
+            s += f[lo + i]
+        }
+        return s
+    }
+    if n <= 128 {
+        r = zeros(8)
+        for j to 8 {
+            r[j] = f[lo + j]
+        }
+        i = 8
+        while i < n - n % 8 {
+            for j to 8 {
+                r[j] += f[lo + i + j]
+            }
+            i += 8
+        }
+        s = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+        while i < n {
+            s += f[lo + i]
+            i += 1
+        }
+        return s
+    }
+    n2 = floor(n / 2)
+    n2 = n2 - n2 % 8
+    return py_pw(f, lo, n2) + py_pw(f, lo + n2, n - n2)
+}
+
+#| NumPy's sum of f[lo], ..., f[lo + n - 1] along one axis: from 0.0, a pairwise sum of each
+#| block of NumPy's buffer size (8192 entries), added in order.
+def py_blk(f: Arr, lo, n) {
+    bufsize = 8192
+    s = 0.0
+    b = 0
+    while b < n {
+        s = s + py_pw(f, lo + b, min(bufsize, n - b))
+        b += bufsize
+    }
+    return s
+}
+
+#| np.sum(a), a.sum() of a float array: NumPy's sum over the entries in row-major order (py_blk).
+def py_npsum(a: Arr) {
+    f = py_flat(a)
+    return py_blk(f, 0, len(f))
+}
+
+#| An array size, as NumPy takes it: ValueError for a negative one (Viv would make an empty
+#| array).
+def py_size(n) {
+    if n < 0 {
+        stop("ValueError: negative dimensions are not allowed")
+    }
+    return n
+}
+
+#| a ^ y of an array: through this def, whose parameter is typed an array (Viv types `a ^ y`
+#| of an array a def returned as a number).
+def py_apow(a: Arr, y) {
+    return a ^ y
+}
+
+#| An index next to a slice, as NumPy reads it on an axis of length n: a negative one counts
+#| from the end (one still out of bounds stops the run, as NumPy raises IndexError).
+def py_ix(i, n) {
+    if i < 0 {
+        return i + n
+    }
+    return i
+}
+
+#| The shape NumPy broadcasts two shapes da and db to (aligned at the last axis, a length 1
+#| stretched); the run stops where NumPy raises ValueError.
+def py_bdims(da: Arr, db: Arr) {
+    n = len(da)
+    if len(db) > n {
+        n = len(db)
+    }
+    e = zeros(n)
+    for i to n {
+        x = 1
+        y = 1
+        if i >= n - len(da) {
+            x = da[i - n + len(da)]
+        }
+        if i >= n - len(db) {
+            y = db[i - n + len(db)]
+        }
+        if x == y or y == 1 {
+            e[i] = x
+        }
+        else {
+            if x == 1 {
+                e[i] = y
+            }
+            else {
+                stop("ValueError: operands could not be broadcast together with shapes")
+            }
+        }
+    }
+    return e
+}
+
+#| The flat indices, in row-major order of the shape e, of the entries of an array of shape d
+#| that broadcasting to e reads (a length 1 of d is read again along that axis of e).
+def py_bidx(d: Arr, e: Arr) {
+    n = len(e)
+    m = len(d)
+    st = zeros(n)
+    s = 1
+    for k to m {
+        j = m - 1 - k
+        if d[j] != 1 {
+            st[j + n - m] = s
+        }
+        s = s * d[j]
+    }
+    idx = zeros(1)
+    for i to n {
+        w = e[i]
+        nxt = zeros(len(idx) * w)
+        for p to len(idx) {
+            for c to w {
+                nxt[p * w + c] = idx[p] + c * st[i]
+            }
+        }
+        idx = nxt
+    }
+    return idx
+}
+
+#| a broadcast to the shape e (a shape py_bdims gave for a and another array): a itself when
+#| it has that shape, else a new array whose entries are copies of a's.
+def py_bto(a: Arr, e: Arr) {
+    d = shape(a)
+    if len(d) == len(e) {
+        if all(d == e) {
+            return a
+        }
+    }
+    return py_shaped(take(a, py_bidx(d, e)), e)
+}
+
+#| a * b of two real arrays, broadcast.
+def py_bmul(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) * py_bto(b, e)
+}
+
+#| 1 when a value of shape dv broadcasts to exactly the shape e (each of its lengths,
+#| aligned at the last axis, is e's or 1), else 0.
+def py_bfits(dv: Arr, e: Arr) {
+    n = len(e)
+    m = len(dv)
+    if m > n {
+        return 0
+    }
+    for k to m {
+        x = dv[m - 1 - k]
+        if x != 1 and x != e[n - 1 - k] {
+            return 0
+        }
+    }
+    return 1
+}
+
+#| A value stored into a slice or a row of the shape of s: NumPy broadcasts it into that
+#| shape, and raises ValueError where it cannot.
+def py_bset(v: Arr, s: Arr) {
+    if py_bfits(shape(v), shape(s)) == 0 {
+        stop("ValueError: could not broadcast input array from shape")
+    }
+    return py_bto(v, shape(s))
+}
+
+#| The entries of f, row-major, as an array of shape e (a vector of 1 to 4 lengths).
+def py_shaped(f: Arr, e: Arr) {
+    if len(e) == 1 {
+        return f
+    }
+    if len(e) == 2 {
+        z = zeros(e[0], e[1])
+    }
+    else {
+        if len(e) == 3 {
+            z = zeros(e[0], e[1], e[2])
+        }
+        else {
+            z = zeros(e[0], e[1], e[2], e[3])
+        }
+    }
+    put(z, py_iota(numel(z)), f)
+    return z
+}
+
+#| np.reshape(a, d) in row-major order: a's entries in the shape d, where one length may be
+#| negative (NumPy 1.24 reads any negative length as -1: the one that makes the sizes agree).
+#| NumPy raises ValueError where they cannot agree.
+def py_reshape(a: Arr, d: Arr) {
+    e = copy(d)
+    known = 1
+    free = -1
+    for i to len(e) {
+        if e[i] < 0 {
+            if free >= 0 {
+                stop("ValueError: can only specify one unknown dimension")
+            }
+            free = i
+        }
+        else {
+            known = known * e[i]
+        }
+    }
+    if free >= 0 {
+        if known == 0 or numel(a) % known != 0 {
+            stop("ValueError: cannot reshape the array into that shape")
+        }
+        e[free] = numel(a) / known
+        known = numel(a)
+    }
+    if known != numel(a) {
+        stop("ValueError: cannot reshape the array into that shape")
+    }
+    return py_shaped(py_flat(a), e)
+}
+
+#from: https://groups.google.com/forum/#!topic/parakeet-python/p-flp2kdE4U
+#setup: import numpy as np ;d = 10 ;re = 5 ;params = (d, re, np.ones((2*d, d+1, re)), np.ones((d, d+1, re)),  np.ones((d, 2*d)), np.ones((d, 2*d)), np.ones((d+1, re, d)), np.ones((d+1, re, d)), 1)
+#run: slowparts(*params)
+#pythran export slowparts(int, int, float [][][], float [][][], float [][], float [][], float [][][], float [][][], int)
+def slowparts__fprime(x: Arr) {
+    return 1 - py_apow(tanh(x), 2)
+}
+#| computes the linear algebra intensive part of the gradients of the grae
+def slowparts(d, re_, preDz: Arr, preWz: Arr, SRW: Arr, RSW: Arr, yxV: Arr, xyU: Arr, resid) {
+    partialDU = zeros(py_size(py_int(d + 1)), py_size(re_), py_size(py_int(2 * d)), py_size(d))
+    for k to py_int(2 * d) {
+        for i to d {
+            partialDU[:, :, py_ix(k, shape(partialDU)[2]), py_ix(i, shape(partialDU)[3])] = py_bset(py_bmul(py_bmul(slowparts__fprime(slab(preDz, k)), slowparts__fprime(slab(preWz, i))) * (SRW[i, k] + RSW[i, k]), yxV[:, :, py_ix(i, shape(yxV)[2])]), partialDU[:, :, py_ix(k, shape(partialDU)[2]), py_ix(i, shape(partialDU)[3])])
+        }
+    }
+    return partialDU
+}
+# ---- harness ----
+_s0 = py_int(int(read_text("s0.txt")))
+_s1 = py_int(int(read_text("s1.txt")))
+py_s2 = split(read_text("in2.txt"))
+py_l1 = zeros(len(py_s2))
+for py_i3 to len(py_s2) {
+    py_t4 = py_s2[py_i3]
+    py_l1[py_i3] = float(py_t4)
+}
+_a2 = py_reshape(py_l1, [20, 11, 5])
+py_s6 = split(read_text("in3.txt"))
+py_l5 = zeros(len(py_s6))
+for py_i7 to len(py_s6) {
+    py_t8 = py_s6[py_i7]
+    py_l5[py_i7] = float(py_t8)
+}
+_a3 = py_reshape(py_l5, [10, 11, 5])
+py_s10 = split(read_text("in4.txt"))
+py_l9 = zeros(len(py_s10))
+for py_i11 to len(py_s10) {
+    py_t12 = py_s10[py_i11]
+    py_l9[py_i11] = float(py_t12)
+}
+_a4 = py_reshape(py_l9, [10, 20])
+py_s14 = split(read_text("in5.txt"))
+py_l13 = zeros(len(py_s14))
+for py_i15 to len(py_s14) {
+    py_t16 = py_s14[py_i15]
+    py_l13[py_i15] = float(py_t16)
+}
+_a5 = py_reshape(py_l13, [10, 20])
+py_s18 = split(read_text("in6.txt"))
+py_l17 = zeros(len(py_s18))
+for py_i19 to len(py_s18) {
+    py_t20 = py_s18[py_i19]
+    py_l17[py_i19] = float(py_t20)
+}
+_a6 = py_reshape(py_l17, [11, 5, 10])
+py_s22 = split(read_text("in7.txt"))
+py_l21 = zeros(len(py_s22))
+for py_i23 to len(py_s22) {
+    py_t24 = py_s22[py_i23]
+    py_l21[py_i23] = float(py_t24)
+}
+_a7 = py_reshape(py_l21, [11, 5, 10])
+_s8 = py_int(int(read_text("s8.txt")))
+reps = py_int(int(read_text("reps.txt")))
+res = slowparts(_s0, _s1, _a2, _a3, _a4, _a5, _a6, _a7, _s8)
+print(fmt(py_npsum(res)))
+print(fmt(py_npsum(res * res)))
+_chk = 0.0
+for _i to reps {
+    res = slowparts(_s0, _s1, _a2, _a3, _a4, _a5, _a6, _a7, _s8)
+    _chk = _chk + res[0, 0, 0, 0]
+}
+print(fmt(_chk))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

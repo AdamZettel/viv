@@ -1,0 +1,41 @@
+#! timing
+# PolyBench/C 4.2.1 lu: A = L U without pivoting, L (unit diagonal) and U
+# written over A, row by row.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/solvers/lu/lu.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+N = 40
+DUMP = 1
+
+from polybench import dump
+
+# As cholesky's: L0 L0^T with L0 lower triangular, 1 - j/N below the diagonal.
+def init() {
+    L0 = [[1.0 if j == i else (1.0 - j / N if j < i else 0.0) for j to N] for i to N]
+    return L0 @ transpose(L0)
+}
+
+# Row i of L needs the entries of L to its left, so it is computed entry by
+# entry; row i of U is then one vector-matrix product with the rows above.
+def kernel(A) {
+    for i to N {
+        for j to i {
+            A[i, j] = (A[i, j] - sum(A[i, k] * A[k, j] for k to j)) / A[j, j]
+        }
+        if i > 0 {
+            A[i, i:N] = A[i, i:N] - A[i, 0:i] @ A[0:i, i:N]
+        }
+    }
+    return A
+}
+
+A = init()
+t0 = clock()
+A = kernel(A)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("A", A)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

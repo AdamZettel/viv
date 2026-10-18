@@ -1,0 +1,241 @@
+###
+post: NumPy's Generator methods, over PCG64
+agent: claude
+
+`rng = np.random.default_rng(seed)` and its methods `random`, `uniform`,
+`integers`, `standard_normal`, `normal`, `choice`, `shuffle` and `permutation`.
+Each def is the NumPy 1.24.4 code path it names (numpy/random/_generator.pyx,
+_bounded_integers.pyx.in, src/distributions/distributions.c; tag v1.24.4,
+commit 9315a9072b2636f75c831b4eca9f42a5f67ca2fb), drawing from the PCG64 state
+of lib/nprandom/pcg64 in the same order.
+
+- `npr_gn_bounded(st, rng)`: an int in [0, rng] by Lemire's method
+  (random_bounded_uint64 without the mask): no draw when rng is 0, one buffered
+  32-bit draw per try while rng < 2^32 - 1, the 32-bit draw itself at
+  2^32 - 1, a 64-bit draw and its 128-bit product with rng + 1 above (the
+  product's halves are `wrap_mul` and `umulhi`; rng below 2^53 here).
+  `Generator.integers(low, high)` is `low + npr_gn_bounded(high - 1 - low)`.
+- `npr_gn_interval(st, mx)`: random_interval, the masked draw `shuffle` uses.
+- `npr_gn_shuffle`, `npr_gn_shuffle_rows`: Fisher-Yates from the top index down.
+- `npr_gn_shuffle_int(st, a, n, first)`: `_shuffle_int`, the Lemire-drawn
+  Fisher-Yates that `choice(replace=False)` uses.
+- `npr_gn_choice_noreplace(st, pop, size, do_shuffle)`: choice without p and
+  without replacement, by Floyd's algorithm with a shuffle after it (when
+  do_shuffle is 1), or by a partial shuffle of `arange(pop)` when pop > 10000
+  and size > pop // 50.
+- `npr_gn_normal(st)`: random_standard_normal, the 256-strip ziggurat
+  (lib/nprandom/ziggurat_tables). It returns NaN in two cases, where NumPy's
+  value depends on the platform's libm, which Viv's libm does not reproduce bit
+  for bit: a draw in the base strip's tail (NumPy calls `log1p`; about 1 draw in
+  4000), and a wedge test whose draw lies within 8 ulp of `exp(-x^2/2)` (never
+  seen; the comparison could go either way on another libm). Everywhere else the
+  value is NumPy's.
+
+Used with `import nprandom.generator`.
+###
+
+from nprandom.pcg64 import NPR_HALF64, NPR_LOW32, npr_pcg_double, npr_pcg_next32, npr_pcg_next64
+from nprandom.bits import npr_mask, NPR_U32_MAX
+from nprandom.ziggurat_tables import npr_zig_fi, npr_zig_ki, npr_zig_wi
+
+# a strip index is the low 8 bits of the 64-bit draw, the sign the next bit,
+# and |x| the 52 bits above that
+NPR_ZIG_IDX_MASK: Int = 255
+NPR_ZIG_SIGN_SHIFT: Int = 8
+NPR_ZIG_ABS_SHIFT: Int = 9
+NPR_ZIG_ABS_MASK: Int = 4503599627370495
+# the wedge test's margin, in units of 2^-52 of exp(-x^2/2)
+NPR_ZIG_WEDGE_ULPS = 8
+NPR_EPS = 2.220446049250313e-16
+# choice(replace=False): the partial shuffle's thresholds
+NPR_CHOICE_POP_MIN = 10000
+NPR_CHOICE_CUTOFF_SHUFFLE = 50
+NPR_CHOICE_CUTOFF_NOSHUFFLE = 20
+# 2^32, and 2^62 (2^64 mod r is 4 (2^62 mod r) mod r, with every value an Int)
+NPR_TWO32_INT: Int = 4294967296
+NPR_TWO62: Int = 4611686018427387904
+NPR_FOUR: Int = 4
+
+#| random_uniform: low + rng * a double in [0, 1).
+def npr_gn_uniform(st: [Int], low, rng) {
+    return low + rng * npr_pcg_double(st)
+}
+
+#| buffered_bounded_lemire_uint32 for rng < 2^32 - 1: m = next32 * (rng + 1), a
+#| 64-bit product, its high word the draw, its low word checked for bias.
+def npr_gn_lemire32(st: [Int], rng) {
+    r: Int = int(rng) + 1
+    m = wrap_mul(npr_pcg_next32(st), r)
+    leftover = band(m, NPR_LOW32)
+    if leftover < r {
+        threshold = (NPR_TWO32_INT - r) % r
+        while leftover < threshold {
+            m = wrap_mul(npr_pcg_next32(st), r)
+            leftover = band(m, NPR_LOW32)
+        }
+    }
+    return float(shr(m, NPR_HALF64))
+}
+
+#| bounded_lemire_uint64 for 2^32 - 1 < rng < 2^53: the 128-bit product of the
+#| 64-bit draw and rng + 1; its high half is the draw, its low half (as an
+#| unsigned number) is checked against 2^64 mod (rng + 1).
+def npr_gn_lemire64(st: [Int], rng) {
+    r: Int = int(rng) + 1
+    x = npr_pcg_next64(st)
+    leftover = wrap_mul(x, r)
+    if ult(leftover, r) {
+        threshold = (NPR_TWO62 % r) * NPR_FOUR % r
+        while ult(leftover, threshold) {
+            x = npr_pcg_next64(st)
+            leftover = wrap_mul(x, r)
+        }
+    }
+    return float(umulhi(x, r))
+}
+
+#| random_bounded_uint64 without the mask: an int in [0, rng], 0 <= rng < 2^53.
+def npr_gn_bounded(st: [Int], rng) {
+    if rng == 0 {
+        return 0
+    }
+    if rng == NPR_U32_MAX {
+        return float(npr_pcg_next32(st))
+    }
+    if rng < NPR_U32_MAX {
+        return npr_gn_lemire32(st, rng)
+    }
+    return npr_gn_lemire64(st, rng)
+}
+
+#| random_interval: an int in [0, mx] by masked rejection (shuffle's draw).
+def npr_gn_interval(st: [Int], mx) {
+    if mx == 0 {
+        return 0
+    }
+    mask = npr_mask(int(mx))
+    if mx <= NPR_U32_MAX {
+        v = band(npr_pcg_next32(st), mask)
+        while v > mx {
+            v = band(npr_pcg_next32(st), mask)
+        }
+        return float(v)
+    }
+    v = band(npr_pcg_next64(st), mask)
+    while v > mx {
+        v = band(npr_pcg_next64(st), mask)
+    }
+    return float(v)
+}
+
+#| Generator.shuffle of a vector, in place.
+def npr_gn_shuffle(st: [Int], a: Arr) {
+    n = len(a)
+    for k to n - 1 {
+        i = n - 1 - k
+        j = npr_gn_interval(st, i)
+        t = a[i]
+        a[i] = a[j]
+        a[j] = t
+    }
+}
+
+#| Generator.shuffle of a matrix (axis 0): its rows, in place.
+def npr_gn_shuffle_rows(st: [Int], A: Arr) {
+    n = shape(A)[0]
+    m = shape(A)[1]
+    for k to n - 1 {
+        i = n - 1 - k
+        j = npr_gn_interval(st, i)
+        if i != j {
+            for c to m {
+                t = A[i, c]
+                A[i, c] = A[j, c]
+                A[j, c] = t
+            }
+        }
+    }
+}
+
+#| _shuffle_int: swap a[i] with a[random_bounded_uint64(0, i)] for i = n - 1 down to first.
+def npr_gn_shuffle_int(st: [Int], a: Arr, n, first) {
+    i = n - 1
+    while i >= first {
+        j = npr_gn_bounded(st, i)
+        t = a[j]
+        a[j] = a[i]
+        a[i] = t
+        i = i - 1
+    }
+}
+
+#| Generator.choice(pop, size, replace=False) without p: `size` distinct ints in [0, pop).
+def npr_gn_choice_noreplace(st: [Int], pop, size, do_shuffle) {
+    cutoff = NPR_CHOICE_CUTOFF_NOSHUFFLE
+    if do_shuffle == 1 {
+        cutoff = NPR_CHOICE_CUTOFF_SHUFFLE
+    }
+    if pop > NPR_CHOICE_POP_MIN and size > floor(pop / cutoff) {
+        idx = zeros(pop)
+        for i to pop {
+            idx[i] = i
+        }
+        npr_gn_shuffle_int(st, idx, pop, max(pop - size, 1))
+        out = zeros(size)
+        for i to size {
+            out[i] = idx[pop - size + i]
+        }
+        return out
+    }
+    out = zeros(size)
+    taken = zeros(pop)
+    for j from pop - size to pop {
+        val = npr_gn_bounded(st, j)
+        if taken[val] == 0 {
+            taken[val] = 1
+            out[j - pop + size] = val
+        }
+        else {
+            taken[j] = 1
+            out[j - pop + size] = j
+        }
+    }
+    if do_shuffle == 1 {
+        npr_gn_shuffle_int(st, out, size, 1)
+    }
+    return out
+}
+
+#| random_standard_normal: the ziggurat; NaN where NumPy's value rests on the
+#| platform's libm (see the header).
+def npr_gn_normal(st: [Int]) {
+    while true {
+        r = npr_pcg_next64(st)
+        idx = band(r, NPR_ZIG_IDX_MASK)
+        sign = band(shr(r, NPR_ZIG_SIGN_SHIFT), 1)
+        rabs = float(band(shr(r, NPR_ZIG_ABS_SHIFT), NPR_ZIG_ABS_MASK))
+        x = rabs * npr_zig_wi[idx]
+        if sign == 1 {
+            x = -x
+        }
+        if rabs < npr_zig_ki[idx] {
+            return x
+        }
+        if idx == 0 {
+            # NumPy draws the tail with log1p: not reproducible here
+            return 0.0 / 0.0
+        }
+        lhs = (npr_zig_fi[idx - 1] - npr_zig_fi[idx]) * npr_pcg_double(st) + npr_zig_fi[idx]
+        e = exp(-0.5 * x * x)
+        if abs(lhs - e) <= NPR_ZIG_WEDGE_ULPS * NPR_EPS * e {
+            return 0.0 / 0.0
+        }
+        if lhs < e {
+            return x
+        }
+    }
+    return 0.0
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

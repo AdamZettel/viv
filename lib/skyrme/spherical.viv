@@ -1,0 +1,692 @@
+###
+post: Skyrme Hartree-Fock of any spherical closed-shell nucleus
+agent: claude
+
+The solver of lib/skyrme/skyrme for any nucleus whose protons and neutrons
+each fill whole $(n, l, j)$ shells: oxygen-16 through lead-208, with the
+forces SLy4, SLy5, SIII and SkM*.
+
+    from skyrme.spherical import SLY5, nucleus_z, nucleus_n, solve
+
+    res = solve(0.1, 200, SLY5, nucleus_z("208Pb"), nucleus_n("208Pb"), 0.5, 1.0e-9, 300)
+    show res.e_per_a       # E/A, MeV
+
+Two things change from lib/skyrme/skyrme, which solves oxygen-16 only.
+
+The occupied orbitals are chosen by energy. Each iteration diagonalizes
+every $(l, j)$ block up to $l = 7$, and the protons (or neutrons) go into
+the lowest orbitals across all blocks, $2j + 1$ to an orbital, until all
+$Z$ (or $N$) are placed. A nucleus whose last orbital would be only partly
+filled is open-shell and is refused: a spherical solution with a partly
+filled shell needs pairing or a filling approximation, which this solver
+does not have. Inside a block the $n$-th orbital is the $n$-th eigenvalue,
+so calcium-40's $2s_{1/2}$ is the second state of the $(0, 1/2)$ block.
+
+The force and the center-of-mass factor are arguments. A force is a
+Force record (SLY4, SLY5, SIII and SKMS are defined below), with a flag
+for the $J^2$ terms of $t_1$ and $t_2$, which SLy5 and SIII keep and SLy4
+and SkM* drop. The kinetic term carries $\hbar^2/2m \, (1 - 1/A)$ for every
+force, as each was fitted.
+
+For oxygen-16 with SLy5 the arithmetic is lib/skyrme/skyrme's, operation for
+operation, and gives its bits (the test at the end).
+
+Used with `import skyrme.spherical`.
+###
+from scf.loop import scf
+from scf.mix import MixHistory, MixStep, broyden, linear, mix_densities, pulay
+from skyrme.skyrme import E2, EIG_TOL, FOLD, HBARC, MIN_ITER, M_NUC, NEAR, NEUTRON, NKIND, PI, PROTON, WS_DIFFUSE, WS_R0, coulomb, count_below, grad1, integrate_r2, inverse_iteration, lap_r, particle_number, proton_coulomb, skyrme_o16
+
+#| A Skyrme force: the ten parameters of the functional and whether its
+#| $J^2$ terms are kept. t0 is in MeV fm^3, t1, t2 and w0 in MeV fm^5, t3 in
+#| MeV fm^(3 + 3 alpha); the x's and alpha have no unit.
+record Force {
+    t0: Num
+    t1: Num
+    t2: Num
+    t3: Num
+    x0: Num
+    x1: Num
+    x2: Num
+    x3: Num
+    w0: Num
+    alpha: Num
+    j2: Bool
+}
+
+# SLy4 and SLy5: Chabanat, Bonche, Haensel, Meyer and Schaeffer, Nucl. Phys.
+# A 635, 231 (1998), Table 1 (SLy5's numbers as skyrme_rpa's skyrme.in lists
+# them, the same to the digits printed there)
+SLY4 = Force { t0: -2488.91, t1: 486.82, t2: -546.39, t3: 13777.0, x0: 0.834, x1: -0.344, x2: -1.0, x3: 1.354, w0: 123.0, alpha: 1.0 / 6.0, j2: false }
+SLY5 = Force { t0: -2484.88, t1: 483.13, t2: -549.40, t3: 13763.0, x0: 0.778, x1: -0.328, x2: -1.0, x3: 1.267, w0: 126.0, alpha: 1.0 / 6.0, j2: true }
+# SIII: Beiner, Flocard, Van Giai and Quentin, Nucl. Phys. A 238, 29 (1975);
+# its three-body t3 term is the density-dependent one with x3 = 1, alpha = 1
+SIII = Force { t0: -1128.75, t1: 395.0, t2: -95.0, t3: 14000.0, x0: 0.45, x1: 0.0, x2: 0.0, x3: 1.0, w0: 120.0, alpha: 1.0, j2: true }
+# SkM*: Bartel, Quentin, Brack, Guet and Hakansson, Nucl. Phys. A 386, 79 (1982)
+SKMS = Force { t0: -2645.0, t1: 410.0, t2: -135.0, t3: 15595.0, x0: 0.09, x1: 0.0, x2: 0.0, x3: 0.0, w0: 130.0, alpha: 1.0 / 6.0, j2: false }
+
+# ---- the blocks: l = 0 .. L_MAX, j = l + 1/2 and then (for l > 0) l - 1/2.
+# L_MAX = 7 reaches 1j15/2, the first neutron shell above lead-208's 126.
+L_MAX = 7
+NBLOCK = 2 * L_MAX + 1
+# at most this many orbitals of one block are occupied (lead-208's 3s1/2 is the third)
+S_MAX = 4
+# spectroscopic letters for l = 0 .. 7 (nuclear usage: j for l = 7)
+L_LETTERS = "spdfghij"
+# the kinds, for messages
+KIND_NAMES = ["neutrons", "protons"]
+# a state counts as bound below this energy, MeV
+BOUND = 0.0
+# the margin of the Sturm-count checks on an orbital energy, MeV
+CHECK_TOL = 1.0e-7
+# the element symbols, Z = 1 .. 118
+ELEMENTS = split("H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og", " ")
+
+#| The l of block b; the blocks run s1/2, p3/2, p1/2, d5/2, d3/2, ...
+def block_l(b) {
+    if b == 0 {
+        return 0
+    }
+    return (b + 1) // 2
+}
+
+#| The j of block b: l + 1/2 for odd b and b = 0, l - 1/2 for even b.
+def block_j(b) {
+    l = block_l(b)
+    if b % 2 == 1 or b == 0 {
+        return l + 0.5
+    }
+    return l - 0.5
+}
+
+#| An orbital's name: n, the letter of l, and 2j/2, as "2s1/2".
+def orbital_label(n, l: Int, j) {
+    return f"{n:.0f}{L_LETTERS[l]}{2.0 * j:.0f}/2"
+}
+
+#| The mass number and the proton number of a name such as "208Pb",
+#| "Pb208" or "pb-208": the digits are A, the letters the element.
+def nucleus_az(name: Str) {
+    digits = ""
+    letters = ""
+    for c in name {
+        if c.isdigit() {
+            digits = digits + c
+        }
+        else if c.isalpha() {
+            letters = letters + c
+        }
+    }
+    if len(digits) == 0 or len(letters) == 0 {
+        stop(f"nucleus {name!r}: write the mass number and the element, as \"208Pb\"")
+    }
+    sym = upper(letters[0]) + lower(letters[1:])
+    z = 0
+    for k to len(ELEMENTS) {
+        if ELEMENTS[k] == sym {
+            z = k + 1
+        }
+    }
+    if z == 0 {
+        stop(f"nucleus {name!r}: {sym!r} is not an element symbol")
+    }
+    a = int(digits)
+    if a <= z {
+        stop(f"nucleus {name!r}: the mass number {a} leaves no neutrons for Z = {z}")
+    }
+    return a, z
+}
+
+#| The proton number Z of a nucleus written like "208Pb".
+def nucleus_z(name: Str) {
+    a, z = nucleus_az(name)
+    return z
+}
+
+#| The neutron number N = A - Z of a nucleus written like "208Pb".
+def nucleus_n(name: Str) {
+    a, z = nucleus_az(name)
+    return a - z
+}
+
+#| hbar^2/2m times the one-body center-of-mass factor 1 - 1/A, MeV fm^2.
+def hb_of(a) {
+    return HBARC * HBARC / (2.0 * M_NUC) * (1.0 - 1.0 / a)
+}
+
+#| The mean fields of kind q from the densities: effective mass B, central U, spin-orbit W.
+def fields(f: Force, hb, q, rho: Arr, tau: Arr, jso: Arr, r: Arr, h) {
+    step densities {
+        rt = rho[NEUTRON, :] + rho[PROTON, :]
+        tt = tau[NEUTRON, :] + tau[PROTON, :]
+        jt = jso[NEUTRON, :] + jso[PROTON, :]
+        rq = rho[q, :]
+        sj = jt + jso[q, :]
+        lap_t = lap_r(rt, r, h)
+        drt = grad1(rt, h)
+        lap_q = lap_r(rq, r, h)
+        drq = grad1(rq, h)
+        dsj = grad1(sj, h)
+    }
+    step effective_mass {
+        B = hb + 0.125 * (f.t1 * (2.0 + f.x1) + f.t2 * (2.0 + f.x2)) * rt + 0.125 * (f.t2 * (1.0 + 2.0 * f.x2) - f.t1 * (1.0 + 2.0 * f.x1)) * rq
+    }
+    step central {
+        ra = pow(rt, f.alpha)
+        U = f.t0 * ((1.0 + f.x0 / 2.0) * rt - (f.x0 + 0.5) * rq)
+        U += 0.25 * f.t1 * ((1.0 + f.x1 / 2.0) * (tt - 1.5 * lap_t) - (f.x1 + 0.5) * (tau[q, :] - 1.5 * lap_q))
+        U += 0.25 * f.t2 * ((1.0 + f.x2 / 2.0) * (tt + 0.5 * lap_t) + (f.x2 + 0.5) * (tau[q, :] + 0.5 * lap_q))
+        rsq = rho[NEUTRON, :] * rho[NEUTRON, :] + rho[PROTON, :] * rho[PROTON, :]
+        U += f.t3 / 12.0 * ((1.0 + f.x3 / 2.0) * (2.0 + f.alpha) * ra * rt - (f.x3 + 0.5) * (2.0 * ra * rq + f.alpha * ra / rt * rsq))
+        U -= f.w0 * (sj / r + 0.5 * dsj)
+    }
+    step spin_orbit {
+        W = 0.5 * f.w0 * (drt + drq)
+        if f.j2 {
+            W = 0.5 * f.w0 * (drt + drq) + 0.125 * (f.t1 - f.t2) * jso[q, :] - 0.125 * (f.t1 * f.x1 + f.t2 * f.x2) * jt
+        }
+    }
+    return B, U, W
+}
+
+#| The radial Hamiltonian of one (l, j) block on the mesh, as its diagonal and off-diagonal.
+def hamiltonian(B: Arr, dB: Arr, U: Arr, W: Arr, V: Arr, hb, q, l, sdl, r: Arr, h) {
+    nr = len(r)
+    # B halfway between neighboring points; past the last point it meets hb
+    bm = copy(B)
+    bm[1:nr] = 0.5 * (B[0:nr - 1] + B[1:nr])
+    bp = zeros(nr) + 0.5 * (B[nr - 1] + hb)
+    bp[0:nr - 1] = 0.5 * (B[0:nr - 1] + B[1:nr])
+    off = -bp[0:nr - 1] / (h * h)
+    diag = (bm + bp) / (h * h) + B * l * (l + 1.0) / (r * r) + dB / r + U + sdl * W / r
+    if q == PROTON {
+        diag = diag + V
+    }
+    return diag, off
+}
+
+#| The k-th lowest eigenvalue (k = 0 the lowest) of the tridiagonal matrix,
+#| by bisection on the Sturm count between lo and hi, to EIG_TOL.
+def kth_eigenvalue(diag: Arr, off: Arr, k, lo, hi) {
+    a = lo
+    b = hi
+    while b - a > EIG_TOL {
+        mid = 0.5 * (a + b)
+        if count_below(diag, off, mid) > k {
+            b = mid
+        }
+        else {
+            a = mid
+        }
+    }
+    return a
+}
+
+#| The total energy: the Skyrme energy density plus Coulomb, integrated over r.
+def energy(f: Force, hb, rho: Arr, tau: Arr, jso: Arr, r: Arr, h) {
+    rn = rho[NEUTRON, :]
+    rp = rho[PROTON, :]
+    rt = rn + rp
+    drt = grad1(rt, h)
+    drn = grad1(rn, h)
+    drp = grad1(rp, h)
+    tn = tau[NEUTRON, :]
+    tp = tau[PROTON, :]
+    tt = tn + tp
+    jn = jso[NEUTRON, :]
+    jp = jso[PROTON, :]
+    jt = jn + jp
+    rsq = rn * rn + rp * rp
+    H = hb * tt + 0.5 * f.t0 * ((1.0 + f.x0 / 2.0) * rt * rt - (f.x0 + 0.5) * rsq)
+    H += 0.25 * f.t1 * ((1.0 + f.x1 / 2.0) * (rt * tt + 0.75 * drt * drt) - (f.x1 + 0.5) * (rn * tn + 0.75 * drn * drn + rp * tp + 0.75 * drp * drp))
+    H += 0.25 * f.t2 * ((1.0 + f.x2 / 2.0) * (rt * tt - 0.25 * drt * drt) + (f.x2 + 0.5) * (rn * tn - 0.25 * drn * drn + rp * tp - 0.25 * drp * drp))
+    H += f.t3 / 12.0 * pow(rt, f.alpha) * ((1.0 + f.x3 / 2.0) * rt * rt - (f.x3 + 0.5) * rsq)
+    if f.j2 {
+        H += (f.t1 - f.t2) / 16.0 * (jn * jn + jp * jp) - (f.t1 * f.x1 + f.t2 * f.x2) / 16.0 * jt * jt
+    }
+    H += 0.5 * f.w0 * (jt * drt + jn * drn + jp * drp)
+    #: Coulomb exchange in the Slater approximation
+    ec = 0.5 * coulomb(rp, r, h) * rp - 0.75 * E2 * pow(3.0 / PI, 1.0 / 3.0) * pow(rp, 4.0 / 3.0)
+    return integrate_r2(H, r, h) + integrate_r2(ec, r, h)
+}
+
+#| The bound states of every block of one kind, by bisection: their energies
+#| (MeV), blocks and radial indices s (n = s + 1), at most S_MAX a block,
+#| lowest first in each block.
+def bound_states(dg: Arr, of: Arr) {
+    nblk = len(dg)
+    e = []
+    blk = []
+    idx = []
+    for b to nblk {
+        diag = dg[b, :]
+        off = of[b, :]
+        nb = min(count_below(diag, off, BOUND), S_MAX)
+        # Gershgorin: every eigenvalue lies within diag[i] +- (|off[i-1]| + |off[i]|)
+        big = max(abs(off))
+        for s to nb {
+            e = append(e, kth_eigenvalue(diag, off, s, min(diag) - 2.0 * big, max(diag) + 2.0 * big))
+            blk = append(blk, b)
+            idx = append(idx, s)
+        }
+    }
+    return e, blk, idx
+}
+
+#| How many orbitals of each block hold the `want` nucleons of one kind,
+#| filling the lowest orbitals across all blocks. Stops when the last
+#| orbital would be partly filled (an open shell) or the bound states run out;
+#| `it` is the pass, for the message.
+def fill_by_energy(e: Arr, blk: Arr, want, kind: Str, it) {
+    when = ""
+    if it > 1 {
+        when = f" In pass {round(it)} the orbitals changed order (they were closed at the start), so the iteration is running away rather than converging; lower MIX, or check the force."
+    }
+    #: whole shells only; a partly filled one stops the run
+    occ = zeros(NBLOCK)
+    placed = 0
+    order = argsort(e)
+    k = 0
+    while placed < want {
+        if k >= len(order) {
+            stop(f"{kind}: only {placed} of the {want} fit in the bound orbitals; the nucleus is past the drip line or the box is too small.{when}")
+        }
+        b = blk[order[k]]
+        deg = 2.0 * block_j(b) + 1.0
+        if placed + deg > want {
+            stop(f"{kind}: {want} is not a closed shell: the {orbital_label(occ[b] + 1, round(block_l(b)), block_j(b))} orbital at {e[order[k]]:.3f} MeV would hold {want - placed} of its {deg:.0f}. This solver has no pairing; give a nucleus whose protons and neutrons fill whole shells.{when}")
+        }
+        placed += deg
+        occ[b] = occ[b] + 1
+        k += 1
+    }
+    return occ
+}
+
+#| What solve finds: the energy per nucleon and the total energy (MeV); the
+#| proton, neutron and charge radii (fm); the occupied orbitals' energies
+#| (MeV, neutrons then protons, each lowest first), labels and
+#| occupations; every bound orbital of the final fields with the same three;
+#| the passes, whether the energy settled, how many times the occupation was
+#| refilled after pass 1; the mesh (fm) and the converged number,
+#| kinetic and spin-orbit densities, each `[2, nr]` (neutrons, then protons).
+record Nucleus {
+    z: Num
+    n: Num
+    e_per_a: Num
+    energy: Num
+    r_p: Num
+    r_n: Num
+    r_ch: Num
+    levels: Arr
+    labels: Str
+    spectrum: Arr
+    spectrum_labels: Str
+    spectrum_occ: Arr
+    iterations: Num
+    converged: Bool
+    refills: Num
+    r: Arr
+    rho: Arr
+    tau: Arr
+    jso: Arr
+}
+
+# ---- the radial mesh as the basis of lib/scf/loop. The densities are one
+# flat array of DENSITY_ROWS rows of nr numbers: rho of the neutrons and of
+# the protons, then tau, then J.
+
+#: DENSITY_ROWS  rho, tau and J, each for the two kinds
+DENSITY_ROWS: Int = 3 * round(NKIND)
+
+#: DENSITY_FLOOR  the least number density the fields see, fm^-3. Pulay and
+#:     Broyden extrapolate, and can leave the far tail of rho slightly
+#:     negative before they converge, where rho^alpha is not defined. Linear
+#:     mixing keeps rho positive, and on every mesh in
+#:     lib/skyrme/COMPARISON.md rho stays far above the floor, so the floor
+#:     changes no bit there.
+DENSITY_FLOOR = 1.0e-30
+
+#| The mesh, the force and what the iteration keeps between passes: for
+#| orbital k = (q * NBLOCK + b) * S_MAX + s its vector (row k of uvec) and
+#| last energy (lam[k]); how many orbitals of each block are occupied (row q
+#| of occ); and the tridiagonal blocks of the kind being solved (dg, of).
+#| The arrays are written in place by the functions below.
+record RadialMesh {
+    force: Force
+    hb: Num
+    h: Num
+    r: Arr
+    want: Arr
+    uvec: Arr
+    lam: Arr
+    occ: Arr
+    dg: Arr
+    of: Arr
+}
+
+#| rho, tau and J ([NKIND, nr] each) as one flat array.
+def pack_densities(rho: Arr, tau: Arr, jso: Arr) -> Arr {
+    m = zeros(DENSITY_ROWS, len(rho[0, :]))
+    m[0:NKIND, :] = rho
+    m[NKIND:2 * NKIND, :] = tau
+    m[2 * NKIND:DENSITY_ROWS, :] = jso
+    return ravel(m)
+}
+
+#| rho, tau and J back from the flat array of pack_densities, rho held at
+#| DENSITY_FLOOR or above.
+def unpack_densities(d: Arr, nr) {
+    m = reshape(d, DENSITY_ROWS, nr)
+    rho = m[0:NKIND, :]
+    return where(rho < DENSITY_FLOOR, DENSITY_FLOOR, rho), m[NKIND:2 * NKIND, :], m[2 * NKIND:DENSITY_ROWS, :]
+}
+
+#| Two kinds of particle: neutrons and protons.
+def mesh_groups(b: RadialMesh) -> Int {
+    return round(NKIND)
+}
+
+#| The (l, j) blocks of one kind.
+def mesh_blocks(b: RadialMesh) -> Int {
+    return round(NBLOCK)
+}
+
+#| The fields of kind q as rows B, dB/dr, U, W and the Coulomb potential V
+#| (zero for neutrons).
+def mesh_fields(b: RadialMesh, d: Arr, q) -> Arr {
+    nr = len(b.r)
+    rho, tau, jso = unpack_densities(d, nr)
+    B, U, W = fields(b.force, b.hb, q, rho, tau, jso, b.r, b.h)
+    f = zeros(5, nr)
+    f[0, :] = B
+    f[1, :] = grad1(B, b.h)
+    f[2, :] = U
+    f[3, :] = W
+    if q == PROTON {
+        f[4, :] = proton_coulomb(rho[PROTON, :], b.r, b.h)
+    }
+    return f
+}
+
+#| (j(j + 1) - l(l + 1) - 3/4), the spin-orbit factor of block k.
+def spin_orbit_factor(k) {
+    l = block_l(k)
+    j = block_j(k)
+    return j * (j + 1.0) - l * (l + 1.0) - 0.75
+}
+
+#| Block k of kind q, tridiagonal, kept as row k of dg and of.
+def mesh_block_h(b: RadialMesh, f: Arr, q, k) -> Int {
+    diag, off = hamiltonian(f[0, :], f[1, :], f[2, :], f[3, :], f[4, :], b.hb, q, block_l(k), spin_orbit_factor(k), b.r, b.h)
+    b.dg[k, :] = diag
+    b.of[k, :] = off
+    return round(k)
+}
+
+#| The occupied orbitals of kind q. After pass 1, each from its last vector
+#| by inverse iteration, shifted NEAR below its last energy; then Sturm
+#| counts check that it is still the s-th state of its block and that no
+#| unoccupied state fell below the highest occupied one. In pass 1, or when
+#| a check fails, every bound state by bisection, filled by energy, each
+#| vector from inverse iteration just below its bisected energy. Returns 1
+#| when the occupation was chosen again, 0 when the check passed.
+def mesh_lowest(b: RadialMesh, q, it) -> Int {
+    nr = len(b.r)
+    step warm {
+        refill = it == 1
+        if it > 1 {
+            e_top = -1.0e300
+            for k to NBLOCK {
+                for s to b.occ[q, k] {
+                    o = (q * NBLOCK + k) * S_MAX + s
+                    u = b.uvec[o, :]
+                    b.lam[o] = inverse_iteration(b.dg[k, :], b.of[k, :], b.lam[o] - NEAR, u)
+                    b.uvec[o, :] = u
+                    if count_below(b.dg[k, :], b.of[k, :], b.lam[o] - CHECK_TOL) != s or count_below(b.dg[k, :], b.of[k, :], b.lam[o] + CHECK_TOL) != s + 1 {
+                        refill = true
+                    }
+                    e_top = max(e_top, b.lam[o])
+                }
+            }
+            for k to NBLOCK {
+                if count_below(b.dg[k, :], b.of[k, :], e_top + CHECK_TOL) != b.occ[q, k] {
+                    refill = true
+                }
+            }
+        }
+    }
+    step refill {
+        if refill {
+            be, bb, bs = bound_states(b.dg, b.of)
+            b.occ[q, :] = fill_by_energy(be, bb, b.want[q], KIND_NAMES[q], it)
+            for t to len(be) {
+                k = bb[t]
+                s = bs[t]
+                if s < b.occ[q, k] {
+                    o = (q * NBLOCK + k) * S_MAX + s
+                    u = zeros(nr) + 1.0
+                    b.lam[o] = inverse_iteration(b.dg[k, :], b.of[k, :], be[t] - EIG_TOL, u)
+                    b.uvec[o, :] = u
+                }
+            }
+        }
+    }
+    changed: Int = 0
+    if refill {
+        changed = 1
+    }
+    return changed
+}
+
+#| The densities of kind q's occupied orbitals, added into d_out: rho,
+#| tau = |dR/dr|^2 + l(l + 1)/r^2 R^2 and J = (j(j + 1) - l(l + 1) - 3/4)/r R^2,
+#| each weighted by (2j + 1)/4 pi.
+def mesh_add_densities(b: RadialMesh, q, d_out: Arr) -> Arr {
+    nr = len(b.r)
+    r = b.r
+    h = b.h
+    at_rho = q * nr
+    at_tau = (NKIND + q) * nr
+    at_jso = (2 * NKIND + q) * nr
+    for k to NBLOCK {
+        l = block_l(k)
+        j = block_j(k)
+        sdl = spin_orbit_factor(k)
+        for s to b.occ[q, k] {
+            o = (q * NBLOCK + k) * S_MAX + s
+            R = b.uvec[o, :] / (sqrt(h) * r)
+            dR = grad1(R, h)
+            wt = (2.0 * j + 1.0) / (4.0 * PI)
+            d_out[at_rho:at_rho + nr] = d_out[at_rho:at_rho + nr] + wt * R * R
+            d_out[at_tau:at_tau + nr] = d_out[at_tau:at_tau + nr] + wt * (dR * dR + l * (l + 1.0) / (r * r) * R * R)
+            d_out[at_jso:at_jso + nr] = d_out[at_jso:at_jso + nr] + wt * sdl / r * R * R
+        }
+    }
+    return d_out
+}
+
+#| The total energy of the packed densities d.
+def mesh_energy(b: RadialMesh, d: Arr) -> Num {
+    rho, tau, jso = unpack_densities(d, len(b.r))
+    return energy(b.force, b.hb, rho, tau, jso, b.r, b.h)
+}
+
+#| Linear mixing with the fraction alpha, as one step of lib/scf/mix.
+def linear_step(x_in: Arr, x_out: Arr, hist: MixHistory, alpha) -> MixStep {
+    x, hs, res = linear(x_in, x_out, hist, alpha = alpha)
+    return MixStep { x: x, hist: hs, residual: res }
+}
+
+#| Spherical Skyrme-Hartree-Fock of a closed-shell nucleus, densities mixed
+#| linearly with the fraction `mix` until the energy settles.
+def solve(h, nr, force: Force, z, n, mix, e_tol, max_iter) -> Nucleus {
+    return solve_with(h, nr, force, z, n, fn(x_in, x_out, hist) -> linear_step(x_in, x_out, hist, mix), e_tol, max_iter)
+}
+
+#| Spherical Skyrme-Hartree-Fock of a closed-shell nucleus on the radial
+#| mesh, by lib/scf/loop, with the densities mixed by `mixer`, a function
+#| (x_in, x_out, hist) -> MixStep (lib/scf/mix).
+def solve_with(h, nr, force: Force, z, n, mixer, e_tol, max_iter) -> Nucleus {
+    a_nuc = z + n
+    hb = hb_of(a_nuc)
+    kind_tag = ["n", "p"]
+    nst = NBLOCK * S_MAX
+    step mesh {
+        r = zeros(nr)
+        for i to nr {
+            r[i] = (i + 1) * h
+        }
+    }
+    step start {
+        # a Woods-Saxon profile holding N neutrons and Z protons
+        rho = zeros(NKIND, nr)
+        prof = 1.0 / (1.0 + exp((r - WS_R0 * pow(a_nuc, 1.0 / 3.0)) / WS_DIFFUSE))
+        pn = integrate_r2(prof, r, h)
+        rho[NEUTRON, :] = prof * n / pn
+        rho[PROTON, :] = prof * z / pn
+        d0 = pack_densities(rho, zeros(NKIND, nr), zeros(NKIND, nr))
+        basis = RadialMesh { force: force, hb: hb, h: h, r: r, want: [n, z], uvec: zeros(NKIND * nst, nr) + 1.0, lam: zeros(NKIND * nst), occ: zeros(NKIND, NBLOCK), dg: zeros(NBLOCK, nr), of: zeros(NBLOCK, nr - 1) }
+    }
+    run = scf(basis, d0, mesh_groups, mesh_blocks, mesh_fields, mesh_block_h, mesh_lowest, mesh_add_densities, mesh_energy, mixer, e_tol, round(max_iter), round(MIN_ITER))
+    rho, tau, jso = unpack_densities(run.d, nr)
+    occ = basis.occ
+    lam = basis.lam
+    dg = basis.dg
+    of = basis.of
+    E = run.energy
+    V = zeros(nr)
+    step levels {
+        # the occupied orbitals, each kind lowest first
+        levels = []
+        labels = ""
+        for q to NKIND {
+            ql = []
+            qn = []
+            for b to NBLOCK {
+                for s to occ[q, b] {
+                    ql = append(ql, lam[(q * NBLOCK + b) * S_MAX + s])
+                    qn = append(qn, b * S_MAX + s)
+                }
+            }
+            for t in argsort(ql) {
+                b = qn[t] // S_MAX
+                s = qn[t] - b * S_MAX
+                levels = append(levels, ql[t])
+                labels = labels + ("," if len(labels) > 0 else "") + kind_tag[q] + " " + orbital_label(s + 1, round(block_l(b)), block_j(b))
+            }
+        }
+    }
+    step spectrum {
+        # every bound orbital of the last fields (the ones the last pass
+        # diagonalized), by bisection, with its occupation
+        spectrum = []
+        spectrum_occ = []
+        spectrum_labels = ""
+        for q to NKIND {
+            B, U, W = fields(force, hb, q, rho, tau, jso, r, h)
+            dB = grad1(B, h)
+            if q == PROTON {
+                V = proton_coulomb(rho[PROTON, :], r, h)
+            }
+            for b to NBLOCK {
+                l = block_l(b)
+                j = block_j(b)
+                sdl = j * (j + 1.0) - l * (l + 1.0) - 0.75
+                diag, off = hamiltonian(B, dB, U, W, V, hb, q, l, sdl, r, h)
+                dg[b, :] = diag
+                of[b, :] = off
+            }
+            be, bb, bs = bound_states(dg, of)
+            for t in argsort(be) {
+                b = bb[t]
+                spectrum = append(spectrum, be[t])
+                spectrum_occ = append(spectrum_occ, (2.0 * block_j(b) + 1.0) if bs[t] < occ[q, b] else 0.0)
+                spectrum_labels = spectrum_labels + ("," if len(spectrum_labels) > 0 else "") + kind_tag[q] + " " + orbital_label(bs[t] + 1, round(block_l(b)), block_j(b))
+            }
+        }
+    }
+    step observables {
+        r2p = integrate_r2(rho[PROTON, :] * r * r, r, h) / z
+        r2n = integrate_r2(rho[NEUTRON, :] * r * r, r, h) / n
+    }
+    return Nucleus { z: z, n: n, e_per_a: E / a_nuc, energy: E, r_p: sqrt(r2p), r_n: sqrt(r2n), r_ch: sqrt(r2p + 1.5 * FOLD * FOLD), levels: levels, labels: labels, spectrum: spectrum, spectrum_labels: spectrum_labels, spectrum_occ: spectrum_occ, iterations: run.passes, converged: run.converged, refills: run.refills, r: r, rho: rho, tau: tau, jso: jso }
+}
+
+# ---- tests
+SP_H = 0.1
+SP_BOX = 15.0
+
+test "the element table puts oxygen at 8, calcium at 20, tin at 50 and lead at 82" {
+    assert_near(nucleus_z("16O"), 8, 0.0)
+    assert_near(nucleus_z("ca40"), 20, 0.0)
+    assert_near(nucleus_n("Sn-132"), 82, 0.0)
+    assert_near(nucleus_z("208Pb"), 82, 0.0)
+    assert_near(len(ELEMENTS), 118, 0.0)
+    assert_true(ELEMENTS[117] == "Og")
+}
+
+test "the blocks run 1/2+, 3/2-, 1/2-, 5/2+, 3/2+, ... up to l = 7" {
+    assert_near(block_l(0), 0, 0.0)
+    assert_near(block_j(0), 0.5, 0.0)
+    assert_near(block_j(1), 1.5, 0.0)
+    assert_near(block_j(2), 0.5, 0.0)
+    assert_near(block_l(NBLOCK - 1), L_MAX, 0.0)
+    assert_true(orbital_label(1, 6, 6.5) == "1i13/2")
+}
+
+test "oxygen-16 with SLy5 gives lib/skyrme/skyrme's bits" {
+    sp_old = skyrme_o16(SP_H, round(SP_BOX / SP_H))
+    sp_new = solve(SP_H, round(SP_BOX / SP_H), SLY5, 8, 8, 0.5, 1.0e-9, 300)
+    assert_near(sp_new.energy, sp_old.energy, 0.0)
+    assert_near(sp_new.r_ch, sp_old.r_ch, 0.0)
+    assert_near(max(abs(sp_new.levels - sp_old.levels)), 0.0, 0.0)
+    assert_near(sp_new.iterations, sp_old.iterations, 0.0)
+    assert_true(sp_new.labels == "n 1s1/2,n 1p3/2,n 1p1/2,p 1s1/2,p 1p3/2,p 1p1/2")
+}
+
+#: SP_TIGHT  a tolerance on the energy far below where the three mixers
+#:     stop differing, MeV
+SP_TIGHT = 1.0e-13
+#: SP_AGREE_E  how closely the mixers' converged E/A agree, MeV; the
+#:     largest difference seen is 2e-14 (calcium-40, oxygen-16)
+SP_AGREE_E = 1.0e-12
+#: SP_AGREE_RHO  how closely their converged densities agree, fm^-3; the
+#:     largest difference seen is 5e-13
+SP_AGREE_RHO = 1.0e-11
+#: SP_ITER  a cap on passes no mixer reaches here
+SP_ITER = 1000
+
+#| Mixing steps by each method of mix_densities, for the test below.
+def sp_linear(x_in: Arr, x_out: Arr, hist: MixHistory) -> MixStep {
+    x, hs, res = mix_densities(x_in, x_out, hist) using linear
+    return MixStep { x: x, hist: hs, residual: res }
+}
+def sp_pulay(x_in: Arr, x_out: Arr, hist: MixHistory) -> MixStep {
+    x, hs, res = mix_densities(x_in, x_out, hist) using pulay
+    return MixStep { x: x, hist: hs, residual: res }
+}
+def sp_broyden(x_in: Arr, x_out: Arr, hist: MixHistory) -> MixStep {
+    x, hs, res = mix_densities(x_in, x_out, hist) using broyden
+    return MixStep { x: x, hist: hs, residual: res }
+}
+
+# mix_densities has no per-call agreement on the densities (two mixers
+# make different next densities on purpose), so its methods are compared
+# here, where they should agree: at the converged ground state
+test "linear, Pulay and Broyden mixing reach the same oxygen-16, Pulay and Broyden in fewer passes" {
+    nr: Int = round(SP_BOX / SP_H)
+    by_lin = solve_with(SP_H, nr, SLY4, 8, 8, sp_linear, SP_TIGHT, SP_ITER)
+    by_pul = solve_with(SP_H, nr, SLY4, 8, 8, sp_pulay, SP_TIGHT, SP_ITER)
+    by_bro = solve_with(SP_H, nr, SLY4, 8, 8, sp_broyden, SP_TIGHT, SP_ITER)
+    assert_true(by_lin.converged and by_pul.converged and by_bro.converged)
+    assert_near(by_pul.e_per_a, by_lin.e_per_a, SP_AGREE_E)
+    assert_near(by_bro.e_per_a, by_lin.e_per_a, SP_AGREE_E)
+    assert_near(max(abs(by_pul.rho - by_lin.rho)), 0.0, SP_AGREE_RHO)
+    assert_near(max(abs(by_bro.rho - by_lin.rho)), 0.0, SP_AGREE_RHO)
+    assert_true(by_pul.labels == by_lin.labels and by_bro.labels == by_lin.labels)
+    assert_true(by_pul.iterations < by_lin.iterations and by_bro.iterations < by_lin.iterations)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

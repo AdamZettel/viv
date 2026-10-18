@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Skein — live editor</title>
+<!-- CodeMirror 5 (CDN) for the editor; the compiler/interpreter is local skein.wasm. -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/mode/simple.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+<style>
+  :root { --mono: ui-monospace, "SF Mono", Menlo, monospace; --bg: #16161e; --fg: #c0caf5; --dim: #565f89; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, system-ui, sans-serif; background: #1a1b26; color: var(--fg); height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid #2a2e3e; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; color: #7aa2f7; }
+  header .dim { color: var(--dim); font-size: 12.5px; }
+  .spacer { flex: 1; }
+  select, button { font-size: 13px; padding: 6px 10px; border-radius: 6px; border: 1px solid #2a3050; background: #1f2335; color: var(--fg); cursor: pointer; }
+  button.primary { background: #7aa2f7; color: #1a1b26; border-color: #7aa2f7; font-weight: 600; }
+  button:hover { filter: brightness(1.12); }
+  main { flex: 1; display: flex; min-height: 0; }
+  .pane { display: flex; flex-direction: column; min-width: 0; }
+  .left  { flex: 1; border-right: 1px solid #2a2e3e; }
+  .right { flex: 1; }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); padding: 8px 14px; border-bottom: 1px solid #2a2e3e; }
+  #editor { flex: 1; overflow: auto; }
+  #editor textarea { width: 100%; height: 100%; background: #1a1b26; color: var(--fg); border: 0; font: 13px/1.5 var(--mono); padding: 8px; }
+  #out { flex: 1; margin: 0; padding: 12px 14px; overflow: auto; white-space: pre-wrap; font: 13px/1.5 var(--mono); background: var(--bg); color: var(--fg); }
+
+  .CodeMirror { height: 100% !important; font-family: var(--mono); font-size: 13px; line-height: 1.5; }
+  .cm-s-skein-night.CodeMirror             { background: #1a1b26; color: var(--fg); }
+  .cm-s-skein-night .CodeMirror-gutters    { background: #1a1b26; border-right: 1px solid #2a2e3e; }
+  .cm-s-skein-night .CodeMirror-linenumber { color: #3b4261; }
+  .cm-s-skein-night .CodeMirror-cursor     { border-left-color: var(--fg); }
+  .cm-s-skein-night .CodeMirror-activeline-background { background: rgba(255,255,255,0.03); }
+  .cm-s-skein-night .CodeMirror-selected   { background: #2a3050 !important; }
+  .cm-keyword  { color: #bb9af7; } .cm-atom { color: #f7768e; } .cm-builtin { color: #7dcfff; }
+  .cm-string   { color: #9ece6a; } .cm-number { color: #ff9e64; } .cm-comment { color: var(--dim); font-style: italic; }
+  .cm-variable { color: var(--fg); } .cm-bracket { color: #89ddff; }
+  .cm-s-skein-night .CodeMirror-matchingbracket { color: #ff9e64 !important; text-decoration: underline; }
+
+  /* ── Tutor (type-along) mode ── */
+  #tutor { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  body.tutor #editor { display: none; }
+  body.tutor #tutor  { display: flex; }
+  #tutor-score { margin: 0; padding: 10px 14px; overflow: auto; flex: 1; font: 12.5px/1.5 var(--mono); }
+  #tutor-score .sl { white-space: pre; color: #2d3148; }
+  #tutor-score .sl.done    { color: #9ece6a; }
+  #tutor-score .sl.current { color: #ff9e64; background: rgba(255,158,100,0.08); }
+  #tutor-box { border-top: 1px solid #2a2e3e; padding: 12px 14px; }
+  #tutor-box .hdr { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); margin-bottom: 4px; }
+  #tutor-target { margin: 0 0 10px; font: 14px/1.5 var(--mono); color: #7dcfff; white-space: pre-wrap; }
+  #tutor-typed  { margin: 0; font: 14px/1.5 var(--mono); min-height: 1.5em; white-space: pre-wrap; }
+  #tutor-typed.wrong { animation: shake 0.18s; }
+  @keyframes shake { 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+  .tc-ok { color: #9ece6a; } .tc-err { color: #f7768e; background: rgba(247,118,142,0.18); }
+  .tc-cur { display: inline-block; width: 7px; height: 1.1em; background: var(--fg); vertical-align: text-bottom; animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  #tutor-input { position: absolute; left: -9999px; }
+  #tutor-hint { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  /* walk-to-notes: target hidden until you pay the time cost to peek */
+  #tutor-bar { height: 3px; background: #2a2e3e; border-radius: 2px; margin: 0 0 8px; visibility: hidden; }
+  body.walking #tutor-bar { visibility: visible; }
+  #tutor-fill { height: 100%; width: 0; background: #7aa2f7; border-radius: 2px; }
+  #tutor-target.masked { color: var(--dim); font-style: italic; }
+  #tutor-peek { display: none; } body.walk #tutor-peek { display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Skein</h1>
+  <span class="dim">a Scheme — interpreter <i>and</i> knotkit→C compiler — running as WebAssembly in your browser</span>
+  <span class="spacer"></span>
+  <select id="examples"></select>
+  <button id="run" class="primary" disabled>Run&nbsp;(⌘↵)</button>
+  <button id="showc" disabled>Show&nbsp;C</button>
+  <button id="tutor-btn" disabled>Tutor</button>
+</header>
+<main>
+  <section class="pane left">
+    <div class="label">scheme</div>
+    <div id="editor"></div>
+    <div id="tutor">
+      <div class="label">tutor &nbsp;<span id="tutor-prog" style="color:#7aa2f7"></span>
+        &nbsp;<label style="text-transform:none;color:var(--dim);cursor:pointer"><input type="checkbox" id="tutor-walk"> walk mode (recall from memory)</label>
+        <span id="tutor-peeks" style="color:var(--dim)"></span>
+        <button id="tutor-exit" style="float:right;padding:2px 8px">exit</button></div>
+      <pre id="tutor-score"></pre>
+      <div id="tutor-box">
+        <div class="hdr">type this line<span id="tutor-count" style="color:var(--dim);text-transform:none;letter-spacing:0"></span></div>
+        <div id="tutor-bar"><div id="tutor-fill"></div></div>
+        <pre id="tutor-target"></pre>
+        <div class="hdr">your typing</div>
+        <pre id="tutor-typed"><span class="tc-cur"></span></pre>
+        <input id="tutor-input" type="text" autocomplete="off" spellcheck="false" autocapitalize="off">
+        <div id="tutor-hint">click here and type · Enter advances · blank/comment lines auto-skip · <button id="tutor-peek" style="padding:2px 8px">walk to notes (Tab)</button></div>
+      </div>
+    </div>
+  </section>
+  <section class="pane right">
+    <div class="label" id="outlabel">output</div>
+    <pre id="out">loading skein.wasm…</pre>
+  </section>
+</main>
+
+<script>
+const EXAMPLES = [
+  { name: 'factorial · map · closures', src:
+`; Recursion, higher-order map, and a closure capturing n.
+(define (fact n)
+  (if (= n 0) 1 (* n (fact (- n 1)))))
+
+(define (range a b)
+  (if (= a b) (quote ()) (cons a (range (+ a 1) b))))
+
+(define (map f xs)
+  (if (null? xs) (quote ()) (cons (f (car xs)) (map f (cdr xs)))))
+
+(define (adder n) (lambda (x) (+ x n)))
+
+(display (fact 10))                      (newline)
+(display (map (adder 100) (range 0 5)))  (newline)
+(display (map fact (range 1 6)))` },
+
+  { name: 'fibonacci', src:
+`(define (fib n)
+  (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+
+(display (fib 20))` },
+
+  { name: 'list utilities', src:
+`(define (length xs)
+  (if (null? xs) 0 (+ 1 (length (cdr xs)))))
+
+(define (append a b)
+  (if (null? a) b (cons (car a) (append (cdr a) b))))
+
+(define (rev-acc xs acc)
+  (if (null? xs) acc (rev-acc (cdr xs) (cons (car xs) acc))))
+(define (reverse xs) (rev-acc xs (quote ())))
+
+(display (length (quote (a b c d))))         (newline)
+(display (append (quote (1 2)) (quote (3 4)))) (newline)
+(display (reverse (quote (1 2 3 4 5))))` },
+
+  { name: 'fold (higher-order)', src:
+`(define (fold f init xs)
+  (if (null? xs) init (fold f (f init (car xs)) (cdr xs))))
+
+(display (fold + 0 (list 1 2 3 4 5)))     (newline)   ; sum
+(display (fold * 1 (list 1 2 3 4 5)))` },
+
+  { name: 'mutual recursion', src:
+`(define (even? n) (if (= n 0) #t (odd? (- n 1))))
+(define (odd?  n) (if (= n 0) #f (even? (- n 1))))
+
+(display (even? 10)) (newline)
+(display (odd? 7))` },
+
+  { name: 'symbols · quote · member', src:
+`(define (member x xs)
+  (cond ((null? xs) #f)
+        ((eq? x (car xs)) xs)
+        (else (member x (cdr xs)))))
+
+(display (member (quote c) (quote (a b c d e))))  (newline)
+(display (member (quote z) (quote (a b c))))` },
+
+  { name: 'cond / let*', src:
+`(define (classify n)
+  (cond ((< n 0) (quote negative))
+        ((= n 0) (quote zero))
+        (else    (quote positive))))
+
+(display (classify -5)) (newline)
+(display (classify 7))  (newline)
+(display (let* ((a 3) (b (+ a 1))) (* a b)))` },
+
+  { name: 'tail recursion (Show C → trampoline)', src:
+`; The interpreter runs this directly. "Show C" reveals the compiler's
+; trampoline; the COMPILED program does a million in constant stack.
+(define (sum-to n acc)
+  (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
+
+(display (sum-to 500 0))` },
+];
+
+// CodeMirror scheme mode.
+if (window.CodeMirror) {
+  const D = "(?![^\\s()\\[\\];\"])";
+  CodeMirror.defineSimpleMode('skein', {
+    start: [
+      { regex: /;.*/, token: 'comment' },
+      { regex: /"(?:[^"\\]|\\.)*"/, token: 'string' },
+      { regex: /#[tf]\b/, token: 'atom' },
+      { regex: /-?\d+\.\d+(?:[eE][+-]?\d+)?/, token: 'number' },
+      { regex: /-?\d+/, token: 'number' },
+      { regex: new RegExp('(?:define|lambda|let\\*|let|if|cond|begin|quote|else|and|or)' + D), token: 'keyword' },
+      { regex: new RegExp('(?:cons|car|cdr|list|display|newline|null\\?|pair\\?|eq\\?|equal\\?|not|\\+|\\-|\\*|=|<|>)' + D), token: 'builtin' },
+      { regex: /[()\[\]]/, token: 'bracket' },
+      { regex: /[^\s()\[\];"]+/, token: 'variable' },
+    ],
+    meta: { lineComment: ';' },
+  });
+}
+
+const out = document.getElementById('out');
+const outlabel = document.getElementById('outlabel');
+const exSel = document.getElementById('examples');
+const editorHost = document.getElementById('editor');
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+let getSrc, setSrc;
+if (window.CodeMirror) {
+  const cm = CodeMirror(editorHost, {
+    value: EXAMPLES[0].src, mode: 'skein', theme: 'skein-night',
+    lineNumbers: true, matchBrackets: true, viewportMargin: Infinity,
+    extraKeys: { 'Cmd-Enter': () => run(), 'Ctrl-Enter': () => run() },
+  });
+  getSrc = () => cm.getValue(); setSrc = s => cm.setValue(s);
+} else {
+  const ta = document.createElement('textarea'); ta.value = EXAMPLES[0].src; editorHost.appendChild(ta);
+  getSrc = () => ta.value; setSrc = s => { ta.value = s; };
+}
+for (const ex of EXAMPLES) { const o = document.createElement('option'); o.textContent = ex.name; exSel.appendChild(o); }
+exSel.onchange = () => { const ex = EXAMPLES.find(e => e.name === exSel.value); if (ex) setSrc(ex.src); };
+
+// ── wasm ──
+let ex = null;
+function loaded(exports) {
+  ex = exports; out.textContent = 'ready — edit and Run (⌘↵), or try Tutor.';
+  for (const id of ['run','showc','tutor-btn']) document.getElementById(id).disabled = false;
+}
+WebAssembly.instantiateStreaming(fetch('skein.wasm'), {})
+  .then(r => loaded(r.instance.exports))
+  .catch(async () => { const b = await (await fetch('skein.wasm')).arrayBuffer(); loaded((await WebAssembly.instantiate(b, {})).instance.exports); });
+
+function call(fn, src) {
+  const enc = new TextEncoder().encode(src);
+  const ptr = ex.skein_alloc(enc.length);
+  new Uint8Array(ex.memory.buffer, ptr, enc.length).set(enc);
+  let packed;
+  try { packed = fn(ptr, enc.length); }
+  catch (e) { return '(runtime trap — likely deep non-tail recursion; the compiler has TCO, the interpreter does not)\n' + e; }
+  return new TextDecoder().decode(new Uint8Array(ex.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)));
+}
+function run()   { outlabel.textContent = 'output';                         out.textContent = call(ex.skein_run, getSrc()); }
+function showC() { outlabel.textContent = 'generated C (knotkit backend)';  out.textContent = call(ex.skein_compile, getSrc()); }
+document.getElementById('run').onclick = run;
+document.getElementById('showc').onclick = showC;
+
+// ── Tutor: type the program line by line, with an optional walk-to-notes mode ──
+const tScore = document.getElementById('tutor-score');
+const tTarget = document.getElementById('tutor-target');
+const tTyped = document.getElementById('tutor-typed');
+const tInput = document.getElementById('tutor-input');
+const tProg = document.getElementById('tutor-prog');
+const tCount = document.getElementById('tutor-count');
+const tFill = document.getElementById('tutor-fill');
+const tPeeks = document.getElementById('tutor-peeks');
+let lines = [], idx = 0;
+// walk mode: target hidden, type from memory; a timed "walk to notes" to peek.
+let walk = false, walkState = 'typing', walkTimers = [], peeks = 0;
+const WALK_MS = 1500, LOOK_S = 5;
+const typeable = l => { const t = l.trim(); return t !== '' && !t.startsWith(';'); };
+const nextTypeable = from => { let i = from; while (i < lines.length && !typeable(lines[i])) i++; return i; };
+
+function enterTutor() {
+  document.body.classList.add('tutor');
+  walk = document.getElementById('tutor-walk').checked;
+  document.body.classList.toggle('walk', walk);
+  peeks = 0; updatePeeks();
+  lines = getSrc().split('\n');
+  idx = nextTypeable(0);
+  startLine(); tInput.focus();
+}
+function exitTutor() { cancelWalk(); document.body.classList.remove('tutor'); }
+function updatePeeks() { tPeeks.textContent = walk ? `· peeks: ${peeks}` : ''; }
+
+function startLine() {
+  cancelWalk();
+  if (idx >= lines.length) { complete(); return; }
+  tInput.value = ''; renderScore(); paintTarget(); renderTyped();
+  const total = lines.filter(typeable).length;
+  const done = lines.slice(0, idx).filter(typeable).length;
+  tProg.textContent = `line ${done + 1} / ${total}`;
+}
+function renderScore() {
+  tScore.innerHTML = lines.map((l, i) => {
+    const cls = i < idx ? (typeable(l) ? 'done' : '') : (i === idx ? 'current' : '');
+    // In walk mode, mask not-yet-done lines so the whole program isn't a cheat sheet.
+    const text = (walk && i >= idx && typeable(l)) ? l.replace(/\S/g, '·') : (l || ' ');
+    return `<div class="sl ${cls}">${esc(text)}</div>`;
+  }).join('');
+  const cur = tScore.querySelector('.current'); if (cur) cur.scrollIntoView({ block: 'center' });
+}
+function paintTarget() {
+  const visible = !walk || walkState === 'looking';
+  if (visible) { tTarget.classList.remove('masked'); tTarget.textContent = (lines[idx] || '').trim(); }
+  else { tTarget.classList.add('masked'); tTarget.textContent = '(type from memory — press Tab to walk to your notes)'; }
+}
+function renderTyped() {
+  const target = (lines[idx] || '').trim(), typed = tInput.value;
+  const colorize = !walk || walkState === 'looking';
+  let h = '';
+  if (colorize) for (let i = 0; i < typed.length; i++) h += `<span class="${typed[i] === target[i] ? 'tc-ok' : 'tc-err'}">${esc(typed[i])}</span>`;
+  else h = esc(typed);
+  tTyped.innerHTML = h + '<span class="tc-cur"></span>';
+}
+tInput.oninput = renderTyped;
+tInput.onkeydown = e => {
+  // Tab peeks (walk to notes). preventDefault keeps focus on the practice field;
+  // Tab is never part of Scheme source, so it can't clash with typing code.
+  if (e.key === 'Tab') { e.preventDefault(); startWalk(); return; }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (walk && walkState !== 'typing') return;
+    if (tInput.value.trim() === (lines[idx] || '').trim()) { idx = nextTypeable(idx + 1); startLine(); }
+    else { tTyped.classList.add('wrong'); setTimeout(() => tTyped.classList.remove('wrong'), 200); }
+  }
+};
+
+// ── walk-to-notes state machine ──
+function cancelWalk() {
+  walkTimers.forEach(clearTimeout); walkTimers = [];
+  walkState = 'typing'; document.body.classList.remove('walking', 'looking');
+  tInput.disabled = false; tCount.textContent = '';
+  tFill.style.transition = 'none'; tFill.style.width = '0%';
+}
+function startWalk() {
+  if (!walk || walkState !== 'typing' || idx >= lines.length) return;
+  peeks++; updatePeeks();
+  walkState = 'walking_there'; document.body.classList.add('walking'); tInput.disabled = true;
+  tCount.textContent = ' — → walking to notes…';
+  tFill.style.transition = 'none'; tFill.style.width = '0%'; void tFill.offsetWidth;
+  tFill.style.transition = `width ${WALK_MS}ms linear`; tFill.style.width = '100%';
+  walkTimers.push(setTimeout(beginLooking, WALK_MS));
+}
+function beginLooking() {
+  walkState = 'looking'; document.body.classList.remove('walking'); document.body.classList.add('looking');
+  paintTarget(); renderTyped();
+  let s = LOOK_S; tCount.textContent = ` — looking (${s})`;
+  const tick = () => { s--; if (s > 0) { tCount.textContent = ` — looking (${s})`; walkTimers.push(setTimeout(tick, 1000)); } else walkBack(); };
+  walkTimers.push(setTimeout(tick, 1000));
+}
+function walkBack() {
+  walkState = 'walking_back'; document.body.classList.remove('looking'); document.body.classList.add('walking');
+  paintTarget(); renderTyped();
+  tCount.textContent = ' — ← walking back…';
+  tFill.style.transition = 'none'; tFill.style.width = '100%'; void tFill.offsetWidth;
+  tFill.style.transition = `width ${WALK_MS}ms linear`; tFill.style.width = '0%';
+  walkTimers.push(setTimeout(() => {
+    walkState = 'typing'; document.body.classList.remove('walking'); tInput.disabled = false;
+    tCount.textContent = ''; paintTarget(); renderTyped(); tInput.focus();
+  }, WALK_MS));
+}
+
+function complete() {
+  exitTutor();
+  outlabel.textContent = 'output ✓ lesson complete';
+  out.textContent = call(ex.skein_run, lines.join('\n'));
+}
+document.getElementById('tutor-btn').onclick = enterTutor;
+document.getElementById('tutor-exit').onclick = exitTutor;
+document.getElementById('tutor-peek').onclick = startWalk;
+document.getElementById('tutor').onclick = e => { if (e.target.id !== 'tutor-peek') tInput.focus(); };
+</script>
+</body>
+</html>

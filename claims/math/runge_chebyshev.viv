@@ -1,0 +1,124 @@
+###
+title: Chebyshev nodes tame Runge's function
+line: At degree 20 equally spaced nodes err by 60 and Chebyshev nodes by 0.018; at degree 40 Chebyshev is below $10^{-3}$.
+claim: Interpolating Runge's function $1/(1 + 25x^2)$ on $[-1, 1]$ by a polynomial of degree 20, equally spaced nodes give a largest error above 50 near the ends, while Chebyshev nodes give a largest error below 0.02. From degree 8 to 40 (in steps of 4) the equispaced error grows at every step while the Chebyshev error falls at every step, geometrically, to below $10^{-3}$ at degree 40.
+topic: math
+section: approximation
+reference: Trefethen, Approximation Theory and Approximation Practice (2013), chapters 11 and 13: equispaced interpolants of this function diverge, Chebyshev interpolants converge geometrically at the rate set by its poles at $x = \pm 0.2i$.
+scope: Errors are the largest over 2,001 equally spaced test points; the interpolants are evaluated by the barycentric formula, which is forward stable at Chebyshev nodes; at equispaced nodes its rounding error grows with the Lebesgue constant (Higham 2004), and up to degree 40 it stays far below the interpolation error measured.
+lane: ai
+by: claude
+cost: fast
+###
+
+#: pi
+PI_K = 4.0 * atan(1.0)
+N_TEST: Int = 2001
+
+def runge(x: Num) -> Num {
+    return 1.0 / (1.0 + 25.0 * x * x)
+}
+
+#| The largest error over the test points of the barycentric interpolant through nodes xs.
+def max_error(xs: Arr) -> Num {
+    n: Int = len(xs)
+    w = zeros(n)
+    for j to n {
+        p = 1.0
+        for k to n {
+            if k != j {
+                p = p * (xs[j] - xs[k])
+            }
+        }
+        w[j] = 1.0 / p
+    }
+    worst = 0.0
+    for t to N_TEST {
+        x = -1.0 + 2.0 * t / (N_TEST - 1.0)
+        num = 0.0
+        den = 0.0
+        hit = -1
+        for j to n {
+            if x == xs[j] {
+                hit = j
+            }
+        }
+        val = 0.0
+        if hit >= 0 {
+            val = runge(xs[hit])
+        }
+        else {
+            for j to n {
+                c = w[j] / (x - xs[j])
+                num = num + c * runge(xs[j])
+                den = den + c
+            }
+            val = num / den
+        }
+        worst = max(worst, abs(val - runge(x)))
+    }
+    return worst
+}
+
+def equispaced(deg: Int) -> Arr {
+    return linspace(-1.0, 1.0, deg + 1)
+}
+
+def chebyshev(deg: Int) -> Arr {
+    xs = zeros(deg + 1)
+    for j to deg + 1 {
+        xs[j] = cos(PI_K * j / deg)
+    }
+    return xs
+}
+
+#: degrees 4, 8, ..., 40
+N_DEG: Int = 10
+err_equi = zeros(N_DEG)
+err_cheb = zeros(N_DEG)
+for k to N_DEG {
+    err_equi[k] = max_error(equispaced(4 * (k + 1)))
+    err_cheb[k] = max_error(chebyshev(4 * (k + 1)))
+}
+show err_equi
+show err_cheb
+#: the fitted rate per degree of the Chebyshev error, log10 per degree
+cheb_rate = (log(err_cheb[N_DEG - 1]) - log(err_cheb[1])) / (log(10.0) * (40.0 - 8.0))
+show cheb_rate
+err_equi_20 = max_error(equispaced(20))
+err_cheb_20 = max_error(chebyshev(20))
+err_cheb_40 = max_error(chebyshev(40))
+show err_equi_20
+show err_cheb_20
+show err_cheb_40
+
+#: the figure: the largest error against the degree for both node sets
+fg_deg = zeros(N_DEG)
+for fg_k to N_DEG {
+    fg_deg[fg_k] = 4.0 * (fg_k + 1)
+}
+figure("Interpolating 1 / (1 + 25 x^2) on [-1, 1]", "degree", "largest error")
+yscale("log")
+plot(fg_deg, err_equi, "equally spaced nodes")
+style("equally spaced nodes", "s2 square")
+plot(fg_deg, err_cheb, "Chebyshev nodes")
+style("Chebyshev nodes", "s1 circle")
+
+test "equally spaced nodes at degree 20: error above 50" {
+    assert_gt(err_equi_20, 50.0)
+}
+test "Chebyshev nodes at degree 20: error below 0.02" {
+    assert_lt(err_cheb_20, 0.02)
+}
+test "from degree 8 on, the equispaced error grows with every step of 4 in degree, and the Chebyshev error falls" {
+    for k from 1 to N_DEG - 1 {
+        assert_gt(err_equi[k + 1], err_equi[k])
+        assert_lt(err_cheb[k + 1], err_cheb[k])
+    }
+}
+test "Chebyshev nodes at degree 40: error below 1e-3" {
+    assert_lt(err_cheb_40, 1.0e-3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

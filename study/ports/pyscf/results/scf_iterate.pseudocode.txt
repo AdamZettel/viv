@@ -1,0 +1,56 @@
+scf_iterate(setup, D0)  —  30 statements: 0 a phrase, 0 with a phrase in them, 30 code
+  The loop: iterate from the densities `D0` (`[1, n, n]` for RHF, `[2, n, n]`
+  otherwise) until the energy and the commutator settle, or `max_iter`
+  iterations have run.
+
+  n ← len(setup.h)                                                              [code]
+  nd ← len(D0)                                                                  [code]
+  opts ← scf_opts(setup)                                                        [code]
+  1. build the orthonormal basis X from S, its m kept columns
+    X ← orth_of(setup.s, opts)                                                  [code]
+    X ← X[:, 0:orth_rank(X)]                                                    [code]
+  2. start the DIIS history and the loop's counters from the starting
+    densities
+    diis ← accel_new(scf_nmatrix(setup, nd), shape(X)[1], opts)                 [code]
+    D ← D0                                                                      [code]
+    JK ← zeros(2 * nd, n, n)                                                    [code]
+    F ← zeros(nd, n, n)                                                         [code]
+    e ← 0.0                                                                     [code]
+    eprev ← 0.0                                                                 [code]
+    conv ← 0                                                                    [code]
+    it ← 0                                                                      [code]
+  for it from 1 to setup.options.max_iter + 1                                   [code]
+  repeat for at most max_iter iterations, leaving once the energy changed less
+    than e_tol and the commutator is below grad_tol:
+    for it                                                                      [code]
+    3. build J and K from the current densities
+      JK ← jk_of(setup.eri, D, opts)                                            [code]
+    4. form the Fock matrices
+      F ← den_fock(setup.h, JK, nd)                                             [code]
+    5. compute the energy of the current densities
+      e ← den_energy(setup.h, F, D, nd, setup.enuc)                             [code]
+    6. move F and D into the orthonormal basis and measure how far they are
+      from commuting
+      comm ← scf_commutator(setup, X, F, D, opts)                               [code]
+    if it > 1 and abs(e - eprev) < setup.options.e_tol and comm.norm <
+      setup.options.grad_tol:
+      conv ← 1                                                                  [code]
+      break                                                                     [code]
+    eprev ← e                                                                   [code]
+    7. store the matrix and its error, and mix the stored ones by DIIS; in the
+      first diis_start iterations, pass the new matrix on unmixed
+      if it > setup.options.diis_start:
+        accel_push(diis, comm.matrix, comm.error)                               [code]
+        Fnext ← accel_extrapolate(diis, opts)                                   [code]
+      otherwise:
+        Fnext ← comm.matrix                                                     [code]
+    if a level shift is set:
+      8. raise the empty orbitals by the shift
+        Fnext ← scf_level_shift(setup, Fnext, comm, setup.options.level_shift)  [code]
+    9. diagonalize each matrix
+      eigs ← scf_diagonalize(Fnext, opts)                                       [code]
+    10. fill the lowest orbitals to make the next densities
+      D ← scf_occupy(setup, X, eigs, comm)                                      [code]
+  11. the result record: energy, orbitals, densities, the convergence record
+    r ← scf_result(setup, X, D, F, JK, e, conv, it, opts)                       [code]
+  return r                                                                      [code]

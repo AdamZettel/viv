@@ -1,0 +1,172 @@
+# The bottom of the lock ladder: water in STO-3G and 6-31G, from the basis
+# packs to the energy, with every stage swept.
+#
+# The integrals come from lib/hf/integrals, where every member of each
+# registry runs and must agree: three for S and T, two for V, and here all
+# four ERI members (MD screened, MD full, HGP, Rys). The consensus is then
+# held to PySCF 2.5.0's full integral sets (lib/hfref/water_sto3g,
+# water_631g). The SCF runs on the computed integrals, not the stored ones,
+# and its energy is held to PySCF's within 1e-9, at each registry member of
+# the guess, accelerator, orthogonalizer, eigensolver and J/K stages.
+#
+#     tools/both-engines.sh scf lock_water
+from hf.hf import (
+    hf_blob, hf_energy, hf_eri, hf_gap, hf_hcore, hf_lock_assert, hf_lock_report, hf_overlap,
+    hf_scf, hf_setup_of, hf_step,
+)
+from hf.molecule import mol_enuc, mol_nalpha, Molecule, molecule_packs
+from hf.scf_loop import scf_densities, scf_opts, scf_setup_with, ScfSetup
+from hf.opts import scf_checked, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.eigen import eig_methods
+from hf.orthogonalize import orth_methods
+from hf.guess import GS_IMPORT
+from hf.jk import jk_methods
+from hf.jk_direct import INT_JK_DIRECT
+from hf.accelerate import accel_methods
+from hf.integrals import int_contract, int_eri, int_jk
+from hf.sweep import sw_rep_new, SW_REP_NSTRAT, SW_REP_WORST
+from hfref.water_sto3g import (
+    watersto3g_atoms, WATERSTO3G_E_NUC, WATERSTO3G_E_RHF, WATERSTO3G_E_UHF,
+    watersto3g_eri8_cart, WATERSTO3G_ERI8_CART_LEN, watersto3g_prims, watersto3g_rhf_d,
+    watersto3g_s_unit, watersto3g_shells, watersto3g_t_unit, watersto3g_v_unit,
+)
+from hfref.water_631g import (
+    water631g_atoms, water631g_cation_rohf_da, water631g_cation_rohf_db,
+    WATER631G_E_CATION_ROHF, WATER631G_E_CATION_UHF, WATER631G_E_RHF, WATER631G_E_SPINM2_ROHF,
+    WATER631G_E_SPINM2_UHF, water631g_eri8_cart, WATER631G_ERI8_CART_LEN, water631g_prims,
+    water631g_rhf_d, water631g_s_unit, water631g_shells, WATER631G_SPINM2_UHF_S2,
+    water631g_t_unit, water631g_v_unit,
+)
+from hfref.h_sto3g import h_sto3g_atoms, H_STO3G_E_UHF, h_sto3g_prims, h_sto3g_shells
+from hfref.he import he_sto3g_atoms, HE_STO3G_E_RHF, he_sto3g_prims, he_sto3g_shells
+
+#| The energy gap to `eref` of the SCF of `p`, which must converge.
+def lkw_gap(p: ScfSetup, eref) {
+    r = hf_scf(p)
+    assert_near(r.converged, 1.0, 0.0)
+    return abs(r.energy - eref)
+}
+
+#| The setup `p` with options `o`.
+def lkw_with(p: ScfSetup, o: ScfOptions) -> ScfSetup {
+    return scf_setup_with(p, o)
+}
+
+test "water STO-3G: all five ERI members agree, S T V and the ERIs are PySCF's, RHF -74.9630631297292" {
+    lkw_m = molecule_packs(watersto3g_atoms(), watersto3g_shells(), watersto3g_prims())
+    lkw_rep = sw_rep_new()
+    lkw_G = int_eri(lkw_m.atoms, lkw_m.shells, lkw_m.prims, 0, lkw_rep)
+    assert_near(lkw_rep[SW_REP_NSTRAT], 5, 0.0)
+    assert_lt(lkw_rep[SW_REP_WORST], 1.0e-13)
+    assert_lt(hf_gap(lkw_G, watersto3g_eri8_cart(), WATERSTO3G_ERI8_CART_LEN), 1.0e-12)
+    lkw_cn = int_contract(lkw_m.atoms, lkw_m.shells, lkw_m.prims, lkw_rep)
+    assert_near(lkw_rep[SW_REP_NSTRAT], 3, 0.0)
+    assert_near(mol_enuc(lkw_m), WATERSTO3G_E_NUC, 1.0e-13)
+    lkw_o = scf_checked()
+    lkw_S = hf_overlap(lkw_m, lkw_o)
+    lkw_H = hf_hcore(lkw_m, lkw_o)
+    assert_lt(hf_gap(lkw_S, watersto3g_s_unit(), 49), 1.0e-12)
+    assert_lt(hf_gap(lkw_H, watersto3g_t_unit() + watersto3g_v_unit(), 49), 1.0e-12)
+    lkw_p = hf_setup_of(lkw_m, lkw_H, lkw_S, lkw_G, lkw_o)
+    hf_lock_assert(hf_lock_report(lkw_p, WATERSTO3G_E_RHF), lkw_p)
+    # PySCF's density has PySCF's energy on these integrals
+    lkw_half = watersto3g_rhf_d() * 0.5
+    lkw_f = hf_step(lkw_p, lkw_half, lkw_half)
+    assert_lt(abs(lkw_f.energy - WATERSTO3G_E_RHF), 1.0e-10)
+    lkw_u = lkw_with(lkw_p, ScfOptions { method: SCF_UHF, ..lkw_o })
+    hf_lock_assert(hf_lock_report(lkw_u, WATERSTO3G_E_UHF), lkw_u)
+}
+
+test "water 6-31G: every member of every SCF registry lands on PySCF's -75.98394849810573" {
+    lkw_m = molecule_packs(water631g_atoms(), water631g_shells(), water631g_prims())
+    lkw_rep = sw_rep_new()
+    lkw_G = int_eri(lkw_m.atoms, lkw_m.shells, lkw_m.prims, 0, lkw_rep)
+    assert_near(lkw_rep[SW_REP_NSTRAT], 5, 0.0)
+    assert_lt(lkw_rep[SW_REP_WORST], 1.0e-13)
+    assert_lt(hf_gap(lkw_G, water631g_eri8_cart(), WATER631G_ERI8_CART_LEN), 1.0e-12)
+    lkw_o = scf_checked()
+    lkw_S = hf_overlap(lkw_m, lkw_o)
+    lkw_H = hf_hcore(lkw_m, lkw_o)
+    assert_lt(hf_gap(lkw_S, water631g_s_unit(), 169), 1.0e-12)
+    assert_lt(hf_gap(lkw_H, water631g_t_unit() + water631g_v_unit(), 169), 1.0e-12)
+    lkw_p = hf_setup_of(lkw_m, lkw_H, lkw_S, lkw_G, lkw_o)
+    hf_lock_assert(hf_lock_report(lkw_p, WATER631G_E_RHF), lkw_p)
+    lkw_half = water631g_rhf_d() * 0.5
+    lkw_f = hf_step(lkw_p, lkw_half, lkw_half)
+    assert_lt(abs(lkw_f.energy - WATER631G_E_RHF), 1.0e-10)
+    # guesses (gs_avg, core, GWH, zero: every member before gs_import),
+    # accelerators (CDIIS, plain, damped), orthogonalizers (canonical, Lowdin,
+    # Cholesky, Gram-Schmidt), eigensolvers (QL, Jacobi, builtin) and J/K
+    # members (packed, pairs, dense); the direct member is the next test
+    lkw_w = 0.0
+    for lkw_k to GS_IMPORT {
+        lkw_w = max(lkw_w, lkw_gap(lkw_with(lkw_p, ScfOptions { guess: lkw_k, ..lkw_o }), WATER631G_E_RHF))
+    }
+    for lkw_k to len(accel_methods()) {
+        lkw_w = max(lkw_w, lkw_gap(lkw_with(lkw_p, ScfOptions { accelerator: lkw_k, ..lkw_o }), WATER631G_E_RHF))
+    }
+    for lkw_k to len(orth_methods()) {
+        lkw_w = max(lkw_w, lkw_gap(lkw_with(lkw_p, ScfOptions { orthogonalizer: lkw_k, ..lkw_o }), WATER631G_E_RHF))
+    }
+    for lkw_k to len(eig_methods()) {
+        lkw_w = max(lkw_w, lkw_gap(lkw_with(lkw_p, ScfOptions { eigensolver: lkw_k, ..lkw_o }), WATER631G_E_RHF))
+    }
+    for lkw_k to len(jk_methods()) {
+        lkw_w = max(lkw_w, lkw_gap(lkw_with(lkw_p, ScfOptions { jk: lkw_k, ..lkw_o }), WATER631G_E_RHF))
+    }
+    assert_lt(lkw_w, 1.0e-9)
+    # J and K at the converged density from all five J/K members, the
+    # direct ones recomputing the integrals from the basis
+    lkw_r = hf_scf(lkw_p)
+    lkw_JK = int_jk(lkw_G, hf_blob(lkw_m), scf_densities(lkw_r), scf_opts(lkw_p), 0, lkw_rep)
+    assert_near(lkw_rep[SW_REP_NSTRAT], 5, 0.0)
+    assert_lt(lkw_rep[SW_REP_WORST], 1.0e-13)
+}
+
+test "water 6-31G: the direct SCF, which never stores an integral, gives the in-core energy" {
+    lkw_m = molecule_packs(water631g_atoms(), water631g_shells(), water631g_prims())
+    lkw_r = hf_energy(lkw_m, ScfOptions { jk: INT_JK_DIRECT, ..scf_checked() })
+    assert_near(lkw_r.converged, 1.0, 0.0)
+    assert_lt(abs(lkw_r.energy - WATER631G_E_RHF), 1.0e-9)
+}
+
+test "water 6-31G open shells: H2O+ ROHF -75.578396379589748 and UHF, spin -2 UHF -75.726396909036637 and ROHF -75.723654936331599" {
+    lkw_mol = molecule_packs(water631g_atoms(), water631g_shells(), water631g_prims())
+    lkw_m = Molecule { charge: 1, spin: 1, ..lkw_mol }
+    lkw_o = scf_checked()
+    lkw_S = hf_overlap(lkw_m, lkw_o)
+    lkw_H = hf_hcore(lkw_m, lkw_o)
+    lkw_G = hf_eri(lkw_m, lkw_o)
+    lkw_p = hf_setup_of(lkw_m, lkw_H, lkw_S, lkw_G, ScfOptions { method: SCF_ROHF, ..lkw_o })
+    lkw_lr = hf_lock_report(lkw_p, WATER631G_E_CATION_ROHF)
+    hf_lock_assert(lkw_lr, lkw_p)
+    lkw_f = hf_step(lkw_p, water631g_cation_rohf_da(), water631g_cation_rohf_db())
+    assert_lt(abs(lkw_f.energy - WATER631G_E_CATION_ROHF), 1.0e-10)
+    lkw_u = lkw_with(lkw_p, ScfOptions { method: SCF_UHF, ..lkw_o })
+    lkw_lu = hf_lock_report(lkw_u, WATER631G_E_CATION_UHF)
+    hf_lock_assert(lkw_lu, lkw_u)
+    assert_lt(WATER631G_E_CATION_UHF + lkw_lu.de, WATER631G_E_CATION_ROHF + lkw_lr.de)
+    # spin -2: 4 alpha and 6 beta electrons
+    lkw_t = Molecule { spin: -2, ..lkw_mol }
+    assert_near(mol_nalpha(lkw_t), 4, 0.0)
+    lkw_u = hf_setup_of(lkw_t, lkw_H, lkw_S, lkw_G, ScfOptions { method: SCF_UHF, ..lkw_o })
+    lkw_lu = hf_lock_report(lkw_u, WATER631G_E_SPINM2_UHF)
+    hf_lock_assert(lkw_lu, lkw_u)
+    assert_lt(abs(lkw_lu.s2 - WATER631G_SPINM2_UHF_S2), 1.0e-6)
+    lkw_p = lkw_with(lkw_u, ScfOptions { method: SCF_ROHF, ..lkw_o })
+    lkw_lr = hf_lock_report(lkw_p, WATER631G_E_SPINM2_ROHF)
+    assert_lt(abs(lkw_lr.de), 1.0e-9)
+    assert_near(lkw_lr.converged, 1.0, 0.0)
+    assert_lt(lkw_lr.trace, 1.0e-10)
+}
+
+test "one- and two-electron atoms: H STO-3G UHF -0.46658184955727533, He STO-3G RHF -2.807783957539974" {
+    lkw_r = hf_energy(molecule_packs(h_sto3g_atoms(), h_sto3g_shells(), h_sto3g_prims()), scf_checked())
+    assert_near(lkw_r.method, SCF_UHF, 0.0)
+    assert_lt(abs(lkw_r.energy - H_STO3G_E_UHF), 1.0e-12)
+    lkw_r = hf_energy(molecule_packs(he_sto3g_atoms(), he_sto3g_shells(), he_sto3g_prims()), scf_checked())
+    assert_lt(abs(lkw_r.energy - HE_STO3G_E_RHF), 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

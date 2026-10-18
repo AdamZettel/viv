@@ -1,0 +1,244 @@
+###
+post: Shell-model energies, spins and occupations of a nucleus
+agent: claude
+
+The lowest states of a nucleus in the nuclear shell model: Z valence
+protons and N valence neutrons outside a closed core, in one of the shipped
+spaces (the sd shell with USDB, the p shell with Cohen-Kurath), or in a
+.sps and .int pair read from disk. lib/nuclear/shell/shell.viv builds the
+M-scheme basis and applies H; lib/eigen/lowest finds the states with
+Lanczos (or, by `eigensolver`, from H as a matrix); this program sets the
+parameters and collects what each state is. BIGSTICK
+(github.com/cwjsdsu/BigstickPublick) gives the same energies, spins and
+basis dimensions: lib/nuclear/shell/bigstick_compare.py runs both.
+###
+#
+#     viv run lib/nuclear/shell/shellmodel.viv
+#     viv export lib/nuclear/shell/shellmodel.export.toml
+#
+# The defaults are neon-20 in the sd shell with USDB: 2 valence protons and 2
+# valence neutrons on oxygen-16, M = 0, the lowest 10 states.
+#
+# The design follows BIGSTICK, Copyright (c) 2017 Lawrence Livermore National
+# Security and San Diego State University Research Foundation; its license
+# notice is in shell.viv.
+from nuclear.shell.shell import ShellH, Space, apply_h, j_from_j2, j_squared, lowest_m2, make_basis, make_species, mass_scale, mscheme_tables, occupations, popcounts, read_space, species_h, species_jumps
+from nuclear.shell.interactions import CKPOT_INT, P_SPS, SD_SPS, USDB_INT
+from eigen.lowest import LowestEigenpairs, lowest_eigenpairs
+
+#: Interaction  the shipped spaces and interactions
+enum Interaction {
+    Usdb
+    Ckpot
+}
+
+#: interaction  which shipped space and interaction to use: USDB in the sd
+#:     shell, or Cohen-Kurath in the p shell
+interaction = Interaction.Usdb
+#: sps_file  a .sps file to read instead of the shipped space ("" for none);
+#:     it needs int_file too
+sps_file: Str = ""
+#: int_file  an isospin .int file to read with sps_file ("" for none)
+int_file: Str = ""
+#: z  valence protons
+z: Int = 2
+#: n  valence neutrons
+n: Int = 2
+#: twice_m  2 M, twice the angular-momentum projection of the basis; a
+#:     negative value takes the lowest, 0 or 1
+twice_m: Int = -1
+#: nstates  how many of the lowest states to find
+nstates: Int = 10
+#: eigensolver  how the lowest states are found: lanczos (the default);
+#:     householder_ql or jacobi, from H formed as a matrix (up to
+#:     LOWEST_DENSE_MAX basis states); "every dense" (both of those, checked
+#:     against each other); or every (all three)
+eigensolver = LowestEigenpairs.Lanczos
+#: tol  the largest residual norm |H v - E v| a converged state may have;
+#:     Lanczos only, ignored with the other methods
+tol = 1.0e-8
+#: max_iter  the most products H v Lanczos may take; Lanczos only, ignored
+#:     with the other methods
+max_iter: Int = 2000
+#: krylov  the most Lanczos vectors kept at once; the basis restarts from the
+#:     lowest Ritz vectors when it is full. Lanczos only, ignored with
+#:     the other methods
+krylov: Int = 100
+
+using lowest_eigenpairs = eigensolver
+settings lanczos(krylov = krylov, tol = tol, max_iter = max_iter)
+
+# ---- the space ----------------------------------------------------------
+sps_text: Str = SD_SPS
+int_text: Str = USDB_INT
+label: Str = "usdb"
+match interaction {
+    Usdb => {
+        sps_text = SD_SPS
+        int_text = USDB_INT
+        label = "usdb"
+    }
+    Ckpot => {
+        sps_text = P_SPS
+        int_text = CKPOT_INT
+        label = "ckpot"
+    }
+}
+if len(sps_file) > 0 or len(int_file) > 0 {
+    if len(sps_file) == 0 or len(int_file) == 0 {
+        stop("sps_file and int_file go together")
+    }
+    sps_text = read_text(sps_file)
+    int_text = read_text(int_file)
+    label = "files"
+}
+space = read_space(sps_text, int_text)
+if z < 0 or n < 0 or z > space.ns or n > space.ns {
+    stop("z and n must be between 0 and the number of m-states of one species")
+}
+m2: Int = twice_m
+if m2 < 0 {
+    m2 = lowest_m2(z, n)
+}
+if (m2 + z + n) % 2 != 0 {
+    stop("twice_m must have the parity of z + n")
+}
+scale = mass_scale(space, z, n)
+same, pn = mscheme_tables(space, scale)
+
+# ---- the basis and the Hamiltonian's pieces -----------------------------
+pc = popcounts(space.ns)
+protons = make_species(space, pc, z)
+neutrons = make_species(space, pc, n)
+basis = make_basis(protons, neutrons, m2)
+if basis.dim == 0 {
+    stop("no Slater determinant has this 2M")
+}
+hp = species_h(space, pc, same, protons)
+hn = species_h(space, pc, same, neutrons)
+jp = species_jumps(space, pc, protons)
+jn = species_jumps(space, pc, neutrons)
+
+#: counted  y, with one more product counted in products[0]
+def counted(y: Arr, products: [Int]) -> Arr {
+    products[0] += 1
+    return y
+}
+
+# ---- the eigensolver ---------------------------------------------------
+want: Int = nstates
+if want > basis.dim {
+    want = basis.dim
+}
+H = ShellH { b: basis, p: protons, n: neutrons, hp: hp, hn: hn, jp: jp, jn: jn, pn: pn, ns: space.ns }
+#: H applied to a vector, counting the products
+products: [Int] = [0]
+op = fn(x) -> counted(apply_h(H, x), products)
+# The lowest states come from the contract lowest_eigenpairs (lib/eigen/lowest),
+# by the method `eigensolver` names (the `using` line
+# above); Lanczos takes this program's settings (the `settings` line).
+energies, psi = lowest_eigenpairs(op, basis.dim, want)
+iterations: Int = products[0]
+# converged: every state's residual norm |H v - E v| is under tol
+converged = true
+for k to len(energies) {
+    v = zeros(basis.dim)
+    for i to basis.dim {
+        v[i] = psi[k, i]
+    }
+    r = apply_h(H, v) - energies[k] * v
+    if sqrt(dot(r, r)) > tol {
+        converged = false
+    }
+}
+solver_tag: Str = ""
+match eigensolver {
+    Lanczos => {
+        solver_tag = ""
+    }
+    HouseholderQl => {
+        solver_tag = "-householder_ql"
+    }
+    Jacobi => {
+        solver_tag = "-jacobi"
+    }
+    Every => {
+        solver_tag = "-every"
+    }
+    EveryIterative => {
+        solver_tag = "-every_iterative"
+    }
+    EveryDense => {
+        solver_tag = "-every_dense"
+    }
+}
+
+# ---- what each state is -------------------------------------------------
+found: Int = len(energies)
+basis_up = make_basis(protons, neutrons, m2 + 2)
+spins = zeros(found)
+excitation = zeros(found)
+occ_p = zeros(found, space.norb)
+occ_n = zeros(found, space.norb)
+for k to found {
+    spins[k] = j_from_j2(j_squared(space, basis, basis_up, protons, neutrons, jp, jn, psi, k))
+    excitation[k] = energies[k] - energies[0]
+    occ_pk, occ_nk = occupations(space, basis, protons, neutrons, psi, k)
+    for a to space.norb {
+        occ_p[k, a] = occ_pk[a]
+        occ_n[k, a] = occ_nk[a]
+    }
+}
+
+# ---- results ------------------------------------------------------------
+#: ENERGIES  the lowest energies, MeV, relative to the core
+ENERGIES = energies
+#: J  the angular momentum of each state, from <J^2> = J (J + 1)
+J = spins
+#: EXCITATION  each energy above the lowest, MeV
+EXCITATION = excitation
+#: OCC_P  [state, orbit] proton occupation of each orbit, in the .sps order
+OCC_P = occ_p
+#: OCC_N  [state, orbit] neutron occupation of each orbit
+OCC_N = occ_n
+#: DIM  the dimension of the M-scheme basis
+DIM: Int = basis.dim
+#: ITERATIONS  the products H v the eigensolver took
+ITERATIONS: Int = iterations
+#: CONVERGED  every state's residual norm is under tol
+CONVERGED = converged
+#: RUN_ID  the run's settings in one string: interaction, z, n, 2M, nstates,
+#:     tol, max_iter, krylov, and the eigensolver when it is not Lanczos
+RUN_ID: Str = f"shell-{label}-z{z}-n{n}-m2_{m2}-k{want}-tol{tol}-it{max_iter}-kr{krylov}{solver_tag}"
+
+show DIM, ITERATIONS, CONVERGED, RUN_ID
+for k to found {
+    print(f"{k + 1:3d} {ENERGIES[k]:18.10f} {EXCITATION[k]:14.10f} {J[k]:10.6f}")
+}
+
+test "the states are sorted and their spins are whole or half-whole" {
+    for k to found {
+        if k > 0 {
+            assert_true(ENERGIES[k] >= ENERGIES[k - 1])
+        }
+        twice = 2.0 * J[k]
+        assert_near(twice, round(twice), 1.0e-6)
+    }
+}
+
+test "the occupations add up to z and n" {
+    for k to found {
+        sp_total = 0.0
+        sn_total = 0.0
+        for a to space.norb {
+            sp_total = sp_total + OCC_P[k, a]
+            sn_total = sn_total + OCC_N[k, a]
+        }
+        assert_near(sp_total, z, 1.0e-10)
+        assert_near(sn_total, n, 1.0e-10)
+    }
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2017 Lawrence Livermore National Security and San Diego State University Research Foundation
+# SPDX-FileCopyrightText: 2026 The Viv authors

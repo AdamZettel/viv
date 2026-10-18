@@ -1,0 +1,821 @@
+###
+post: Electron repulsion integrals on the kernels lib/cas generated
+agent: claude
+
+The production ERI member. It is lib/hf/md_eri's method, McMurchie-Davidson
+one shell quartet at a time with the sums over primitives inside two matrix
+products, with three changes:
+
+- **Generated kernels.** The R table of each primitive quartet comes from
+  `mdg_rfill` and the E coefficients and the Hermite expansion of each
+  primitive pair from `mdg_pair`, straight-line defs per angular-momentum
+  class that lib/cas wrote (lib/hf/mdg_kernels, tools/cas/gen_integrals.viv).
+  `herm_rfill`'s loops recompute the cube offsets of every entry; the
+  generated def has them as constants and keeps the levels in locals. The
+  R values go into the matrix of the ket product through `mdg_gather`,
+  generated per ket order with the ket offsets and signs as constants;
+  `mdg_gather_general` reads them from a table and
+  checks it.
+- **Spherical rows in the store.** For a spherical basis, each pair's E
+  matrix is moved to spherical functions once, when the store is built:
+  `E_sph = (M_a (x) M_b)^T E_cart`, `M` the c2s blocks of lib/hf/cart2sph.
+  A quartet's block then comes out spherical, with fewer rows (5 for d,
+  7 for f, against 6 and 10), and no quartet is transformed afterwards;
+  md_eri's `mderi_sph` multiplies every block by the two transforms.
+- **The E matrices are kept**, one record per pair (`MdgE`), where md_eri
+  copies each one out of its flat store for every quartet it is in.
+
+The store's directory and its per-pair headers are md_eri's (`MDERI_*`), and
+the shell groups of general contractions are md_eri's groups. Each pair
+also keeps the packed index of each of its rows, so writing a block is two
+loops over rows and columns (`mdg_put`), and the Hermite offset tables
+md_eri makes for every quartet are made once per build (`mdg_htab`).
+
+**Direct J and K** (`mdg_jk_screened`, the production direct build of
+lib/hf/jk_direct) is lib/hf/md_direct's density-screened build on these
+quartets: the screening, the chunks and the eight contributions of each
+unique integral are md_direct's, and its header explains them. md_direct
+works over Cartesian functions, so a spherical run there moves each density
+to Cartesian functions and J and K back; here the quartets come out in the
+run's functions, so the density, J and K stay in them, with fewer functions
+per quartet and no transforms per build. The Schwarz factors must be those
+of the same functions (`mdg_schwarz_basis`).
+
+**Verification.** md_eri stays as the general code and checks this module:
+`mdg_screened` against `mderi_full`, `mdg_sph` against `mderi_sph` and
+`mdg_jk_screened` against md_direct's `mdjk_direct` on the same molecules, with the tolerance of the registry, `|v - median| / (1 +
+|median|) <= 1e-12`, in lib/hf/tests/mdg_eri. The two do not run the same
+sums in the same order (the spherical transform moved into the store, the
+E entries multiplied in another order), so they agree to rounding, not bit
+for bit; the measured gap is in that test. The R kernels are bit for bit
+`herm_rfill`, and the tests here hold every class to it and every pair
+class to `herm_efill`.
+
+Used with `import hf.mdg_eri`.
+###
+
+from hf.opts import OPT_DIRECT_TOL, OPT_SCREEN_TOL
+from hf.basis import (
+    bas_atom_pos, bas_contract, bas_nao_cart, bas_nao_sph, bas_nc, bas_ncart, bas_nsph,
+    bas_powers, bas_prim_exp, shell_atom, shell_cart0, shell_f0, shell_l, shell_nprim, shell_p0,
+    shell_sph0,
+)
+from hf.eri_store import es_len8
+from hf.hermite import herm_boys_fill, herm_esize, herm_etab, herm_nh, herm_rfill, herm_tuv
+from hf.md_eri import (
+    MDERI_BATCH, mderi_canon_pairs, MDERI_D_GA, MDERI_D_GB, MDERI_D_NA, MDERI_D_NB, MDERI_D_SA,
+    MDERI_D_SB, MDERI_DIR_LEN, mderi_grid, mderi_groups, MDERI_HDR, mderi_hoff, MDERI_PI,
+    MDERI_PP_LEN, mderi_qlist, MDERI_SCREEN_TOL, MDERI_TOP,
+)
+from hf.md_direct import MDJK_NCHUNK
+from hf.mdg_kernels import mdg_gather, MDG_LMAX, mdg_pair, mdg_rfill, MDG_RMAX
+
+#| One pair's E matrix, `[rows, primitive pairs * Hermite functions]`.
+record MdgE { E: Arr }
+
+# the directory entry md_eri leaves 0, which this store uses for where the
+# pair's row index starts: per row `(i (i + 1)/2 + j, i, j)`, the first `-1`
+# for a row whose pair is not canonical (`j > i` within one shell group)
+MDG_D_IX = 7
+MDG_IX_LEN = 3
+
+#| The pair transform `(M_a (x) M_b)^T`, `[nsph_a nsph_b, ncart_a ncart_b]`,
+#| from the c2s blocks of shells `sa` and `sb` in the block-diagonal `M`.
+#@ 2543cdfa
+def mdg_t2(M: Arr, shells: Arr, sa, sb) {
+    na = bas_ncart(shell_l(shells, sa))
+    nb = bas_ncart(shell_l(shells, sb))
+    ma = bas_nsph(shell_l(shells, sa))
+    mb = bas_nsph(shell_l(shells, sb))
+    ca = shell_cart0(shells, sa)
+    cb = shell_cart0(shells, sb)
+    pa = shell_sph0(shells, sa)
+    pb = shell_sph0(shells, sb)
+    T = zeros(ma * mb, na * nb)
+    for qa to ma {
+        for qb to mb {
+            for ia to na {
+                for ib to nb {
+                    T[qa * mb + qb, ia * nb + ib] = M[ca + ia, pa + qa] * M[cb + ib, pb + qb]
+                }
+            }
+        }
+    }
+    return T
+}
+
+#| `mdg_pair` for a class with no generated kernel: the same entries from
+#| `herm_etab` (lib/hf/hermite) in loops, into the flat `V`.
+#@ 088d6645
+def mdg_pair_general(V: Arr, la, lb, a, b, X, Y, Z) {
+    PA = bas_powers(la)
+    PB = bas_powers(lb)
+    nb = len(PB)
+    H = herm_tuv(la + lb)
+    EX = herm_etab(la, lb, a, b, X)
+    EY = herm_etab(la, lb, a, b, Y)
+    EZ = herm_etab(la, lb, a, b, Z)
+    for i to len(PA) {
+        for j to nb {
+            w = bas_nc(PA[i, 0], PA[i, 1], PA[i, 2]) * bas_nc(PB[j, 0], PB[j, 1], PB[j, 2])
+            for h to len(H) {
+                if H[h, 0] <= PA[i, 0] + PB[j, 0] and H[h, 1] <= PA[i, 1] + PB[j, 1] and H[h, 2] <= PA[i, 2] + PB[j, 2] {
+                    V[(i * nb + j) * len(H) + h] = w * EX[PA[i, 0], PB[j, 0], H[h, 0]] * EY[PA[i, 1], PB[j, 1], H[h, 1]] * EZ[PA[i, 2], PB[j, 2], H[h, 2]]
+                }
+            }
+        }
+    }
+    return 0
+}
+
+#| The E matrix of the group pair of `nga` shells from `sa` and `ngb` from
+#| `sb`; its primitive pairs' `(p, Px, Py, Pz)` into `ST` at `off` (md_eri's
+#| pack header and primitive list) and its row index at `ix`. With `sph = 1`
+#| the rows are spherical, `T` the pair transform; else Cartesian and `T` is
+#| not read.
+#@ 8a357370
+def mdg_fillpack(ST: Arr, off, ix, atoms: Arr, shells: Arr, prims: Arr, cn: Arr, sa, nga, sb, ngb, sph, T: Arr) {
+    #: only shells above p need moving to spherical rows
+    la = shell_l(shells, sa)
+    lb = shell_l(shells, sb)
+    na = bas_ncart(la)
+    nb = bas_ncart(lb)
+    nra = na
+    nrb = nb
+    if sph > 0 {
+        nra = bas_nsph(la)
+        nrb = bas_nsph(lb)
+    }
+    move = sph > 0 and (la > 1 or lb > 1)
+    npa = shell_nprim(shells, sa)
+    npb = shell_nprim(shells, sb)
+    npp = npa * npb
+    nh = herm_nh(la + lb)
+    nr = nra * nrb
+    ST[off] = la
+    ST[off + 1] = lb
+    ST[off + 2] = npp
+    ST[off + 3] = nga * ngb * nr
+    ST[off + 4] = nh
+    A = bas_atom_pos(atoms, shell_atom(shells, sa))
+    B = bas_atom_pos(atoms, shell_atom(shells, sb))
+    Ax = A[0]
+    Ay = A[1]
+    Az = A[2]
+    Bx = B[0]
+    By = B[1]
+    Bz = B[2]
+    E = zeros(nga * ngb * nr, npp * nh)
+    pa0 = shell_p0(shells, sa)
+    pb0 = shell_p0(shells, sb)
+    #: one primitive expansion serves every shell of the two groups
+    for ip to npa {
+        a = bas_prim_exp(prims, pa0 + ip)
+        for jp to npb {
+            b = bas_prim_exp(prims, pb0 + jp)
+            k = ip * npb + jp
+            p = a + b
+            b1 = off + MDERI_HDR + MDERI_PP_LEN * k
+            ST[b1] = p
+            ST[b1 + 1] = (a * Ax + b * Bx) / p
+            ST[b1 + 2] = (a * Ay + b * By) / p
+            ST[b1 + 3] = (a * Az + b * Bz) / p
+            Vf = zeros(na * nb * nh)
+            EX = zeros(herm_esize(la, lb))
+            EY = zeros(herm_esize(la, lb))
+            EZ = zeros(herm_esize(la, lb))
+            if mdg_pair(Vf, EX, EY, EZ, la, lb, a, b, Ax - Bx, Ay - By, Az - Bz) < 0 {
+                mdg_pair_general(Vf, la, lb, a, b, Ax - Bx, Ay - By, Az - Bz)
+            }
+            V = reshape(Vf, na * nb, nh)
+            if move {
+                V = T @ V
+            }
+            for ga to nga {
+                for gb to ngb {
+                    c = cn[shell_p0(shells, sa + ga) + ip] * cn[shell_p0(shells, sb + gb) + jp]
+                    r0 = (ga * ngb + gb) * nr
+                    for r to nr {
+                        for h to nh {
+                            E[r0 + r, k * nh + h] = c * V[r, h]
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #: -1 marks a row that is not canonical
+    for ga to nga {
+        for gb to ngb {
+            for ia to nra {
+                for ib to nrb {
+                    i = shell_f0(shells, sa + ga, sph) + ia
+                    j = shell_f0(shells, sb + gb, sph) + ib
+                    o = ix + MDG_IX_LEN * (((ga * ngb + gb) * nra + ia) * nrb + ib)
+                    ST[o] = max(i, j) * (max(i, j) + 1) / 2 + min(i, j)
+                    if sa == sb and j > i {
+                        ST[o] = -1
+                    }
+                    ST[o + 1] = i
+                    ST[o + 2] = j
+                }
+            }
+        }
+    }
+    return MdgE { E: E }
+}
+
+#| The rows of pair `k` of the store: shells in the two groups times
+#| functions per shell pair.
+#@ 41daef4b
+def mdg_nrows(ST: Arr, shells: Arr, k, sph) {
+    d0 = MDERI_TOP + MDERI_DIR_LEN * k
+    la = shell_l(shells, ST[d0 + MDERI_D_SA])
+    lb = shell_l(shells, ST[d0 + MDERI_D_SB])
+    n = bas_ncart(la) * bas_ncart(lb)
+    if sph > 0 {
+        n = bas_nsph(la) * bas_nsph(lb)
+    }
+    return ST[d0 + MDERI_D_NA] * ST[d0 + MDERI_D_NB] * n
+}
+
+#| Entry `i` of `A` followed by `B`.
+#@ 301a0394
+def mdg_pick(A: [MdgE], B: [MdgE], i) -> MdgE {
+    if i < len(A) {
+        return A[i]
+    }
+    return B[i - len(A)]
+}
+
+#| The E matrices of store pairs `k0 .. k0 + n - 1`, filling their packs in
+#| `ST` as it goes. Built by halves: a loop that appended every pair's record
+#| would keep all the arrays made so far, and the C runtime checks each
+#| array it frees at the end of an iteration against those it keeps
+#| (`viv_arena_release_kept`), which made the loop quadratic in the pairs
+#| (study/ports/pyscf/FRICTION.json, pyscf-024).
+#@ f5f23d59
+def mdg_packs(ST: Arr, atoms: Arr, shells: Arr, prims: Arr, cn: Arr, sph, M: Arr, k0, n) -> [MdgE] {
+    if n == 1 {
+        d0 = MDERI_TOP + MDERI_DIR_LEN * k0
+        sa = ST[d0 + MDERI_D_SA]
+        sb = ST[d0 + MDERI_D_SB]
+        T = zeros(1, 1)
+        if sph > 0 {
+            T = mdg_t2(M, shells, sa, sb)
+        }
+        return [mdg_fillpack(ST, ST[d0], ST[d0 + MDG_D_IX], atoms, shells, prims, cn, sa, ST[d0 + MDERI_D_NA], sb, ST[d0 + MDERI_D_NB], sph, T)]
+    }
+    #: by halves: one loop keeping every array would be quadratic (pyscf-024)
+    h = floor(n / 2)
+    A = mdg_packs(ST, atoms, shells, prims, cn, sph, M, k0, h)
+    B = mdg_packs(ST, atoms, shells, prims, cn, sph, M, k0 + h, n - h)
+    # `extend` joins real vectors only (FRICTION.json pyscf-024)
+    return [mdg_pick(A, B, i) for i to len(A) + len(B)]
+}
+
+#| The store over every canonical pair of md_eri's shell groups: md_eri's
+#| directory and pack headers in `ST` (no E entries) followed by the pairs'
+#| row indices, and each pair's E matrix in `EM`. `M` is the c2s matrix when
+#| `sph = 1`.
+#@ 3692d20e
+def mdg_store(atoms: Arr, shells: Arr, prims: Arr, sph, M: Arr) {
+    cn = bas_contract(shells, prims)
+    GT = mderi_groups(shells, prims)
+    PL = mderi_canon_pairs(len(GT))
+    npl = len(PL)
+    packs = MDERI_TOP + MDERI_DIR_LEN * npl
+    nix = 0
+    lmax = 0
+    for k to npl {
+        sa = GT[PL[k, 0], 0]
+        sb = GT[PL[k, 1], 0]
+        la = shell_l(shells, sa)
+        lb = shell_l(shells, sb)
+        nf = bas_ncart(la) * bas_ncart(lb)
+        if sph > 0 {
+            nf = bas_nsph(la) * bas_nsph(lb)
+        }
+        packs = packs + MDERI_HDR + MDERI_PP_LEN * shell_nprim(shells, sa) * shell_nprim(shells, sb)
+        nix = nix + MDG_IX_LEN * GT[PL[k, 0], 1] * GT[PL[k, 1], 1] * nf
+        lmax = max(lmax, max(la, lb))
+    }
+    ST = zeros(packs + nix)
+    ST[0] = npl
+    ST[1] = lmax
+    off = MDERI_TOP + MDERI_DIR_LEN * npl
+    ix = packs
+    for k to npl {
+        ga = PL[k, 0]
+        gb = PL[k, 1]
+        sa = GT[ga, 0]
+        sb = GT[gb, 0]
+        d0 = MDERI_TOP + MDERI_DIR_LEN * k
+        ST[d0] = off
+        ST[d0 + MDERI_D_SA] = sa
+        ST[d0 + MDERI_D_SB] = sb
+        ST[d0 + MDERI_D_NA] = GT[ga, 1]
+        ST[d0 + MDERI_D_NB] = GT[gb, 1]
+        ST[d0 + MDERI_D_GA] = ga
+        ST[d0 + MDERI_D_GB] = gb
+        ST[d0 + MDG_D_IX] = ix
+        off = off + MDERI_HDR + MDERI_PP_LEN * shell_nprim(shells, sa) * shell_nprim(shells, sb)
+        ix = ix + MDG_IX_LEN * mdg_nrows(ST, shells, k, sph)
+    }
+    EM = mdg_packs(ST, atoms, shells, prims, cn, sph, M, 0, npl)
+    return ST, EM
+}
+
+#| md_eri's `mderi_hoff` for every case a build with shells up to `lmax`
+#| meets, made once, as one flat table with rows of `herm_nh(2 lmax)`.
+#| With `nl = 4 lmax + 1` totals and `lp = 2 lmax + 1` pair orders, row
+#| `Ls nl + L` holds the cube offsets `(t D + u) D + v`, `D = L + 1`, of the
+#| Hermite list of order `Ls`, and row `lp nl + Ls` the signs `(-1)^(t+u+v)`.
+#@ 3a87b9d6
+def mdg_htab(lmax) -> Arr {
+    lp = 2 * lmax + 1
+    nl = 4 * lmax + 1
+    hw = herm_nh(2 * lmax)
+    HT = zeros((lp * nl + lp) * hw)
+    for ls to lp {
+        for L to nl {
+            if L >= ls {
+                O = mderi_hoff(ls, L + 1, 0)
+                for h to len(O) {
+                    HT[(ls * nl + L) * hw + h] = O[h]
+                }
+            }
+        }
+        O = mderi_hoff(ls, 1, 1)
+        for h to len(O) {
+            HT[(lp * nl + ls) * hw + h] = O[h]
+        }
+    }
+    return HT
+}
+
+#| Write block `B` of store pairs `(k1, k2)` into the packed vector, the
+#| canonical entries only, as md_eri's `mderi_put_at` does, through the
+#| pairs' row indices in `ST`.
+#@ 369a2e87
+def mdg_put(Gp: Arr, B: Arr, ST: Arr, k1, k2) {
+    x1 = ST[MDERI_TOP + MDERI_DIR_LEN * k1 + MDG_D_IX]
+    x2 = ST[MDERI_TOP + MDERI_DIR_LEN * k2 + MDG_D_IX]
+    nr = len(B)
+    nc = shape(B)[1]
+    for r to nr {
+        if ST[x1 + MDG_IX_LEN * r] < 0 {
+            continue
+        }
+        ij = ST[x1 + MDG_IX_LEN * r]
+        for c to nc {
+            if ST[x2 + MDG_IX_LEN * c] < 0 {
+                continue
+            }
+            kl = ST[x2 + MDG_IX_LEN * c]
+            if k1 == k2 and kl > ij {
+                continue
+            }
+            slot = kl * (kl + 1) / 2 + ij
+            if ij >= kl {
+                slot = ij * (ij + 1) / 2 + kl
+            }
+            Gp[slot] = B[r, c]
+        }
+    }
+    return 0
+}
+
+#| The block `(ab|cd)` for bra pair `k1` and ket pair `k2`, `[rows of k1,
+#| rows of k2]`, in the store's functions (spherical or Cartesian). `G` is
+#| from `mderi_grid`, `HT` from `mdg_htab`. md_eri's `mderi_block` with the
+#| generated R kernel, the kept E matrices and the offset tables made once.
+#@ d9cd5b2b
+def mdg_block(ST: Arr, EM: [MdgE], k1, k2, G: Arr, HT: Arr) {
+    o1 = ST[MDERI_TOP + MDERI_DIR_LEN * k1]
+    o2 = ST[MDERI_TOP + MDERI_DIR_LEN * k2]
+    L1 = ST[o1] + ST[o1 + 1]
+    L2 = ST[o2] + ST[o2 + 1]
+    np1 = ST[o1 + 2]
+    np2 = ST[o2 + 2]
+    nh1 = ST[o1 + 4]
+    nh2 = ST[o2 + 4]
+    L = L1 + L2
+    D = L + 1
+    nl = 4 * ST[1] + 1
+    ra = L1 * nl + L
+    rc = L2 * nl + L
+    rs = (2 * ST[1] + 1) * nl + L2
+    ncd = ST[o2 + 3]
+    # bra primitive pairs per batch, so BR stays near MDERI_BATCH entries
+    nbat = max(1, min(np1, floor(MDERI_BATCH / (np2 * nh2 * nh1))))
+    ncol = nbat * nh1
+    BRf = zeros(np2 * nh2 * ncol)
+    # where the rows of the offset table start
+    hw = herm_nh(2 * ST[1])
+    ia = ra * hw
+    ic = rc * hw
+    isg = rs * hw
+    ZT = zeros(np1 * nh1, ncd)
+    # herm_rfill, for a class with no generated kernel, uses the upper half
+    S = zeros(2 * D * D * D)
+    F = zeros(L + 1)
+    c52 = 2.0 * pow(MDERI_PI, 2.5)
+    #: per batch: R tables (generated kernel if any) into BR, then Z_b = E_cd @ BR
+    k0 = 0
+    while k0 < np1 {
+        kn = min(nbat, np1 - k0)
+        for kk to kn {
+            b1 = o1 + MDERI_HDR + MDERI_PP_LEN * (k0 + kk)
+            p = ST[b1]
+            for m to np2 {
+                b2 = o2 + MDERI_HDR + MDERI_PP_LEN * m
+                q = ST[b2]
+                X = ST[b1 + 1] - ST[b2 + 1]
+                Y = ST[b1 + 2] - ST[b2 + 2]
+                Z = ST[b1 + 3] - ST[b2 + 3]
+                al = p * q / (p + q)
+                herm_boys_fill(G, L, al * (X * X + Y * Y + Z * Z), F)
+                if mdg_rfill(S, L, al, X, Y, Z, F, c52 / (p * q * sqrt(p + q))) < 0 {
+                    herm_rfill(S, L, al, X, Y, Z, F, c52 / (p * q * sqrt(p + q)))
+                }
+                o = m * nh2 * ncol + kk * nh1
+                if mdg_gather(BRf, int(o), int(ncol), S, int(L1), int(D), L2) < 0 {
+                    mdg_gather_general(BRf, o, ncol, S, HT, ia, ic, isg, nh1, nh2)
+                }
+            }
+        }
+        # this batch of bra primitive pairs against every ket one, then its
+        # rows of Z^T; columns past the batch hold stale values and are not read
+        Zb = EM[k2].E @ reshape(BRf, np2 * nh2, ncol)
+        for c to kn * nh1 {
+            for cd to ncd {
+                ZT[k0 * nh1 + c, cd] = Zb[cd, c]
+            }
+        }
+        k0 = k0 + nbat
+    }
+    return EM[k1].E @ ZT
+}
+
+#| The general gather of one primitive quartet's Hermite values:
+#| `BR[o + hc ncol + ha] = sign(hc) S[offset(hc) + offset(ha)]`, the offsets
+#| and signs read from `mdg_htab`'s table (`ia`, `ic` and `isg` where the bra
+#| offsets, the ket offsets and the ket signs start). The generated
+#| `mdg_gather` does the same with the ket offsets as constants; this def
+#| runs the orders above it and checks it (the test below).
+#@ 420ada25
+def mdg_gather_general(BR: Arr, o, ncol, S: Arr, HT: Arr, ia, ic, isg, nh1, nh2) {
+    for hc to nh2 {
+        b = o + hc * ncol
+        base = HT[ic + hc]
+        sg = HT[isg + hc]
+        for ha to nh1 {
+            BR[b + ha] = sg * S[base + HT[ia + ha]]
+        }
+    }
+    return 0
+}
+
+#| `Q[k] = sqrt(max (ab|ab))` over the rows of store pair `k`.
+#@ 67464697
+def mdg_schwarz(ST: Arr, EM: [MdgE], G: Arr, HT: Arr) {
+    npl = ST[0]
+    Q = zeros(npl)
+    parallel for k to npl {
+        mdg_schwarz_one(ST, EM, G, HT, Q, k)
+    }
+    return Q
+}
+
+#| `Q[k]` for one store pair; a def of its own so its block is freed on return.
+#@ 81c65192
+def mdg_schwarz_one(ST: Arr, EM: [MdgE], G: Arr, HT: Arr, Q: Arr, k) {
+    B = mdg_block(ST, EM, k, k, G, HT)
+    Q[k] = sqrt(max(0.0, max([B[r, r] for r to len(B)])))
+    return 0
+}
+
+#| One row of the quartet list, computed and written; a def of its own so
+#| its arrays are freed on return.
+#@ ee3be550
+def mdg_do(Gp: Arr, ST: Arr, EM: [MdgE], G: Arr, HT: Arr, QL: Arr, q) {
+    k1 = QL[q, 0]
+    k2 = QL[q, 1]
+    mdg_put(Gp, mdg_block(ST, EM, k1, k2, G, HT), ST, k1, k2)
+    return 0
+}
+
+#| Packed-8 ERIs, Schwarz-screened at `tol` (a negative `tol` skips nothing),
+#| over spherical functions when `sph = 1` (`M` the c2s matrix) and Cartesian
+#| ones otherwise.
+#@ 6e5d6998
+def mdg_build(atoms: Arr, shells: Arr, prims: Arr, sph, M: Arr, tol) {
+    ST, EM = mdg_store(atoms, shells, prims, sph, M)
+    G = mderi_grid(ST)
+    HT = mdg_htab(ST[1])
+    npl = ST[0]
+    Q = zeros(npl)
+    if tol >= 0.0 {
+        Q = mdg_schwarz(ST, EM, G, HT)
+    }
+    QL = mderi_qlist(Q, npl, tol)
+    n = bas_nao_cart(shells)
+    if sph > 0 {
+        n = bas_nao_sph(shells)
+    }
+    Gp = zeros(es_len8(n))
+    #: rows write disjoint slots, so they run in parallel
+    parallel for q to len(QL) {
+        mdg_do(Gp, ST, EM, G, HT, QL, q)
+    }
+    return Gp
+}
+
+#| The production ERIs over spherical functions, `M` the c2s matrix of
+#| lib/hf/cart2sph: Schwarz-screened at `MDERI_SCREEN_TOL`.
+#@ bdc51343
+def mdg_sph(atoms: Arr, shells: Arr, prims: Arr, M: Arr) -> Arr {
+    return mdg_build(atoms, shells, prims, 1, M, MDERI_SCREEN_TOL)
+}
+
+#| The production ERIs over unit-normalized Cartesian functions,
+#| Schwarz-screened at `MDERI_SCREEN_TOL`: the integral-stage member
+#| `(atoms, shells, prims) -> packed-8`.
+#@ 9eb2795d
+def mdg_screened(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return mdg_build(atoms, shells, prims, 0, zeros(1, 1), MDERI_SCREEN_TOL)
+}
+
+# ---- direct J and K ------------------------------------------------------------------
+
+#| Add block `B` of store pairs `(k1, k2)` into the J and K copies
+#| `W[w0 + 2d]` (J) and `W[w0 + 2d + 1]` (K) of each density `d`: md_direct's
+#| `mdjk_put` through the rows' function indices in `ST`.
+#@ 8af1c808
+def mdg_jk_put(W: Arr, w0, B: Arr, D: Arr, nd, ST: Arr, k1, k2) {
+    x1 = ST[MDERI_TOP + MDERI_DIR_LEN * k1 + MDG_D_IX]
+    x2 = ST[MDERI_TOP + MDERI_DIR_LEN * k2 + MDG_D_IX]
+    nr = len(B)
+    nc = shape(B)[1]
+    for r to nr {
+        o1 = x1 + MDG_IX_LEN * r
+        ij = ST[o1]
+        if ij < 0 {
+            continue
+        }
+        i = ST[o1 + 1]
+        j = ST[o1 + 2]
+        #: halve once per equal index pair, so the eight orders count each integral once
+        for c to nc {
+            o2 = x2 + MDG_IX_LEN * c
+            kl = ST[o2]
+            if kl < 0 or (k1 == k2 and kl > ij) {
+                continue
+            }
+            k = ST[o2 + 1]
+            l = ST[o2 + 2]
+            f = B[r, c]
+            if i == j {
+                f = 0.5 * f
+            }
+            if k == l {
+                f = 0.5 * f
+            }
+            if ij == kl {
+                f = 0.5 * f
+            }
+            for d to nd {
+                wj = w0 + 2 * d
+                wk = wj + 1
+                dkl = f * (D[d, k, l] + D[d, l, k])
+                dij = f * (D[d, i, j] + D[d, j, i])
+                W[wj, i, j] = W[wj, i, j] + dkl
+                W[wj, j, i] = W[wj, j, i] + dkl
+                W[wj, k, l] = W[wj, k, l] + dij
+                W[wj, l, k] = W[wj, l, k] + dij
+                W[wk, i, k] = W[wk, i, k] + f * D[d, j, l]
+                W[wk, j, k] = W[wk, j, k] + f * D[d, i, l]
+                W[wk, i, l] = W[wk, i, l] + f * D[d, j, k]
+                W[wk, j, l] = W[wk, j, l] + f * D[d, i, k]
+                W[wk, k, i] = W[wk, k, i] + f * D[d, l, j]
+                W[wk, l, i] = W[wk, l, i] + f * D[d, k, j]
+                W[wk, k, j] = W[wk, k, j] + f * D[d, l, i]
+                W[wk, l, j] = W[wk, l, j] + f * D[d, k, i]
+            }
+        }
+    }
+    return 0
+}
+
+#| md_direct's `mdjk_dmax` over spherical functions when `sph = 1` and
+#| Cartesian ones otherwise: the largest `|D|` over the functions of each pair
+#| of shell groups, `[ng, ng]`.
+#@ bfd24919
+def mdg_dmax(D: Arr, shells: Arr, GT: Arr, sph) {
+    ng = len(GT)
+    A = abs(slab(D, 0))
+    for d from 1 to len(D) {
+        A = max(A, abs(slab(D, d)))
+    }
+    lo = zeros(ng)
+    hi = zeros(ng)
+    for g to ng {
+        s = GT[g, 0]
+        nf = bas_ncart(shell_l(shells, s))
+        if sph > 0 {
+            nf = bas_nsph(shell_l(shells, s))
+        }
+        lo[g] = shell_f0(shells, s, sph)
+        hi[g] = lo[g] + GT[g, 1] * nf
+    }
+    Dm = zeros(ng, ng)
+    for a to ng {
+        for b to a + 1 {
+            v = max(max(A[lo[a]:hi[a], lo[b]:hi[b]]), max(A[lo[b]:hi[b], lo[a]:hi[a]]))
+            Dm[a, b] = v
+            Dm[b, a] = v
+        }
+    }
+    return Dm
+}
+
+#| One quartet computed and added into `W`; a def of its own so the block is
+#| freed as soon as it has been added.
+#@ c8c6462e
+def mdg_jk_pair(W: Arr, D: Arr, nd, ST: Arr, EM: [MdgE], G: Arr, HT: Arr, k1, k2) {
+    mdg_jk_put(W, 0, mdg_block(ST, EM, k1, k2, G, HT), D, nd, ST, k1, k2)
+    return 0
+}
+
+#| Chunk `c` of `nch`: md_direct's `mdjk_chunk_screened` on this module's
+#| quartets. Bra pairs `c, c + nch, ...`, each against every ket pair up to
+#| it, a quartet kept when it passes the Schwarz test (`Q_AB Q_CD >= tol_s`)
+#| and the density test.
+#@ a800d89e
+def mdg_jk_chunk(W: Arr, D: Arr, nd, ST: Arr, EM: [MdgE], G: Arr, HT: Arr, Q: Arr, Dm: Arr, tol_s, tol_d, c, nch) {
+    #: bounds for the early bra test
+    npl = ST[0]
+    qmax = max(Q)
+    dmax = max(Dm)
+    #: skip a bra pair no ket can lift over the density test
+    k1 = c
+    while k1 < npl {
+        ga = ST[MDERI_TOP + MDERI_DIR_LEN * k1 + MDERI_D_GA]
+        gb = ST[MDERI_TOP + MDERI_DIR_LEN * k1 + MDERI_D_GB]
+        q1 = Q[k1]
+        # no ket pair can lift this bra pair over the density test
+        if q1 * qmax * 4.0 * dmax > tol_d {
+            dab = 4.0 * Dm[ga, gb]
+            for k2 to k1 + 1 {
+                q = q1 * Q[k2]
+                if q >= tol_s {
+                    gc = ST[MDERI_TOP + MDERI_DIR_LEN * k2 + MDERI_D_GA]
+                    gd = ST[MDERI_TOP + MDERI_DIR_LEN * k2 + MDERI_D_GB]
+                    dm = max(max(dab, 4.0 * Dm[gc, gd]), max(max(Dm[ga, gc], Dm[ga, gd]), max(Dm[gb, gc], Dm[gb, gd])))
+                    if q * dm > tol_d {
+                        mdg_jk_pair(W, D, nd, ST, EM, G, HT, k1, k2)
+                    }
+                }
+            }
+        }
+        k1 = k1 + nch
+    }
+    return 0
+}
+
+#| The Schwarz factors of the store `mdg_jk_screened` builds, over spherical
+#| functions when `sph = 1` (`M` the c2s matrix): a property of the basis,
+#| computed once per SCF (lib/hf/jk_direct's blob).
+#@ 89b261a8
+def mdg_schwarz_basis(atoms: Arr, shells: Arr, prims: Arr, sph, M: Arr) -> Arr {
+    ST, EM = mdg_store(atoms, shells, prims, sph, M)
+    return mdg_schwarz(ST, EM, mderi_grid(ST), mdg_htab(ST[1]))
+}
+
+#| J and K of the densities `D[nd, n, n]` in the run's functions (spherical
+#| when `sph = 1`, `M` the c2s matrix; Cartesian otherwise), Schwarz and
+#| density screened, from the Schwarz factors `Q` of `mdg_schwarz_basis`;
+#| `[2 nd, n, n]`, J then K per density.
+#@ ca2a2531
+def mdg_jk_screened(atoms: Arr, shells: Arr, prims: Arr, D: Arr, opts: Arr, Q: Arr, sph, M: Arr) -> Arr {
+    n = len(slab(D, 0))
+    nd = len(D)
+    nch = MDJK_NCHUNK
+    ST, EM = mdg_store(atoms, shells, prims, sph, M)
+    G = mderi_grid(ST)
+    HT = mdg_htab(ST[1])
+    Dm = mdg_dmax(D, shells, mderi_groups(shells, prims), sph)
+    tol_s = opts[OPT_SCREEN_TOL]
+    tol_d = opts[OPT_DIRECT_TOL]
+    #: one J/K copy per chunk: parallel without shared writes
+    W = zeros(nch, 2 * nd, n, n)
+    parallel for c to nch {
+        Wc = zeros(2 * nd, n, n)
+        mdg_jk_chunk(Wc, D, nd, ST, EM, G, HT, Q, Dm, tol_s, tol_d, c, nch)
+        setslab(W, c, Wc)
+    }
+    #: summed in chunk order, so the result does not depend on threads
+    out = zeros(2 * nd, n, n)
+    for c to nch {
+        out = out + slab(W, c)
+    }
+    return out
+}
+
+# ---- the generated kernels against the general ones --------------------------------
+
+test "every R kernel is herm_rfill, bit for bit" {
+    mdg_worst = 0.0
+    for mdg_L to MDG_RMAX + 1 {
+        mdg_D = mdg_L + 1
+        mdg_F = zeros(mdg_L + 1)
+        for mdg_n to mdg_L + 1 {
+            mdg_F[mdg_n] = 1.0 / (2.0 * mdg_n + 1.0) - 0.03 * mdg_n
+        }
+        mdg_S1 = zeros(2 * mdg_D * mdg_D * mdg_D)
+        mdg_S2 = zeros(mdg_D * mdg_D * mdg_D)
+        herm_rfill(mdg_S1, mdg_L, 0.7, 0.31, -0.52, 0.27, mdg_F, 1.3)
+        mdg_rfill(mdg_S2, mdg_L, 0.7, 0.31, -0.52, 0.27, mdg_F, 1.3)
+        for mdg_t to mdg_D {
+            for mdg_u to mdg_D - mdg_t {
+                for mdg_v to mdg_D - mdg_t - mdg_u {
+                    mdg_o = (mdg_t * mdg_D + mdg_u) * mdg_D + mdg_v
+                    mdg_worst = max(mdg_worst, abs(mdg_S1[mdg_o] - mdg_S2[mdg_o]))
+                }
+            }
+        }
+    }
+    assert_near(mdg_worst, 0.0, 0.0)
+}
+
+test "every pair kernel is N_i N_j E^x E^y E^z from herm_efill, to 1e-15 relative" {
+    mdg_worst = 0.0
+    for mdg_la to MDG_LMAX + 1 {
+        for mdg_lb to MDG_LMAX + 1 {
+            mdg_L = mdg_la + mdg_lb
+            mdg_nh = herm_nh(mdg_L)
+            mdg_PA = bas_powers(mdg_la)
+            mdg_PB = bas_powers(mdg_lb)
+            mdg_na = len(mdg_PA)
+            mdg_nb = len(mdg_PB)
+            mdg_V = zeros(mdg_na * mdg_nb * mdg_nh)
+            mdg_a = 1.7
+            mdg_b = 0.45
+            mdg_X = 0.4
+            mdg_Y = -1.1
+            mdg_Z = 0.25
+            mdg_pair(mdg_V, zeros(herm_esize(mdg_la, mdg_lb)), zeros(herm_esize(mdg_la, mdg_lb)), zeros(herm_esize(mdg_la, mdg_lb)), mdg_la, mdg_lb, mdg_a, mdg_b, mdg_X, mdg_Y, mdg_Z)
+            mdg_EX = herm_etab(mdg_la, mdg_lb, mdg_a, mdg_b, mdg_X)
+            mdg_EY = herm_etab(mdg_la, mdg_lb, mdg_a, mdg_b, mdg_Y)
+            mdg_EZ = herm_etab(mdg_la, mdg_lb, mdg_a, mdg_b, mdg_Z)
+            mdg_H = herm_tuv(mdg_L)
+            for mdg_i to mdg_na {
+                for mdg_j to mdg_nb {
+                    mdg_w = bas_nc(mdg_PA[mdg_i, 0], mdg_PA[mdg_i, 1], mdg_PA[mdg_i, 2]) * bas_nc(mdg_PB[mdg_j, 0], mdg_PB[mdg_j, 1], mdg_PB[mdg_j, 2])
+                    for mdg_h to mdg_nh {
+                        mdg_ref = 0.0
+                        if mdg_H[mdg_h, 0] <= mdg_PA[mdg_i, 0] + mdg_PB[mdg_j, 0] and mdg_H[mdg_h, 1] <= mdg_PA[mdg_i, 1] + mdg_PB[mdg_j, 1] and mdg_H[mdg_h, 2] <= mdg_PA[mdg_i, 2] + mdg_PB[mdg_j, 2] {
+                            mdg_ref = mdg_w * mdg_EX[mdg_PA[mdg_i, 0], mdg_PB[mdg_j, 0], mdg_H[mdg_h, 0]] * mdg_EY[mdg_PA[mdg_i, 1], mdg_PB[mdg_j, 1], mdg_H[mdg_h, 1]] * mdg_EZ[mdg_PA[mdg_i, 2], mdg_PB[mdg_j, 2], mdg_H[mdg_h, 2]]
+                        }
+                        mdg_worst = max(mdg_worst, abs(mdg_V[(mdg_i * mdg_nb + mdg_j) * mdg_nh + mdg_h] - mdg_ref) / (1.0 + abs(mdg_ref)))
+                    }
+                }
+            }
+        }
+    }
+    assert_lt(mdg_worst, 1.0e-15)
+}
+
+test "every generated gather is the general one, bit for bit" {
+    mdg_HT = mdg_htab(MDG_LMAX)
+    mdg_nl = 4 * MDG_LMAX + 1
+    mdg_hw = herm_nh(2 * MDG_LMAX)
+    mdg_cases = 0
+    mdg_diff = 0.0
+    for mdg_L1 to 2 * MDG_LMAX + 1 {
+        for mdg_L2 to 2 * MDG_LMAX + 1 {
+            mdg_L = mdg_L1 + mdg_L2
+            mdg_D = mdg_L + 1
+            mdg_S = [sin(1.0 + 0.37 * mdg_i) for mdg_i to 2 * mdg_D * mdg_D * mdg_D]
+            mdg_nh1 = herm_nh(mdg_L1)
+            mdg_nh2 = herm_nh(mdg_L2)
+            # two bra primitive pairs in the columns, the second one's
+            mdg_ncol = 2 * mdg_nh1
+            mdg_B1 = zeros(mdg_nh2 * mdg_ncol)
+            mdg_B2 = zeros(mdg_nh2 * mdg_ncol)
+            mdg_ia = (mdg_L1 * mdg_nl + mdg_L) * mdg_hw
+            mdg_ic = (mdg_L2 * mdg_nl + mdg_L) * mdg_hw
+            mdg_isg = ((2 * MDG_LMAX + 1) * mdg_nl + mdg_L2) * mdg_hw
+            mdg_gather(mdg_B1, int(mdg_nh1), int(mdg_ncol), mdg_S, int(mdg_L1), int(mdg_D), mdg_L2)
+            mdg_gather_general(mdg_B2, mdg_nh1, mdg_ncol, mdg_S, mdg_HT, mdg_ia, mdg_ic, mdg_isg, mdg_nh1, mdg_nh2)
+            mdg_diff = max(mdg_diff, amax(abs(mdg_B1 - mdg_B2)))
+            mdg_cases = mdg_cases + 1
+        }
+    }
+    assert_near(mdg_cases, 49, 0.0)
+    assert_near(mdg_diff, 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

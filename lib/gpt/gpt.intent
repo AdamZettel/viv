@@ -1,0 +1,279 @@
+module lib/gpt/gpt  documents every variable
+  A GPT is a model that reads a sequence of tokens and, at every position,
+  gives each token of its vocabulary a probability of coming next. Here a
+  token is one character and the vocabulary is the set of characters in the
+  training text. The model is the one nanoGPT and the modded-nanogpt speedrun
+  train, cut down to a size the interpreter trains in seconds.
+
+  Each token becomes a row of `width` numbers: its row of the token embedding
+  plus its position's row of the position embedding. The rows of a sequence
+  form the residual stream, a matrix with one row per position. Each block
+  reads the stream and adds two things to it. Self-attention lets each
+  position take a weighted average of information from itself and the
+  positions before it, never the ones after. The MLP (multilayer perceptron)
+  works on each position alone, through a wider layer and back. After the
+  last block, a normalization and one matrix turn each row into a logit per
+  vocabulary entry, and a softmax of the logits is the prediction.
+
+  The model is a record of its matrices, laid out as nanoGPT's modules are:
+  a `Gpt` holds the embeddings, its `Block`s and the output map; a block
+  holds its attention (a `Head` of query, key and value matrices per head,
+  and the output projection) and its MLP. Training lowers the cross-entropy
+  between the predictions and the characters that come next. A training step
+  runs the model on a whole batch of sequences at once: the stream is then a
+  stack of matrices, one per sequence, and `@` and the reductions work on
+  each matrix of the stack. The gradient is `value_and_grad` of the batch's
+  loss with respect to the model: a `Gpt` of the same shape, filled by the
+  backward pass the compiler writes from the forward pass; the explorer shows the forward pass inside it as the
+  defs here. The update is the speedrun's split: Muon for
+  the matrices inside the blocks, Adam for the embeddings and the output map,
+  each matrix updated in place.
+
+init_matrix  @b13b4343
+  what  A matrix of normal random numbers scaled by $1/\sqrt{\text{rows}}$.
+  why   The scale keeps a matrix product's entries about as large as its
+        input's, whatever the width.
+  rows  its rows: the width of what it multiplies
+  cols  its columns
+
+Head  @c61322ca
+  what  One head's query, key and value matrices, drawn in that order, each
+        width by width / heads.
+  c     the model's sizes
+  hd    the width of one head
+
+Block  @0226da76
+  what   One block's starting matrices, drawn in the order the speedrun's
+         layout lists them: each head's query, key and value (the heads one
+         after another), the output projection, the MLP's two matrices.
+  c      the model's sizes
+  attn   the block's attention
+  mlp    the block's MLP
+
+Gpt  @f4a74658
+  what    The starting model: the embeddings normal random numbers, unscaled,
+          every block's matrices from `Block`, and the output map zero.
+  why     A zero output map makes every logit zero, so the first prediction
+          is uniform over the vocabulary and the first loss is $\log V$
+          exactly: the loss of a guess.
+  c       the model's sizes
+  tok     the token embedding, vocab by width: one row per token
+  pos     the position embedding, context by width: one row per position
+  blocks  the blocks, in the order the stream passes through them
+
+count_into  @55c63807
+  what  Add a matrix's number of entries to `n[0]`: what `gpt_size` calls on
+        each matrix of the model.
+  w     a matrix of the model
+  n     the count so far, in its one entry
+
+gpt_size  @94d90dce
+  what  The number of the model's parameters: the entries of all its matrices.
+  m     the model
+  n     the count, in its one entry
+
+self_attention  @2d2dd5ee
+  what    Causal self-attention with several heads. Each head attends on its own,
+          with its own query, key and value matrices of width D / heads; their
+          outputs sit side by side in Z, and the output projection mixes them
+          back into width D.
+  how     lib/nn's attention computes each head for every sequence of the
+          batch at once, and its output goes into its own columns of Z.
+  why     Several narrow heads can each look at a different position for a
+          different reason, one at the character before and one further back,
+          for the arithmetic of one wide head.
+  a       the block's attention: its heads and its output projection
+  N       the normalized stream, B by T by D: what attention reads
+  hd      the width of one head
+  Z       the heads' outputs side by side, B by T by D, before the output projection
+  i       the head's place among the heads, which picks its columns of Z
+  h       its query, key and value matrices, each D by hd
+  Y       attention's output, B by T by D, which the block adds to the stream
+
+  for each i
+    head     run one head and put its output in its own columns of Z
+  project  mix the heads' outputs with the output projection
+
+block  @0fbc10e7
+  what    One transformer block: normalize the stream and attend, add the result
+          to the stream; normalize again and run the MLP, add that too.
+  how     Pre-norm: each branch reads a normalized copy of the stream, and its
+          output is added to the stream as it is. Each step is one line of the
+          formula below, and `X` holds $x$, then $x_1$, then $x_2$.
+  why     Adding to the stream instead of replacing it (the residual) lets each
+          block make a small change, and on the way back it gives the gradient a
+          path around every branch. Normalizing a branch's input fixes its scale
+          however large the stream grows.
+  b       the block's matrices
+  X       $x$  the stream, B by T by D: as it enters the block, after
+          attention's output is added, and after the MLP's
+
+  $$ x_1 = x + \mathrm{Attn}(\mathrm{norm}(x)), \qquad x_2 = x_1 + \mathrm{MLP}(\mathrm{norm}(x_1)) $$
+
+  attention  normalize the stream, attend over its rows, and add the result to the stream
+  mlp        normalize the new stream, run the MLP (widen to hidden, apply ReLU squared, come back to width), and add its output
+    $$ \mathrm{MLP}(n) = \max(n W_{\mathrm{up}}, 0)^2 \, W_{\mathrm{down}} $$
+
+gpt_forward  @8db5167e
+  what    The logits for every position of a batch of token sequences: embed,
+          run the blocks in order, normalize, map each row to one logit per
+          vocabulary entry.
+  m       the model
+  tokens  the sequences, batch by positions: one token index per position
+  X       the residual stream, B by T by D
+  b       the block being run
+  logits  B by T by vocab: row t of a sequence scores every token as the one
+          after position t
+
+  embed       each token's row of the token embedding plus its position's row of the position embedding
+    why         Attention and the MLP treat every position alike. The position embedding is the only place the model can learn where a token sits, and without it "lo" and "ol" would look the same to attention.
+  for each b
+    block       run the stream through the block
+  logits      normalize the last stream and map each row to one logit per vocabulary entry
+
+sequence_loss  @e4a4b838
+  what    The mean cross-entropy of a batch of sequences against their
+          targets, over every position of every sequence: the function
+          training differentiates.
+  how     `train` calls `value_and_grad(sequence_loss, model, ...)`, which runs
+          this forward pass, keeps what the backward pass needs, and runs the
+          backward pass the compiler wrote for it: from the loss to the logits,
+          back through the output map, the final normalization and the blocks,
+          last block first, to the embeddings, where each position's gradient
+          goes to the one row of each table that position looked up. Each
+          matrix's gradient lands at its own place in a `Gpt` of the model's
+          shape.
+  m       the model
+  x       the input tokens, batch by positions
+  y       the targets: at each position, the token that comes next in the text
+  logits  B by T by V
+  loss    the mean over positions and sequences of $-\log p$, with p the
+          probability the model gave the right next token
+
+  forward  run the model
+  loss     score the logits against the next tokens
+
+optimizer_step  @a4d42823
+  what      One update of every matrix of the model from the gradient: Muon for
+            each matrix inside the blocks, Adam for the embeddings and the output
+            map.
+  how       `for_leaves` calls `muon_update` (lib/optim) on each matrix of the
+            blocks with the same matrix of the gradient and of the momentum;
+            `adam_update` (lib/optim) takes the other three. `GPT_MUON` and
+            `GPT_ADAM` hold the step sizes and decay rates.
+  model     the model, its matrices changed in place
+  g         $G$  the gradient, a `Gpt` of the model's shape, averaged over the batch
+  m         the optimizer's first memory, of the model's shape: Muon's momentum
+            for the blocks, Adam's average gradient for the rest
+  v         the second: Adam's average squared gradient
+  taken     how many updates have been made, this one included
+  lr_scale  the fraction of the starting step sizes the schedule allows now
+
+  muon  momentum, orthogonalize it, step along it, for every matrix of the blocks
+  adam  running averages, bias corrected, step by their ratio, for the rest
+
+batch_windows  @96c8a87a
+  what     The sequences of training step t: `batch` windows of `context` tokens
+           cut from the text, each step's windows starting where the last
+           step's left off. With a shift of one token, the same windows moved
+           one token on: the targets.
+  tokens   the whole text as tokens
+  c        the model's sizes
+  t        the training step
+  shift    `0` for the inputs, `1` for the targets
+  starts   where each window starts in the text, one per row of the batch;
+           window b of step t starts at t * batch + b, wrapped to the text
+
+train  @9ee69166
+  what      Train the model in place for `steps` steps, and return the mean loss
+            of each step's batch, measured before the step's update.
+  how       Each step cuts a batch of windows, takes the batch's loss and
+            gradient from one `value_and_grad` over the whole batch, and
+            updates the model. The step sizes fall in a straight line from
+            their starting values toward `LR_FLOOR` of them.
+  why       The loss is measured on the batch the step trains on, so it is
+            noisy: windows that start at different characters are not equally
+            easy. A falling step size lets the last steps settle instead of
+            stepping over the minimum.
+  model     the model, changed in place
+  c         its sizes; the batch size is read here
+  tokens    the training text as tokens
+  steps     how many steps to take
+  losses    one entry per step
+  m         the optimizer's first memory, of the model's shape
+  v         its second memory
+  t         the step
+  xs        the batch's inputs, batch by context
+  ys        the batch's targets: the same windows one token on
+  loss      the batch's mean loss
+  grad      the gradient of the batch's mean loss, a `Gpt` of the model's shape
+  gnorm     the length of the gradient over all the model's matrices
+  lr_scale  the schedule's fraction of the starting step sizes
+
+  for each t
+    batch             cut this step's windows, and the targets one token on
+    forward_backward  the batch's loss and its gradient
+    measure           the length of the gradient
+    update            one optimizer step at the scheduled step size
+
+sample  @f720937f
+  what    Continue the prompt by count tokens, each drawn from the model's
+          probabilities given the last context tokens written so far.
+  why     Drawing from the probabilities, instead of always taking the most likely
+          token, is how a GPT is sampled; a model that has learned the text puts
+          nearly all the probability on the right character, and the draws
+          follow it.
+  m       the model
+  prompt  the tokens to continue
+  count   how many tokens to add
+  seed    the random generator's seed for the draws
+  n       the context length: the position embedding's rows
+  out     the prompt followed by the tokens drawn so far
+  k       the token being drawn
+  ctx     the last n tokens of out, or all of them while there are fewer
+  p       the probability of each token coming next: the softmax of the
+          logits at the last position, from the model run on a batch of one
+          sequence
+
+  for each k
+    context  take the last context tokens written so far
+    probs    the model's probabilities for the next token
+    draw     draw a token from them and append it
+
+encode  @313025f1
+  what    A text as tokens: each character replaced by its place in the
+          vocabulary, which is the text's characters each once, in code point
+          order (`unique(text)`).
+  text    the text
+  vocab   the vocabulary
+  stoi    each character's place in the vocabulary, by character
+
+decode  @3f94e289
+  what    Tokens back to text: each token's character, joined into a string.
+  tokens  the tokens
+  vocab   the vocabulary
+
+gpt_test_config  @8253c658
+  what  Sizes small enough for a central-difference check of every
+        parameter: five tokens, four positions, width eight, two heads, two
+        blocks.
+
+fd_check  @bf78c929
+  what   Check one matrix's gradient against central differences of the loss:
+         move each entry by h both ways and compare the change in the loss
+         with the gradient's entry. The test calls it on every matrix.
+  w      a matrix of the model, moved in place and put back
+  g      its gradient
+  x      the input tokens, batch by positions
+  y      the targets
+  found  `found[0]` the largest difference so far, `found[1]` the largest
+         gradient entry
+  m      the model, which reads `w` where it is
+  h      the step of the central difference
+  rows   w's rows
+  cols   w's columns
+  i      a row
+  j      a column
+  was    the entry before it is moved
+  up     the loss with the entry moved up
+  dn     the loss with it moved down

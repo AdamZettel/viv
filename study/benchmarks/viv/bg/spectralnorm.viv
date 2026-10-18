@@ -1,0 +1,61 @@
+# The Computer Language Benchmarks Game: spectral-norm.
+# Reference: upstream/benchmarksgame/programs/spectralnorm.python3-6.python3
+# (Sebastien Loisel et al.), ported line by line. Differences: viv/NOTES.md.
+
+def eval_A(i, j) {
+    ij = i + j
+    return 1.0 / (ij * (ij + 1) / 2 + i + 1)
+}
+
+def eval_A_times_u(u: Arr) {
+    n = len(u)
+    out = zeros(n)
+    for i to n {
+        s = 0.0
+        for j to n {
+            s = s + eval_A(i, j) * u[j]
+        }
+        out[i] = s
+    }
+    return out
+}
+
+def eval_At_times_u(u: Arr) {
+    n = len(u)
+    out = zeros(n)
+    for i to n {
+        s = 0.0
+        for j to n {
+            s = s + eval_A(j, i) * u[j]
+        }
+        out[i] = s
+    }
+    return out
+}
+
+def eval_AtA_times_u(u: Arr) {
+    return eval_At_times_u(eval_A_times_u(u))
+}
+
+def main_() {
+    n = int(strip(read_text("N.txt")))
+    u = zeros(n) + 1
+    v = zeros(n)
+    for dummy to 10 {
+        v = eval_AtA_times_u(u)
+        u = eval_AtA_times_u(v)
+    }
+    vBv = 0.0
+    vv = 0.0
+    for k to n {
+        vBv += u[k] * v[k]
+        vv += v[k] * v[k]
+    }
+    print(fmt(sqrt(vBv / vv), ".9f"))
+    return 0
+}
+
+main_()
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,32 @@
+kernel def axpy(a: Num, x: Arr, y: Arr) -> Arr {
+    return a * x + y
+}
+
+kernel def block_sum(x: Arr, out: Arr) {
+    s = shared(8)
+    t = thread_id()
+    s[t] = x[block_id() * block_size() + t]
+    stride: Int = block_size() // 2
+    while stride > 0 {
+        barrier()
+        if t < stride {
+            s[t] = s[t] + s[t + stride]
+        }
+        stride = stride // 2
+    }
+    if t == 0 {
+        out[block_id()] = s[0]
+    }
+}
+
+x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+show axpy(2.0, x, x)
+schedule block_sum(blocks = 2, threads = 8)
+sums = block_sum(x, zeros(2))
+show sums
+test "one partial sum per block" {
+    assert_near(sums[0] + sums[1], sum(x), 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

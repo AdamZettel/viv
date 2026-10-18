@@ -1,0 +1,200 @@
+###
+post: The bus admittance matrix
+agent: claude
+
+A network of n buses joined by branches is summarized by the n by n bus
+admittance matrix Y: the bus current injections are I = Y V. Each branch is
+a pi section (series admittance ys = 1/(r + jx), total charging susceptance
+b split between its ends) behind an ideal transformer of complex ratio
+t = tap e^(j shift) at the from end, so its two-port admittances are
+
+    yff = (ys + jb/2) / |t|^2     yft = -ys / conj(t)
+    ytf = -ys / t                 ytt = ys + jb/2
+
+and it adds yff at (f, f), yft at (f, t), ytf at (t, f) and ytt at (t, t).
+A bus shunt Gs + jBs (MW and MVAr consumed at 1 per unit voltage) adds
+(Gs + jBs) / baseMVA on the diagonal. These are the branch model and the
+assembly of MATPOWER's makeYbus (MATPOWER manual, section 3.2); a tap ratio
+of 0 means 1, a line rather than a transformer.
+
+Y is stored in compressed sparse column form with complex values. Each
+branch's four admittances are kept too, for the branch flows.
+
+The fast-decoupled method needs two real matrices made the same way from
+a simplified network (MATPOWER's makeB, the XB version): B' with no bus
+shunts, no line charging, unit tap ratios and no resistance, B'' with no
+phase shifts. `make_ybus` takes those simplifications as flags.
+###
+
+from power.case import BR_B, BR_R, BR_STATUS, BR_X, BS, GS, SHIFT, TAP
+
+record Ybus {
+    n: Int
+    colptr: [Int]
+    rowind: [Int]
+    vals: CArr
+    yff: CArr
+    yft: CArr
+    ytf: CArr
+    ytt: CArr
+}
+
+#: which parts of the network make_ybus leaves out
+record YbusOpts {
+    no_bus_shunt: Bool
+    no_charging: Bool
+    unit_tap: Bool
+    no_resistance: Bool
+    no_shift: Bool
+}
+
+DEG: Num = pi / 180.0
+
+def full_network() -> YbusOpts {
+    return YbusOpts { no_bus_shunt: false, no_charging: false, unit_tap: false, no_resistance: false,
+                      no_shift: false }
+}
+
+#| Y for buses 0..nb-1, branch k joining fbus[k] to tbus[k] (internal
+#| numbers); out-of-service branches add nothing.
+def make_ybus(nb: Int, fbus: [Int], tbus: [Int], bus: Arr, branch: Arr, base_mva: Num, o: YbusOpts) -> Ybus {
+    nl: Int = len(fbus)
+    yff = czeros(nl)
+    yft = czeros(nl)
+    ytf = czeros(nl)
+    ytt = czeros(nl)
+    status = branch[:, BR_STATUS]
+    res = zeros(nl) if o.no_resistance else branch[:, BR_R]
+    reac = branch[:, BR_X]
+    charging = zeros(nl) if o.no_charging else branch[:, BR_B]
+    taps = branch[:, TAP]
+    shifts = zeros(nl) if o.no_shift else branch[:, SHIFT] * DEG
+    for k to nl {
+        if status[k] > 0.0 {
+            ys = 1.0 / (res[k] + reac[k] * 1.0i)
+            bc = charging[k]
+            ratio = taps[k]
+            if ratio == 0.0 or o.unit_tap {
+                ratio = 1.0
+            }
+            ang = shifts[k]
+            tc = ratio * (cos(ang) + sin(ang) * 1.0i)
+            yt = ys + bc / 2.0 * 1.0i
+            yff[k] = yt / (ratio * ratio)
+            yft[k] = -ys / conj(tc)
+            ytf[k] = -ys / tc
+            ytt[k] = yt
+        }
+    }
+
+    #: count the entries of each column, a diagonal for every bus
+    cnt = int_zeros(nb)
+    for j to nb {
+        cnt[j] = 1
+    }
+    for k to nl {
+        cnt[fbus[k]] += 1
+        cnt[tbus[k]] += 1
+    }
+    ptr = int_zeros(nb + 1)
+    for j to nb {
+        ptr[j + 1] = ptr[j] + cnt[j]
+    }
+    total: Int = ptr[nb]
+    ri = int_zeros(total)
+    rv = czeros(total)
+    fill = int_zeros(nb)
+    for j to nb {
+        fill[j] = ptr[j]
+        ri[fill[j]] = j
+        sh = 0.0 + 0.0i
+        if not o.no_bus_shunt {
+            sh = (bus[j, GS] + bus[j, BS] * 1.0i) / base_mva
+        }
+        else {
+            sh = bus[j, GS] / base_mva + 0.0i
+        }
+        rv[fill[j]] = sh
+        fill[j] += 1
+    }
+    for k to nl {
+        f = fbus[k]
+        t = tbus[k]
+        rv[ptr[f]] += yff[k]
+        rv[ptr[t]] += ytt[k]
+        #: column t holds row f (yft); column f holds row t (ytf)
+        ri[fill[t]] = f
+        rv[fill[t]] = yft[k]
+        fill[t] += 1
+        ri[fill[f]] = t
+        rv[fill[f]] = ytf[k]
+        fill[f] += 1
+    }
+
+    #: merge repeated rows within each column (parallel branches): count, then fill
+    pos = int_zeros(nb)
+    for j to nb {
+        pos[j] = -1
+    }
+    colptr = int_zeros(nb + 1)
+    for j to nb {
+        for p from ptr[j] to ptr[j + 1] {
+            if pos[ri[p]] != j {
+                pos[ri[p]] = j
+                colptr[j + 1] += 1
+            }
+        }
+        colptr[j + 1] += colptr[j]
+    }
+    m: Int = colptr[nb]
+    rowind = int_zeros(m)
+    vals = czeros(m)
+    for j to nb {
+        k: Int = colptr[j]
+        for p from ptr[j] to ptr[j + 1] {
+            i = ri[p]
+            if pos[i] >= colptr[j] and pos[i] < k and rowind[pos[i]] == i {
+                vals[pos[i]] += rv[p]
+            }
+            else {
+                pos[i] = k
+                rowind[k] = i
+                vals[k] = rv[p]
+                k += 1
+            }
+        }
+    }
+    return Ybus { n: nb, colptr: colptr, rowind: rowind, vals: vals, yff: yff, yft: yft, ytf: ytf,
+                  ytt: ytt }
+}
+
+#| I = Y V.
+def ybus_mul(y: Ybus, v: CArr) -> CArr {
+    out = czeros(y.n)
+    for j to y.n {
+        vj = v[j]
+        for p from y.colptr[j] to y.colptr[j + 1] {
+            out[y.rowind[p]] += y.vals[p] * vj
+        }
+    }
+    return out
+}
+
+test "a two-bus line: Y is ys [[1, -1], [-1, 1]] plus half the charging at each end" {
+    bus = zeros(2, 13)
+    branch = zeros(1, 13)
+    branch[0, BR_R] = 0.01
+    branch[0, BR_X] = 0.1
+    branch[0, BR_B] = 0.02
+    branch[0, BR_STATUS] = 1.0
+    fb: [Int] = [0]
+    tb: [Int] = [1]
+    y = make_ybus(2, fb, tb, bus, branch, 100.0, full_network())
+    ys = 1.0 / (0.01 + 0.1i)
+    I = ybus_mul(y, [1.0 + 0.0i, 0.0 + 0.0i])
+    assert_near(abs(I[0] - (ys + 0.01i)), 0.0, 1e-13)
+    assert_near(abs(I[1] + ys), 0.0, 1e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

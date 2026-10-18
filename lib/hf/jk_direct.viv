@@ -1,0 +1,225 @@
+###
+post: Direct J and K, from the basis instead of stored integrals
+agent: claude
+
+`lib/hf/md_direct` recomputes the electron repulsion integrals every time J
+and K are built and needs the basis, not a packed vector. The J/K members
+all take the same arguments (lib/hf/jk), and the SCF passes the same array
+in each of the three integral slots, so the direct members here read a flat
+*basis blob* from their second slot:
+
+    [natm, nsh, nprim, nao_cart, nao_sph (0 for Cartesian),
+     the row widths of the three tables (4, 8, 2), npair,
+     atoms (natm*4), shells (nsh*8), prims (nprim*2), M (nao_cart*nao_sph),
+     Q (npair)]
+
+`int_basis_blob` builds it, and `int_blob_basis` reads it back as an
+`IntBasis` record. `Q` holds the Schwarz factor of every shell pair over the
+run's functions (lib/hf/mdg_eri, `mdg_schwarz_basis`): it is a property of
+the basis, so it is computed once with the blob instead of at every J/K
+build.
+
+Two members:
+
+- `int_jk_direct` (`INT_JK_DIRECT`, the production one): Schwarz and density
+  screening on the generated kernels (`mdg_jk_screened`, lib/hf/mdg_eri),
+  with the blob's `Q`, in the run's functions: a spherical basis gets
+  spherical quartets and nothing is transformed.
+- `int_jk_direct_full` (`INT_JK_DIRECT_FULL`): Schwarz screening only, on
+  lib/hf/md_eri's general kernels over Cartesian functions (`mdjk_direct`),
+  every quartet the Schwarz test keeps. It checks the production member on
+  small cases. For a spherical basis it moves the densities to Cartesian
+  functions (`M D M^T`), builds J and K there, and moves them back
+  (`M^T J M`).
+`ScfOptions.jk = INT_JK_DIRECT` selects the production member (lib/hf/jk,
+`jk_of`).
+
+Used with `import hf.jk_direct`.
+###
+
+import hf.opts
+from hf.basis import bas_nao_cart, bas_nao_sph
+from hf.md_direct import mdjk_direct
+from hf.mdg_eri import mdg_jk_screened, mdg_schwarz_basis
+
+# the J/K members that read the basis blob (ScfOptions.jk, lib/hf/jk)
+INT_JK_DIRECT = 3
+INT_JK_DIRECT_FULL = 4
+
+# the blob header: counts first, then each table's row width, the shell-pair
+# count, then the packs
+INT_BLOB_NATM = 0
+INT_BLOB_NSH = 1
+INT_BLOB_NPRIM = 2
+INT_BLOB_NC = 3
+INT_BLOB_NS = 4
+INT_BLOB_ATW = 5
+INT_BLOB_SHW = 6
+INT_BLOB_PRW = 7
+INT_BLOB_NPAIR = 8
+INT_BLOB_TOP = 9
+
+#| The basis a direct member reads out of a blob.
+record IntBasis {
+    atoms: Arr
+    shells: Arr
+    prims: Arr
+    M: Arr
+    Q: Arr
+    spherical: Num
+}
+
+#| `1` when J/K member `k` is one of the direct ones, which read a basis blob
+#| in place of packed integrals.
+def int_jk_is_direct(k) {
+    if round(k) == INT_JK_DIRECT or round(k) == INT_JK_DIRECT_FULL {
+        return 1
+    }
+    return 0
+}
+
+#| The basis blob that the direct members read (layout in the header). `M`
+#| is the c2s matrix for a spherical basis; pass `spherical = 0` for
+#| Cartesian, and then `M` is not read. The Schwarz factors of the shell
+#| pairs are computed here, once.
+def int_basis_blob(atoms: Arr, shells: Arr, prims: Arr, M: Arr, spherical) {
+    natm = len(atoms)
+    nsh = len(shells)
+    npr = len(prims)
+    # the tables are copied row by row, whatever their columns are
+    atw = shape(atoms)[1]
+    shw = shape(shells)[1]
+    prw = shape(prims)[1]
+    nc = bas_nao_cart(shells)
+    ns = 0
+    sph = 0
+    if spherical > 0.5 {
+        ns = bas_nao_sph(shells)
+        sph = 1
+    }
+    Q = mdg_schwarz_basis(atoms, shells, prims, sph, M)
+    npair = len(Q)
+    b = zeros(INT_BLOB_TOP + atw * natm + shw * nsh + prw * npr + nc * ns + npair)
+    b[INT_BLOB_NATM] = natm
+    b[INT_BLOB_NSH] = nsh
+    b[INT_BLOB_NPRIM] = npr
+    b[INT_BLOB_NC] = nc
+    b[INT_BLOB_NS] = ns
+    b[INT_BLOB_ATW] = atw
+    b[INT_BLOB_SHW] = shw
+    b[INT_BLOB_PRW] = prw
+    b[INT_BLOB_NPAIR] = npair
+    k = INT_BLOB_TOP
+    for a to natm {
+        for c to atw {
+            b[k] = atoms[a, c]
+            k = k + 1
+        }
+    }
+    for s to nsh {
+        for c to shw {
+            b[k] = shells[s, c]
+            k = k + 1
+        }
+    }
+    for p to npr {
+        for c to prw {
+            b[k] = prims[p, c]
+            k = k + 1
+        }
+    }
+    for i to nc {
+        for j to ns {
+            b[k] = M[i, j]
+            k = k + 1
+        }
+    }
+    b[k:k + npair] = Q
+    return b
+}
+
+#| One `[rows, cols]` pack read back out of a blob, starting at `k0`.
+def int_blob_pack(b: Arr, k0, rows, cols) {
+    P = zeros(rows, cols)
+    k = k0
+    for r to rows {
+        for c to cols {
+            P[r, c] = b[k]
+            k = k + 1
+        }
+    }
+    return P
+}
+
+#| The basis a blob holds, as a record (see the header for the layout).
+def int_blob_basis(b: Arr) -> IntBasis {
+    natm = b[INT_BLOB_NATM]
+    nsh = b[INT_BLOB_NSH]
+    npr = b[INT_BLOB_NPRIM]
+    nc = b[INT_BLOB_NC]
+    ns = b[INT_BLOB_NS]
+    npair = b[INT_BLOB_NPAIR]
+    k = INT_BLOB_TOP
+    atoms = int_blob_pack(b, k, natm, b[INT_BLOB_ATW])
+    k = k + b[INT_BLOB_ATW] * natm
+    shells = int_blob_pack(b, k, nsh, b[INT_BLOB_SHW])
+    k = k + b[INT_BLOB_SHW] * nsh
+    prims = int_blob_pack(b, k, npr, b[INT_BLOB_PRW])
+    k = k + b[INT_BLOB_PRW] * npr
+    sph = 0
+    M = zeros(1, 1)
+    if ns > 0 {
+        sph = 1
+        M = int_blob_pack(b, k, nc, ns)
+    }
+    k = k + nc * ns
+    return IntBasis { atoms: atoms, shells: shells, prims: prims, M: M, Q: b[k:k + npair], spherical: sph }
+}
+
+#| The densities `D[nd, n, n]` in the Cartesian functions the integrals are
+#| computed in: `M D M^T` for a spherical basis, `D` as it is otherwise.
+def int_dens_cart(B: IntBasis, D: Arr) -> Arr {
+    if B.spherical < 1 {
+        return D
+    }
+    nd = len(D)
+    nc = len(B.M)
+    Dc = zeros(nd, nc, nc)
+    for d to nd {
+        setslab(Dc, d, B.M @ slab(D, d) @ transpose(B.M))
+    }
+    return Dc
+}
+
+#| Cartesian J and K `R[2 nd, nc, nc]` in the run's functions: `M^T R M` for
+#| a spherical basis, `R` as it is otherwise.
+def int_jk_run(B: IntBasis, R: Arr) -> Arr {
+    if B.spherical < 1 {
+        return R
+    }
+    ns = shape(B.M)[1]
+    out = zeros(len(R), ns, ns)
+    for r to len(R) {
+        setslab(out, r, transpose(B.M) @ (slab(R, r) @ B.M))
+    }
+    return out
+}
+
+#| J/K member `INT_JK_DIRECT`, the production one: direct J and K from the
+#| basis blob in `X2`, screened by the Schwarz bound and the density, on the
+#| generated kernels in the run's functions (lib/hf/mdg_eri). `X1` and
+#| `X3` are not read.
+def int_jk_direct(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    B = int_blob_basis(X2)
+    return mdg_jk_screened(B.atoms, B.shells, B.prims, D, opts, B.Q, B.spherical, B.M)
+}
+
+#| J/K member `INT_JK_DIRECT_FULL`: direct J and K from the basis blob in
+#| `X2`, every quartet the Schwarz test keeps. `X1` and `X3` are not read.
+def int_jk_direct_full(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    B = int_blob_basis(X2)
+    return int_jk_run(B, mdjk_direct(B.atoms, B.shells, B.prims, int_dens_cart(B, D), opts))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,176 @@
+module lib/hf/stab
+  Orbital-rotation stability of an SCF solution, and the orbital-basis
+  quantities it is built from: the orbitals of a density, the Fock matrix
+  and the two-electron integrals in the orbital basis, the Hessian of the
+  energy with respect to rotations of occupied orbitals into virtual ones,
+  and the follow-down from a saddle point to a lower solution.
+
+  An SCF run stops where the energy is stationary. That does not make it a
+  minimum: some rotation of the orbitals may still lower the energy. This
+  module computes the second derivatives of the energy along every such
+  rotation and follows the lowest one down when it is negative. The module
+  text in lib/hf/stab.viv gives the formulas.
+
+stab_orbitals  @14a97589
+  how   Build the Fock matrix of each density with the J/K member the
+        options pick, move it into the orthonormal basis X, diagonalize it,
+        and take the eigenvectors back to the basis functions. The lowest
+        orbitals of each spin get the occupation flag `1`, as many as the
+        setup's electron count for that spin.
+  why   The analysis needs orbitals, not densities: a rotation mixes an
+        occupied orbital with a virtual one. Using the eigenvectors of
+        $F(D)$ gives the same orbitals the SCF driver would fill next, so at
+        a converged density they are the SCF's own
+        [test "water 6-31G is stable and follow-down leaves it alone, with either Hessian member"].
+  p     the SCF setup: $H$, $S$, the integrals, the electron counts, the options
+  D     the densities, `[nd, n, n]`: one for RHF, one per spin for UHF
+  sh    D's shape
+  nd    the number of densities
+  n     the number of basis functions
+  opts  the options, as the array the stage members read
+  X     the orthogonalizer, `[n, m]`: its columns are orthonormal combinations of basis functions
+  m     the number of orthonormal functions X keeps
+  F     the Fock matrices of the densities, `[nd, n, n]`
+  orb   the orbital pack being filled, `[nd, n + 1, m]`
+  d     a density (a spin)
+  V     the eigenvectors of that density's Fock matrix in the orthonormal basis
+
+  = V    diagonalize the Fock matrix in the orthonormal basis, with the eigensolver the options pick
+  = orb#2  each orbital's coefficients on the basis functions: $C = X V$
+  = orb#3  the lowest orbitals are occupied, as many as the spin's electron count
+
+stab_density  @3ab1be84
+  why   The energy of a rotated set of orbitals is the energy of its
+        density, so every energy this module compares is computed from here.
+  orb   the orbital pack, `[nd, n + 1, m]`
+  sh    its shape
+  nd    the number of densities
+  n     the number of basis functions
+  m     the number of orbitals
+  D     the densities, `[nd, n, n]`
+  w     electrons per occupied orbital: `2` for one closed-shell set, `1` per spin for two
+  d     a density
+  C     the orbitals of density d, `[n, m]`
+  Cf    C with each column times its occupation flag, so the virtual ones drop out
+  p     an orbital; the occupation flag in row n leaves out the virtual ones
+
+  $$ D_{ij} = w \sum_{p\ \text{occupied}} C_{ip}\, C_{jp} $$
+
+stab_fock_mo  @a59cd5fc
+  how   The Fock matrix of the pack's own densities, then $C^\top (F C)$.
+  why   In the orbital basis the occupied-virtual block of $F$ is the
+        energy gradient. At a converged density, with the orbitals
+        stab_orbitals gives, $F$ is diagonal in the orbital basis and its
+        diagonal holds the orbital energies (lib/hf/casida reads them from
+        it).
+  orb   the orbital pack
+  H     the core Hamiltonian, `[n, n]`
+  Gp    the packed two-electron integrals
+  sh    the pack's shape
+  nd    the number of densities
+  n     the number of basis functions
+  m     the number of orbitals
+  D     the pack's densities
+  F     their Fock matrices in the basis functions, `[nd, n, n]`
+  Fm    the Fock matrices in the orbitals, `[nd, m, m]`
+  d     a density
+  C     the orbitals of density d, `[n, m]`
+
+  $$ F^{\mathrm{MO}} = C^\top F\, C $$
+
+stab_mo_eri  @866393e1
+  how   Four quarter transformations, one index at a time: sum the first
+        index against the orbitals, then the second, the third and the
+        fourth. Each step is a sum over one index of the basis functions,
+        so each costs about $m\, n^4$ multiplications instead of the
+        $m^4 n^4$ of the direct sum.
+  why   The Hessian's formulas and the Casida matrices (lib/hf/casida) are
+        written with integrals over orbitals. Dense tensors are simple, and
+        they fit in memory for small molecules like water in 6-31G.
+  G     $(\mu\nu|\lambda\sigma)$  the integrals over basis functions, dense, `[n, n, n, n]`
+  orb   the orbital pack
+  s     the spin of the orbitals in the first pair
+  t     the spin of the orbitals in the second pair
+  sh    the pack's shape
+  n     the number of basis functions
+  m     the number of orbitals
+  A     $(p\nu|\lambda\sigma)$  the first index transformed, `[m, n, n, n]`
+  B     $(pq|\lambda\sigma)$  the first two transformed, `[m, m, n, n]`
+  C3    $(pq|r\sigma)$  three transformed, `[m, m, m, n]`
+  M     $(pq|rs)$  the integrals over orbitals, `[m, m, m, m]`
+  p     the first orbital
+  q     the second orbital
+  r     the third orbital
+  u     the fourth orbital
+  i     a basis function summed against the first orbital
+  j     a basis function
+  k     a basis function
+  l     a basis function
+  v     one sum, over the index being transformed
+
+  $$ (pq|rs) = \sum_{\mu\nu\lambda\sigma} C_{\mu p}\, C_{\nu q}\, C_{\lambda r}\, C_{\sigma s}\, (\mu\nu|\lambda\sigma) $$
+  = A#2   the first index: $(p\nu|\lambda\sigma) = \sum_\mu C_{\mu p} (\mu\nu|\lambda\sigma)$
+  = B#2   the second index, against the first result
+  = C3#2  the third index, with the second pair's spin
+  = M#2   the fourth index: the integrals over orbitals
+
+stab_fill_block  @5bcd8d90
+
+  = h      the Coulomb response between the two spins' rotations: the only term when the spins differ
+  = f#2    on the diagonal of the occupied indices, the virtual-virtual Fock element
+  = f#3    on the diagonal of the virtual indices, minus the occupied-occupied one
+  = h#2    RHF: the whole closed-shell formula, four times the bracket
+  = h#3    UHF, same spin: add the Fock terms and the same-spin exchange terms
+  = Hs     the entry, at the block's row and column
+
+stab_hop  @96bea3bc
+  orb   the orbital pack, `[nd, n + 1, m]`
+  Fm    the Fock matrices in the orbital basis, from stab_fock_mo
+  Gp    the packed two-electron integrals
+  idx   each spin's occupied, then virtual, orbital indices (stab_layout)
+  no    each spin's number of occupied orbitals
+  off   each spin's first parameter in the Hessian's layout
+  kap   the rotation parameters $\kappa$
+  nd    the number of spins
+  n     the number of basis functions
+  m     the number of orbitals
+  X     the AO matrices $C_d (\kappa_d + \kappa_d^\top) C_d^\top$, `[nd, n, n]`
+  JK    J and K of the X matrices
+  hk    the result, $H \kappa$, in the Hessian's layout
+  pref  the Fock part's factor: `4` for RHF, `2` per spin for UHF
+  G     the field's response to the rotation, `[n, n]`
+  C     the orbitals of spin d, `[n, m]`
+  GC    $G C$
+  f     the Fock part of one entry
+
+  = X#2    each rotation parameter adds its occupied-virtual pair to the symmetric AO matrix $X_d = C_d (\kappa_d + \kappa_d^\top) C_d^\top$
+  = JK     J and K of the X matrices: the response of the Coulomb and exchange fields to the rotation
+  = G      RHF: the field's response, $8 (J - K/2)$
+  = G#2    UHF: the Coulomb response of both spins, minus this spin's exchange
+  = f#2    the Fock part, $F_{vv} \kappa$ ...
+  = f#3    ... minus $\kappa F_{oo}$
+  = GC     the field applied to the orbitals, $G C$; the field part of an entry is $C_a^\top (G C)_i$
+  = hk#2   one entry of the Hessian times $\kappa$
+
+stab_expm  @ddf848e2
+  K      the generator, `[m, m]`
+  m      its size
+  nrm    the largest absolute row sum of K
+  sq     how many times K was halved, and how many squarings undo it
+  scale  $2^{-sq}$
+  U      the identity, then the Taylor sum, then $e^K$
+  T      the current Taylor term
+  k      the term's order less one
+  c      one squaring
+
+  = nrm#2    the largest absolute row sum of K, a bound on its norm
+  = scale#2  halve until the scaled K has row sums at most 1/4
+  = T#2      the next Taylor term: the last one times the scaled K, over its order
+  = U#3      add it to the sum
+  = U#4      square the result, once for every halving
+
+stab_rotate  @d92adca3
+
+  = K#2    the antisymmetric generator: $\kappa$ at (virtual, occupied) and $-\kappa$ at (occupied, virtual)
+  = out#2  the rotated orbitals, $C\, e^{tK}$, the exponential from stab_expm
+  = out#3  the occupation flags, unchanged

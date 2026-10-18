@@ -1,0 +1,281 @@
+###
+post: Reading a GGUF file, part 3, ggml's quantized number formats
+agent: claude
+
+A quantized tensor is a run of blocks. Each block holds a few numbers in
+full or half precision (a scale, sometimes a minimum) and a small integer
+per weight; a weight is the integer times the scale, plus the minimum. The
+formats differ in the block size, the bits per integer and how the scales
+are packed. This module turns blocks back into numbers, one def per format:
+a rewrite of `dequantize_row_*` in ggml's `src/ggml-quants.c`, with the
+block structs of `src/ggml-common.h` (ggml at commit 3612c0af93f2, MIT, The
+ggml authors). The tests hold every def to gguf-py 0.19.0's
+`gguf.quants.dequantize`, the NumPy version of the same code, number for
+number.
+
+ggml computes in single precision. Where a step rounds there, the code here
+rounds with `fround`; a product of a half and a small integer is exact in
+both, so most steps need nothing.
+
+Used with `from gguf.quants import tensor_rows` (and the other names here).
+###
+
+from gguf.tensors import Tensor, float_rows, rows_bytes, row_len, GGML_NAMES, GGML_F32, GGML_F16, GGML_BF16
+
+GGML_Q4_0: Int = 2
+GGML_Q4_1: Int = 3
+GGML_Q8_0: Int = 8
+GGML_Q4_K: Int = 12
+GGML_Q6_K: Int = 14
+# Q8_0 (block_q8_0): 32 weights in 34 bytes
+QK8_0: Int = 32
+Q8_0_BYTES: Int = 34
+# Q4_0 (block_q4_0): 32 weights in 18 bytes
+QK4_0: Int = 32
+Q4_0_BYTES: Int = 18
+# Q4_1 (block_q4_1): 32 weights in 20 bytes
+QK4_1: Int = 32
+Q4_1_BYTES: Int = 20
+# the K-quants' super-block: 256 weights (QK_K)
+QK_K: Int = 256
+# Q4_K (block_q4_K): 256 weights in 144 bytes: d, dmin, 12 bytes of scales, 128 of weights
+Q4_K_BYTES: Int = 144
+K_SCALE_SIZE: Int = 12
+# Q4_K's sub-blocks: 8 of 32 weights, each with a 6-bit scale and a 6-bit minimum
+Q4_K_SUB: Int = 32
+SIX_BITS: Int = 63
+# where the top 2 bits of a byte start, and how many scales share a byte group
+TOP_TWO: Int = 6
+SCALE_GROUP: Int = 4
+# Q6_K (block_q6_K): 256 weights in 210 bytes: 128 of low 4 bits, 64 of high
+# 2 bits, 16 signed 8-bit scales, then d; Q6_K stores q + 32 for q in -32..31
+Q6_K_BYTES: Int = 210
+Q6_K_ZERO: Int = 32
+TWO_BITS: Int = 3
+# a Q6_K half: 128 weights from 64 bytes of ql, 32 of qh and 8 scales
+Q6_K_HALF: Int = 128
+Q6_K_QUARTER: Int = 32
+Q6_K_SUB: Int = 16
+# bytes of a half-precision scale at the start of a block
+HALF: Int = 2
+# a 4-bit field: its mask, and the shift to the high one of a byte's two
+NIBBLE: Int = 15
+NIBBLE_BITS: Int = 4
+# Q4_0 stores q + 8 for q in -8..7
+Q4_0_ZERO: Int = 8
+
+#| `n` numbers from Q8_0 blocks (ggml-quants.c, dequantize_row_q8_0).
+def q8_0_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    for blk to n // QK8_0 {
+        at = blk * Q8_0_BYTES
+        #: a block: the scale d as a half, then 32 weights as signed bytes q; each number is q * d
+        d = le_f16(b, at)
+        for j to QK8_0 {
+            x[blk * QK8_0 + j] = le_i8(b, at + HALF + j) * d
+        }
+    }
+    return x
+}
+
+#| `n` numbers from Q4_0 blocks (ggml-quants.c, dequantize_row_q4_0).
+def q4_0_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    half_block = QK4_0 // 2
+    for blk to n // QK4_0 {
+        at = blk * Q4_0_BYTES
+        #: a block: the scale d as a half, then 16 bytes; byte j holds weight j in its low 4 bits and weight j + 16 in its high 4, each stored as q + 8
+        d = le_f16(b, at)
+        for j to half_block {
+            byte = b[at + HALF + j]
+            x[blk * QK4_0 + j] = (band(byte, NIBBLE) - Q4_0_ZERO) * d
+            x[blk * QK4_0 + j + half_block] = (shr(byte, NIBBLE_BITS) - Q4_0_ZERO) * d
+        }
+    }
+    return x
+}
+
+#| `n` numbers from Q4_1 blocks (ggml-quants.c, dequantize_row_q4_1).
+def q4_1_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    half_block = QK4_1 // 2
+    for blk to n // QK4_1 {
+        at = blk * Q4_1_BYTES
+        #: a block: the scale d and the minimum m as halves, then 16 bytes of two weights each, as in Q4_0 but unsigned, 0..15
+        d = le_f16(b, at)
+        m = le_f16(b, at + HALF)
+        for j to half_block {
+            byte = b[at + 2 * HALF + j]
+            #: q * d is exact; ggml adds m in single precision, which rounds
+            x[blk * QK4_1 + j] = fround(band(byte, NIBBLE) * d + m)
+            x[blk * QK4_1 + j + half_block] = fround(shr(byte, NIBBLE_BITS) * d + m)
+        }
+    }
+    return x
+}
+
+#| The 6-bit scale and 6-bit minimum of sub-block `j` (0..7) of a Q4_K
+#| super-block whose 12 scale bytes start at `b[at]` (ggml-quants.c,
+#| get_scale_min_k4).
+def scale_min_k4(b: [Int], at: Int, j: Int) {
+    #: bytes 0-3 hold scales 0-3 in their low 6 bits, bytes 4-7 minimums 0-3; for 4-7, bytes 8-11 hold the low 4 bits of the scale and of the minimum, and the top 2 bits of bytes 0-3 and 4-7 hold their high 2
+    if j < SCALE_GROUP {
+        sc = band(b[at + j], SIX_BITS)
+        m = band(b[at + j + SCALE_GROUP], SIX_BITS)
+        return sc, m
+    }
+    sc = bor(band(b[at + j + SCALE_GROUP], NIBBLE), shl(shr(b[at + j - SCALE_GROUP], TOP_TWO), NIBBLE_BITS))
+    m = bor(shr(b[at + j + SCALE_GROUP], NIBBLE_BITS), shl(shr(b[at + j], TOP_TWO), NIBBLE_BITS))
+    return sc, m
+}
+
+#| `n` numbers from Q4_K super-blocks (ggml-quants.c, dequantize_row_q4_K).
+def q4_k_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    for blk to n // QK_K {
+        at = blk * Q4_K_BYTES
+        #: a super-block: d and dmin as halves, 12 bytes of packed scales, then 128 bytes of 4-bit weights
+        d = le_f16(b, at)
+        dmin = le_f16(b, at + HALF)
+        sc_at = at + 2 * HALF
+        qs = sc_at + K_SCALE_SIZE
+        #: 32 bytes serve two sub-blocks: their low nibbles the first, their high nibbles the second
+        for g to QK_K // (2 * Q4_K_SUB) {
+            sc1, m1 = scale_min_k4(b, sc_at, 2 * g)
+            sc2, m2 = scale_min_k4(b, sc_at, 2 * g + 1)
+            #: d * sc and dmin * m are exact in single precision, and so is d * sc * q; the subtraction rounds
+            d1 = d * sc1
+            d2 = d * sc2
+            min1 = dmin * m1
+            min2 = dmin * m2
+            out = blk * QK_K + 2 * Q4_K_SUB * g
+            for l to Q4_K_SUB {
+                byte = b[qs + Q4_K_SUB * g + l]
+                x[out + l] = fround(d1 * band(byte, NIBBLE) - min1)
+                x[out + Q4_K_SUB + l] = fround(d2 * shr(byte, NIBBLE_BITS) - min2)
+            }
+        }
+    }
+    return x
+}
+
+#| `n` numbers from Q6_K super-blocks (ggml-quants.c, dequantize_row_q6_K).
+def q6_k_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    ql_n = QK_K // 2
+    qh_n = QK_K // 4
+    for blk to n // QK_K {
+        at = blk * Q6_K_BYTES
+        #: a super-block: 128 bytes ql (the low 4 bits of each weight), 64 bytes qh (the high 2 bits), 16 signed scales, then d as a half
+        sc_at = at + ql_n + qh_n
+        d = le_f16(b, sc_at + QK_K // Q6_K_SUB)
+        #: each half of 128 weights takes 64 bytes of ql, 32 of qh and 8 scales; byte l of qh holds the high bits of weights l, l + 32, l + 64, l + 96, two bits each
+        for half to QK_K // Q6_K_HALF {
+            ql = at + 64 * half
+            qh = at + ql_n + Q6_K_QUARTER * half
+            sc = sc_at + 8 * half
+            out = blk * QK_K + Q6_K_HALF * half
+            for l to Q6_K_QUARTER {
+                s = l // Q6_K_SUB
+                lo0 = b[ql + l]
+                lo1 = b[ql + l + Q6_K_QUARTER]
+                hi = b[qh + l]
+                q1 = bor(band(lo0, NIBBLE), shl(band(hi, TWO_BITS), 4)) - Q6_K_ZERO
+                q2 = bor(band(lo1, NIBBLE), shl(band(shr(hi, 2), TWO_BITS), 4)) - Q6_K_ZERO
+                q3 = bor(shr(lo0, NIBBLE_BITS), shl(band(shr(hi, 4), TWO_BITS), 4)) - Q6_K_ZERO
+                q4 = bor(shr(lo1, NIBBLE_BITS), shl(band(shr(hi, 6), TWO_BITS), 4)) - Q6_K_ZERO
+                #: (d * scale) is exact in single precision; times q it can need 25 bits, and rounds
+                x[out + l] = fround(d * le_i8(b, sc + s) * q1)
+                x[out + l + Q6_K_QUARTER] = fround(d * le_i8(b, sc + s + 2) * q2)
+                x[out + l + 2 * Q6_K_QUARTER] = fround(d * le_i8(b, sc + s + 4) * q3)
+                x[out + l + 3 * Q6_K_QUARTER] = fround(d * le_i8(b, sc + s + 6) * q4)
+            }
+        }
+    }
+    return x
+}
+
+#| `n` numbers from bytes `b` of ggml type `t`.
+def dequantize(b: [Int], t: Int, n: Int) -> Arr {
+    if t == GGML_Q8_0 {
+        return q8_0_values(b, n)
+    }
+    if t == GGML_Q4_0 {
+        return q4_0_values(b, n)
+    }
+    if t == GGML_Q4_1 {
+        return q4_1_values(b, n)
+    }
+    if t == GGML_Q4_K {
+        return q4_k_values(b, n)
+    }
+    if t == GGML_Q6_K {
+        return q6_k_values(b, n)
+    }
+    stop(f"GGUF: lib/gguf does not read {GGML_NAMES[t]} tensors")
+    return zeros(0)
+}
+
+#| Rows `r0` to `r0 + n - 1` of tensor `t` of the file at `path`, as numbers,
+#| whatever its type: one window of the file, read and decoded.
+def tensor_rows(path: Str, t: Tensor, r0: Int, n: Int) -> Arr {
+    if t.ggml_type == GGML_F32 or t.ggml_type == GGML_F16 or t.ggml_type == GGML_BF16 {
+        return float_rows(path, t, r0, n)
+    }
+    return dequantize(rows_bytes(path, t, r0, n), t.ggml_type, n * row_len(t))
+}
+
+#| Every number of tensor `t`, rows one after another.
+def tensor_values(path: Str, t: Tensor) -> Arr {
+    return tensor_rows(path, t, 0, t.n_elems // row_len(t))
+}
+
+test "a Q8_0 block" {
+    # d = 0.5 (half 0x3800), then q = 2, -3, 127, -128 and 28 zeros
+    b: [Int] = [0, 56, 2, 253, 127, 128]
+    for j from len(b) - HALF to QK8_0 {
+        b = append(b, 0)
+    }
+    x = q8_0_values(b, QK8_0)
+    assert_allclose(x[:4], [1.0, -1.5, 63.5, -64.0], 0.0)
+    assert_near(sum(x[4:]), 0.0, 0.0)
+}
+
+test "a Q4_0 block" {
+    # d = 2.0 (half 0x4000); byte 0 = 0x9F: weight 0 is 15 - 8 = 7, weight 16 is 9 - 8 = 1
+    b: [Int] = [0, 64, 159]
+    for j from 1 to QK4_0 // 2 {
+        b = append(b, 136)
+    }
+    x = q4_0_values(b, QK4_0)
+    assert_near(x[0], 14.0, 0.0)
+    assert_near(x[16], 2.0, 0.0)
+    # 0x88 holds 8 and 8: zero
+    assert_near(sum(abs(x)), 16.0, 0.0)
+}
+
+test "a Q4_1 block rounds as single precision does" {
+    # d = 1.0 (0x3C00), m = 2^-24 (the smallest half, 0x0001); weight 0 is 15:
+    # 15 + 2^-24 needs 28 bits and rounds to 15 in single precision
+    b: [Int] = [0, 60, 1, 0, 15]
+    for j from 1 to QK4_1 // 2 {
+        b = append(b, 0)
+    }
+    x = q4_1_values(b, QK4_1)
+    assert_near(x[0], 15.0, 0.0)
+    assert_near(x[1], 5.960464477539063e-08, 0.0)
+}
+
+test "Q4_K's packed scales" {
+    # scales 0-3 = 1, 2, 3, 63; minimums 0-3 = 4, 5, 6, 7; sub-block 4: scale
+    # 0x3A (low 0xA from byte 8, high 0b11 from byte 0's top bits), minimum
+    # 0x15 (low 0x5 from byte 8's high nibble, high 0b01 from byte 4's top)
+    s: [Int] = [193, 2, 3, 63, 68, 5, 6, 7, 90, 0, 0, 0]
+    sc0, m0 = scale_min_k4(s, 0, 0)
+    sc4, m4 = scale_min_k4(s, 0, 4)
+    assert_true(sc0 == 1 and m0 == 4)
+    assert_true(sc4 == 58 and m4 == 21)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

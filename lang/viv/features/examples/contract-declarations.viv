@@ -1,0 +1,51 @@
+# Three ways to sum the squares of an array, declared as one contract with
+# its methods in two labeled groups. A call runs the default (by_loop);
+# `using by_dot` picks another, a top-level `settings by_dot(...)` gives
+# by_dot its settings, `using every array method` runs the array group, and
+# `using every method` runs all three and stops if they disagree.
+
+def by_loop(x: Arr) {
+    s = 0.0
+    for i to len(x) {
+        s = s + x[i] * x[i]
+    }
+    return s, len(x)
+}
+
+def by_dot(x: Arr, scale: Num = 1.0) {
+    return scale * dot(x, x), len(x)
+}
+
+def by_sum(x: Arr) {
+    return sum(x * x), len(x)
+}
+
+contract sumsq(x: Arr) -> total: Num, count: Int {
+    intent "the sum of the squares of the elements of x, and how many there are"
+    methods
+        scalar: by_loop
+        array: by_dot, by_sum
+    agree total within relative 1.0e-12
+    agree count exactly
+}
+
+# by_dot's setting, used wherever by_dot runs
+settings by_dot(scale = 1.0)
+
+v = [1.0, 2.0, 3.0]
+t, n = sumsq(v)
+t_dot, n_dot = sumsq(v) using by_dot
+t_arr, n_arr = sumsq(v) using every array method
+using sumsq = every method
+t_all, n_all = sumsq(v)
+show t, t_dot, t_arr, t_all, n
+test "every method gives 14 for 1, 2, 3" {
+    assert_near(t, 14.0, 1.0e-12)
+    assert_near(t_dot, 14.0, 1.0e-12)
+    assert_near(t_arr, 14.0, 1.0e-12)
+    assert_near(t_all, 14.0, 1.0e-12)
+    assert_true(n == 3 and n_dot == 3 and n_all == 3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

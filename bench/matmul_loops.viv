@@ -1,0 +1,40 @@
+# Matrix product written as loops, three indexed reads and one indexed
+# write per multiply-add: the program where array bounds checks cost the
+# most, because indexing is nearly all it does. `@` would call the runtime's
+# own loop instead and never touch viv_get2.
+#
+#     tools/bounds-cost.sh bench/matmul_loops.viv
+
+def mm_fill(n) {
+    a = zeros(n, n)
+    for i to n {
+        for j to n {
+            a[i, j] = mod(i * 7 + j * 3, 11) / 11
+        }
+    }
+    return a
+}
+
+def mm_loops(a: Arr, b: Arr) {
+    n = len(a)
+    c = zeros(n, n)
+    for i to n {
+        for k to n {
+            aik = a[i, k]
+            for j to n {
+                c[i, j] = c[i, j] + aik * b[k, j]
+            }
+        }
+    }
+    return c
+}
+
+mm_a = mm_fill(400)
+mm_c = mm_loops(mm_a, mm_a)
+show sum(mm_c)
+test "the loops agree with @" {
+    assert_near(sum(mm_c), sum(mm_a @ mm_a), 1e-6)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

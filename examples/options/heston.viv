@@ -1,0 +1,95 @@
+#|| European options under the Heston model by the COS method of Fang and
+#|| Oosterlee (SIAM J. Sci. Comput. 31, 2008): the density of
+#|| y = log(S_T / K) is expanded in a cosine series on [a, b], whose
+#|| coefficients come from the characteristic function in closed form.
+#||
+#|| Parameters: v0 the initial variance, kappa the speed of mean reversion,
+#|| theta the long-run variance, eta the volatility of variance, rho the
+#|| correlation of the two Brownian motions.
+
+PI = 3.141592653589793
+
+#| The characteristic function of log(S_T / S_0), E exp(i u log(S_T / S_0)),
+#| in the form that keeps the complex logarithm on its principal branch
+#| (Albrecher, Mayer, Schoutens and Tistaert, "The little Heston trap", 2007).
+def heston_cf(u: Num, T: Num, r: Num, q: Num, v0: Num, kappa: Num, theta: Num, eta: Num, rho: Num) -> Complex {
+    iu = u * 1.0i
+    beta = kappa - rho * eta * iu
+    D = sqrt(beta * beta + eta * eta * (u * u + iu))
+    G = (beta - D) / (beta + D)
+    e = exp(-D * T)
+    C = kappa * theta / (eta * eta) * ((beta - D) * T - 2.0 * log((1.0 - G * e) / (1.0 - G)))
+    B = (beta - D) / (eta * eta) * (1.0 - e) / (1.0 - G * e)
+    return exp(iu * (r - q) * T + C + B * v0)
+}
+
+# The first cumulant of log(S_T / S_0), its mean (Fang and Oosterlee, Table 11).
+def _c1(T: Num, r: Num, q: Num, v0: Num, kappa: Num, theta: Num) -> Num {
+    return (r - q) * T + (1.0 - exp(-kappa * T)) * (theta - v0) / (2.0 * kappa) - 0.5 * theta * T
+}
+
+# The second cumulant, -d^2/du^2 log phi(u) at u = 0, by a central
+# difference of the characteristic function (h = 1e-4: relative error near
+# 1e-8, ample for a truncation width)
+def _c2(T: Num, r: Num, q: Num, v0: Num, kappa: Num, theta: Num, eta: Num, rho: Num) -> Num {
+    h = 1.0e-4
+    lp = log(heston_cf(h, T, r, q, v0, kappa, theta, eta, rho))
+    lm = log(heston_cf(-h, T, r, q, v0, kappa, theta, eta, rho))
+    return -re(lp + lm) / (h * h)
+}
+
+#| Heston prices of European options on one stock for an array of strikes,
+#| with N cosine terms and the truncation half-width L standard deviations.
+#| The put comes from the series (its payoff is bounded) and the call from
+#| put-call parity, as Fang and Oosterlee recommend. is_call: 1 call, 0 put.
+def heston_cos(S: Num, K: Arr, T: Num, r: Num, q: Num, v0: Num, kappa: Num, theta: Num, eta: Num, rho: Num, N: Int, L: Num, is_call: Arr) -> Arr {
+    c1 = _c1(T, r, q, v0, kappa, theta)
+    w = L * sqrt(abs(_c2(T, r, q, v0, kappa, theta, eta, rho)))
+    bma = 2.0 * w
+    # the characteristic function at u_k = k pi / (b - a): b - a is the
+    # same for every strike, so these are shared
+    phi = czeros(N)
+    for k to N {
+        phi[k] = heston_cf(k * PI / bma, T, r, q, v0, kappa, theta, eta, rho)
+    }
+    nk = len(K)
+    out = zeros(nk)
+    for j to nk {
+        x = log(S / K[j])
+        a = x + c1 - w
+        total = 0.0
+        for k to N {
+            uk = k * PI / bma
+            # the put's payoff coefficient U_k = 2 / (b - a) (psi_k(a, 0) - chi_k(a, 0))
+            cd = cos(-uk * a)
+            sd = sin(-uk * a)
+            chi = (cd - exp(a) + uk * sd) / (1.0 + uk * uk)
+            psi = -a
+            if k > 0 {
+                psi = sd / uk
+            }
+            Uk = 2.0 / bma * (psi - chi)
+            term = re(phi[k] * exp(uk * (x - a) * 1.0i)) * Uk
+            if k == 0 {
+                term = 0.5 * term
+            }
+            total += term
+        }
+        put = K[j] * exp(-r * T) * total
+        if is_call[j] > 0.5 {
+            out[j] = put + S * exp(-q * T) - K[j] * exp(-r * T)
+        }
+        else {
+            out[j] = put
+        }
+    }
+    return out
+}
+
+test "Fang and Oosterlee's Heston call, T = 1: 5.785155450" {
+    p = heston_cos(100.0, [100.0], 1.0, 0.0, 0.0, 0.0175, 1.5768, 0.0398, 0.5751, -0.5711, 1024, 32.0, [1.0])
+    assert_near(p[0], 5.785155450, 2.0e-8)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

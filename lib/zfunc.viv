@@ -1,0 +1,125 @@
+###
+post: The Faddeeva function and the plasma dispersion function
+agent: claude
+
+The plasma dispersion function
+
+$$Z(\zeta) = \frac{1}{\sqrt\pi}\int_{-\infty}^{\infty} \frac{e^{-t^2}}{t - \zeta}\,dt \quad (\operatorname{Im}\zeta > 0),$$
+
+continued analytically to the whole plane, is what a Maxwellian velocity
+distribution contributes to the response of a plasma to a wave with phase
+velocity $\zeta$ in thermal units (Fried and Conte, 1961). It is a rescaled
+Faddeeva function, $Z(\zeta) = i\sqrt\pi\, w(\zeta)$ with
+$w(z) = e^{-z^2}\operatorname{erfc}(-iz)$, and its derivative is
+$Z'(\zeta) = -2\left(1 + \zeta Z(\zeta)\right)$.
+
+`zf_w` computes $w$ by J. A. C. Weideman's rational expansion ("Computation of
+the complex error function", SIAM J. Numer. Anal. 31, 1497-1518, 1994). With
+$L = \sqrt{N/\sqrt 2}$ and $Z = (L + iz)/(L - iz)$, which maps the upper half plane
+onto the unit disc,
+
+$$w(z) = \frac{2\,p(Z)}{(L - iz)^2} + \frac{1}{\sqrt\pi\,(L - iz)}, \qquad p(Z) = \sum_{n=1}^{N} a_n Z^{n-1},$$
+
+and the $a_n$ are Fourier coefficients of $e^{-t^2}(L^2 + t^2)$ under the change of
+variable $t = L\tan(\theta/2)$. Weideman gets them from one FFT; here they are
+the same sum written out as cosines, computed once when the module is loaded.
+With $N = 40$ the result agrees with `scipy.special.wofz` to a relative error
+of $1.0 \times 10^{-14}$ on $-6 \le \operatorname{Re}z \le 6$, $-1 \le \operatorname{Im}z \le 4$
+(`lib/zfunc_ref.py`). The expansion is for $\operatorname{Im} z \ge 0$; below the axis
+`zf_w` uses $w(z) = 2e^{-z^2} - w(-z)$, which loses relative accuracy as
+$e^{-z^2}$ grows, so far below the axis ($\operatorname{Im} z \lesssim -3$) it is only
+as good as that cancellation allows.
+
+Used with `import zfunc`. Names start with `zf_` or `ZF_`.
+###
+
+# 40 terms: the relative error on the tested region is 1e-14 (32 terms gave 3e-13)
+ZF_N = 40
+ZF_M = 2.0 * ZF_N
+ZF_L = sqrt(ZF_N / sqrt(2.0))
+ZF_RTPI = sqrt(3.141592653589793)
+
+#| Weideman's coefficients $a_n = \frac{1}{2M}\sum_{k=-M+1}^{M-1} f(\theta_k)\cos(n\theta_k)$, $n = 1 \ldots N$,
+#| with $\theta_k = k\pi/M$, $t_k = L\tan(\theta_k/2)$ and $f = e^{-t^2}(L^2 + t^2)$. Stored as `a[n - 1]`.
+def zf_coefficients(nterm, m, el) {
+    a = zeros(nterm)
+    pi = 3.141592653589793
+    #: trapezoid rule over 2m points
+    for j to 2.0 * m - 1.0 {
+        th = (j - m + 1.0) * pi / m
+        t = el * tan(0.5 * th)
+        f = exp(-t * t) * (el * el + t * t)
+        for n to nterm {
+            a[n] = a[n] + f * cos((n + 1.0) * th)
+        }
+    }
+    for n to nterm {
+        a[n] = a[n] / (2.0 * m)
+    }
+    return a
+}
+ZF_A = zf_coefficients(ZF_N, ZF_M, ZF_L)
+
+#| $w(z)$ for $\operatorname{Im} z \ge 0$: Weideman's rational expansion, the polynomial by Horner's rule.
+def zf_w_upper(z: Complex) {
+    #: Weideman's rational series, by Horner's rule
+    ll = complex(ZF_L, 0.0)
+    iz = complex(0.0, 1.0) * z
+    zz = (ll + iz) / (ll - iz)
+    nterm = len(ZF_A)
+    p = complex(ZF_A[nterm - 1], 0.0)
+    for j to nterm - 1.0 {
+        p = p * zz + ZF_A[nterm - 2.0 - j]
+    }
+    d = ll - iz
+    return 2.0 * p / (d * d) + 1.0 / (ZF_RTPI * d)
+}
+
+#| The Faddeeva function $w(z) = e^{-z^2}\operatorname{erfc}(-iz)$ anywhere in the plane:
+#| the expansion above the real axis, $w(z) = 2e^{-z^2} - w(-z)$ below it.
+def zf_w(z: Complex) {
+    if im(z) >= 0.0 {
+        return zf_w_upper(z)
+    }
+    return 2.0 * exp(-(z * z)) - zf_w_upper(-z)
+}
+
+#| The plasma dispersion function $Z(\zeta) = i\sqrt\pi\,w(\zeta)$.
+def zf_z(zeta: Complex) {
+    return complex(0.0, ZF_RTPI) * zf_w(zeta)
+}
+
+#| Its derivative, $Z'(\zeta) = -2\left(1 + \zeta Z(\zeta)\right)$.
+def zf_zprime(zeta: Complex) {
+    return -2.0 * (1.0 + zeta * zf_z(zeta))
+}
+
+#| The relative distance $|a - b| / |b|$ between two complex numbers.
+def zf_rel(a: Complex, b: Complex) {
+    return abs(a - b) / abs(b)
+}
+
+test "w(0) = 1 and w(1) = e^-1 + (2i/sqrt pi) Dawson(1), to 1e-14" {
+    assert_near(zf_rel(zf_w(complex(0.0, 0.0)), complex(1.0, 0.0)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_w(complex(1.0, 0.0)), complex(0.36787944117144233, 0.6071577058413937)), 0.0, 1.0e-14)
+}
+test "w matches scipy.special.wofz at five points in the upper half plane, to 1e-14" {
+    assert_near(zf_rel(zf_w(complex(0.5, 0.3)), complex(0.6148515391469911, 0.303124349647351)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_w(complex(2.0, 1.0)), complex(0.14023958136627798, 0.22221344017989925)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_w(complex(-3.0, 0.5)), complex(0.037126366054692383, -0.19298375530036244)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_w(complex(5.5, 2.5)), complex(0.039913386367779885, 0.08534994689831508)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_w(complex(0.0, 3.0)), complex(0.17900115118138998, 0.0)), 0.0, 1.0e-14)
+}
+test "below the real axis too: three points, to 1e-14" {
+    assert_near(zf_rel(zf_w(complex(2.0, -0.2)), complex(-0.03296849805777885, 0.3486824920327794)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_w(complex(-1.2, -0.7)), complex(-0.36503957021206046, -1.0607254808827826)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_w(complex(0.3, -1.0)), complex(3.6868102733256856, 2.8853724063828023)), 0.0, 1.0e-14)
+}
+test "Z and Z' at zeta = 2 - 0.2i match i sqrt(pi) wofz and -2(1 + zeta Z)" {
+    zeta = complex(2.0, -0.2)
+    assert_near(zf_rel(zf_z(zeta), complex(-0.6180236257468317, -0.058435141341081145)), 0.0, 1.0e-14)
+    assert_near(zf_rel(zf_zprime(zeta), complex(0.4954685595237591, -0.013468884934408093)), 0.0, 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

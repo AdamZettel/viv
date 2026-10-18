@@ -1,0 +1,99 @@
+###
+post: enorm and dpmpar from MINPACK
+agent: claude
+
+A port of `enorm.f` and of the IEEE branch of `dpmpar.f` from netlib MINPACK
+(lib/minpack/ref). The explanation is in lib/minpack/enorm.intent.
+
+Used with `import minpack.enorm`.
+###
+
+# dpmpar(1) and dpmpar(2) exactly as netlib's dpmpar.f writes them for IEEE
+# machines: 11 significant digits, not the exact powers of two
+EPSMCH = 2.22044604926e-16
+DWARF = 2.22507385852e-308
+# enorm's two thresholds, from its data statement
+RDWARF = 3.834e-20
+RGIANT = 1.304e19
+
+def enorm(n, x: Arr) {
+    s1 = 0.0
+    s2 = 0.0
+    s3 = 0.0
+    x1max = 0.0
+    x3max = 0.0
+    agiant = RGIANT / n
+    for i to n {
+        xabs = abs(x[i])
+        if xabs > RDWARF and xabs < agiant {
+            s2 = s2 + xabs * xabs
+        } else if xabs <= RDWARF {
+            if xabs > x3max {
+                q = x3max / xabs
+                s3 = 1.0 + s3 * (q * q)
+                x3max = xabs
+            } else if xabs != 0.0 {
+                q = xabs / x3max
+                s3 = s3 + q * q
+            }
+        } else if xabs > x1max {
+            q = x1max / xabs
+            s1 = 1.0 + s1 * (q * q)
+            x1max = xabs
+        } else {
+            q = xabs / x1max
+            s1 = s1 + q * q
+        }
+    }
+    if s1 != 0.0 {
+        return x1max * sqrt(s1 + (s2 / x1max) / x1max)
+    }
+    if s2 != 0.0 {
+        if s2 >= x3max {
+            return sqrt(s2 * (1.0 + (x3max / s2) * (x3max * s3)))
+        }
+        return sqrt(x3max * ((s2 / x3max) + (x3max * s3)))
+    }
+    return x3max * sqrt(s3)
+}
+
+#~ test
+def en_naive(x: Arr) {
+    s = 0.0
+    for i to len(x) {
+        s = s + x[i] * x[i]
+    }
+    return sqrt(s)
+}
+
+test "for ordinary numbers enorm is the plain square root of the sum of squares" {
+    v = [3.0, -4.0, 12.0]
+    assert_near(enorm(len(v), v), 13.0, 0.0)
+    w = [0.1, 0.2, 0.3, 0.4, 0.5]
+    assert_near(enorm(len(w), w), en_naive(w), 1.0e-16)
+}
+
+test "enorm reads only the first n entries" {
+    v = [3.0, 4.0, 100.0]
+    assert_near(enorm(2.0, v), 5.0, 0.0)
+}
+
+test "enorm of 1e200 and 1e-200 entries does not overflow or underflow" {
+    big = [3.0e200, 4.0e200]
+    assert_near(enorm(len(big), big) / 5.0e200, 1.0, 1.0e-15)
+    assert_gt(en_naive(big), 1.0e308)
+    small = [3.0e-200, 4.0e-200]
+    assert_near(enorm(len(small), small) / 5.0e-200, 1.0, 1.0e-15)
+    assert_near(en_naive(small), 0.0, 0.0)
+    mixed = [1.0e200, 1.0, 1.0e-200]
+    assert_near(enorm(len(mixed), mixed) / 1.0e200, 1.0, 0.0)
+}
+
+test "enorm of a zero vector is zero" {
+    z = [0.0, 0.0, 0.0]
+    assert_near(enorm(len(z), z), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: LicenseRef-Minpack
+# SPDX-FileCopyrightText: 1999 University of Chicago (Argonne National Laboratory, MINPACK)
+# SPDX-FileCopyrightText: 2026 The Viv authors

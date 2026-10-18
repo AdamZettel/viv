@@ -1,0 +1,70 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// The explorer's index: every program in src/data/explorables.mjs, each as a
+// scene with its walk.
+import Base from '../../layouts/Base.astro';
+import data from '../../data/explore.json';
+import '../../styles/explore.css';
+import '../../styles/codemap.css';
+import '../../styles/zoomwalk.css';
+import '../../styles/scenes.css';
+import Scenes from '../../components/Scenes.jsx';
+import LookInside from '../../components/LookInside.astro';
+
+// One scene per program, the walk the home page opens with: the camera moves
+// along the program's recording while it is on screen.
+const WALKS = data.programs.map((p) => ({
+  id: p.slug,
+  kind: 'walk',
+  slug: p.slug,
+  title: p.title,
+  line: p.blurb,
+  check: `${p.file} · ${p.defs} defs in ${p.modules} ${p.modules === 1 ? 'file' : 'files'} · ${p.steps} named steps in its code`,
+  href: `/explore/${p.slug}`,
+  cta: 'Explore the run',
+  more: { href: `/explore/walk/${p.slug}`, cta: 'The whole walk' },
+}));
+---
+
+<Base
+  title="Explore a run · Viv"
+  description="Run a Viv program, then move through what it did: where you are in its graph of defs and steps, the intent of the step that ran, its code line by line, and the values it set."
+  bleed>
+  <div class="page page-wide ex-head">
+    <p class="eyebrow">Explore a run</p>
+    <h1>Recorded runs of Viv programs</h1>
+    <p class="lede">
+      Each card plays a short walk through a program's run; its arrows move a stop at a time.
+      Explore the run opens the program's own page: your browser runs it once, recording every step,
+      and then you move through the run forward and back by line, by step, by pass of a loop or by
+      call, without running it again.
+      At each point you see where you are in the program's graph, what that part is for, the code that
+      ran, and the values it set.
+    </p>
+    <LookInside links={{ atlas: '/atlas/', explore: '/explore/' }} here="explore" heading="Look inside a program" />
+  </div>
+  <section class="scn-wrap" data-side="viv" aria-label="The programs">
+    <Scenes client:visible scenes={WALKS} />
+  </section>
+  <div class="page page-wide">
+  <p>
+    Each program can also be watched as it runs. The walk puts the whole program on one map, modules
+    as regions and defs as boxes, and moves a camera along the recording: to the def each call enters,
+    the step and line running there, and back to the caller on return.
+  </p>
+  <h2>Steps and loops</h2>
+  <p>
+    The compiler reads the program as a graph: its defs, the steps inside them, and the loops that
+    hold steps. For each step it works out the interface: the values the step reads that were set
+    before it, and the values it sets that are read after it. <code>viv graph</code> prints that
+    graph.
+  </p>
+  <p>
+    A loop is one position until you open it; then you see its first pass
+    line by line and only the passes where something changed. A loop without steps, such as a matrix
+    fill inside a step, is always one line, and the recording keeps one event for it however many
+    times it went round.
+  </p>
+  </div>
+</Base>

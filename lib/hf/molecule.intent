@@ -1,0 +1,98 @@
+module lib/hf/molecule
+  The `Molecule` record every Hartree-Fock routine of lib/hf reads, and the
+  defs that build it and answer simple questions about it. A molecule here
+  is the nuclei (charge and position of each atom) plus the basis: the
+  Gaussian shells placed on each atom, whose functions the orbitals are
+  built from. Both are kept as the numeric packs the integral code indexes,
+  laid out as PySCF lays out its own,
+  so lib/hf can be compared with PySCF pack for pack.
+
+molecule_bohr  @b4bfaefa
+  why   Every other way of making a molecule (from angstrom, from text) ends
+        here, so the order of shells and the numbering of basis functions are
+        decided in one place. That order is PySCF's: atoms in the order
+        given, each atom's shells in the table's order.
+  z       the atomic number of each atom, `[natm]`
+  xyz     each atom's position in bohr, `[natm, 3]`
+  b       the basis set table (lib/basis/basis), shells listed per element
+  natm    how many atoms
+  atoms   the atoms pack, `[natm, AT_LEN]`: charge and position of each atom
+  shells  the shell pack, `[nsh, SH_LEN]`, one row appended per shell: its
+          atom, angular momentum `l`, number of primitives, first primitive
+          row, and the index of its first Cartesian and first spherical basis
+          function
+  prims   the primitive pack, `[npr, PR_LEN]`, one row appended per Gaussian:
+          its exponent and contraction coefficient
+  cart0   the index the next shell's first Cartesian function gets
+  sph0    the index the next shell's first spherical function gets
+  a       the atom being placed
+  s       the table row being read
+  l       that shell's angular momentum
+  np      that shell's number of primitives
+  sh      the shell's row of the shell pack
+  k       one of the shell's primitives
+  pr      that primitive's row of the primitive pack
+
+  pack   fill the atoms, shells and primitives packs, numbering the basis functions as each shell is placed, and stop if an element has no shells in the basis
+  return the neutral molecule, spin from the electron count's parity, spherical functions
+
+molecule_from  @e0372cb7
+  why   Angstrom is PySCF's default unit and the unit people write
+        geometries in. Dividing by `MOL_BOHR` the way PySCF does (multiplying
+        by its inverse) keeps the positions equal to PySCF's to the last bit.
+  z    the atomic number of each atom
+  xyz  each atom's position in angstrom, `[natm, 3]`
+  b    the basis set table
+
+molecule_packs  @dd55a75b
+  why   The lock ladder holds lib/hf against packs PySCF wrote out
+        (lib/hfref); wrapping them as a `Molecule` lets those runs use the
+        same entry points as a molecule built here.
+  atoms   an atoms pack made elsewhere
+  shells  a shell pack made elsewhere
+  prims   a primitive pack made elsewhere
+  n       the sum of the nuclear charges, which fixes the spin's parity
+
+mol_nelectron  @0bef7974
+  why   The nuclear charges and the net charge are what the record stores;
+        the electron count is derived, so the two cannot disagree.
+  mol  the molecule
+
+mol_nalpha  @78506ddf
+  why   The SCF fills orbitals per spin, so it needs the two counts. A spin
+        that does not match the electron count's parity has no such split,
+        and the run stops instead of rounding.
+  mol  the molecule
+  n    the number of electrons
+
+mol_nbeta  @98200f62
+  mol  the molecule
+
+mol_enuc  @ee1ea9e7
+  why   The nuclear repulsion is a constant added to the electronic energy
+        to give the total energy a Hartree-Fock run reports.
+  mol    the molecule
+  atoms  its atoms pack: charge and position of each atom, in bohr
+  e      the repulsion summed over the pairs seen so far, in hartree
+  a      the first atom of a pair
+  b      the second atom of a pair, one before `a`, so each pair counts once
+  dx     the pair's separation along x, in bohr
+  dy     the pair's separation along y
+  dz     the pair's separation along z
+
+mol_lmax  @ceaf84ae
+  why   It decides whether any shell has spherical functions that differ from
+        the Cartesian ones (mol_spherical).
+  mol  the molecule
+
+mol_spherical  @916d8b74
+  why   The integrals are computed over Cartesian functions; only when this
+        is `1` does the SCF transform them to spherical ones, so a basis with
+        no d shells skips the transform.
+  mol  the molecule
+
+mol_nao  @3cafcce1
+  why   The size of the SCF's matrices (overlap, Fock, density), for a
+        program that needs it before a run. In the repository only this
+        module's tests call it.
+  mol  the molecule

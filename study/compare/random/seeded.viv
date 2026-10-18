@@ -1,0 +1,46 @@
+# @@ imports
+from nprandom.generator import npr_gn_bounded, npr_gn_normal, npr_gn_shuffle
+from nprandom.pcg64 import npr_pcg_double, npr_pcg_from_entropy
+
+# @@ a generator from a seed
+SEED = 42
+rng = npr_pcg_from_entropy([SEED])
+
+# @@ uniform draws in [0, 1)
+FIRST = 4
+print("first draws", " ".join(f"{npr_pcg_double(rng):.6f}" for i to FIRST))
+
+# @@ estimate pi from random points in the unit square
+N = 20000
+x = [npr_pcg_double(rng) for i to N]
+y = [npr_pcg_double(rng) for i to N]
+inside = sum(x * x + y * y < 1.0)
+print(f"pi ~ {4 * inside / N:.4f} from {N:d} points")
+
+# @@ dice
+ROLLS = 12
+SIDES = 6
+rolls = [1 + npr_gn_bounded(rng, SIDES - 1) for i to ROLLS]
+print("dice", rolls)
+
+# @@ shuffle a deck
+CARDS = 10
+deck = [i for i to CARDS]
+npr_gn_shuffle(rng, deck)
+print("deck", deck)
+
+# @@ normal draws
+M = 1000
+z = [npr_gn_normal(rng) for i to M]
+mean = sum(z) / M
+std = sqrt(sum((z - mean) ^ 2) / M)
+print(f"mean {mean:.4f}, std {std:.4f}")
+
+# @@ checks
+test "draws" {
+    assert_true(min(rolls) >= 1 and max(rolls) <= SIDES)
+    assert_true(all(z == z))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

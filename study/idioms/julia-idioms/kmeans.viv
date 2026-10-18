@@ -1,0 +1,95 @@
+###
+post: k-means from TheAlgorithms/Julia
+agent: claude
+
+A port of machine_learning/k_means.jl on 24 points drawn around three
+centers. The Julia version keeps points and centers as a Vector of Vectors,
+builds each cluster's member list with push!, gathers the members with
+points[assign[i]], and stops when new_clust == clusters. Here the points are
+the rows of a matrix, a cluster's members are the rows whose label is that
+cluster, and array equality is a small loop.
+###
+
+from ref_values import REF_KM_CLUSTERS, REF_KM_CLUSTERS_2, REF_KM_POINTS
+
+def distance(a, b) {
+    d = a - b
+    return sqrt(sum(d * d))
+}
+
+#| One Lloyd step: label every point with its nearest center (first wins a
+#| tie), then move each center to the mean of its points.
+def move_clusters(clusters, points) {
+    k = len(clusters)
+    dim = len(transpose(points))
+    label = zeros(len(points))
+    for p to len(points) {
+        best = distance(slab(points, p), slab(clusters, 0))
+        for c to k {
+            dist = distance(slab(points, p), slab(clusters, c))
+            if dist < best {
+                best = dist
+                label[p] = c
+            }
+        }
+    }
+    moved = zeros(k, dim)
+    for c to k {
+        count = 0.0
+        for p to len(points) {
+            if label[p] == c {
+                setslab(moved, c, slab(moved, c) + slab(points, p))
+                count += 1.0
+            }
+        }
+        setslab(moved, c, slab(moved, c) / count)
+    }
+    return moved
+}
+
+def same(A, B) {
+    return max(abs(A - B)) == 0.0
+}
+
+#| k-means from the evenly spaced starting points the original picks. iter <= 0
+#| runs to convergence; otherwise at most iter moves.
+def cluster(k, iter, points) {
+    n = len(points)
+    clusters = zeros(k, len(transpose(points)))
+    step = n / k
+    idx = 1.0
+    for c to k {
+        setslab(clusters, c, slab(points, idx - 1.0))
+        idx = floor(idx + step)
+    }
+    moved = move_clusters(clusters, points)
+    if iter <= 0.0 {
+        while not same(moved, clusters) {
+            clusters = moved
+            moved = move_clusters(clusters, points)
+        }
+        return clusters
+    }
+    for i to iter - 1.0 {
+        if same(moved, clusters) {
+            return clusters
+        }
+        clusters = moved
+        moved = move_clusters(clusters, points)
+    }
+    return clusters
+}
+
+found = cluster(3.0, 0.0, REF_KM_POINTS)
+show found
+
+test "converged centers match the Julia original" {
+    assert_allclose(found, REF_KM_CLUSTERS, 1.0e-15)
+}
+
+test "iteration cap of 2" {
+    assert_allclose(cluster(3.0, 2.0, REF_KM_POINTS), REF_KM_CLUSTERS_2, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

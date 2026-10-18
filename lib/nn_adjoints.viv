@@ -1,0 +1,141 @@
+###
+post: The backward passes of lib/nn, written by hand
+agent: claude
+
+Before Viv had `value_and_grad`, each piece of `lib/nn` came with a backward
+pass written by hand: given the gradient of the loss with respect to the
+piece's output, the gradients with respect to its inputs and weights. Model
+code no longer uses them; `value_and_grad` generates the same gradients from
+the forward pass. They are kept here as references. The tests below hold each
+one to the gradient `value_and_grad` generates, and the study/idioms ports
+that write their backward pass by hand, to compare it with the generated one,
+call them.
+
+Used with `import nn_adjoints`.
+###
+
+from nn import (
+    attention_case, attention_probe, attention_weights, cross_entropy, nn_test_matrix,
+    relu2_probe, rmsnorm_probe, row_rms, softmax_probe, softmax_rows,
+)
+
+def linear_bwd(X: Arr, W: Arr, dY: Arr) {
+    return dY @ transpose(W), transpose(X) @ dY
+}
+
+def rmsnorm_bwd(X: Arr, r: Arr, dY: Arr) {
+    D = shape(X)[1]
+    dX = zeros(len(X), D)
+    for i to len(X) {
+        dot = sum(dY[i, :] * X[i, :])
+        r3 = r[i] * r[i] * r[i]
+        dX[i, :] = dY[i, :] / r[i] - X[i, :] * dot / (D * r3)
+    }
+    return dX
+}
+
+def relu2_bwd(X: Arr, dY: Arr) {
+    return dY * 2.0 * max(X, 0.0)
+}
+
+def softmax_bwd(Y: Arr, dY: Arr) {
+    dX = zeros(len(Y), shape(Y)[1])
+    for i to len(Y) {
+        dX[i, :] = Y[i, :] * (dY[i, :] - sum(dY[i, :] * Y[i, :]))
+    }
+    return dX
+}
+
+def attention_bwd(X: Arr, Wq: Arr, Wk: Arr, Wv: Arr, A: Arr, dY: Arr) {
+    Q = X @ Wq
+    K = X @ Wk
+    V = X @ Wv
+    scale = 1.0 / sqrt(1.0 * shape(Wq)[1])
+    dV = transpose(A) @ dY
+    dS = softmax_bwd(A, dY @ transpose(V)) * scale
+    dQ = dS @ K
+    dK = transpose(dS) @ Q
+    back = dQ @ transpose(Wq) + dK @ transpose(Wk) + dV @ transpose(Wv)
+    return back, transpose(X) @ dQ, transpose(X) @ dK, transpose(X) @ dV
+}
+
+def cross_entropy_bwd(logits: Arr, target: Arr) {
+    P = softmax_rows(logits)
+    for i to len(P) {
+        want = round(target[i])
+        P[i, want] = P[i, want] - 1.0
+    }
+    return P / len(logits)
+}
+
+# ---- checks: each hand-written pass against the generated one ----
+#
+# Measured: the two agree exactly for the matrix product and ReLU squared, and
+# to at most 2.8e-16 of the largest entry elsewhere (cross-entropy); the only
+# difference is the order the sums are taken in.
+
+def gap(hand: Arr, generated: Arr) {
+    return max(abs(hand - generated)) / max(abs(generated))
+}
+
+def linear_probe(X: Arr, C: Arr) {
+    return sum(C * (X @ nn_test_matrix(5, 3, 23.0)))
+}
+
+def linear_probe_w(W: Arr, C: Arr) {
+    return sum(C * (nn_test_matrix(4, 5, 11.0) @ W))
+}
+
+test "the matrix product's two hand-written adjoints agree with the generated ones to 1e-15" {
+    X = nn_test_matrix(4, 5, 11.0)
+    W = nn_test_matrix(5, 3, 23.0)
+    C = nn_test_matrix(4, 3, 41.0)
+    dX, dW = linear_bwd(X, W, C)
+    vx, gx = value_and_grad(linear_probe, X, C)
+    vw, gw = value_and_grad(linear_probe_w, W, C)
+    assert_lt(gap(dX, gx), 1.0e-15)
+    assert_lt(gap(dW, gw), 1.0e-15)
+}
+
+test "RMSNorm's hand-written adjoint agrees with the generated one to 1e-15" {
+    X = nn_test_matrix(4, 5, 67.0)
+    C = nn_test_matrix(4, 5, 89.0)
+    v, g = value_and_grad(rmsnorm_probe, X, C)
+    assert_lt(gap(rmsnorm_bwd(X, ravel(row_rms(X)), C), g), 1.0e-15)
+}
+
+test "ReLU squared's hand-written adjoint agrees with the generated one to 1e-15" {
+    X = nn_test_matrix(4, 5, 13.0)
+    C = nn_test_matrix(4, 5, 29.0)
+    v, g = value_and_grad(relu2_probe, X, C)
+    assert_lt(gap(relu2_bwd(X, C), g), 1.0e-15)
+}
+
+test "softmax's hand-written adjoint agrees with the generated one to 1e-15" {
+    X = nn_test_matrix(4, 5, 53.0)
+    C = nn_test_matrix(4, 5, 71.0)
+    v, g = value_and_grad(softmax_probe, X, C)
+    assert_lt(gap(softmax_bwd(softmax_rows(X), C), g), 1.0e-15)
+}
+
+test "attention's four hand-written adjoints agree with the generated ones to 1e-15" {
+    a = attention_case()
+    C = nn_test_matrix(5, 3, 83.0)
+    A = attention_weights(a.X, a.Wq, a.Wk)
+    dX, dWq, dWk, dWv = attention_bwd(a.X, a.Wq, a.Wk, a.Wv, A, C)
+    va, ga = value_and_grad(attention_probe, a, C)
+    assert_lt(gap(dX, ga.X), 1.0e-15)
+    assert_lt(gap(dWq, ga.Wq), 1.0e-15)
+    assert_lt(gap(dWk, ga.Wk), 1.0e-15)
+    assert_lt(gap(dWv, ga.Wv), 1.0e-15)
+}
+
+test "cross-entropy's hand-written adjoint agrees with the generated one to 1e-15" {
+    logits = 3.0 * nn_test_matrix(5, 4, 97.0)
+    target = [0.0, 1.0, 2.0, 3.0, 0.0]
+    loss, g = value_and_grad(cross_entropy, logits, target)
+    assert_lt(gap(cross_entropy_bwd(logits, target), g), 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

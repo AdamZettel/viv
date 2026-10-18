@@ -1,0 +1,334 @@
+# The builtins, by group: one row per form, tab-separated:
+#   name<TAB>signature<TAB>what it does<TAB>example program (\n between lines)
+# A group starts with `## title` and may have a `note:` line. The rows are the
+# reference page's Builtins tables and `viv features <builtin>`; every builtin
+# the compiler's tables know must appear in a signature here (tests/features.rs).
+
+## Real math
+note: Every one-argument function here also maps elementwise over an array, so `y = sin(x)` needs no loop.
+exp	exp(x)	e^x	show exp(1.0)
+log	log(x)	natural log	show log(2.718281828459045)
+ln	ln(x)	alias for log	show ln(1.0)
+sqrt	sqrt(x)	square root	show sqrt(2.0)
+pow	pow(x, y)	x to the y	show pow(2.0, 10.0)
+abs	abs(x)	magnitude	show abs(-3.0)
+fabs	fabs(x)	alias for abs	show fabs(-3.0)
+sin	sin(x)		show sin(0.0)
+cos	cos(x)		show cos(0.0)
+tan	tan(x)		show tan(0.0)
+asin	asin(x)		show asin(0.0)
+acos	acos(x)		show acos(1.0)
+atan	atan(x)		show atan(0.0)
+atan2	atan2(y, x)	quadrant-correct angle	show atan2(1.0, 1.0)
+sinh	sinh(x)		show sinh(0.0)
+cosh	cosh(x)		show cosh(0.0)
+tanh	tanh(x)		show tanh(0.0)
+erf	erf(x)	error function	show erf(1.0)
+gamma	gamma(x)	Γ, C’s tgamma	show gamma(5.0)
+floor	floor(x)		show floor(1.7)
+ceil	ceil(x)		show ceil(1.2)
+round	round(x)		show round(1.5)
+min	min(a, b) · min(a, b, c, ...)	the smallest; three or more arguments are min(min(a, b), c)	show min(3.0, 1.0, 2.0)
+max	max(a, b) · max(a, b, c, ...)	the largest, as min	show max(1.0, 5.0, 2.0)
+hypot	hypot(x, y)	sqrt(x^2 + y^2) with no overflow on the way (musl's, as abs of a complex number)	show hypot(3.0, 4.0)
+copysign	copysign(x, y)	|x| with the sign of y; -0.0 is negative	show copysign(2.0, -0.0)
+fma	fma(a, b, c)	a*b + c rounded once (IEEE 754 fusedMultiplyAdd), the same bits in every engine and every build	show fma(0.1, 10.0, -1.0)
+fsum	fsum(xs)	the correctly rounded sum, as Python's math.fsum (Shewchuk's partials)	print(fmt(fsum([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])))
+mod	mod(a, b)	C’s fmod: the result takes the sign of a. The operator `a % b` is the floored remainder, with the sign of b	show mod(7.0, 3.0)
+
+## Bits
+note: These take a number (a double), truncate it toward zero, wrap it into [0, 2^32) and hand back the result as an unsigned 32-bit value, so they compose without a cast. A shift of 32 or more gives 0, except that `sar` of a negative value gives all 32 bits set (4294967295, which `i32` reads as -1). These are the operations a logic gate, an adder or a RISC-V instruction needs.
+band	band(a, b)	bitwise and	show band(12.0, 10.0)
+bor	bor(a, b)	bitwise or	show bor(12.0, 10.0)
+bxor	bxor(a, b)	bitwise exclusive or	show bxor(12.0, 10.0)
+bnot	bnot(a)	all 32 bits flipped	show bnot(0.0)
+shl	shl(a, k)	shift left by k	show shl(1.0, 4.0)
+shr	shr(a, k)	shift right by k, zeros in	show shr(256.0, 4.0)
+sar	sar(a, k)	shift right by k, sign in	show sar(i32(-8.0), 1.0)
+u32	u32(x)	the low 32 bits, unsigned	show u32(-1.0)
+i32	i32(x)	the same bits, signed	show i32(4294967295.0)
+
+## Ints
+note: Int is a 64-bit integer. Overflow, `//` and `%` are checked and stop the run with the same words in every engine; these builtins are the unchecked forms an algorithm on 64-bit patterns needs (a random generator, a hash), with the pattern read as unsigned where the name says so.
+int_zeros	int_zeros(n)	an [Int] array of n zeros	xs = int_zeros(3)\nxs[1] = 7\nshow xs
+wrap_add	wrap_add(a, b) · wrap_sub(a, b) · wrap_mul(a, b)	the result mod 2^64, as a pattern: no overflow check	a: Int = 9223372036854775807\nshow wrap_add(a, 1)
+umulhi	umulhi(a, b)	the high 64 bits of the 128-bit unsigned product of the two patterns	a: Int = -1\nshow umulhi(a, a)
+ult	ult(a, b)	a < b with both read as unsigned	a: Int = -1\nb: Int = 1\nshow ult(b, a)
+ustr	ustr(a)	the pattern as an unsigned decimal string	a: Int = -1\nshow ustr(a)
+
+## Binary data
+note: A file's bytes are an [Int], one element per byte, 0 to 255. The readers take that array and an offset and decode the bytes there, little-endian, as Python's struct with `<` does; an offset past the end, or an element that is not a byte, stops the run. In the browser `read_bytes` reads the files the page attaches to the run.
+read_bytes	read_bytes(path) · read_bytes(path, offset, count)	a file's bytes as an [Int]; with offset and count, only those (count left out: to the end)	x = 1
+le_u8	le_u8(b, i) · le_i8(b, i) · le_u16(b, i) · le_i16(b, i) · le_u32(b, i) · le_i32(b, i)	the Int that the 1, 2 or 4 bytes at offset i encode, unsigned or two's complement	b: [Int] = [1, 2, 255, 255]\nshow le_u16(b, 0), le_i16(b, 2)
+le_u64	le_u64(b, i) · le_i64(b, i)	the Int that the 8 bytes at i encode; le_u64 stops when the value is above 2^63 - 1	b: [Int] = [1, 0, 0, 0, 0, 0, 0, 0]\nshow le_u64(b, 0)
+le_f16	le_f16(b, i) · le_bf16(b, i) · le_f32(b, i) · le_f64(b, i)	the number an IEEE half, a bfloat16, a single or a double at i holds, exactly (subnormals, infinities and NaN included)	b: [Int] = [0, 60, 128, 63]\nshow le_f16(b, 0), le_bf16(b, 2)
+fround	fround(x)	x rounded to the nearest binary32 (ties to even), as a number: JavaScript's Math.fround, NumPy's float64(float32(x)); a format that computes in single precision rounds each step with it	show fround(0.1)
+
+## Arrays
+zeros	zeros(d1 … d4)	allocate, rank 1 to 4	a = zeros(3)\nshow len(a)
+len	len(a)	the leading dimension	a = zeros(3)\nshow len(a)
+numel	numel(a)	the number of elements, every axis multiplied	a = zeros(2, 3)\nshow numel(a)
+shape	shape(a)	the lengths of the axes, as a vector	a = zeros(2, 3)\nshow shape(a)
+linspace	linspace(lo, hi, n)	n evenly spaced points	x = linspace(0.0, 1.0, 5)\nshow len(x)
+fill	fill(a, v)	set every element in place	a = zeros(3)\nfill(a, 2.0)\nshow a[1]
+sort	sort(a)	in place, ascending, stable; -0.0 before 0.0, NaN last; no value (copy first for a sorted copy)	a = [3.0, 1.0, 2.0]\nsort(a)\nshow a[0]
+transpose	transpose(A)		A = [[1.0, 2.0], [3.0, 4.0]]\nB = transpose(A)\nshow B[0, 1]
+sum	sum(a)	the sum of every element of a real array, in NumPy's order in every exact engine: the entries in row-major order, from 0.0, in blocks of 8192, each block by NumPy's pairwise sum (below 8 entries left to right; to 128, eight running sums combined as a tree; above, two halves, the first a multiple of 8 long). Fast mode is not bound by this order	show sum([1.0, 2.0, 3.5])
+histogram	histogram(a, lo, hi, nbins)	counts of a's entries in nbins equal bins over [lo, hi], the last bin closed on the right, entries outside not counted. Draw it with bars()	h = histogram([0.1, 0.5, 0.9, 2.0], 0.0, 1.0, 2)\nshow h[0]
+roll	roll(a, k) · roll(A, k, axis)	circular shift: element i moves to i + k, wrapping. A periodic stencil in one line: roll(u, 1) - 2.0 * u + roll(u, -1)	u = roll([1.0, 2.0, 3.0], 1.0)\nshow u[0]
+tridiag_solve	tridiag_solve(sub, diag, super, rhs)	the Thomas algorithm: solves a tridiagonal system in O(n), for the diagonally dominant systems that implicit PDE schemes produce. sub[0] and super[n-1] are unused	z = [0.0, -1.0]\nx = tridiag_solve(z, [2.0, 2.0], [-1.0, 0.0], [1.0, 1.0])\nshow x[0]
+max (array)	max(a, s) · max(a, b)	elementwise, against a scalar (either side) or another array; `max(rho, 1.0e-30)` floors a density	a = max([-1.0, 0.5, 3.0], 0.0)\nshow a[0]
+min (array)	min(a, s) · min(a, b)	elementwise, as max	a = min([-1.0, 0.5, 3.0], [0.0, 0.0, 0.0])\nshow a[2]
+max (reduce)	max(a) · min(a)	with ONE array: its largest / smallest entry. `max(abs(u - exact))` is the max-norm error of a solve	show max(abs([1.0, -7.5, 3.0]))
+max (key)	max(xs, key=f) · min(xs, key=f)	the first element whose key is largest (smallest), as Python's; xs an array, a list of strings, a string or rows(M); f a def, a builtin or fn(x) -> ...	show max([3.0, -7.0, 4.0], key=abs)
+sorted (key)	sorted(xs, key=f, reverse=r)	a new array or list in the order of the keys (numbers or strings), stable, as Python's; a NaN key last	show sorted([3.0, -7.0, 4.0], key=fn(v) -> v * v)
+argsort (key)	argsort(xs, key=f, reverse=r)	the positions of xs in the order sorted(xs, key=f) puts them	show argsort([3.0, -7.0, 4.0], key=abs)
+all	all(m)	true when every entry of a real array is nonzero, as in the mask `a == b` gives; true for an empty array	show all([1.0, 2.0] == [1.0, 2.0])
+any	any(m)	true when some entry is nonzero; false for an empty array	show any([-1.0, 2.0] > 0.0)
+where	where(m, a, b)	a where m is nonzero, b where it is 0. a and b are each an array or a number, and the three broadcast to one shape, as NumPy's `where`: `where(x > 0.0, x, 0.0)`	x = [-1.0, 2.0]\ny = where(x > 0.0, x, 0.0)\nshow y[1]
+pow (array)	pow(a, s)	every entry of a real array to the same scalar power: `pow(rho, 1.0 / 3.0)`	c = pow([1.0, 8.0, 27.0], 1.0 / 3.0)\nshow c[1]
+slab	slab(A, k)	a COPY of the k-th slab along the leading axis: row k of a matrix, plane k of a rank-3 array. Real or complex	A = [[1.0, 2.0], [3.0, 4.0]]\nr = slab(A, 1)\nshow r[0]
+setslab	setslab(A, k, S)	overwrite that slab with S, in place	A = zeros(2, 2)\nsetslab(A, 1, [5.0, 6.0])\nshow A[1, 1]
+take	take(A, idx)	gather: A viewed flat (row-major), idx a real array of flat indices; the result has idx's shape	A = [[1.0, 2.0], [3.0, 4.0]]\nt = take(A, [3.0, 0.0])\nshow t[0]
+put	put(A, idx, V)	scatter, in place: the inverse of take	A = zeros(2, 2)\nput(A, [3.0, 0.0], [7.0, 8.0])\nshow A[1, 1]
+slice	a[lo:hi:s] · A[i, :] · A[:, j]	a COPY of a block: lo to hi - 1 in steps of s, any part left out; a plain index drops its axis. Real or complex. See Slices above	A = [[1.0, 2.0], [3.0, 4.0]]\nc = A[:, 1]\nshow c[1]
+slice write	a[lo:hi] = v · A[:, j] = v	write a number, or an array of the slice's shape, into the block, in place	a = zeros(4)\na[1:3] = [5.0, 6.0]\nshow a[2]
+copy	copy(a)	a new array with a's shape and elements (assignment aliases; this does not)	a = [1.0, 2.0]\nb = copy(a)\nb[0] = 9.0\nshow a[0]
+concat	concat(a, b, ...)	vectors joined end to end	c = concat([1.0], [2.0, 3.0])\nshow c[2]
+vcat	vcat(A, B, ...)	rows stacked; a vector is one row	M = vcat([1.0, 2.0], [3.0, 4.0])\nshow M[1, 0]
+hcat	hcat(A, B, ...)	matrices side by side; a vector is one column	M = hcat([1.0, 2.0], [3.0, 4.0])\nshow M[0, 1]
+[]	[]	an empty vector, the start of an array grown by append	a = []\nshow len(a)
+append	a = append(a, x)	a with x on the end: a number onto a vector, or a vector as a new last row of a matrix ([] takes a first row). Written rebinding a; amortized O(1). See Growable arrays above	a = []\na = append(a, 2.0)\nshow a[0]
+extend	a = extend(a, b)	vector a followed by vector b, grown like an append	a = [1.0]\na = extend(a, [2.0, 3.0])\nshow a[2]
+
+## Shapes and constructors
+note: NumPy's names and results (interp/arrays.rs; each case checked against NumPy in tools/arrays/numpy_cases.py). Every result is a new array. An axis may be negative, as in NumPy: -1 is the last.
+reshape	reshape(a, d1 … d4)	the same entries in row-major order under a new shape; one dimension may be -1 and is worked out	a = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, -1)\nshow a[1, 2]
+ravel	ravel(a) · flatten(a)	every entry as a vector, row-major	show len(ravel(zeros(2, 3)))
+transpose (any rank)	transpose(a) · transpose(a, axes=axes)	the axes reversed (a vector is copied); with axes, axis d of the result is axis axes[d] of a	a = zeros(2, 3, 4)\nshow shape(transpose(a, axes=[2.0, 0.0, 1.0]))[0]
+swapaxes	swapaxes(a, i, j)	two axes exchanged	show shape(swapaxes(zeros(2, 3, 4), 0, 2))[0]
+eye	eye(n) · eye(n, m) · eye(n, m, k)	ones on diagonal k (k > 0 above the main one)	show eye(3)[1, 1]
+diag	diag(v) · diag(v, k=k) · diag(A) · diag(A, k=k)	a vector onto diagonal k of a square matrix, or diagonal k of a matrix as a vector	show diag([1.0, 2.0])[1, 1]
+ones	ones(d1 … d4) · zeros_like(a) · ones_like(a)	filled arrays	show sum(ones(2, 3))
+arange	arange(stop) · arange(start, stop) · arange(start, stop, step)	NumPy's arange: ceil((stop - start) / step) entries, entry i start + i * ((start + step) - start)	show arange(0.0, 1.0, 0.25)[3]
+linspace (endpoint)	linspace(lo, hi, n, endpoint=endpoint)	NumPy's linspace: i * step + lo, with the end point included or left out; n may be 0 or 1	show linspace(0.0, 1.0, 4, endpoint=false)[3]
+rand (shaped)	rand(d1 … d4) · randn() · randn(d1 … d4)	draws from rand()'s generator in row-major order; randn is Box-Muller from two draws, lib/random's formula	srand(1.0)\nshow numel(rand(2, 3))
+
+## Reductions, products and broadcasting
+note: Arithmetic and comparisons between two arrays (not complex ones) broadcast as NumPy's do: the last axes line up, and each pair of lengths is equal or one of them is 1, so `A - mean(A, axis=0)` subtracts the column means and `A * transpose([w])` scales rows. `sum`, `mean`, `var`, `std` along an axis and `trace` add in NumPy's order (pairwise, in blocks of 8192), so they agree with NumPy to the bit; so does `sum(a)` of a whole array. `keepdims=true` keeps the reduced axis with length 1 (NumPy's keepdims).
+sum (ordered)	sum(a, ordered=true)	the sum of every element left to right from 0.0 (row-major), the order of a Fortran or C loop, in every engine; for a port that must match a reference's last digits. `ordered=false` is `sum(a)`. `dot` and `prod` always go left to right and take `ordered=true` to say so	show sum([1.0e16, 1.0, -1.0e16, 1.0, 3.0, 1.0e-3, 7.0, 2.0, 1.0, 1.0], ordered=true)
+sum (axis)	sum(a, axis=axis) · sum(a, axis=axis, keepdims=keepdims)	along one axis, in NumPy's order	show sum([[1.0, 2.0], [3.0, 4.0]], axis=0)[1]
+mean	mean(a) · mean(a, axis=axis) · mean(a, axis=axis, keepdims=keepdims)	NumPy's pairwise sum divided by the count	show mean([1.0, 2.0, 4.0])
+var	var(a) · std(a) · var(a, axis=axis) · std(a, axis=axis)	population variance (divides by n) and its square root, NumPy's order	show var([1.0, 2.0, 3.0, 4.0])
+prod	prod(a) · prod(a, axis=axis)	left to right	show prod([1.0, 2.0, 3.0])
+amax	amax(a) · amin(a) · amax(a, axis=axis) · amin(a, axis=axis)	NumPy's max and min: a NaN wins, -0.0 is below 0.0 (max(a) of one array skips NaN, as C's fmax)	show amax([[1.0, 5.0], [3.0, 2.0]], axis=1)[0]
+argmax	argmax(a) · argmin(a) · argmax(a, axis=axis) · argmin(a, axis=axis)	the index of the first largest (smallest) entry, flat or along an axis; the first NaN if there is one	show argmax([1.0, 3.0, 3.0])
+any (axis)	any(a, axis=axis) · all(a, axis=axis)	masks of 1.0 and 0.0 along an axis	show all([[1.0, 0.0], [1.0, 1.0]], axis=1)[1]
+count_nonzero	count_nonzero(a)	how many entries are not 0	show count_nonzero([0.0, 2.0, -1.0])
+outer	outer(u, v)	u[i] * v[j], each argument flattened	show outer([1.0, 2.0], [3.0, 4.0])[1, 0]
+dot	dot(u, v) · dot(u, v, ordered=true)	two vectors of one length, summed left to right (A @ B is the matrix product); `ordered=true` states that order and changes nothing	show dot([1.0, 2.0], [3.0, 4.0])
+norm	norm(a)	sqrt(dot(a, a)) over every entry (the Frobenius norm of a matrix)	show norm([3.0, 4.0])
+trace	trace(A) · trace(A, offset=k)	the sum of diagonal k, NumPy's order	show trace([[1.0, 2.0], [3.0, 4.0]])
+triu	triu(A) · triu(A, k=k) · tril(A) · tril(A, k=k)	the entries on and above (below) diagonal k; the rest 0	show triu([[1.0, 2.0], [3.0, 4.0]])[1, 0]
+einsum	einsum("ij,jk->ik", A, B)	a contraction of one to three arrays written in NumPy's subscripts (a string literal; an implicit output is the letters written once); a number when the output has no index. Summed left to right over the indices in their order of first appearance, so it agrees with NumPy to rounding	show einsum("ij,ij->", [[1.0, 2.0]], [[3.0, 4.0]])
+
+## Gathers, masks, sorting and scans
+note: A mask is an array of 1.0 and 0.0, as a comparison gives, so an array cannot say whether it is a mask or a list of indices: selecting by a mask is `extract`, and by indices `take`.
+take (axis)	take(A, idx, axis=axis)	NumPy's take along an axis: the result has A's axes before it, idx's shape, then A's axes after it. take(A, idx) with two arguments is flat	show take([[1.0, 2.0], [3.0, 4.0]], [1.0], axis=1)[1, 0]
+extract	extract(mask, a)	the entries of a where mask is nonzero, as a vector (NumPy's a[mask])	a = [1.0, -2.0, 3.0]\nshow len(extract(a > 0.0, a))
+putmask	putmask(a, mask, v)	a[mask] = v in place: v a number, or an array of a's shape whose entries go where mask is nonzero	a = [1.0, -2.0, 3.0]\nputmask(a, a < 0.0, 0.0)\nshow a[1]
+flatnonzero	flatnonzero(a)	the flat indices of the nonzero entries	show flatnonzero([0.0, 5.0, 0.0, 1.0])[1]
+argsort	argsort(a)	indices that sort each row (the last axis), stable, NaN last, -0.0 equal to 0.0: NumPy's argsort(kind="stable")	show argsort([3.0, 1.0, 2.0])[0]
+cumsum	cumsum(a) · cumsum(a, axis=axis) · cumprod(a) · cumprod(a, axis=axis)	running sums and products, left to right; without an axis over every entry, flat	show cumsum([1.0, 2.0, 3.0])[2]
+diff	diff(a) · diff(a, n=n) · diff(a, n=n, axis=axis)	a[i + 1] - a[i] along the last axis (or axis), n times	show diff([1.0, 4.0, 9.0])[1]
+clip	clip(x, lo, hi)	a number or an array held to [lo, hi]; a NaN entry stays NaN and a NaN bound is no bound, as NumPy's clip	show clip(5.0, 0.0, 1.0)
+
+## Strings
+note: Python's semantics, by code point; `a.f(b)` is `f(a, b)`. See Strings above.
+len	len(s)	code points (a list: its strings)	show len("héllo")
+str	str(x)	a number as Python's repr, a boolean as true/false	show str(1.5)
+repr	repr(x)	a string in quotes, as Python writes it	show repr("it's")
+float	float(s)	CPython's float(str), correctly rounded	show float(" 1_000.5 ")
+int	int(s[, base])	CPython's int(str, base), to the nearest double	show int("0x1f", 16)
+chr	chr(n)	the character with code point n	show chr(233)
+ord	ord(c)	the code point of one character	show ord("é")
+upper	upper(s)	full Unicode mapping (ß is SS)	show upper("straße")
+lower	lower(s)	full mapping, final sigma	show lower("ΑΣ")
+strip	strip(s[, chars])	whitespace (or chars) off both ends; lstrip, rstrip one end	show strip("  a  ")
+lstrip	lstrip(s[, chars])		show lstrip("  a")
+rstrip	rstrip(s[, chars])		show rstrip("a  ")
+split	split(s[, sep[, maxsplit]])	a list of strings; no sep: runs of whitespace	show split("a b  c")
+rsplit	rsplit(s[, sep[, maxsplit]])	from the right	show rsplit("a,b,c", ",", 1)
+splitlines	splitlines(s)	Python's line boundaries	show splitlines("a\\nb\\r\\nc")
+join	join(sep, words)	Python's sep.join(words)	show join("-", ["a", "b"])
+find	find(s, sub[, start[, end]])	first position, or -1; rfind the last	show find("hello", "l")
+rfind	rfind(s, sub[, start[, end]])		show rfind("hello", "l")
+index	index(s, sub)	find, but a miss stops; also a list's index	show index("hello", "e")
+rindex	rindex(s, sub)		show rindex("hello", "l")
+count	count(s, sub)	non-overlapping occurrences	show count("abab", "ab")
+replace	replace(s, old, new[, count])		show replace("a-b-c", "-", "+")
+startswith	startswith(s, p)		show startswith("hello", "he")
+endswith	endswith(s, p)		show endswith("hello", "lo")
+contains	contains(s, sub)	the `in` operator: sub in s	show contains("hello", "ell")
+ljust	ljust(s, width[, fill])	rjust and center likewise	show ljust("a", 3, "*")
+rjust	rjust(s, width[, fill])		show rjust("a", 3)
+center	center(s, width[, fill])		show center("a", 3)
+zfill	zfill(s, width)	zeros after a sign	show zfill("-7", 4)
+isdigit	isdigit(s)	also isspace isalpha isalnum isdecimal isnumeric isupper islower isascii isprintable	show isdigit("42")
+isalpha	isalpha(s) · isalnum(s) · isdecimal(s) · isnumeric(s)	Python's character classes, by CPython 3.11's Unicode tables: true when s is not empty and every character is in the class	show isalpha("ab"), isalnum("a1"), isdecimal("12"), isnumeric("½")
+isspace	isspace(s) · isupper(s) · islower(s) · isascii(s) · isprintable(s)	Python's, character for character (isascii and isprintable are true for an empty string)	show isspace(" "), isupper("AB"), islower("ab"), isascii("é"), isprintable("a")
+unique	unique(s) · unique(words) · unique(xs)	each character of a string, or each string of a list, once, in code point order: Python's sorted(set(s)); of numbers, the distinct values ascending, as np.unique	show unique(split("b a b c"))
+sorted	sorted(words) · sorted(xs)	a new list, by code point; of numbers, a new array, ascending and stable, NaN last	show sorted(["b", "a"]), sorted([3.0, 1.0, 2.0])
+reversed	reversed(x)	x[::-1]: an array, a string or a list of strings, back to front	show reversed([1.0, 2.0, 3.0]), reversed("abc")
+pop	pop(xs) · pop(xs, i)	a statement: `y = pop(xs, i)` takes element i (the last when left out) out of the list xs, as Python's	xs = [1.0, 2.0, 3.0]\ny = pop(xs, 0)\nshow y, xs
+read_text	read_text(path) · read_lines(path) · write_text(path, s)	a UTF-8 file; read_lines(path) its lines; write_text(path, s)	x = 1
+
+## Databases (SQLite)
+note: SQLite (third_party/sqlite, public domain) is built into viv and compiled beside a C program that uses these (`viv export --with-sqlite`); the browser does not have them yet. A database is a number, its handle. Parameters are `?` in the SQL, bound from a list of strings (as text) or an array of numbers (NaN as NULL), never pasted into it. `db_exec` runs inside a savepoint: SQL that fails changes nothing. A query is one statement giving one column. NULL reads as NaN in `db_col` and is an error in `db_col_int` and `db_col_str` (select COALESCE(x, k)). SQLite's errors are VivError; a misuse (a bad handle, a wrong count of parameters, a NULL in an Int column) is ValueError.
+db_open	db_open(path) · db_close(db)	open or create the database file; its handle. db_close closes it	x = 1
+db_exec	db_exec(db, sql) · db_exec(db, sql, params)	run SQL (several statements, or one with `?` parameters) inside a savepoint; the rows it changed	x = 1
+db_col	db_col(db, sql, params) · db_col_int(db, sql, params) · db_col_str(db, sql, params)	the query's one column as an array of numbers (NULL is NaN), an [Int], or a list of strings; params may be left out	x = 1
+db_stage	db_stage(db, name, column) · db_insert(db, table)	set a column ([Num], [Int] or [Str]) aside, then write every staged column as rows in one transaction (NaN as NULL); the rows written	x = 1
+
+## Maps
+note: A map holds numbers or strings under number keys or string keys (one kind of each per map), in the order the keys were first stored. It is one handle: `b = m`, a def's parameter and a record field all change the same map. See Maps above.
+map	map()	a new empty map	m = map()\nshow len(m)
+m[k] = v	m[k] = v · m[k]	store v under k (a key already there keeps its place), or read it; a key that is not there stops the run	m = map()\nm[3.0] = 1.5\nshow m[3.0]
+m[s] = v	m["key"] = v	a string key: printed in its repr, `{'the': 2}`; keys(m) is then a list of strings	m = map()\nm["the"] = 2.0\nshow m["the"]
+has	has(m, k)	true when k is a key of m	m = map()\nm[1.0] = 2.0\nshow has(m, 1.0)
+get	get(m, k, d)	m[k] when k is there, else d	m = map()\nshow get(m, 1.0, -1.0)
+remove	remove(m, k) · remove(m, k, d)	take k out and give its value; without d a key that is not there stops the run	m = map()\nm[1.0] = 2.0\nshow remove(m, 1.0)
+keys	keys(m) · values(m)	a new vector of the keys, or the values, in insertion order: loop over a map with `ks = keys(m)` then `for i to len(ks)`	m = map()\nm[5.0] = 1.0\nm[2.0] = 3.0\nshow keys(m)[0]
+copy (map)	copy(m)	a new map with the same keys, values and order	m = map()\nm[1.0] = 2.0\nc = copy(m)\nc[3.0] = 4.0\nshow len(m)
+clear	clear(m)	take every key out	m = map()\nm[1.0] = 2.0\nclear(m)\nshow len(m)
+len (map)	len(m)	the number of keys	m = map()\nm[1.0] = 2.0\nshow len(m)
+
+## Group-by on Int keys
+note: Written in Viv (lang/viv/std/groupby.viv) and added to a program that calls them, so every engine runs the same code. The keys stay Ints (no float conversion), hashed into an open-addressing table whose slot holds the key beside its group id. A group-by is factorize, then a dense loop: `s[ids[i]] += v[i]`.
+factorize	uniq, ids = factorize(keys)	the distinct Ints of an [Int] column in first-appearance order, and each row's position in them (`uniq[ids[i]] == keys[i]`), as pandas.factorize(sort=False); any Int is a key	keys: [Int] = [30, -1, 30, 7]\nu, ids = factorize(keys)\ns = int_zeros(len(u))\nfor i to len(keys) {\n    s[ids[i]] += 1\n}\nshow u, ids, s
+factorize2	ka, kb, ids = factorize2(a, b)	factorize on two key columns at once: the distinct pairs in first-appearance order, as two columns, and each row's pair id; three columns: factorize2 its ids with the third	a: [Int] = [1, 1, 2, 1]\nb: [Int] = [5, 6, 5, 5]\nka, kb, ids = factorize2(a, b)\nshow ka, kb, ids
+match_rows	match_rows(build, probe)	a hash join's probe: for each Int of probe, the first row of build with that key, or -1 (pandas.Index.get_indexer)	b: [Int] = [10, 20, 30]\np: [Int] = [20, 40, 10]\nshow match_rows(b, p)
+key_range	lo, hi = key_range(keys)	the smallest and largest Int of a column, in one pass (0, 0 for no keys)	ks: [Int] = [5, -2, 9]\nlo, hi = key_range(ks)\nshow lo, hi
+group_sum	uniq, s, c = group_sum(keys, v)	per-group sum and row count of an [Int] column in one pass, the groups in first-appearance order as factorize's; keys spanning few values (found inside the call) are slotted by key - lo, others hashed with the sums beside the table; group_sum_num sums a number column	k: [Int] = [4, 2, 4, 9]\nv: [Int] = [1, 2, 3, 4]\nu, s, c = group_sum(k, v)\nshow u, s, c
+group_sum2	ka, kb, s, c = group_sum2(a, b, v)	group_sum keyed by two [Int] columns: one pass over pair slots when both span few values, else factorize2 and a loop	a: [Int] = [1, 1, 2]\nb: [Int] = [5, 6, 5]\nv: [Int] = [1, 2, 3]\nka, kb, s, c = group_sum2(a, b, v)\nshow ka, kb, s
+
+## Linear algebra
+note: In debug mode each solve checks its own result (a residual, a pivot check or a trace invariant) and stops with an error instead of returning a wrong answer.
+eig_sym	eig_sym(A, vals, vecs)	symmetric spectrum by cyclic Jacobi; values ascending, vectors in columns	A = [[2.0, 0.0], [0.0, 3.0]]\nv = zeros(2)\nQ = zeros(2, 2)\neig_sym(A, v, Q)\nshow v[0]
+spectrum_sym	spectrum_sym(A, vals)	the same eigenvalues eig_sym computes; in debug mode it runs every available method and asserts they agree	A = [[2.0, 0.0], [0.0, 3.0]]\nv = zeros(2)\nspectrum_sym(A, v)\nshow v[0]
+lin_solve	lin_solve(A, b, x)	LU with partial pivoting; checks the residual in debug mode	A = [[2.0, 0.0], [0.0, 4.0]]\nb = [2.0, 4.0]\nx = zeros(2)\nlin_solve(A, b, x)\nshow x[0]
+lin_solve_multi	lin_solve_multi(A, B, X)	factor once, many right-hand sides	A = [[2.0, 0.0], [0.0, 4.0]]\nB = [[2.0], [4.0]]\nX = zeros(2, 1)\nlin_solve_multi(A, B, X)\nshow X[0, 0]
+cholesky	cholesky(A, L)	factors a symmetric positive-definite matrix; checks every pivot	A = [[4.0, 0.0], [0.0, 9.0]]\nL = zeros(2, 2)\ncholesky(A, L)\nshow L[0, 0]
+lin_solve (returning)	x = lin_solve(A, b) · X = lin_solve(A, B) · inv(A)	the same LU as lin_solve and lin_solve_multi, into a new array: the same bits	x = lin_solve([[2.0, 0.0], [0.0, 4.0]], [2.0, 4.0])\nshow x[1]
+cholesky (returning)	L = cholesky(A)	the same factorization, into a new array	L = cholesky([[4.0, 0.0], [0.0, 9.0]])\nshow L[1, 1]
+eig_sym (returning)	vals, vecs = eig_sym(A) · w, V = eig_herm(A)	the eigensolvers, unpacked into new arrays (written as the call that fills them)	vals, vecs = eig_sym([[2.0, 0.0], [0.0, 3.0]])\nshow vals[1]
+svd	U, s, Vt = svd(A) · svd(A, U, s, Vt)	A = U diag(s) Vt with k = min(m, n) singular values, descending: one-sided Jacobi, lib/svd.viv's algorithm. The signs of the vectors can differ from LAPACK's	U, s, Vt = svd([[3.0, 0.0], [0.0, 2.0], [0.0, 0.0]])\nshow s[0]
+eig_general	eig_general(A, re, im)	balancing + Hessenberg + Francis double-shift QR; complex pairs split across re/im	A = [[0.0, -1.0], [1.0, 0.0]]\nre = zeros(2)\nim = zeros(2)\neig_general(A, re, im)\nshow re[0]
+eig_near	eig_near(A, sigma, k, re, im)	k eigenvalues near a real shift by shift-invert Arnoldi — one LU instead of a full QR	A = [[2.0, 0.0], [0.0, 3.0]]\nre = zeros(2)\nim = zeros(2)\neig_near(A, 1.8, 1.0, re, im)\nshow re[0]
+
+## Higher-order and contracts
+note: A contract is named for what it computes, not for the method. In debug mode it runs every method that applies and asserts they agree; `viv run --release` runs the auto-selected one. The methods are ordinary Viv code, in lang/viv/std/contracts.viv.
+simpson	simpson(f, a, b, n)	composite Simpson	show simpson(fn(x) -> x * x, 0.0, 1.0, 100)
+trapezoid	trapezoid(f, a, b, n)		show trapezoid(fn(x) -> x, 0.0, 1.0, 100)
+deriv	deriv(f, x0)	the exact derivative, computed by forward-mode autodiff when the program is compiled	show deriv(fn(x) -> x * x * x, 2.0)
+apply	apply(f, args…)	call a function held in a variable or an array	def sq(x) { return x * x }\ng = sq\nshow apply(g, 4.0)
+release_mode	release_mode()	true under --release, else false, so a program can choose what to run in each mode	show release_mode()
+clock	clock()	wall time in seconds from a monotonic clock; only the difference of two readings means anything, and only a program with a `#! timing` line may call it (every engine refuses it elsewhere; three-engines lists a timing program and does not compare it)	#! timing\nt0 = clock()\nt1 = clock()\nshow t1 >= t0
+
+## Derivatives and records
+note: grad and value_and_grad are reverse mode over a whole def (lang/viv/src/grad.rs): the compiler writes the gradient def before any engine runs, so the three engines run the same generated code.
+grad	grad(f, x, args…)	the gradient of the number def f returns with respect to its first argument x (a number, an array, or a record of arrays), with the shape of x; the other arguments are constants	def f(w) {\n    return sum(w * w)\n}\nshow grad(f, [1.0, 2.0])
+value_and_grad	l, g = value_and_grad(f, x, args…)	the value and the gradient in one forward and one backward pass, unpacked on a line of its own	def f(w) {\n    return sum(w * w)\n}\nl, g = value_and_grad(f, [1.0, 2.0])\nshow l, g
+for_leaves	for_leaves(f, r1, r2, …, x)	call def f on each array of one or more records of the same type at once (the records' arrays first, then x), in field order; f may write the arrays in place: an optimizer step over a model	record P {\n    a: Arr\n    b: Arr\n}\ndef halve(x) {\n    x[:] = x / 2.0\n}\np = P { a: [2.0, 4.0], b: [6.0] }\nfor_leaves(halve, p)\nshow p.a, p.b
+
+## Complex scalars
+note: The `i` suffix works only on a number, so a loop variable named `i` is still a variable. For arrays of them, see the next group.
+complex	complex(re, im)		z = complex(1.0, 2.0)\nshow re(z)
+re	re(z)	real part	show re(2.0 + 3.0i)
+im	im(z)	imaginary part	show im(2.0 + 3.0i)
+conj	conj(z)		show im(conj(2.0 + 3.0i))
+
+## Complex arrays and the Fourier transform
+note: A complex array is packed — interleaved (re, im) doubles, which is exactly how C99 lays out `double complex`, so both engines walk the same memory and agree to the byte. `fft` is radix-2 at a power of two, mixed radix (with dedicated radix-3 and radix-5 butterflies) when the primes of the length are all ≤ 7, and Bluestein everywhere else, so no length is a special case and 2·3·5-smooth ones are fast. The twiddle factors and factorization for each length are computed once and reused. Whole-array arithmetic works on complex arrays: `a + b`, `a * b`, a real array or a real or complex scalar on either side of `*`, `/` by a scalar, and `@`. Convention: `fft` is unscaled with exp(−2πikn/N); `ifft` carries the 1/N — the same as numpy and FFTW.
+czeros	czeros(d1 … d4)	a complex array of zeros, rank 1 to 4	a = czeros(4)\nshow len(a)
+fft	fft(a)	forward transform, in place, any length	a = czeros(8)\na[0] = 1.0\nfft(a)\nshow re(a[3])
+ifft	ifft(a)	inverse transform, in place; ifft(fft(x)) returns x to rounding error	a = czeros(6)\na[1] = 1.0\nfft(a)\nifft(a)\nshow re(a[1])
+re (array)	re(a)	real parts, as a real array of the same shape	a = [1.0 + 2.0i, 3.0]\nr = re(a)\nshow r[0]
+im (array)	im(a)	imaginary parts, as a real array	a = [1.0 + 2.0i, 3.0]\nr = im(a)\nshow r[0]
+abs (array)	abs(a)	magnitudes — what you plot as a spectrum	a = [3.0 + 4.0i, 1.0]\nr = abs(a)\nshow r[0]
+conj (array)	conj(a)	the conjugate, as another complex array	a = [1.0 + 2.0i, 3.0]\nc = conj(a)\nshow im(c[0])
+complex (arrays)	complex(re, im)	a complex array from two real ones of the same shape	a = complex([1.0, 2.0], [0.5, 0.0])\nshow im(a[0])
+fft3	fft3(a)	forward transform of a rank-3 complex array along all three axes, in place; all-zero lines are skipped	a = czeros(4, 4, 4)\na[0, 0, 0] = 1.0\nfft3(a)\nshow re(a[1, 2, 3])
+ifft3	ifft3(a)	its inverse, carrying 1/N	a = czeros(3, 3, 3)\na[1, 0, 2] = 1.0\nfft3(a)\nifft3(a)\nshow re(a[1, 0, 2])
+eig_herm	eig_herm(A, w, V)	the Hermitian eigenproblem: ascending eigenvalues into w, eigenvectors into the COLUMNS of V. Householder to real tridiagonal, then implicit QL	A = czeros(2, 2)\nA[0, 1] = 0.0 - 1.0i\nA[1, 0] = 0.0 + 1.0i\nw = zeros(2)\nV = czeros(2, 2)\neig_herm(A, w, V)\nshow w[1]
+transpose (complex)	transpose(A)	plain transpose, NO conjugation: the adjoint is conj(transpose(A)), spelled out where it is meant	A = czeros(2, 2)\nA[0, 1] = 0.0 + 1.0i\nB = transpose(A)\nshow im(B[1, 0])
+slab (complex)	slab(A, k) · setslab · take · put	slab, setslab, take and put work on complex arrays too; source and target must both be real or both complex	A = czeros(2, 2)\nsetslab(A, 1, [1.0 + 1.0i, 2.0])\nr = slab(A, 1)\nshow im(r[0])
+
+## Randomness
+note: Park–Miller MINSTD in pure f64, so the stream is bit-identical between the interpreter and compiled C — a seeded Monte Carlo gives the same answer either way. `#! use lib/random` adds randn, randn_matrix, randint, shuffle, randperm, choice, arange and pi, written in Viv over rand(), each documented as the formula it computes so Python can replay it (tools/random_replay.py); `#! use lib/stats` adds mean and std.
+srand	srand(seed)	seed the stream	srand(1.0)\nshow rand()
+rand	rand()	uniform on [0, 1)	srand(1.0)\nshow rand()
+
+## Figures and geometry
+note: Each of these prints a structured record on stdout, and the page draws the chart from it. Compiled C prints the same record, so a figure is part of the program's output, not a call into a plotting library.
+plot	plot(x, y, "label")	a line series; consecutive calls sharing x overlay	figure("t", "x", "y")\nx = linspace(0.0, 1.0, 5)\nplot(x, x, "line")
+scatter	scatter(x, y, "label")	points	figure("t", "x", "y")\nx = linspace(0.0, 1.0, 5)\nscatter(x, x, "pts")
+bars	bars(x, y, "label")	a bar chart: a histogram's counts at its bin centers. A plot() on the same x afterwards draws a curve over the bars	figure("t", "x", "count")\nbars([0.5, 1.5], [3.0, 1.0], "counts")
+plot2d	plot2d(Z, "label")	a rank-2 array as a viridis heatmap with a colorbar	figure("t", "x", "y")\nZ = zeros(2, 2)\nplot2d(Z, "field")
+plot3d	plot3d(x, y, z, "label")	a curve in 3-space, rotatable	figure("t", "x", "y")\nx = linspace(0.0, 1.0, 4)\nplot3d(x, x, x, "curve")
+quiver	quiver(x, y, u, v, "label")	a vector field	figure("t", "x", "y")\nx = linspace(0.0, 1.0, 3)\nquiver(x, x, x, x, "field")
+scene	scene("title")	open a 3D scene; wire/verts output belongs to it	scene("truss")
+wire	wire(x, y, z, "group")	a 3D polyline, optionally colormapped by a 4th array	scene("s")\nx = linspace(0.0, 1.0, 3)\nwire(x, x, x, "beam")
+verts	verts(x, y, z, "group")	point markers — joints, atoms, nodes	scene("s")\nx = linspace(0.0, 1.0, 3)\nverts(x, x, x, "nodes")
+figure	figure(title, xlabel, ylabel[, xlo, xhi, ylo, yhi[, style]])	REQUIRED before the first plot. The program sets the axis labels and limits; the page adds none of its own. On a plot2d the window is the picture's physical extent and gives it real axes; style is "contour" (overlay level lines) or "pixels" (no smoothing: the cells are categories or counts)	figure("panel", "t", "y")
+xtick	xtick("text", x)	inside a figure: a tick labeled with the text at x (a high-symmetry point, a category). A chart with any xtick shows only those x ticks.	figure("t", "k", "E")\nx = linspace(0.0, 1.0, 3)\nplot(x, x, "band")\nxtick("L", 0.0)\nxtick("X", 1.0)
+xscale	xscale("log") · yscale("log")	a logarithmic x or y axis for the open figure: plot the values, not their logs. Ticks at powers of ten; a value of zero or less is a gap, and the chart says how many it left out. "linear" is the default	figure("t", "h", "error")\nxscale("log")\nyscale("log")\nplot([0.1, 0.01], [0.01, 0.0001], "e")
+aspect	aspect("equal")	one unit of x as long on the screen as one unit of y, for an orbit or a shape in a plane: the plot takes the height that makes a circle round, and widens a range only if that height would be too tall or too flat. "auto" is the default	figure("orbit", "x", "y")\naspect("equal")\nth = linspace(0.0, 6.0, 13)\nplot(cos(th), sin(th), "r = 1")
+fill_between	fill_between("label", x, lo, hi)	a band shaded from lo to hi over x: a confidence band, a gap, a tolerance. Grouped like a plot; takes its label's color, so a band labeled like its curve is drawn in the curve's color	figure("t", "x", "y")\nx = linspace(0.0, 1.0, 5)\nplot(x, x, "mean")\nfill_between("mean", x, x - 0.1, x + 0.1)
+rangebars	rangebars("label", x, lo, hi)	a capped bar from lo to hi at each x: error bars, spreads, ranges. It takes the ends, not a center and an error, so mean ± err is rangebars("m", x, m - err, m + err) and an asymmetric interval is no harder; the center is a plot or scatter of its own	figure("t", "x", "y")\nx = linspace(0.0, 1.0, 5)\nscatter(x, x, "m")\nrangebars("m", x, x - 0.05, x + 0.1)
+grid	grid("title", rows, cols) · share("x")	the next rows * cols figures become the panels of one picture, row by row, each drawn as it would be alone. share("x") gives each column one x range and labels it under the lowest panel; share("y") does the same along each row; share("xy") both	grid("a swing", 2, 1)\nshare("x")\nt = linspace(0.0, 1.0, 5)\nfigure("angle", "", "degrees")\nplot(t, 90.0 * t, "angle")\nfigure("torque", "seconds", "N m")\nplot(t, 2.0 * t, "torque")
+yright	yright("series label", "axis label")	the series with that label read against a second, linear y axis on the right, with its own ticks and label: two quantities in different units over one x. The legend marks the entry "(right axis)"	figure("swing", "seconds", "newton meters")\nt = linspace(0.0, 1.0, 5)\nplot(t, 2.0 * t, "torque")\nplot(t, 40.0 * t * t, "energy")\nyright("energy", "joules")
+style	style("label", "dash s2 ring thick")	how the open figure draws the series with that label: a line (solid, dash, dot, noline), a palette slot (s1 to s6), a marker (circle, ring, square, cross, nomarker) and a width (thin, thick), at most one of each. Any other word is a compile error. With no style, series take the palette in order, solid	figure("t", "x", "y")\nx = linspace(0.0, 1.0, 3)\nplot(x, x, "exact")\nstyle("exact", "dash s2")
+ytick	ytick("text", y)	inside a figure: a y tick labeled with the text; a chart with any shows only those y ticks	figure("t", "x", "E")\nx = linspace(0.0, 1.0, 3)\nplot(x, x, "e")\nytick("zero", 0.0)
+origin	origin("lower") · colormap("diverging")	heatmap settings for the open figure: row 0 at the bottom instead of the top; a blue-white-red map centered on zero for a signed field	figure("t", "x", "y")\norigin("lower")\ncolormap("diverging")\nplot2d([[-1.0, 1.0], [1.0, -1.0]], "u")
+clim	clim(lo, hi) · levels(values)	heatmap color limits (beyond them, the end color), and contour lines at exactly these values	figure("t", "x", "y")\nclim(-1.0, 1.0)\nlevels([0.0])\nplot2d([[-1.0, 1.0], [1.0, -1.0]], "u")
+box	box("id", "style", x0, y0, x1, y1)	in a figure with the style "diagram": a box by two corners. Style words, at most one of each: a color (s1 to s6, ink, muted), a fill (plain, tint, clear), a line (solid, dash, dot, noline), a width (thin, thick), corners (round, square)	figure("d", "", "", 0.0, 100.0, 0.0, 50.0, "diagram")\nbox("a", "s1 tint", 10.0, 10.0, 90.0, 40.0)
+arrow	arrow("id", "style", xs, ys)	in a diagram: a line through the points with a head at the last. Words: a color, a line (solid, dash, dot), a width, head or nohead, straight or curved	figure("d", "", "", 0.0, 100.0, 0.0, 50.0, "diagram")\narrow("a", "s5 curved", [10.0, 50.0, 90.0], [10.0, 40.0, 10.0])
+note	note("id", "text", "style", x, y)	in a diagram: text at a point. Words: a color, left, center or right, top, middle or bottom (which part of the text is at the point), small, normal or large (11, 13, 15 units), bold, mono	figure("d", "", "", 0.0, 100.0, 0.0, 50.0, "diagram")\nnote("n", "here", "left top mono", 10.0, 40.0)
+checkpoint	checkpoint()	save the figures so far as one frame; a sequence of frames plays as an animation	checkpoint()
+
+## Animation
+note: An animation is a Viv program. Objects are created hidden and named by a string id; transitions reveal, morph and move them. Each call prints one record, and the page plays the records with a scrubber.
+stage	stage("title", xlo, xhi, ylo, yhi)	opens an animation; the window is its coordinate system	stage("s", 0.0, 1.0, 0.0, 1.0)
+axes	axes("x label", "y label")	ticks and a grid on the stage	stage("s", 0.0, 1.0, 0.0, 1.0)\naxes("x", "y")
+curve	curve("id", x, y)	a named polyline, created hidden. The same id again replaces its data	x = linspace(0.0, 1.0, 3)\nstage("s", 0.0, 1.0, 0.0, 1.0)\ncurve("f", x, x)
+dots	dots("id", x, y) · dots("id", x, y, r)	named point markers; with a radius, discs of that size in data units (atoms)	x = linspace(0.0, 1.0, 3)\nstage("s", 0.0, 1.0, 0.0, 1.0)\ndots("p", x, x, 0.05)
+circle	circle("id", x, y, r)	a disc	stage("s", 0.0, 1.0, 0.0, 1.0)\ncircle("c", 0.5, 0.5, 0.1)
+rect	rect("id", x, y, w, h) · rect("id", x, y, w, h, angle)	a rectangle centered at (x, y), turned by angle radians	stage("s", 0.0, 1.0, 0.0, 1.0)\nrect("r", 0.5, 0.5, 0.3, 0.1, 0.2)
+segment	segment("id", x1, y1, x2, y2)	a line between two points: a pole, a rod, a spring	stage("s", 0.0, 1.0, 0.0, 1.0)\nsegment("p", 0.1, 0.1, 0.9, 0.9)
+poly	poly("id", xs, ys)	a filled polygon	stage("s", 0.0, 1.0, 0.0, 1.0)\npoly("t", [0.0, 1.0, 0.5], [0.0, 0.0, 1.0])
+frame	frame(seconds)	a KEYFRAME: advance the clock; an object set again later moves there over the time between. In a keyframed animation objects are visible from creation	stage("s", 0.0, 1.0, 0.0, 1.0)\ncircle("c", 0.2, 0.5, 0.05)\nframe(0.5)\ncircle("c", 0.8, 0.5, 0.05)
+label	label("id", "text", x, y)	text at a point; $...$ is TeX, with \\ for a backslash	stage("s", 0.0, 1.0, 0.0, 1.0)\nlabel("n", "here", 0.5, 0.5)
+hline	hline("id", y) · vline("id", x)	a dashed reference line across the stage	stage("s", 0.0, 1.0, 0.0, 1.0)\nhline("h", 0.5)\nvline("v", 0.5)
+draw	draw("id", seconds)	a curve is drawn on, start to end; anything else fades in	x = linspace(0.0, 1.0, 3)\nstage("s", 0.0, 1.0, 0.0, 1.0)\ncurve("f", x, x)\ndraw("f", 1.0)
+fade_in	fade_in("id", seconds) · fade_out("id", seconds)	reveal or hide any object	stage("s", 0.0, 1.0, 0.0, 1.0)\nhline("h", 0.5)\nfade_in("h", 0.5)\nfade_out("h", 0.5)
+morph	morph("id", x, y, seconds)	move a curve's or dots' points smoothly to new data over the given seconds; the point count may change	x = linspace(0.0, 1.0, 3)\nstage("s", 0.0, 1.0, 0.0, 1.0)\ncurve("f", x, x)\nmorph("f", x, x * x, 1.0)
+move_to	move_to("id", x, y, seconds)	slide a label	stage("s", 0.0, 1.0, 0.0, 1.0)\nlabel("n", "here", 0.5, 0.5)\nmove_to("n", 0.2, 0.2, 1.0)
+say	say("caption") · say("caption", value)	the caption until the next say; a value is appended, which is how a caption reports a computed number	say("the answer is", 42.0)
+wait	wait(seconds)	hold	wait(1.0)
+together	together() … apart()	the transitions between them start at the same time	together()\napart()
+
+## Output and testing
+note: A failed assert prints what failed (for assert_near, the two values, their difference and the tolerance), keeps running, and makes the process exit nonzero at the end, so a build can stop on it while you still see every failure in one run.
+print	print(x)	the bare value	print(1.0)
+print	print("text", x, ..., sep=" ")	text and values on one line, a space (or sep) between them, as Python's print	x = 0.5\nprint("x =", x, "and", [1.0, 2.0])\nprint("a", "b", sep="")
+fmt	fmt(x)	a print argument: the shortest digits that read back as x, as Python's repr	print("x =", fmt(0.1 + 0.2))
+fmt	fmt(x, 17)	a print argument: 1 to 17 significant digits, as %.17g	print("x =", fmt(0.1, 17))
+fmt	fmt(x, ".3f")	a print argument: a Python format, [[fill]align][sign][0][width][,][.precision] then e, f, g, d, % (or E, F, G)	print("[", fmt(1.5, "8.3f"), "] ", fmt(-2.0e-5, "+.2e"), " ", fmt(1234.5, "09,.1f"), sep="")
+narrate	narrate "text"	prints a progress line while the program runs, separate from data output	narrate "working"
+text	text(codes)	writes an array of Unicode code points as one line of text (the counterpart of chars)	text([72.0, 105.0])
+assert_near	assert_near(a, b, tol)		assert_near(1.0, 1.0, 1.0e-9)
+assert_true	assert_true(cond)		assert_true(1.0 < 2.0)
+assert_gt	assert_gt(a, b)		assert_gt(2.0, 1.0)
+assert_lt	assert_lt(a, b)		assert_lt(1.0, 2.0)
+assert_allclose	assert_allclose(a, b, tol)	elementwise, over arrays	a = [1.0, 2.0]\nb = [1.0, 2.0]\nassert_allclose(a, b, 1.0e-9)

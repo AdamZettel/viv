@@ -1,0 +1,352 @@
+###
+post: Sweeping point strategies against a guaranteed enclosure
+agent: claude
+
+The sweep drivers of lib/hf/sweep compare strategies with each other: the
+consensus is the elementwise median, and the member farthest from it is
+blamed. That has two blind spots. With two members the median cannot say
+which one is wrong. And agreement is not correctness: members that share a
+mistake agree on it.
+
+`sweep_iv3` adds a second registry of **interval members**, which return
+enclosures that are guaranteed to contain the exact result
+(lib/hf/iv_ints). Then:
+
+- the interval members must overlap entry by entry; the exact value is in
+  their common part, the **enclosure**;
+- every point member's every compared entry must lie inside the enclosure.
+  A point value outside it is wrong by at least its distance from it,
+  whatever the other members say;
+- the median check of lib/hf/sweep still runs, with its tolerance.
+
+The report is the one of lib/hf/sweep, `[strategy, flat index, worst,
+nstrat, lo, hi]`, and this driver fills the two slots reserved for it: `lo`
+and `hi` are the enclosure at the reported flat index. Blame goes, in this
+order, to
+
+1. an interval member whose enclosure misses the others' at some entry: the
+   strategy is reported as `nstrat + j` for interval member `j`, and `worst`
+   is the gap relative to `1 + |median|`;
+2. the point member farthest outside the enclosure, with `worst` its
+   distance relative to `1 + |median|`;
+3. otherwise the median's blame, as in `sw_table_median`.
+
+The verdict is 1 only when the enclosures overlap everywhere, every point
+value is inside, and the median deviation is below `tol`.
+
+Point members have the signature `(Arr, Arr, Arr) -> Arr` and return `N`
+entries. Interval members have the same signature and return `2N` entries,
+entry `k` at `[2k, 2k+1]` (a `[..., 2]` array flattened). Only the first
+`ncmp` entries are compared. `release_mode()` runs point member 0 alone.
+
+Used with `import hf.iv_sweep`.
+###
+
+from hf.sweep import (
+    sw_id3, SW_REP_HI, SW_REP_INDEX, SW_REP_LO, sw_rep_new, SW_REP_NSTRAT, sw_rep_release,
+    SW_REP_STRAT, SW_REP_WORST, sw_table_median,
+)
+from hf.interval import (
+    iv_add, iv_meet, iv_mid, iv_mul, iv_outside, iv_overlaps, iv_pred, iv_pt, iv_put, iv_relw,
+    iv_succ, iv_width,
+)
+
+# the three widths iv_sw_widths reports (relative, around 0, against the midpoint)
+IV_SW_WIDTHS_LEN = 3
+# the tests' vectors: their length, and the entry iv_sw_t_bad perturbs
+IV_SW_T_N = 5
+IV_SW_T_BAD = 3
+
+#| The flattened enclosure (`2N` entries) that every interval member's result
+#| overlaps, or the blame when two do not: returns the verdict and, on a
+#| dissent, fills `rep` (strategy `nstrat + j`).
+def iv_sw_meet(ivs, x1: Arr, x2: Arr, x3: Arr, N, ncmp, nstrat, H: Arr, rep: Arr) {
+    ix = zeros(2 * N)
+    for i to 2 * N {
+        ix[i] = i
+    }
+    first = apply(ivs[0], x1 + 0.0, x2 + 0.0, x3 + 0.0)
+    put(H, ix, take(first, ix))
+    ok = 1
+    worst = 0.0
+    for j to len(ivs) {
+        if j > 0 {
+            cur = take(apply(ivs[j], x1 + 0.0, x2 + 0.0, x3 + 0.0), ix)
+            for i to N {
+                I = [cur[2 * i], cur[2 * i + 1]]
+                K = [H[2 * i], H[2 * i + 1]]
+                if iv_overlaps(I, K) > 0 {
+                    iv_put(H, i, iv_meet(I, K))
+                }
+                else {
+                    if i < ncmp {
+                        gap = max(I[0] - K[1], K[0] - I[1]) / (1.0 + abs(iv_mid(K)))
+                        if gap > worst {
+                            worst = gap
+                            ok = 0
+                            rep[SW_REP_STRAT] = nstrat + j
+                            rep[SW_REP_INDEX] = i
+                            rep[SW_REP_WORST] = gap
+                            rep[SW_REP_LO] = K[0]
+                            rep[SW_REP_HI] = K[1]
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return ok
+}
+
+#| The core: run the point registry `ms` and the interval registry `ivs`,
+#| write the median consensus into `C` (`N` entries), fill `rep`, and return
+#| the verdict. With `release` 1 only point member 0 runs.
+def iv_sw_run3(ms, ivs, x1: Arr, x2: Arr, x3: Arr, N, ncmp, tol, rep: Arr, C: Arr, release) {
+    ix = zeros(N)
+    for i to N {
+        ix[i] = i
+    }
+    if release > 0.5 {
+        sw_rep_release(rep)
+        put(C, ix, take(apply(ms[0], x1, x2, x3), ix))
+        return 1
+    }
+    nstrat = len(ms)
+    T = zeros(nstrat, N)
+    for m to nstrat {
+        setslab(T, m, take(apply(ms[m], x1 + 0.0, x2 + 0.0, x3 + 0.0), ix))
+    }
+    sw_table_median(T, nstrat, N, ncmp, C, rep)
+    medworst = rep[SW_REP_WORST]
+    H = zeros(2 * N)
+    rep2 = sw_rep_new()
+    if iv_sw_meet(ivs, x1, x2, x3, N, ncmp, nstrat, H, rep2) < 1 {
+        rep[:] = rep2
+        rep[SW_REP_NSTRAT] = nstrat
+        return 0
+    }
+    # a point value outside the enclosure outranks any median deviation
+    far = 0.0
+    for i to ncmp {
+        K = [H[2 * i], H[2 * i + 1]]
+        for m to nstrat {
+            d = iv_outside(K, T[m, i]) / (1.0 + abs(C[i]))
+            if d > far {
+                far = d
+                rep[SW_REP_STRAT] = m
+                rep[SW_REP_INDEX] = i
+                rep[SW_REP_WORST] = d
+            }
+        }
+    }
+    k = round(rep[SW_REP_INDEX])
+    rep[SW_REP_LO] = H[2 * k]
+    rep[SW_REP_HI] = H[2 * k + 1]
+    if far > 0.0 {
+        return 0
+    }
+    if medworst < tol {
+        return 1
+    }
+    return 0
+}
+
+#| Debug: run both registries, assert the verdict, return the consensus in
+#| the point members' shape. Release: point member 0's result.
+def sweep_iv3(ms, ivs, x1: Arr, x2: Arr, x3: Arr, N, ncmp, tol, rep: Arr) -> Arr {
+    if release_mode() {
+        sw_rep_release(rep)
+        return apply(ms[0], x1, x2, x3)
+    }
+    out = apply(ms[0], x1 + 0.0, x2 + 0.0, x3 + 0.0)
+    C = zeros(N)
+    v = iv_sw_run3(ms, ivs, x1, x2, x3, N, ncmp, tol, rep, C, 0)
+    assert_true(v > 0)
+    ix = zeros(N)
+    for i to N {
+        ix[i] = i
+    }
+    put(out, ix, C)
+    return out
+}
+
+#| Like `sweep_iv3` without the assertion: the consensus goes into `out`
+#| (any array with `N` entries) and the return value is the verdict.
+def iv_check3(ms, ivs, x1: Arr, x2: Arr, x3: Arr, N, ncmp, tol, rep: Arr, out: Arr) {
+    C = zeros(N)
+    v = iv_sw_run3(ms, ivs, x1, x2, x3, N, ncmp, tol, rep, C, 0)
+    ix = zeros(N)
+    for i to N {
+        ix[i] = i
+    }
+    put(out, ix, C)
+    return v
+}
+
+#| The enclosure alone, `2N` entries, for callers that want the widths.
+def iv_sw_enclosure(ivs, x1: Arr, x2: Arr, x3: Arr, N) {
+    H = zeros(2 * N)
+    rep = sw_rep_new()
+    assert_true(iv_sw_meet(ivs, x1, x2, x3, N, N, 0, H, rep) > 0)
+    return H
+}
+
+#| Widths of a flat enclosure over its first `ncmp` entries:
+#| `[largest (hi - lo) / max(|lo|, |hi|) over entries that exclude 0,
+#|   largest hi - lo over entries that contain 0,
+#|   largest (hi - lo) / (1 + |mid|) over all]`.
+#| An integral that is 0 by symmetry has an enclosure around 0, whose width
+#| relative to its ends is meaningless, so it is reported apart.
+def iv_sw_widths(H: Arr, ncmp) {
+    w = zeros(IV_SW_WIDTHS_LEN)
+    for i to ncmp {
+        K = [H[2 * i], H[2 * i + 1]]
+        if K[0] > 0.0 or K[1] < 0.0 {
+            w[0] = max(w[0], iv_relw(K))
+        }
+        else {
+            w[1] = max(w[1], iv_width(K))
+        }
+        w[2] = max(w[2], iv_width(K) / (1.0 + abs(iv_mid(K))))
+    }
+    return w
+}
+
+#| Never run: types both registry parameters of every driver here, so that
+#| a program that uses this module without calling them still compiles.
+#~ entry
+def iv_sw_anchor(x: Arr) {
+    rep = sw_rep_new()
+    out = zeros(1)
+    a = sweep_iv3([sw_id3], [sw_id3], x, x, x, 1, 1, 1.0, rep)
+    v = iv_check3([sw_id3], [sw_id3], x, x, x, 1, 1, 1.0, rep, out)
+    H = iv_sw_enclosure([sw_id3], x, x, x, 1)
+    return v + a[0] + H[0]
+}
+
+# ---- tests ----------------------------------------------------------------------------
+# The strategies below compute y_i = x1_i * x2_i + x3_i on vectors of 5, and
+# the interval members enclose it. Rounding to nearest is monotone, so a
+# point member that rounds the product and then the sum lies between the
+# enclosure's ends, which round the same two steps down and up.
+
+def iv_sw_t_fma(a: Arr, b: Arr, c: Arr) -> Arr {
+    return a * b + c
+}
+
+def iv_sw_t_split(a: Arr, b: Arr, c: Arr) -> Arr {
+    # c + b a: the same two roundings in another order
+    return c + b * a
+}
+
+def iv_sw_t_bad(a: Arr, b: Arr, c: Arr) -> Arr {
+    y = iv_sw_t_fma(a, b, c)
+    y[IV_SW_T_BAD] = y[IV_SW_T_BAD] * (1.0 + 1.0e-9)
+    return y
+}
+
+def iv_sw_t_ivm(a: Arr, b: Arr, c: Arr) -> Arr {
+    y = zeros(len(a), 2)
+    for i to len(a) {
+        I = iv_add(iv_mul(iv_pt(a[i]), iv_pt(b[i])), iv_pt(c[i]))
+        y[i, 0] = I[0]
+        y[i, 1] = I[1]
+    }
+    return y
+}
+
+def iv_sw_t_ivm2(a: Arr, b: Arr, c: Arr) -> Arr {
+    # the same enclosure computed as c + b a, widened one step each side
+    y = zeros(len(a), 2)
+    for i to len(a) {
+        I = iv_add(iv_pt(c[i]), iv_mul(iv_pt(b[i]), iv_pt(a[i])))
+        y[i, 0] = iv_pred(I[0])
+        y[i, 1] = iv_succ(I[1])
+    }
+    return y
+}
+
+def iv_sw_t_ivbad(a: Arr, b: Arr, c: Arr) -> Arr {
+    y = iv_sw_t_ivm(a, b, c)
+    y[1, 0] = y[1, 0] + 1.0e-6
+    y[1, 1] = y[1, 1] + 1.0e-6
+    return y
+}
+
+def iv_sw_t_x(k) {
+    x = zeros(IV_SW_T_N)
+    for i to len(x) {
+        x[i] = 0.1 * (i + 1) + 0.37 * k
+    }
+    return x
+}
+
+test "agreeing members pass, and lo and hi hold the enclosure at the reported entry" {
+    iv_swa = iv_sw_t_x(0)
+    iv_swb = iv_sw_t_x(1)
+    iv_swc = iv_sw_t_x(2)
+    iv_swrep = sw_rep_new()
+    iv_swout = zeros(len(iv_swa))
+    iv_swv = iv_check3([iv_sw_t_fma, iv_sw_t_split], [iv_sw_t_ivm, iv_sw_t_ivm2], iv_swa, iv_swb, iv_swc, len(iv_swa), len(iv_swa), 1.0e-12, iv_swrep, iv_swout)
+    assert_near(iv_swv, 1, 0)
+    iv_swk = round(iv_swrep[SW_REP_INDEX])
+    assert_true(iv_swrep[SW_REP_LO] <= iv_swout[iv_swk])
+    assert_true(iv_swout[iv_swk] <= iv_swrep[SW_REP_HI])
+    assert_true(iv_swrep[SW_REP_LO] <= iv_swrep[SW_REP_HI])
+    assert_near(iv_swrep[SW_REP_NSTRAT], 2, 0)
+    # the asserting driver returns the consensus
+    iv_swr = sweep_iv3([iv_sw_t_fma, iv_sw_t_split], [iv_sw_t_ivm, iv_sw_t_ivm2], iv_swa, iv_swb, iv_swc, len(iv_swa), len(iv_swa), 1.0e-12, iv_swrep)
+    assert_near(iv_swr[4], iv_swa[4] * iv_swb[4] + iv_swc[4], 1.0e-15)
+    iv_sww = iv_sw_widths(iv_sw_enclosure([iv_sw_t_ivm, iv_sw_t_ivm2], iv_swa, iv_swb, iv_swc, len(iv_swa)), len(iv_swa))
+    assert_lt(iv_sww[0], 1.0e-15)
+}
+
+test "a member off by 1e-9 is blamed by the enclosure even where the median cannot" {
+    iv_sba = iv_sw_t_x(0)
+    iv_sbb = iv_sw_t_x(1)
+    iv_sbc = iv_sw_t_x(2)
+    iv_sbrep = sw_rep_new()
+    iv_sbout = zeros(len(iv_sba))
+    # two point members: the median alone would blame whichever sits higher,
+    # and with tol 1e-6 it would not object at all
+    iv_sbv = iv_check3([iv_sw_t_bad, iv_sw_t_fma], [iv_sw_t_ivm], iv_sba, iv_sbb, iv_sbc, len(iv_sba), len(iv_sba), 1.0e-6, iv_sbrep, iv_sbout)
+    assert_near(iv_sbv, 0, 0)
+    assert_near(iv_sbrep[SW_REP_STRAT], 0, 0)
+    assert_near(iv_sbrep[SW_REP_INDEX], 3, 0)
+    assert_lt(0.5e-9, iv_sbrep[SW_REP_WORST])
+    # the same bad member listed second is still the one blamed
+    iv_sbv2 = iv_check3([iv_sw_t_fma, iv_sw_t_bad], [iv_sw_t_ivm], iv_sba, iv_sbb, iv_sbc, len(iv_sba), len(iv_sba), 1.0e-6, iv_sbrep, iv_sbout)
+    assert_near(iv_sbv2, 0, 0)
+    assert_near(iv_sbrep[SW_REP_STRAT], 1, 0)
+    assert_near(iv_sbrep[SW_REP_INDEX], 3, 0)
+    assert_true(iv_sbrep[SW_REP_LO] <= iv_sbout[IV_SW_T_BAD])
+    # outside the compared prefix (the entries before the bad one) nothing is checked
+    iv_sbv3 = iv_check3([iv_sw_t_fma, iv_sw_t_bad], [iv_sw_t_ivm], iv_sba, iv_sbb, iv_sbc, len(iv_sba), IV_SW_T_BAD, 1.0e-6, iv_sbrep, iv_sbout)
+    assert_near(iv_sbv3, 1, 0)
+}
+
+test "interval members that miss each other are reported as nstrat + j" {
+    iv_sia = iv_sw_t_x(0)
+    iv_sib = iv_sw_t_x(1)
+    iv_sic = iv_sw_t_x(2)
+    iv_sirep = sw_rep_new()
+    iv_siout = zeros(len(iv_sia))
+    iv_siv = iv_check3([iv_sw_t_fma, iv_sw_t_split], [iv_sw_t_ivm, iv_sw_t_ivbad], iv_sia, iv_sib, iv_sic, len(iv_sia), len(iv_sia), 1.0e-12, iv_sirep, iv_siout)
+    assert_near(iv_siv, 0, 0)
+    assert_near(iv_sirep[SW_REP_STRAT], 3, 0)
+    assert_near(iv_sirep[SW_REP_INDEX], 1, 0)
+}
+
+test "release runs point member 0 alone" {
+    iv_sra = iv_sw_t_x(0)
+    iv_srrep = sw_rep_new()
+    iv_srout = zeros(len(iv_sra))
+    # the bad members would fail a debug run
+    iv_srv = iv_sw_run3([iv_sw_t_fma, iv_sw_t_bad], [iv_sw_t_ivbad], iv_sra, iv_sra, iv_sra, len(iv_sra), len(iv_sra), 1.0e-12, iv_srrep, iv_srout, 1)
+    assert_near(iv_srv, 1, 0)
+    assert_near(iv_srrep[SW_REP_NSTRAT], 1, 0)
+    assert_near(iv_srout[2], iv_sra[2] * iv_sra[2] + iv_sra[2], 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

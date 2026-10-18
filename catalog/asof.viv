@@ -1,0 +1,111 @@
+# As-of join: attach to each left row the latest right value of the same key.
+#
+# Both tables sorted by (user, ts); ts in int64 nanoseconds. For a left row at
+# time t the match is the right row of the same user with the largest ts such
+# that
+#
+#     ts_r <= t   (strict = 0, inclusive)
+#     ts_r <  t   (strict = 1, strict: use it when a right value stamped t is
+#                  only known after t, such as an end-of-period figure)
+#
+# Several right rows at the matching instant: the largest value wins, so the
+# answer does not depend on the right table's row order.
+#
+#   value     the matched right value, NaN when there is none
+#   age_secs  t - ts_r in seconds, NaN when there is none
+
+from rows import group_end
+
+NS_PER_S: Int = 1000000000
+
+record Left {
+    user: [Int]
+    ts: [Int]
+}
+
+record Right {
+    user: [Int]
+    ts: [Int]
+    value: Arr
+}
+
+record AsOf {
+    value: Arr
+    age_secs: Arr
+}
+
+#| Each left row's latest right value at or before its time (or strictly before,
+#| with `strict`), per user, and how old that value is.
+#|| A merge of the two sorted tables: one pointer walks the right table as the
+#|| left rows advance in time.
+#||| The tie rule (largest value at the matching instant) makes the join a
+#||| function of the right table's content, not of its row order.
+#: left  the rows that receive a value, sorted by (user, ts)
+#: right  the rows that supply values, sorted by (user, ts)
+#: strict  1 to require ts_r < t, 0 to allow ts_r <= t
+#@ fb49f30f
+def asof(left: Left, right: Right, strict: Int) -> AsOf {
+    n = len(left.ts)
+    m = len(right.ts)
+    val = zeros(n)
+    age = zeros(n)
+    none = 0.0 / 0.0
+    rg: Int = 0
+    while rg < m {
+        rg = group_end(right.user, right.ts, rg, "asof (right)")
+    }
+    g: Int = 0
+    r: Int = 0
+    while g < n {
+        stop_at = group_end(left.user, left.ts, g, "asof (left)")
+        u = left.user[g]
+        step align "skip the right rows of users before this one" {
+            while r < m and right.user[r] < u {
+                r += 1
+            }
+        }
+        j: Int = r
+        best: Int = -1
+        for i from g to stop_at {
+            t = left.ts[i]
+            step advance "take every right row of the user that is known at t" {
+                while j < m and right.user[j] == u and (right.ts[j] < t or (strict == 0 and right.ts[j] == t)) {
+                    if best < 0 or right.ts[j] > right.ts[best] or right.value[j] > right.value[best] {
+                        best = j
+                    }
+                    j += 1
+                }
+            }
+            if best < 0 {
+                val[i] = none
+                age[i] = none
+            }
+            else {
+                val[i] = right.value[best]
+                gap: Int = t - right.ts[best]
+                age[i] = float(gap) / float(NS_PER_S)
+            }
+        }
+        r = j
+        g = stop_at
+    }
+    return AsOf { value: val, age_secs: age }
+}
+
+test "inclusive and strict, with a tie at the matching instant" {
+    lu: [Int] = [1, 1, 2]
+    lt: [Int] = [5, 10, 5]
+    ru: [Int] = [1, 1, 1, 3]
+    rt: [Int] = [5, 5, 7, 0]
+    rv = [3.0, 9.0, 1.0, 4.0]
+    a = asof(Left { user: lu, ts: lt }, Right { user: ru, ts: rt, value: rv }, 0)
+    assert_near(a.value[0], 9.0, 0.0)
+    assert_near(a.value[1], 1.0, 0.0)
+    assert_true(a.value[2] != a.value[2])
+    b = asof(Left { user: lu, ts: lt }, Right { user: ru, ts: rt, value: rv }, 1)
+    assert_true(b.value[0] != b.value[0])
+    assert_near(b.value[1], 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

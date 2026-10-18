@@ -1,0 +1,481 @@
+# Restricted Hartree-Fock for WATER (H2O) in 6-31G(d) [6-31G*], with a general
+# McMurchie-Davidson integral engine over s, p, AND d Cartesian Gaussians.
+#
+# A real polyatomic calculation with a polarized split-valence basis (19 basis
+# functions, variable contraction lengths, 6 Cartesian d functions on oxygen).
+# At the (stretched) Crawford geometry, E(SCF) = -76.0192 hartree; the basis
+# series STO-3G (-74.942) > 6-31G (-75.936) > 6-31G* (-76.019) descends
+# monotonically toward the HF limit (~-76.067), exactly as variational theory
+# requires. The s/p engine is anchored by the exact STO-3G match in
+# scf_water.viv (-74.9420787).
+
+pi = 3.141592653589793
+# Max primitives per contracted function; shorter contractions pad with
+# coefficient 0 (skipped in the contraction loops below).
+n_prim = 6
+
+# =====================================================================
+# McMurchie-Davidson integral engine (molecule-independent).
+# =====================================================================
+
+# Boys function F_n(T) = integral_0^1 t^(2n) exp(-T t^2) dt.
+def boys_n(nn, T) {
+    if T < 1.0e-12 {
+        return 1.0 / (2.0 * nn + 1.0)
+    }
+    return simpson(fn(t) -> pow(t, 2.0 * nn) * exp(-T * t * t), 0.0, 1.0, 100)
+}
+
+# Hermite expansion coefficient E_t^{ij} (1D), exponents a,b, Qx = Ax - Bx.
+def hermite_E(i, j, t, Qx, a, b) {
+    if i < 0.0 { return 0.0 }
+    if j < 0.0 { return 0.0 }
+    if t < 0.0 { return 0.0 }
+    if t > i + j { return 0.0 }
+    p = a + b
+    if i == 0.0 {
+        if j == 0.0 {
+            mu = a * b / p
+            return exp(-mu * Qx * Qx)
+        }
+        xpb = a / p * Qx
+        return (0.5 / p * hermite_E(i, j - 1.0, t - 1.0, Qx, a, b)
+             + xpb * hermite_E(i, j - 1.0, t, Qx, a, b)
+             + (t + 1.0) * hermite_E(i, j - 1.0, t + 1.0, Qx, a, b))
+    }
+    xpa = -b / p * Qx
+    return (0.5 / p * hermite_E(i - 1.0, j, t - 1.0, Qx, a, b)
+         + xpa * hermite_E(i - 1.0, j, t, Qx, a, b)
+         + (t + 1.0) * hermite_E(i - 1.0, j, t + 1.0, Qx, a, b))
+}
+
+# Hermite Coulomb integral R_{tuv}^n.
+def hermite_R(t, u, v, nn, p, PCx, PCy, PCz, RPC2) {
+    if t == 0.0 {
+        if u == 0.0 {
+            if v == 0.0 {
+                return pow(-2.0 * p, nn) * boys_n(nn, p * RPC2)
+            }
+            res = PCz * hermite_R(t, u, v - 1.0, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+            if v > 1.0 {
+                res += (v - 1.0) * hermite_R(t, u, v - 2.0, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+            }
+            return res
+        }
+        res = PCy * hermite_R(t, u - 1.0, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+        if u > 1.0 {
+            res += (u - 1.0) * hermite_R(t, u - 2.0, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+        }
+        return res
+    }
+    res = PCx * hermite_R(t - 1.0, u, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+    if t > 1.0 {
+        res += (t - 1.0) * hermite_R(t - 2.0, u, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+    }
+    return res
+}
+
+def overlap_1d(i, j, Qx, a, b) {
+    return hermite_E(i, j, 0.0, Qx, a, b) * sqrt(pi / (a + b))
+}
+
+# 1D kinetic energy matrix element (differentiate the ket twice).
+def kinetic_1d(i, j, Qx, a, b) {
+    term = b * (2.0 * j + 1.0) * overlap_1d(i, j, Qx, a, b)
+    term += -2.0 * b * b * overlap_1d(i, j + 2.0, Qx, a, b)
+    term += -0.5 * j * (j - 1.0) * overlap_1d(i, j - 2.0, Qx, a, b)
+    return term
+}
+
+# =====================================================================
+# Primitive integrals over two/four basis functions (reading bf data
+# by index from the globals defined in the MOLECULE/BASIS block).
+# =====================================================================
+
+def prim_overlap(a, b, mu, nu) {
+    sx = overlap_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    sy = overlap_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    sz = overlap_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    return sx * sy * sz
+}
+
+def prim_kinetic(a, b, mu, nu) {
+    sx = overlap_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    sy = overlap_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    sz = overlap_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    tx = kinetic_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    ty = kinetic_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    tz = kinetic_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    return tx * sy * sz + sx * ty * sz + sx * sy * tz
+}
+
+def prim_nuclear(a, b, mu, nu, Cx, Cy, Cz) {
+    la = bfL[mu]
+    ma = bfM[mu]
+    na = bfN[mu]
+    lb = bfL[nu]
+    mb = bfM[nu]
+    nb = bfN[nu]
+    p = a + b
+    Px = (a * bfCx[mu] + b * bfCx[nu]) / p
+    Py = (a * bfCy[mu] + b * bfCy[nu]) / p
+    Pz = (a * bfCz[mu] + b * bfCz[nu]) / p
+    PCx = Px - Cx
+    PCy = Py - Cy
+    PCz = Pz - Cz
+    RPC2 = PCx * PCx + PCy * PCy + PCz * PCz
+    qx = bfCx[mu] - bfCx[nu]
+    qy = bfCy[mu] - bfCy[nu]
+    qz = bfCz[mu] - bfCz[nu]
+    val = 0.0
+    for t to la + lb + 1.0 {
+        for u to ma + mb + 1.0 {
+            for v to na + nb + 1.0 {
+                e = hermite_E(la, lb, t, qx, a, b) * hermite_E(ma, mb, u, qy, a, b) * hermite_E(na, nb, v, qz, a, b)
+                val += e * hermite_R(t, u, v, 0.0, p, PCx, PCy, PCz, RPC2)
+            }
+        }
+    }
+    return 2.0 * pi / p * val
+}
+
+def prim_eri(a, b, c, d, mu, nu, lam, sig) {
+    p = a + b
+    q = c + d
+    Px = (a * bfCx[mu] + b * bfCx[nu]) / p
+    Py = (a * bfCy[mu] + b * bfCy[nu]) / p
+    Pz = (a * bfCz[mu] + b * bfCz[nu]) / p
+    Qx = (c * bfCx[lam] + d * bfCx[sig]) / q
+    Qy = (c * bfCy[lam] + d * bfCy[sig]) / q
+    Qz = (c * bfCz[lam] + d * bfCz[sig]) / q
+    alpha = p * q / (p + q)
+    PQx = Px - Qx
+    PQy = Py - Qy
+    PQz = Pz - Qz
+    RPQ2 = PQx * PQx + PQy * PQy + PQz * PQz
+    qx1 = bfCx[mu] - bfCx[nu]
+    qy1 = bfCy[mu] - bfCy[nu]
+    qz1 = bfCz[mu] - bfCz[nu]
+    qx2 = bfCx[lam] - bfCx[sig]
+    qy2 = bfCy[lam] - bfCy[sig]
+    qz2 = bfCz[lam] - bfCz[sig]
+    val = 0.0
+    for t1 to bfL[mu] + bfL[nu] + 1.0 {
+        for u1 to bfM[mu] + bfM[nu] + 1.0 {
+            for v1 to bfN[mu] + bfN[nu] + 1.0 {
+                e1 = hermite_E(bfL[mu], bfL[nu], t1, qx1, a, b) * hermite_E(bfM[mu], bfM[nu], u1, qy1, a, b) * hermite_E(bfN[mu], bfN[nu], v1, qz1, a, b)
+                for t2 to bfL[lam] + bfL[sig] + 1.0 {
+                    for u2 to bfM[lam] + bfM[sig] + 1.0 {
+                        for v2 to bfN[lam] + bfN[sig] + 1.0 {
+                            e2 = hermite_E(bfL[lam], bfL[sig], t2, qx2, c, d) * hermite_E(bfM[lam], bfM[sig], u2, qy2, c, d) * hermite_E(bfN[lam], bfN[sig], v2, qz2, c, d)
+                            sign = pow(-1.0, t2 + u2 + v2)
+                            val += e1 * e2 * sign * hermite_R(t1 + t2, u1 + u2, v1 + v2, 0.0, alpha, PQx, PQy, PQz, RPQ2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 2.0 * pow(pi, 2.5) / (p * q * sqrt(p + q)) * val
+}
+
+# Contracted integrals: sum primitive integrals weighted by contraction coeffs.
+def cont_overlap(mu, nu) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            cc = bfC[mu, ka] * bfC[nu, kb]
+            if cc != 0.0 {
+                s += cc * prim_overlap(bfA[mu, ka], bfA[nu, kb], mu, nu)
+            }
+        }
+    }
+    return s
+}
+
+def cont_kinetic(mu, nu) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            cc = bfC[mu, ka] * bfC[nu, kb]
+            if cc != 0.0 {
+                s += cc * prim_kinetic(bfA[mu, ka], bfA[nu, kb], mu, nu)
+            }
+        }
+    }
+    return s
+}
+
+def cont_nuclear(mu, nu, Cx, Cy, Cz) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            cc = bfC[mu, ka] * bfC[nu, kb]
+            if cc != 0.0 {
+                s += cc * prim_nuclear(bfA[mu, ka], bfA[nu, kb], mu, nu, Cx, Cy, Cz)
+            }
+        }
+    }
+    return s
+}
+
+def cont_eri(mu, nu, lam, sig) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            for kc to n_prim {
+                for kd to n_prim {
+                    coef = bfC[mu, ka] * bfC[nu, kb] * bfC[lam, kc] * bfC[sig, kd]
+                    if coef != 0.0 {
+                        s += coef * prim_eri(bfA[mu, ka], bfA[nu, kb], bfA[lam, kc], bfA[sig, kd], mu, nu, lam, sig)
+                    }
+                }
+            }
+        }
+    }
+    return s
+}
+
+# =====================================================================
+# MOLECULE / BASIS: water (H2O) in 6-31G(d) (a.k.a. 6-31G*), with s, p,
+# AND 6 Cartesian d functions on oxygen. Split-valence: O 1s is 6 primitives,
+# the 2s/2p valence is split into a 3-primitive inner and 1-primitive outer
+# shell; H valence is split 3+1. 19 basis functions total.
+# Geometry (bohr): Crawford HF projects geometry.
+# Validation: E(SCF) ~= -76.01 hartree (HF/6-31G* water; ~0.07 below the
+# HF limit and ~1.07 below the STO-3G -74.942 result — variational).
+# =====================================================================
+n_atoms = 3
+n_basis = 19
+n_occ = 5
+
+atom_x = zeros(n_atoms)
+atom_y = zeros(n_atoms)
+atom_z = zeros(n_atoms)
+atom_Z = zeros(n_atoms)
+atom_x[0] = 0.0
+atom_y[0] = -0.143225816552
+atom_z[0] = 0.0
+atom_Z[0] = 8.0
+atom_x[1] = 1.638036840407
+atom_y[1] = 1.136548822547
+atom_z[1] = 0.0
+atom_Z[1] = 1.0
+atom_x[2] = -1.638036840407
+atom_y[2] = 1.136548822547
+atom_z[2] = 0.0
+atom_Z[2] = 1.0
+
+bfL = zeros(n_basis)
+bfM = zeros(n_basis)
+bfN = zeros(n_basis)
+bfCx = zeros(n_basis)
+bfCy = zeros(n_basis)
+bfCz = zeros(n_basis)
+bfA = zeros(n_basis, n_prim)
+bfC = zeros(n_basis, n_prim)
+
+# Radial primitive normalization (2a/pi)^{3/4} (4a)^{(l+m+n)/2}; the angular
+# part is constant within a shell and absorbed by the contracted renorm.
+def prim_norm(a, lt) {
+    return pow(2.0 * a / pi, 0.75) * pow(4.0 * a, lt / 2.0)
+}
+
+def set_bf1(idx, cx, cy, cz, l, m, n, a0, c0) {
+    bfCx[idx] = cx
+    bfCy[idx] = cy
+    bfCz[idx] = cz
+    bfL[idx] = l
+    bfM[idx] = m
+    bfN[idx] = n
+    lt = l + m + n
+    bfA[idx, 0] = a0
+    bfC[idx, 0] = c0 * prim_norm(a0, lt)
+    for k to 5 {
+        bfA[idx, k + 1.0] = 1.0
+        bfC[idx, k + 1.0] = 0.0
+    }
+}
+
+def set_bf3(idx, cx, cy, cz, l, m, n, a0, a1, a2, c0, c1, c2) {
+    bfCx[idx] = cx
+    bfCy[idx] = cy
+    bfCz[idx] = cz
+    bfL[idx] = l
+    bfM[idx] = m
+    bfN[idx] = n
+    lt = l + m + n
+    bfA[idx, 0] = a0
+    bfA[idx, 1] = a1
+    bfA[idx, 2] = a2
+    bfC[idx, 0] = c0 * prim_norm(a0, lt)
+    bfC[idx, 1] = c1 * prim_norm(a1, lt)
+    bfC[idx, 2] = c2 * prim_norm(a2, lt)
+    for k to 3 {
+        bfA[idx, k + 3.0] = 1.0
+        bfC[idx, k + 3.0] = 0.0
+    }
+}
+
+def set_bf6(idx, cx, cy, cz, l, m, n, a0, a1, a2, a3, a4, a5, c0, c1, c2, c3, c4, c5) {
+    bfCx[idx] = cx
+    bfCy[idx] = cy
+    bfCz[idx] = cz
+    bfL[idx] = l
+    bfM[idx] = m
+    bfN[idx] = n
+    lt = l + m + n
+    bfA[idx, 0] = a0
+    bfA[idx, 1] = a1
+    bfA[idx, 2] = a2
+    bfA[idx, 3] = a3
+    bfA[idx, 4] = a4
+    bfA[idx, 5] = a5
+    bfC[idx, 0] = c0 * prim_norm(a0, lt)
+    bfC[idx, 1] = c1 * prim_norm(a1, lt)
+    bfC[idx, 2] = c2 * prim_norm(a2, lt)
+    bfC[idx, 3] = c3 * prim_norm(a3, lt)
+    bfC[idx, 4] = c4 * prim_norm(a4, lt)
+    bfC[idx, 5] = c5 * prim_norm(a5, lt)
+}
+
+# --- Oxygen 6-31G* ---
+# 1s (6 primitives)
+set_bf6(0, atom_x[0], atom_y[0], atom_z[0], 0.0, 0.0, 0.0, 5484.6717000, 825.2349500, 188.0469600, 52.9645000, 16.8975700, 5.7996353, 0.0018311, 0.0139501, 0.0684451, 0.2327143, 0.4701930, 0.3585209)
+# 2s inner (3 prim) and outer (1 prim)
+set_bf3(1, atom_x[0], atom_y[0], atom_z[0], 0.0, 0.0, 0.0, 15.5396160, 3.5999336, 1.0137618, -0.1107775, -0.1480263, 1.1307670)
+set_bf1(2, atom_x[0], atom_y[0], atom_z[0], 0.0, 0.0, 0.0, 0.2700058, 1.0)
+# 2p inner (x, y, z)
+set_bf3(3, atom_x[0], atom_y[0], atom_z[0], 1.0, 0.0, 0.0, 15.5396160, 3.5999336, 1.0137618, 0.0708743, 0.3397528, 0.7271586)
+set_bf3(4, atom_x[0], atom_y[0], atom_z[0], 0.0, 1.0, 0.0, 15.5396160, 3.5999336, 1.0137618, 0.0708743, 0.3397528, 0.7271586)
+set_bf3(5, atom_x[0], atom_y[0], atom_z[0], 0.0, 0.0, 1.0, 15.5396160, 3.5999336, 1.0137618, 0.0708743, 0.3397528, 0.7271586)
+# 2p outer (x, y, z)
+set_bf1(6, atom_x[0], atom_y[0], atom_z[0], 1.0, 0.0, 0.0, 0.2700058, 1.0)
+set_bf1(7, atom_x[0], atom_y[0], atom_z[0], 0.0, 1.0, 0.0, 0.2700058, 1.0)
+set_bf1(8, atom_x[0], atom_y[0], atom_z[0], 0.0, 0.0, 1.0, 0.2700058, 1.0)
+# d polarization (xx, yy, zz, xy, xz, yz), exponent 0.8
+set_bf1(9, atom_x[0], atom_y[0], atom_z[0], 2.0, 0.0, 0.0, 0.8, 1.0)
+set_bf1(10, atom_x[0], atom_y[0], atom_z[0], 0.0, 2.0, 0.0, 0.8, 1.0)
+set_bf1(11, atom_x[0], atom_y[0], atom_z[0], 0.0, 0.0, 2.0, 0.8, 1.0)
+set_bf1(12, atom_x[0], atom_y[0], atom_z[0], 1.0, 1.0, 0.0, 0.8, 1.0)
+set_bf1(13, atom_x[0], atom_y[0], atom_z[0], 1.0, 0.0, 1.0, 0.8, 1.0)
+set_bf1(14, atom_x[0], atom_y[0], atom_z[0], 0.0, 1.0, 1.0, 0.8, 1.0)
+# --- Hydrogen 6-31G (inner 3-prim + outer 1-prim) on each H ---
+set_bf3(15, atom_x[1], atom_y[1], atom_z[1], 0.0, 0.0, 0.0, 18.7311370, 2.8253937, 0.6401217, 0.03349460, 0.23472695, 0.81375733)
+set_bf1(16, atom_x[1], atom_y[1], atom_z[1], 0.0, 0.0, 0.0, 0.1612778, 1.0)
+set_bf3(17, atom_x[2], atom_y[2], atom_z[2], 0.0, 0.0, 0.0, 18.7311370, 2.8253937, 0.6401217, 0.03349460, 0.23472695, 0.81375733)
+set_bf1(18, atom_x[2], atom_y[2], atom_z[2], 0.0, 0.0, 0.0, 0.1612778, 1.0)
+
+# Normalize each contracted basis function so <mu|mu> = 1.
+for i to n_basis {
+    nrm = 1.0 / sqrt(cont_overlap(i, i))
+    for k to n_prim {
+        bfC[i, k] = bfC[i, k] * nrm
+    }
+}
+
+# =====================================================================
+# Build integrals and run the SCF.
+# =====================================================================
+S = zeros(n_basis, n_basis)
+H_core = zeros(n_basis, n_basis)
+for mu to n_basis {
+    for nu to n_basis {
+        S[mu, nu] = cont_overlap(mu, nu)
+        v = 0.0
+        for atom to n_atoms {
+            v += -atom_Z[atom] * cont_nuclear(mu, nu, atom_x[atom], atom_y[atom], atom_z[atom])
+        }
+        H_core[mu, nu] = cont_kinetic(mu, nu) + v
+    }
+}
+
+eri = zeros(n_basis, n_basis, n_basis, n_basis)
+parallel for mu to n_basis {
+    for nu to n_basis {
+        for lam to n_basis {
+            for sig to n_basis {
+                eri[mu, nu, lam, sig] = cont_eri(mu, nu, lam, sig)
+            }
+        }
+    }
+}
+
+# Symmetric orthogonalization X = S^{-1/2}.
+s_vals = zeros(n_basis)
+s_vecs = zeros(n_basis, n_basis)
+eig_sym(S, s_vals, s_vecs)
+D_inv_sqrt = zeros(n_basis, n_basis)
+for i to n_basis {
+    D_inv_sqrt[i, i] = 1.0 / sqrt(s_vals[i])
+}
+X = s_vecs @ D_inv_sqrt @ transpose(s_vecs)
+
+# Nuclear repulsion.
+E_nuc = 0.0
+for i to n_atoms {
+    for j to n_atoms {
+        if j > i {
+            dx = atom_x[i] - atom_x[j]
+            dy = atom_y[i] - atom_y[j]
+            dz = atom_z[i] - atom_z[j]
+            E_nuc += atom_Z[i] * atom_Z[j] / sqrt(dx * dx + dy * dy + dz * dz)
+        }
+    }
+}
+
+# SCF.
+P = zeros(n_basis, n_basis)
+E_total = 0.0
+for iter to 100 {
+    G = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            g = 0.0
+            for lam to n_basis {
+                for sig to n_basis {
+                    g += P[lam, sig] * (eri[mu, nu, lam, sig] - 0.5 * eri[mu, lam, nu, sig])
+                }
+            }
+            G[mu, nu] = g
+        }
+    }
+    F = H_core + G
+    Fp = transpose(X) @ F @ X
+    eps_vals = zeros(n_basis)
+    Cp = zeros(n_basis, n_basis)
+    eig_sym(Fp, eps_vals, Cp)
+    C = X @ Cp
+    P_new = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            psum = 0.0
+            for a to n_occ {
+                psum += C[mu, a] * C[nu, a]
+            }
+            P_new[mu, nu] = 2.0 * psum
+        }
+    }
+    E_elec = 0.0
+    for mu to n_basis {
+        for nu to n_basis {
+            E_elec += 0.5 * P_new[mu, nu] * (H_core[mu, nu] + F[mu, nu])
+        }
+    }
+    E_total = E_elec + E_nuc
+    delta = 0.0
+    for mu to n_basis {
+        for nu to n_basis {
+            dd = P_new[mu, nu] - P[mu, nu]
+            if dd < 0.0 { dd = -dd }
+            if dd > delta { delta = dd }
+        }
+    }
+    P = P_new
+    if delta < 1.0e-9 { break }
+}
+
+show E_total
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

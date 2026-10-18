@@ -1,0 +1,662 @@
+###
+post: Three symmetric eigensolvers that check each other
+agent: claude
+
+Every SCF iteration ends in a symmetric eigenproblem: the Fock matrix, written
+in an orthonormal basis, is diagonalized, and its lowest eigenvectors become
+the occupied orbitals. This module holds three solvers that share no
+numerical kernel (only the final sort and sign fix):
+
+- `eig_ql` (member 0, production): Householder reduction to a tridiagonal
+  matrix, then the implicit QL iteration with Wilkinson shifts. This is the
+  `tred2`/`tql2` pair of EISPACK in the form JAMA gives it.
+- `eig_jacobi`: cyclic Jacobi rotations, each one zeroing one off-diagonal
+  pair, until every off-diagonal entry is too small to change the diagonal
+  it sits next to. It is slower, but it works on the full matrix and never
+  forms a tridiagonal, so a bug in the reduction cannot hide in it. The
+  method is the cyclic Jacobi of G. H. Golub and C. F. Van Loan, *Matrix
+  Computations*, 4th ed. (Johns Hopkins, 2013), Algorithms 8.5.1 and 8.5.3,
+  with the relative stopping test of J. Demmel and K. Veselic, SIAM J.
+  Matrix Anal. Appl. 13, 1204 (1992).
+- `eig_builtin`: the language's own `eig_sym`, a Jacobi code written
+  outside this library (in Rust for the interpreter, in C for the compiled
+  runtime), with its own rotation formula and stopping rule.
+
+Each member takes `(A, B, opts)` with a symmetric `A[n, n]`; `B` and `opts`
+are not read (the stage signature is shared with the orthogonalizers). It
+returns `[n + 1, n]`: row 0 holds the eigenvalues in ascending order, and
+row `1 + i` column `k` holds component `i` of eigenvector `k`.
+
+Eigenvectors are only defined up to sign, and inside a degenerate level up to
+a rotation. Every member fixes the sign the same way (the component of
+largest magnitude is positive; the first one wins a tie), so two members
+agree vector by vector wherever the eigenvalues are separated. Inside a
+degenerate level only the projector onto the whole level is comparable, and
+that is what the SCF uses: the density is the projector onto the occupied
+levels.
+
+`eig_of(A, k)` runs member `k` on `A`; `eig_values` and `eig_vectors` take
+the eigenvalues and the eigenvector matrix out of its result.
+
+Used with `import hf.eigen`.
+###
+
+# the members of eig_methods (ScfOptions.eigensolver)
+EIG_QL = 0
+EIG_JACOBI = 1
+EIG_BUILTIN = 2
+EIG_EPS = 2.220446049250313e-16
+# eig_tql2: the most QL iterations it spends on one eigenvalue
+EIG_TQL2_MAXIT = 60
+# cyclic Jacobi (eig_jacobi_raw): the most sweeps it runs
+EIG_JACOBI_MAXSWEEP = 100
+# Park-Miller's minimal standard generator, for the test matrices
+EIG_MINSTD_A = 16807.0
+EIG_MINSTD_M = 2147483647.0
+
+#| How far the eigensolvers are apart on one matrix (eig_agreement): the
+#| largest eigenvalue gap and occupied-projector gap to member 0, and the
+#| worst residual `|A V - V diag(w)| / |A|` and orthogonality defect
+#| `|V^T V - I|` of any member.
+record EigAgreement {
+    values: Num
+    projector: Num
+    residual: Num
+    orth: Num
+}
+
+# ---- shared helpers --------------------------------------------------------------
+
+#| Sort the eigenvalues in `d` ascending, moving the columns of `V` with them.
+#| Selection sort: n is at most a few dozen, and a stable, simple order is
+#| what makes the members comparable.
+def eig_sort(d: Arr, V: Arr, n) {
+    for i to n - 1 {
+        k = i
+        p = d[i]
+        for j to n {
+            if j > i and d[j] < p {
+                k = j
+                p = d[j]
+            }
+        }
+        if k != i {
+            d[k] = d[i]
+            d[i] = p
+            t = V[:, i]
+            V[:, i] = V[:, k]
+            V[:, k] = t
+        }
+    }
+    return 0
+}
+
+#| Flip each column of `V` so its largest-magnitude component is positive.
+def eig_fix_signs(V: Arr, n) {
+    for k to n {
+        big = 0.0
+        at = 0
+        for i to n {
+            if abs(V[i, k]) > big {
+                big = abs(V[i, k])
+                at = i
+            }
+        }
+        if V[at, k] < 0.0 {
+            V[:, k] = -V[:, k]
+        }
+    }
+    return 0
+}
+
+#| The member result `[n + 1, n]` from eigenvalues and vectors.
+def eig_pack(d: Arr, V: Arr, n) -> Arr {
+    R = zeros(n + 1, n)
+    R[0, :] = d
+    R[1:n + 1, :] = V
+    return R
+}
+
+# ---- member 0: Householder tridiagonalization + implicit QL ---------------------
+
+#| Householder reduction of the symmetric matrix held in `V` to tridiagonal
+#| form (diagonal `d`, subdiagonal `e`), accumulating the transformation in
+#| `V`. JAMA's tred2 with `V` stored transposed: where JAMA reads `V[i, j]`
+#| this reads `V[j, i]`, so its inner loops, which run down a column, walk
+#| along a row of the row-major array. The arithmetic is JAMA's, term for
+#| term; only the storage is transposed.
+def eig_tred2(V: Arr, d: Arr, e: Arr, n) {
+    for j to n {
+        d[j] = V[j, n - 1]
+    }
+    i = n - 1
+    while i > 0 {
+        #: divide the row by its scale so h neither overflows nor underflows
+        scale = 0.0
+        h = 0.0
+        for k to i {
+            scale = scale + abs(d[k])
+        }
+        if scale == 0.0 {
+            e[i] = d[i - 1]
+            for j to i {
+                d[j] = V[j, i - 1]
+                V[j, i] = 0.0
+                V[i, j] = 0.0
+            }
+        }
+        else {
+            #: Householder vector; its sign avoids cancellation
+            for k to i {
+                d[k] = d[k] / scale
+                h = h + d[k] * d[k]
+            }
+            f = d[i - 1]
+            g = sqrt(h)
+            if f > 0.0 {
+                g = -g
+            }
+            e[i] = scale * g
+            h = h - f * g
+            d[i - 1] = f - g
+            #: p = A u / h; q = p - K u, K = u^T p / 2h
+            for j to i {
+                e[j] = 0.0
+            }
+            for j to i {
+                f = d[j]
+                V[i, j] = f
+                g = e[j] + V[j, j] * f
+                k = j + 1
+                while k < i {
+                    g = g + V[j, k] * d[k]
+                    e[k] = e[k] + V[j, k] * f
+                    k = k + 1
+                }
+                e[j] = g
+            }
+            f = 0.0
+            for j to i {
+                e[j] = e[j] / h
+                f = f + e[j] * d[j]
+            }
+            hh = f / (h + h)
+            for j to i {
+                e[j] = e[j] - hh * d[j]
+            }
+            #: A -= u q^T + q u^T (lower triangle)
+            for j to i {
+                f = d[j]
+                g = e[j]
+                k = j
+                while k < i {
+                    V[j, k] = V[j, k] - (f * e[k] + g * d[k])
+                    k = k + 1
+                }
+                d[j] = V[j, i - 1]
+                V[j, i] = 0.0
+            }
+        }
+        d[i] = h
+        i = i - 1
+    }
+    # accumulate the transformations
+    for i2 to n - 1 {
+        V[i2, n - 1] = V[i2, i2]
+        V[i2, i2] = 1.0
+        h = d[i2 + 1]
+        if h != 0.0 {
+            for k to i2 + 1 {
+                d[k] = V[i2 + 1, k] / h
+            }
+            for j to i2 + 1 {
+                g = 0.0
+                for k to i2 + 1 {
+                    g = g + V[i2 + 1, k] * V[j, k]
+                }
+                for k to i2 + 1 {
+                    V[j, k] = V[j, k] - g * d[k]
+                }
+            }
+        }
+        for k to i2 + 1 {
+            V[i2 + 1, k] = 0.0
+        }
+    }
+    for j to n {
+        d[j] = V[j, n - 1]
+        V[j, n - 1] = 0.0
+    }
+    V[n - 1, n - 1] = 1.0
+    e[0] = 0.0
+    return 0
+}
+
+#| Implicit QL on the tridiagonal (`d`, `e`) from eig_tred2, rotating `V`
+#| (stored transposed, as eig_tred2 leaves it: row `k` is eigenvector `k`).
+#| JAMA's tql2. Returns the largest number of QL steps any one eigenvalue
+#| needed.
+def eig_tql2(V: Arr, d: Arr, e: Arr, n) {
+    for i to n - 1 {
+        e[i] = e[i + 1]
+    }
+    e[n - 1] = 0.0
+    f = 0.0
+    tst1 = 0.0
+    most = 0
+    #: find a negligible subdiagonal entry at or below l
+    for l to n {
+        tst1 = max(tst1, abs(d[l]) + abs(e[l]))
+        m = l
+        while m < n - 1 and abs(e[m]) > EIG_EPS * tst1 {
+            m = m + 1
+        }
+        if m > l {
+            it = 0
+            going = 1
+            while going > 0 {
+                it = it + 1
+                #: Wilkinson shift from the 2 by 2 at l
+                g = d[l]
+                p = (d[l + 1] - g) / (2.0 * e[l])
+                r = sqrt(p * p + 1.0)
+                if p < 0.0 {
+                    r = -r
+                }
+                d[l] = e[l] / (p + r)
+                d[l + 1] = e[l] * (p + r)
+                dl1 = d[l + 1]
+                h = g - d[l]
+                i = l + 2
+                while i < n {
+                    d[i] = d[i] - h
+                    i = i + 1
+                }
+                f = f + h
+                #: QL sweep from m up to l, rotations accumulated in V
+                p = d[m]
+                c = 1.0
+                c2 = c
+                c3 = c
+                el1 = e[l + 1]
+                s = 0.0
+                s2 = 0.0
+                i = m - 1
+                while i >= l {
+                    c3 = c2
+                    c2 = c
+                    s2 = s
+                    g = c * e[i]
+                    h = c * p
+                    r = sqrt(p * p + e[i] * e[i])
+                    e[i + 1] = s * r
+                    s = e[i] / r
+                    c = p / r
+                    p = c * d[i] - s * g
+                    d[i + 1] = h + s * (c * g + s * d[i])
+                    for k to n {
+                        h = V[i + 1, k]
+                        V[i + 1, k] = s * V[i, k] + c * h
+                        V[i, k] = c * V[i, k] - s * h
+                    }
+                    i = i - 1
+                }
+                p = -s * s2 * c3 * el1 * e[l] / dl1
+                e[l] = s * p
+                d[l] = c * p
+                if abs(e[l]) <= EIG_EPS * tst1 or it > EIG_TQL2_MAXIT {
+
+                    going = 0
+                }
+            }
+            most = max(most, it)
+        }
+        #: undo the accumulated shifts
+        d[l] = d[l] + f
+        e[l] = 0.0
+    }
+    return most
+}
+
+#| Member `0` (`EIG_QL`): Householder + QL.
+def eig_ql(A: Arr, B: Arr, opts: Arr) -> Arr {
+    n = len(A)
+    # the reduction and the QL steps work on the transpose (see eig_tred2)
+    V = transpose(A)
+    d = zeros(n)
+    e = zeros(n)
+    if n > 1 {
+        eig_tred2(V, d, e, n)
+        eig_tql2(V, d, e, n)
+        V = transpose(V)
+    }
+    else {
+        d[0] = A[0, 0]
+        V[0, 0] = 1.0
+    }
+    eig_sort(d, V, n)
+    eig_fix_signs(V, n)
+    return eig_pack(d, V, n)
+}
+
+# ---- member 1: cyclic Jacobi -----------------------------------------------------
+
+#| The rotation that zeroes the `(p, q)` entry of the symmetric block
+#| `[app apq; apq aqq]`: its cosine, sine and tangent, with the angle at most
+#| a quarter turn in magnitude.
+def eig_jacobi_angle(app, apq, aqq) {
+    tau = (aqq - app) / (2.0 * apq)
+    t = 0.0
+    if abs(tau) > 1.0 / EIG_EPS {
+        t = 0.5 / tau
+    }
+    else {
+        t = 1.0 / (abs(tau) + sqrt(1.0 + tau * tau))
+        if tau < 0.0 {
+            t = -t
+        }
+    }
+    c = 1.0 / sqrt(1.0 + t * t)
+    return c, t * c, t
+}
+
+#| Cyclic Jacobi on a copy of `A`, pairs in row order (Golub and Van Loan's
+#| cyclic Jacobi). Fills `d` and `V` unsorted; returns the sweep count. A
+#| pair is set to zero without a rotation once it is too small to move an
+#| eigenvalue (Demmel and Veselic's relative test), and the iteration stops
+#| after a sweep that rotates nothing.
+def eig_jacobi_raw(A: Arr, d: Arr, V: Arr, n) {
+    W = copy(A)
+    floor_pq = EIG_EPS * EIG_EPS * eig_fnorm(A)
+    for i to n {
+        for j to n {
+            V[i, j] = 0.0
+        }
+        V[i, i] = 1.0
+    }
+    sweeps = 0
+    rotated = true
+    while rotated and sweeps < EIG_JACOBI_MAXSWEEP {
+        rotated = false
+        sweeps = sweeps + 1
+        for p to n - 1 {
+            for q from p + 1 to n {
+                w_pq = W[p, q]
+                if w_pq == 0.0 {
+                    continue
+                }
+                if abs(w_pq) <= EIG_EPS * sqrt(abs(W[p, p] * W[q, q])) or abs(w_pq) <= floor_pq {
+                    W[p, q] = 0.0
+                    W[q, p] = 0.0
+                    continue
+                }
+                rotated = true
+                w_pp = W[p, p]
+                w_qq = W[q, q]
+                c, s, t = eig_jacobi_angle(w_pp, w_pq, w_qq)
+                #: W <- J^T W J outside the 2-by-2 block, kept exactly symmetric
+                for k to n {
+                    if k != p and k != q {
+                        wkp = W[k, p]
+                        wkq = W[k, q]
+                        W[k, p] = c * wkp - s * wkq
+                        W[k, q] = s * wkp + c * wkq
+                        W[p, k] = W[k, p]
+                        W[q, k] = W[k, q]
+                    }
+                }
+                #: the block itself: the pair becomes zero and the diagonal moves by t a_pq
+                W[p, p] = w_pp - t * w_pq
+                W[q, q] = w_qq + t * w_pq
+                W[p, q] = 0.0
+                W[q, p] = 0.0
+                for k to n {
+                    vkp = V[k, p]
+                    vkq = V[k, q]
+                    V[k, p] = c * vkp - s * vkq
+                    V[k, q] = s * vkp + c * vkq
+                }
+            }
+        }
+    }
+    for i to n {
+        d[i] = W[i, i]
+    }
+    return sweeps
+}
+
+#| Member `1` (`EIG_JACOBI`): cyclic Jacobi.
+def eig_jacobi(A: Arr, B: Arr, opts: Arr) -> Arr {
+    n = len(A)
+    d = zeros(n)
+    V = zeros(n, n)
+    eig_jacobi_raw(A, d, V, n)
+    eig_sort(d, V, n)
+    eig_fix_signs(V, n)
+    return eig_pack(d, V, n)
+}
+
+# ---- member 2: the language's eig_sym ----------------------------------------------
+
+#| Member `2` (`EIG_BUILTIN`): the builtin `eig_sym`, sorted and sign-fixed like the others.
+#| It is a Jacobi code too, but written in Rust for the interpreter and in C
+#| for the compiled runtime, with rotation angles from atan2, cos and sin
+#| rather than the tangent formula above, and a different stopping rule
+#| (off-diagonal norm under `1e-12` times the Frobenius norm, checked before each
+#| sweep).
+def eig_builtin(A: Arr, B: Arr, opts: Arr) -> Arr {
+    n = len(A)
+    d = zeros(n)
+    V = zeros(n, n)
+    eig_sym(A, d, V)
+    eig_sort(d, V, n)
+    eig_fix_signs(V, n)
+    return eig_pack(d, V, n)
+}
+
+# ---- registry and the entry the SCF calls ----------------------------------------
+
+#| The eigensolver registry, production member first.
+def eig_methods() {
+    return [eig_ql, eig_jacobi, eig_builtin]
+}
+
+#| The eigensolver `k` names on the symmetric `A[n, n]`: `[n + 1, n]`, row
+#| `0` the eigenvalues in ascending order, rows `1..n` the eigenvectors as
+#| columns. Each member is called by name, `eig_ql` (the production one)
+#| when `k` is the default.
+def eig_of(A: Arr, k) -> Arr {
+    m = round(k)
+    if m == EIG_JACOBI {
+        return eig_jacobi(A, A, A)
+    }
+    if m == EIG_BUILTIN {
+        return eig_builtin(A, A, A)
+    }
+    return eig_ql(A, A, A)
+}
+
+#| The eigenvalues of a member's result, `[n]`.
+def eig_values(R: Arr) {
+    return R[0, :]
+}
+
+#| The eigenvectors of a member's result, as the columns of `[n, n]`.
+def eig_vectors(R: Arr) {
+    return R[1:len(R), :]
+}
+
+# ---- checks used by the tests (and by later streams) -----------------------------
+
+#| max |A V - V diag(vals)| over every entry, for a member result R.
+def eig_residual(A: Arr, R: Arr) {
+    V = eig_vectors(R)
+    AV = A @ V
+    worst = 0.0
+    for k to len(A) {
+        worst = max(worst, max(abs(AV[:, k] - R[0, k] * V[:, k])))
+    }
+    return worst
+}
+
+#| max |V^T V - I| for a member result R.
+def eig_orth_defect(R: Arr) {
+    V = eig_vectors(R)
+    E = transpose(V) @ V
+    for a to len(E) {
+        E[a, a] = E[a, a] - 1.0
+    }
+    return max(abs(E))
+}
+
+#| max |P1 - P2| between the projectors onto the lowest `k` vectors of two
+#| member results. The projector is what an occupied space is, so it is the
+#| comparison that survives degenerate levels.
+def eig_projector_gap(R1: Arr, R2: Arr, k) {
+    if k < 1 {
+        return 0.0
+    }
+    V1 = eig_vectors(R1)[:, 0:k]
+    V2 = eig_vectors(R2)[:, 0:k]
+    return max(abs(V1 @ transpose(V1) - V2 @ transpose(V2)))
+}
+
+#| Frobenius norm of a square matrix.
+def eig_fnorm(A: Arr) {
+    return sqrt(sum(A * A))
+}
+
+#| Test helper: a symmetric `[n, n]` matrix with Park-Miller entries in
+#| $(-1, 1)$ from `seed`, so a failure can be quoted by its seed.
+def eig_random_sym(n, seed) {
+    st = seed
+    A = zeros(n, n)
+    for i to n {
+        for j to i + 1 {
+            st = mod(EIG_MINSTD_A * st, EIG_MINSTD_M)
+            v = 2.0 * st / EIG_MINSTD_M - 1.0
+            A[i, j] = v
+            A[j, i] = v
+        }
+    }
+    return A
+}
+
+#| Test helper: Q diag(lam) Q^T for an orthogonal Q built from the vectors of
+#| a random matrix, so the spectrum is known exactly by construction (up to
+#| the rounding of the product).
+def eig_known_spectrum(lam: Arr, seed) {
+    n = len(lam)
+    Q = zeros(n, n)
+    d = zeros(n)
+    eig_jacobi_raw(eig_random_sym(n, seed), d, Q, n)
+    QL = copy(Q)
+    for k to n {
+        QL[:, k] = Q[:, k] * lam[k]
+    }
+    A = QL @ transpose(Q)
+    return 0.5 * (A + transpose(A))
+}
+
+#| The worst member-to-member eigenvalue and projector gaps over the
+#| registry on one matrix, with k occupied vectors, and each member's worst
+#| residual and orthogonality defect.
+def eig_agreement(A: Arr, k) -> EigAgreement {
+    ms = eig_methods()
+    R0 = apply(ms[0], A, A, A)
+    nrm = eig_fnorm(A)
+    vg = 0.0
+    pg = 0.0
+    rs = 0.0
+    od = 0.0
+    for m to len(ms) {
+        R = apply(ms[m], A, A, A)
+        vg = max(vg, max(abs(eig_values(R) - eig_values(R0))))
+        pg = max(pg, eig_projector_gap(R, R0, k))
+        rs = max(rs, eig_residual(A, R) / max(nrm, 1.0))
+        od = max(od, eig_orth_defect(R))
+    }
+    return EigAgreement { values: vg, projector: pg, residual: rs, orth: od }
+}
+
+test "the three solvers agree on 12 seeded random matrices up to 19 x 19" {
+    eig_nmat = 12
+    eig_nmax = 19
+    for eig_s to eig_nmat {
+        eig_n = 1 + mod(7 * eig_s + 3, eig_nmax)
+        eig_A = eig_random_sym(eig_n, 1000 + 37 * eig_s)
+        eig_g = eig_agreement(eig_A, floor(eig_n / 2))
+        # eigenvalues and projectors absolute; the residual
+        # is relative to |A| and is largest for the builtin (2.6e-13 measured),
+        # which stops once the off-diagonal norm is under 1e-12 |A|
+        assert_lt(eig_g.values, 1.0e-12)
+        assert_lt(eig_g.projector, 1.0e-10)
+        assert_lt(eig_g.residual, 1.0e-12)
+        assert_lt(eig_g.orth, 1.0e-13)
+    }
+}
+
+test "a matrix built with a known spectrum gives that spectrum back" {
+    eig_lam = [-20.5, -1.3, -0.7, -0.5, -0.39, 0.2, 0.3, 1.1, 1.1, 1.1, 4.0, 40.0]
+    eig_A = eig_known_spectrum(eig_lam, 4242)
+    eig_ms = eig_methods()
+    for eig_m to len(eig_ms) {
+        eig_R = apply(eig_ms[eig_m], eig_A, eig_A, eig_A)
+        for eig_j to len(eig_lam) {
+            assert_lt(abs(eig_R[0, eig_j] - eig_lam[eig_j]), 1.0e-12 * 40.0)
+        }
+    }
+    # the triple level at 1.1 splits the vectors arbitrarily, but the
+    # projector onto the lowest 10 (through the whole level) is fixed
+    eig_klevel = 10
+    eig_g = eig_agreement(eig_A, eig_klevel)
+    assert_lt(eig_g.values, 1.0e-12)
+    assert_lt(eig_g.projector, 1.0e-10)
+    assert_lt(eig_g.orth, 1.0e-13)
+}
+
+test "a diagonal matrix, a 1 x 1 matrix and the zero matrix" {
+    eig_ms = eig_methods()
+    eig_D = [[3.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 2.0]]
+    eig_nz = 4
+    eig_Z = zeros(eig_nz, eig_nz)
+    eig_one = [[-7.5]]
+    for eig_m to len(eig_ms) {
+        eig_R = apply(eig_ms[eig_m], eig_D, eig_D, eig_D)
+        assert_near(eig_R[0, 0], -1.0, 0.0)
+        assert_near(eig_R[0, 1], 2.0, 0.0)
+        assert_near(eig_R[0, 2], 3.0, 0.0)
+        # the vector of -1 is e_2, with the positive sign
+        assert_near(eig_R[1 + 1, 0], 1.0, 0.0)
+        eig_R1 = apply(eig_ms[eig_m], eig_one, eig_one, eig_one)
+        assert_near(eig_R1[0, 0], -7.5, 0.0)
+        assert_near(eig_R1[1, 0], 1.0, 0.0)
+        eig_RZ = apply(eig_ms[eig_m], eig_Z, eig_Z, eig_Z)
+        assert_near(eig_RZ[0, 3], 0.0, 0.0)
+        assert_lt(eig_orth_defect(eig_RZ), 1.0e-15)
+    }
+}
+
+test "eig_values and eig_vectors take a member's result apart" {
+    eig_ni = 6
+    eig_A = eig_random_sym(eig_ni, 5)
+    for eig_m to len(eig_methods()) {
+        eig_R = eig_of(eig_A, eig_m)
+        eig_P = eig_pack(eig_values(eig_R), eig_vectors(eig_R), eig_ni)
+        assert_near(len(eig_values(eig_R)), eig_ni, 0.0)
+        assert_lt(eig_residual(eig_A, eig_P), 1.0e-14)
+    }
+}
+
+test "eig_of runs the member the registry holds at each option value" {
+    eig_A = eig_random_sym(7, 99)
+    eig_ms = eig_methods()
+    for eig_k to len(eig_ms) {
+        eig_a = eig_of(eig_A, eig_k)
+        eig_b = apply(eig_ms[eig_k], eig_A, eig_A, eig_A)
+        assert_near(max(abs(eig_a - eig_b)), 0.0, 0.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

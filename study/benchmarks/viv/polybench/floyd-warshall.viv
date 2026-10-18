@@ -1,0 +1,40 @@
+#! timing
+# PolyBench/C 4.2.1 floyd-warshall: all-pairs shortest path lengths.
+# Reference: upstream/polybench-c-4.2.1/medley/floyd-warshall/floyd-warshall.c
+# The C's int lengths are held as Nums here (exact: every length is an
+# integer far below 2^53).
+# The sizes are the MINI dataset; the harness gives the others with --set.
+N = 60
+DUMP = 1
+
+from polybench import dump
+
+# PolyBench's graph: edge (i, j) has length i*j mod 7 + 1, except that the
+# pairs whose i + j is a multiple of 13, 7 or 11 get NO_EDGE.
+NO_EDGE = 999.0
+
+def init() {
+    return [[NO_EDGE if (i + j) % 13 == 0 or (i + j) % 7 == 0 or (i + j) % 11 == 0 else (i * j % 7) + 1 for j to N] for i to N]
+}
+
+# Round k allows paths through vertex k: path[i, j] becomes
+# min(path[i, j], path[i, k] + path[k, j]) for every pair at once (row k and
+# column k do not change in round k).
+def kernel(path) {
+    for k to N {
+        path = min(path, reshape(path[:, k], N, 1) + path[k, :])
+    }
+    return path
+}
+
+path = init()
+t0 = clock()
+path = kernel(path)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("path", path)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

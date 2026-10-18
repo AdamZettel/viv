@@ -1,0 +1,104 @@
+# The tests of lib/hf/jk that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/jk does not load the references.
+from hf.jk import jk_methods, jk_of, jk_packed, jk_pairs, jk_rhf_energy, jk_t_opts, jk_uhf_energy
+from hf.opts import opt_new
+from hf.density import den_stack1, den_stack2
+from hf.sweep import (
+    sw_check5_arr, SW_REP_INDEX, sw_rep_new, SW_REP_NSTRAT, SW_REP_STRAT, SW_REP_WORST,
+    sweep5_arr,
+)
+from hfref.oh_631g import (
+    OH_631G_E_NUC, OH_631G_E_UHF, oh_631g_eri8_cart, OH_631G_NAO_CART, oh_631g_t_unit,
+    oh_631g_uhf_da, oh_631g_uhf_db, oh_631g_v_unit,
+)
+from hfref.water_631g import (
+    WATER631G_E_NUC, WATER631G_E_RHF, water631g_eri8_cart, WATER631G_NAO_CART, water631g_rhf_d,
+    water631g_t_unit, water631g_v_unit,
+)
+from hfref.water_631gs_cart import (
+    WATER631GS_CART_E_NUC, WATER631GS_CART_E_RHF, water631gs_cart_eri8_cart,
+    water631gs_cart_rhf_d, water631gs_cart_t_unit, water631gs_cart_v_unit,
+)
+
+#| Test member with a planted bug: `jk_packed` with one exchange entry off by
+#| `1.0e-9` [test "a planted exchange error is caught and blamed on its member and entry"].
+def jk_t_bad(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    R = jk_packed(X1, X2, X3, D, opts)
+    R[1, 2, 3] = R[1, 2, 3] + 1.0e-9
+    return R
+}
+
+test "the three members agree to 1e-12 on water 6-31G (one density) and OH (two)" {
+    jk_Gp = water631g_eri8_cart()
+    jk_D = den_stack1(water631g_rhf_d())
+    jk_rep = sw_rep_new()
+    # J and K for each density: 2 len(D) matrices of n x n entries
+    jk_nres = 2 * len(jk_D) * WATER631G_NAO_CART * WATER631G_NAO_CART
+    jk_R = sweep5_arr(jk_methods(), jk_Gp, jk_Gp, jk_Gp, jk_D, opt_new(), jk_nres, jk_nres, 1.0e-12, jk_rep)
+    assert_near(jk_rep[SW_REP_NSTRAT], 3, 0.0)
+    assert_lt(jk_rep[SW_REP_WORST], 1.0e-12)
+    # J and K are symmetric for a symmetric density
+    assert_near(jk_R[0, 3, 7], jk_R[0, 7, 3], 1.0e-14)
+    assert_near(jk_R[1, 3, 7], jk_R[1, 7, 3], 1.0e-14)
+    jk_Gp = oh_631g_eri8_cart()
+    jk_D = den_stack2(oh_631g_uhf_da(), oh_631g_uhf_db())
+    jk_nres = 2 * len(jk_D) * OH_631G_NAO_CART * OH_631G_NAO_CART
+    jk_R = sweep5_arr(jk_methods(), jk_Gp, jk_Gp, jk_Gp, jk_D, opt_new(), jk_nres, jk_nres, 1.0e-12, jk_rep)
+    assert_lt(jk_rep[SW_REP_WORST], 1.0e-12)
+}
+
+test "a nonsymmetric density: the members still agree term by term" {
+    jk_Gp = water631g_eri8_cart()
+    jk_D = den_stack1(water631g_rhf_d())
+    jk_D[0, 2, 9] = jk_D[0, 2, 9] + 0.3
+    jk_D[0, 11, 0] = jk_D[0, 11, 0] - 0.2
+    jk_rep = sw_rep_new()
+    jk_nres = 2 * len(jk_D) * WATER631G_NAO_CART * WATER631G_NAO_CART
+    jk_R = sweep5_arr(jk_methods(), jk_Gp, jk_Gp, jk_Gp, jk_D, opt_new(), jk_nres, jk_nres, 1.0e-12, jk_rep)
+    assert_lt(jk_rep[SW_REP_WORST], 1.0e-12)
+}
+
+test "PySCF's densities give PySCF's energies through every member" {
+    jk_H = water631g_t_unit() + water631g_v_unit()
+    for jk_k to len(jk_methods()) {
+        jk_e = jk_rhf_energy(water631g_eri8_cart(), jk_H, water631g_rhf_d(), WATER631G_E_NUC, jk_k)
+        assert_lt(abs(jk_e - WATER631G_E_RHF), 1.0e-10)
+    }
+    jk_H = water631gs_cart_t_unit() + water631gs_cart_v_unit()
+    jk_e = jk_rhf_energy(water631gs_cart_eri8_cart(), jk_H, water631gs_cart_rhf_d(), WATER631GS_CART_E_NUC, 0)
+    assert_lt(abs(jk_e - WATER631GS_CART_E_RHF), 1.0e-10)
+    jk_H = oh_631g_t_unit() + oh_631g_v_unit()
+    for jk_k to len(jk_methods()) {
+        jk_e = jk_uhf_energy(oh_631g_eri8_cart(), jk_H, oh_631g_uhf_da(), oh_631g_uhf_db(), OH_631G_E_NUC, jk_k)
+        assert_lt(abs(jk_e - OH_631G_E_UHF), 1.0e-10)
+    }
+}
+
+test "a planted exchange error is caught and blamed on its member and entry" {
+    jk_Gp = water631g_eri8_cart()
+    jk_D = den_stack1(water631g_rhf_d())
+    jk_rep = sw_rep_new()
+    jk_out = zeros(2 * len(jk_D), WATER631G_NAO_CART, WATER631G_NAO_CART)
+    jk_nres = 2 * len(jk_D) * WATER631G_NAO_CART * WATER631G_NAO_CART
+    jk_ok = sw_check5_arr([jk_pairs, jk_t_bad, jk_packed], jk_Gp, jk_Gp, jk_Gp, jk_D, opt_new(), jk_nres, jk_nres, 1.0e-12, jk_rep, jk_out)
+    assert_near(jk_ok, 0.0, 0.0)
+    assert_near(jk_rep[SW_REP_STRAT], 1.0, 0.0)
+    # entry K[2, 3] of a 13 x 13 matrix sits at 169 + 2 * 13 + 3
+    assert_near(jk_rep[SW_REP_INDEX], 198.0, 0.0)
+}
+
+test "jk_of runs the member the registry holds at each option value" {
+    jk_Gp = oh_631g_eri8_cart()
+    jk_D = den_stack2(oh_631g_uhf_da(), oh_631g_uhf_db())
+    jk_ms = jk_methods()
+    for jk_k to len(jk_ms) {
+        jk_o = jk_t_opts(jk_k)
+        jk_a = jk_of(jk_Gp, jk_D, jk_o)
+        jk_b = apply(jk_ms[jk_k], jk_Gp, jk_Gp, jk_Gp, jk_D, jk_o)
+        assert_near(max(abs(jk_a - jk_b)), 0.0, 0.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

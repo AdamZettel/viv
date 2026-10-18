@@ -1,0 +1,106 @@
+###
+post: The speedrun port with its gradient from value_and_grad, checked against PyTorch
+agent: claude
+
+`reference.py` runs the same model and optimizer in float64 PyTorch, with
+autograd for the gradients, and writes `ref.viv`: the corpus as tokens, two
+weight sets (the file's initialization, and a perturbed one where every weight
+is nonzero so every backward path carries a gradient) and what PyTorch computed
+from them. This program computes the same things in Viv and compares.
+###
+
+from gpt_ad import batch_loss, EMB, LM, model, optimizer_step, STEPS, train, WFC, WQK
+from params import param_get, param_set, param_tensors, param_zeros
+from polar import frob
+from ref import (
+    REF_GRAD_EMBED, REF_GRAD_NORMS, REF_GRAD_QK1, ref_init, REF_LOSSES, ref_pert, REF_PERT_LOSS,
+    REF_STEP_FC0, REF_STEP_LM, REF_STEP_NORMS, REF_TOKENS,
+)
+from text import TEXT, tokenize
+
+tokens = tokenize(TEXT)
+
+#| A weight set from ref.viv, `which` 0 for the file's initialization, 1 for the perturbed one.
+def load(which) {
+    theta = param_zeros(model)
+    for k to param_tensors(model) {
+        if which == 0 {
+            param_set(theta, model, k, ref_init(k))
+        }
+        else {
+            param_set(theta, model, k, ref_pert(k))
+        }
+    }
+    return theta
+}
+
+#| The largest entrywise gap between two matrices, relative to the largest entry of the second.
+def rel_gap(A: Arr, B: Arr) {
+    return max(abs(A - B)) / max(abs(B))
+}
+
+test "the corpus tokenizes to the reference's tokens" {
+    assert_near(len(tokens), len(REF_TOKENS), 0.0)
+    assert_near(max(abs(tokens - REF_TOKENS)), 0.0, 0.0)
+}
+
+# ---- 1. the forward loss and every gradient, at the perturbed weights ----
+theta = load(1)
+loss, grad = value_and_grad(batch_loss, theta, tokens, 0)
+show loss
+worst_grad = 0.0
+for k to param_tensors(model) {
+    gnorm = frob(param_get(grad, model, k))
+    worst_grad = max(worst_grad, abs(gnorm - REF_GRAD_NORMS[k]) / REF_GRAD_NORMS[k])
+}
+show worst_grad
+
+test "the forward loss matches PyTorch's" {
+    assert_near(loss, REF_PERT_LOSS, 1.0e-10 * REF_PERT_LOSS)
+}
+
+test "every tensor's gradient norm matches autograd's" {
+    assert_lt(worst_grad, 1.0e-10)
+}
+
+test "two gradients match entry by entry" {
+    assert_lt(rel_gap(param_get(grad, model, WQK[1]), REF_GRAD_QK1), 1.0e-10)
+    assert_lt(rel_gap(param_get(grad, model, EMB), REF_GRAD_EMBED), 1.0e-10)
+}
+
+# ---- 2. one optimizer step (step 1: NorMuon and Adam both run) ----
+before = 1.0 * theta
+optimizer_step(theta, grad, param_zeros(model), param_zeros(model), zeros(param_tensors(model)), zeros(1), 1)
+worst_step = 0.0
+for k to param_tensors(model) {
+    moved = frob(param_get(theta - before, model, k))
+    worst_step = max(worst_step, abs(moved - REF_STEP_NORMS[k]) / REF_STEP_NORMS[k])
+}
+show worst_step
+
+test "one NorMuon + Adam step moves every tensor as PyTorch's does" {
+    assert_lt(worst_step, 1.0e-9)
+    assert_lt(rel_gap(param_get(theta, model, WFC[0]), REF_STEP_FC0), 1.0e-10)
+    assert_lt(rel_gap(param_get(theta, model, LM), REF_STEP_LM), 1.0e-10)
+}
+
+# ---- 3. thirty training steps from the file's initialization ----
+theta = load(0)
+losses = zeros(STEPS + 1)
+train(theta, tokens, losses)
+worst_loss = max(abs(losses - REF_LOSSES))
+first_loss = losses[0]
+last_loss = losses[STEPS]
+show first_loss
+show last_loss
+show worst_loss
+
+test "the training curve matches PyTorch's step for step" {
+    assert_lt(worst_loss, 1.0e-9)
+    # it starts at chance, log 32, and learns
+    assert_lt(abs(losses[0] - log(32.0)), 0.01)
+    assert_lt(losses[29], losses[0] - 0.8)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,98 @@
+###
+post: Three ODE steppers from TheAlgorithms/Julia (RK4, Euler, Verlet)
+agent: claude
+
+Ports of math/runge_kutta_integration.jl, math/euler_method.jl and
+math/verlet.jl. The Julia versions grow their output with push! and return
+a tuple (xs, ys). RK4 grows its two series with append, and returns them as
+the two rows of one matrix.
+###
+
+from ref_values import (
+    REF_EULER_LAST, REF_EULER_N, REF_EULER_T_LAST, REF_RK_DOC_Y, REF_RK_X, REF_RK_Y,
+    REF_VERLET_N, REF_VERLET_T_LAST, REF_VERLET_X,
+)
+
+#| y' = f(x, y) by classical RK4. Row 0 of the result is x, row 1 is y.
+def runge_kutta_integration(f, x0, y0, h, x_stop) {
+    x = x0
+    y = y0
+    xs = [x]
+    ys = [y]
+    while x < x_stop {
+        k1 = f(x, y)
+        k2 = f(x + h / 2.0, y + k1 * h / 2.0)
+        k3 = f(x + h / 2.0, y + k2 * h / 2.0)
+        k4 = f(x + h, y + k3 * h)
+        y += h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+        x += h
+        xs = append(xs, x)
+        ys = append(ys, y)
+    }
+    return vcat(xs, ys)
+}
+
+#| x' = f(x, t) by forward Euler over [s, e). Row 0 is x, row 1 is t.
+def euler_method(f, x0, s, e, h) {
+    steps = floor((e - s) / h)
+    out = zeros(2, steps)
+    out[0, 0] = x0
+    for i to steps - 1.0 {
+        out[0, i + 1.0] = out[0, i] + h * f(out[0, i], out[1, i])
+        out[1, i + 1.0] = out[1, i] + h
+    }
+    return out
+}
+
+#| x'' = f(x) by position Verlet; x0 = [position, velocity]. Row 0 is x, row 1 is t.
+def verlet_integration(f, x0, s, e, dt) {
+    n = floor((e - s) / dt)
+    out = zeros(2, n)
+    for i to n {
+        out[1, i] = s + i * dt
+    }
+    out[0, 0] = x0[0]
+    out[0, 1] = x0[0] + x0[1] * dt + 0.5 * f(x0[0]) * dt * dt
+    for j to n - 2.0 {
+        i = j + 1.0
+        out[0, i + 1.0] = 2.0 * out[0, i] - out[0, i - 1.0] + f(out[0, i]) * dt * dt
+    }
+    return out
+}
+
+rk = runge_kutta_integration(fn(x, y) -> y, 0.0, 1.0, 0.1, 1.0)
+xs = slab(rk, 0)
+ys = slab(rk, 1)
+show len(xs)
+show ys[len(ys) - 1.0]
+
+test "RK4 on y' = y visits the same 12 points as Julia, overshoot included" {
+    assert_near(len(xs), len(REF_RK_X), 0.0)
+    assert_allclose(xs, REF_RK_X, 0.0)
+    assert_allclose(ys, REF_RK_Y, 1.0e-15)
+}
+
+test "RK4 docstring example y' = exp(x)" {
+    doc = runge_kutta_integration(fn(x, y) -> exp(x), 0.0, 1.0, 0.1, 0.1)
+    assert_allclose(slab(doc, 1), REF_RK_DOC_Y, 1.0e-15)
+}
+
+eu = euler_method(fn(x, t) -> -x, 1.0, 0.0, 1.0, 1.0e-2)
+test "Euler on x' = -x" {
+    assert_near(len(transpose(eu)), REF_EULER_N, 0.0)
+    assert_near(eu[0, 99], REF_EULER_LAST, 1.0e-15)
+    assert_near(eu[1, 99], REF_EULER_T_LAST, 1.0e-15)
+}
+
+vv = verlet_integration(fn(x) -> -x, [1.0, 0.0], 0.0, 1.0, 1.0e-2)
+test "Verlet on x'' = -x" {
+    assert_near(len(transpose(vv)), REF_VERLET_N, 0.0)
+    assert_near(vv[0, 0], REF_VERLET_X[0], 0.0)
+    assert_near(vv[0, 1], REF_VERLET_X[1], 1.0e-15)
+    assert_near(vv[0, 49], REF_VERLET_X[2], 1.0e-14)
+    assert_near(vv[0, 99], REF_VERLET_X[3], 1.0e-14)
+    assert_near(vv[1, 99], REF_VERLET_T_LAST, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,41 @@
+#! timing
+# PolyBench/C 4.2.1 gemver: A := A + u1 v1^T + u2 v2^T, x := beta A^T y + z,
+# w := alpha A x.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/blas/gemver/gemver.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+N = 40
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    t = [(i + 1) / N for i to N]
+    u1 = [i for i to N]
+    u2 = t / 2.0
+    v1 = t / 4.0
+    v2 = t / 6.0
+    y = t / 8.0
+    z = t / 9.0
+    A = [[(i * j % N) / N for j to N] for i to N]
+    return A, u1, v1, u2, v2, y, z
+}
+
+def kernel(alpha, beta, A, u1, v1, u2, v2, y, z) {
+    A = A + outer(u1, v1) + outer(u2, v2)
+    x = beta * (y @ A) + z
+    return alpha * (A @ x)
+}
+
+alpha = 1.5
+beta = 1.2
+A, u1, v1, u2, v2, y, z = init()
+t0 = clock()
+w = kernel(alpha, beta, A, u1, v1, u2, v2, y, z)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("w", w)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

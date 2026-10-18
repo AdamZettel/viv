@@ -1,0 +1,84 @@
+# Microbenchmarks: recursion_quicksort. Reference: upstream/Microbenchmarks/julia/perf.jl
+#   function qsort!(a, lo, hi)
+#       i, j = lo, hi
+#       while i < hi
+#           pivot = a[(lo+hi)>>>1]
+#           while i <= j
+#               while a[i] < pivot; i += 1; end
+#               while a[j] > pivot; j -= 1; end
+#               if i <= j
+#                   a[i], a[j] = a[j], a[i]
+#                   i, j = i + 1, j - 1
+#               end
+#           end
+#           if lo < j; qsort!(a, lo, j); end
+#           lo, j = i, hi
+#       end
+#       return a
+#   end
+#   sortperf(n) = qsort!(rand(n), 1, n)
+#   @test issorted(sortperf(5000))
+# Indices are 0-based here, so the pivot index (lo+hi)>>>1 of 1-based indices
+# is (lo + hi) // 2 of 0-based ones (the Python version's form).
+
+def qsort(a: Arr, lo, hi) {
+    i = lo
+    j = hi
+    while i < hi {
+        pivot = a[(lo + hi) // 2]
+        while i <= j {
+            while a[i] < pivot {
+                i = i + 1
+            }
+            while a[j] > pivot {
+                j = j - 1
+            }
+            if i <= j {
+                a[i], a[j] = a[j], a[i]
+                i = i + 1
+                j = j - 1
+            }
+        }
+        if lo < j {
+            qsort(a, lo, j)
+        }
+        lo = i
+        j = hi
+    }
+    return a
+}
+
+def randvec(n) {
+    a = zeros(n)
+    for k to n {
+        a[k] = rand()
+    }
+    return a
+}
+
+def sortperf(n) {
+    return qsort(randvec(n), 0, n - 1)
+}
+
+def issorted(a: Arr) {
+    for k from 1 to len(a) {
+        if a[k - 1] > a[k] {
+            return false
+        }
+    }
+    return true
+}
+
+reps = int(strip(read_text("reps.txt")))
+if not issorted(sortperf(5000)) {
+    stop("not sorted")
+}
+acc = 0.0
+for r to reps {
+    b = sortperf(5000)
+    acc = acc + b[0]
+}
+print("quicksort ok")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

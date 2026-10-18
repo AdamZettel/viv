@@ -1,0 +1,885 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// The front page. vipyr first: the install lines and one example per topic,
+// each its code, its figure and the reference it is checked against. Then the topics, then the Viv
+// language underneath (with the compiler running in the tab), the embed, and
+// posts.
+import Base from '../layouts/Base.astro';
+import TriView, { triOf, splitC, withWasmRun, DEFAULT_TRI_SRC } from '../components/TriView.jsx';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import VivCell from '../components/VivCell.jsx';
+import Code from '../components/Code.astro';
+import facts from '../data/facts.json';
+import { REPO_PUBLIC, GITHUB } from '../lib/repo.js';
+import feed from '../data/feed.json';
+import gallery from '../data/gallery.json';
+import vipyr from '../data/vipyr.json';
+import { TOPICS } from '../lib/site';
+import Scenes from '../components/Scenes.jsx';
+import { SCENES } from '../data/scenes.mjs';
+import dft from '../data/dft.json';
+import storyMd from '../data/story.md?raw';
+import '../styles/show.css';
+import '../styles/dft.css';
+import '../styles/explore.css';
+import '../styles/codemap.css';
+import '../styles/zoomwalk.css';
+import '../styles/scenes.css';
+
+// The three-engines band starts with the build's own run of its program
+// (TriView triOf), so the page loads viv.wasm only when a reader edits it.
+const WASM_FILE = join(process.cwd(), 'public/viv/viv.wasm');
+const TRI_EX = existsSync(WASM_FILE) ? (await WebAssembly.instantiate(readFileSync(WASM_FILE), {})).instance.exports : null;
+// the interpreter's run and the direct wasm module's own run, both at build time
+const TRI_RUN = TRI_EX ? await withWasmRun(TRI_EX, triOf(TRI_EX, DEFAULT_TRI_SRC)) : null;
+const TRI = TRI_RUN && !TRI_RUN.c.startsWith('error') ? { ...TRI_RUN, c: '', cParts: splitC(TRI_RUN.c) } : TRI_RUN;
+
+const exampleOf = (topic: string) => (gallery as any).entries.find((e: any) => e.topic === topic);
+
+// The scenes after the Viv band: one per program, the walk first
+// (src/data/scenes.mjs); silicon's comes from the recorded DFT run.
+const si = dft.materials.find((m: any) => m.id === 'si')!;
+const HOME_SCENES = SCENES.filter((s: any) => s.home);
+
+// The story under the hero is the owner's own writing (src/data/story.md),
+// printed as written with data-by="user": one paragraph per blank-line block
+// after its provenance comment, and a block starting "## " is a heading the
+// owner approved with the text.
+const STORY = (storyMd as string)
+  .replace(/^<!--[\s\S]*?-->\s*/, '')
+  .trim()
+  .split(/\n\s*\n/)
+  .map((b) => (b.startsWith('## ') ? { head: b.slice(3).trim() } : { p: b }));
+
+const NEWTON = `# Newton's method for the square root of 2.
+# deriv() is exact: the compiler differentiates the expression.
+x = 1.0
+for i to 6 {
+    x = x - (x * x - 2.0) / deriv(fn(t) -> t * t - 2.0, x)
+}
+show fmt(x, ".16g")
+residual = x * x - 2.0
+show residual
+
+test "x squared is 2, within one unit in the last place of 2" {
+    assert_near(x * x, 2.0, 4.5e-16)
+}`;
+
+// The embed band: the markup a reader would paste, and the same cell, live.
+const EMBED_SRC = `n = 61
+t = linspace(0.0, 6.0, n)
+y = exp(-0.5 * t) * cos(3.0 * t)
+figure("A damped cosine", "t", "y")
+plot(t, y, "y")`;
+const EMBED_HTML = `<script src="https://viv-lang.org/embed/viv-embed.js" defer></script>
+
+<viv-cell>
+${EMBED_SRC}
+</viv-cell>`;
+
+// The hero examples. Each is a short Python call and a figure, taken from data
+// the docs build writes: vipyr.json's API examples (run by the docs check) and
+// gallery.json's cells (the gallery scripts, run when the docs are built); the
+// snippets drawn from a gallery script are that script's calls with the
+// plotting left out. The figure is the gallery page's own SVG, and the gallery
+// page has the printed output and the full account of the check.
+const fns = (vipyr as any).functions;
+const entry = (slug: string) => (gallery as any).entries.find((e: any) => e.slug === slug);
+// The example panel shows 64 columns before its code scrolls sideways. In a
+// docs example that is wider, comments make room: trailing comments lose
+// their alignment padding, and a long comment line wraps.
+const WIDTH = 64;
+const fitCode = (code: string) => {
+  const lines = code.split('\n');
+  const trailing = /^(.*\S)\s{2,}(# .*)$/;
+  const tooWide = lines.some((l) => l.length > WIDTH);
+  return lines
+    .map((l) => (tooWide ? l.replace(trailing, '$1  $2') : l))
+    .flatMap((l) => {
+      const m = l.match(/^(\s*)# (.*)$/);
+      if (!m || l.length <= WIDTH) return [l];
+      const out: string[] = [];
+      let cur = '';
+      for (const w of m[2].split(' ')) {
+        if (cur && (m[1] + '# ' + cur + ' ' + w).length > WIDTH) {
+          out.push(m[1] + '# ' + cur);
+          cur = w;
+        } else cur = cur ? cur + ' ' + w : w;
+      }
+      return [...out, m[1] + '# ' + cur];
+    })
+    .join('\n');
+};
+const apiCode = (fn: string, i = 0) => fitCode(fns[fn].examples[i].code as string);
+// a gallery figure, with its clip-path ids made unique on this page
+const fig = (slug: string, n: number, key: string) =>
+  (entry(slug).cells.flatMap((c: any) => c.figs)[n] as string)
+    .replace(/id="vp/g, `id="h${key}vp`)
+    .replace(/url\(#vp/g, `url(#h${key}vp`);
+
+const TABS = [
+  {
+    id: 'science',
+    label: 'Science',
+    code: apiCode('scf.run'),
+    check: 'Checked against PySCF 2.5.0',
+    fig: fig('plot-water-hartree-fock', 0, 'sci'),
+    more: ['/vipyr/gallery/plot-water-hartree-fock', entry('plot-water-hartree-fock').title],
+  },
+  {
+    id: 'stats',
+    label: 'Statistics',
+    code: `import numpy as np
+import vipyr as vp
+
+# mtcars$mpg and mtcars$vs, from R's datasets package
+mpg = np.array([21.0, 21.0, 22.8, 21.4, 18.7, 18.1, 14.3, 24.4,
+                22.8, 19.2, 17.8, 16.4, 17.3, 15.2, 10.4, 10.4,
+                14.7, 32.4, 30.4, 33.9, 21.5, 15.5, 15.2, 13.3,
+                19.2, 27.3, 26.0, 30.4, 15.8, 19.7, 15.0, 21.4])
+vs = np.array([0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+               0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1],
+              dtype=float)
+X = np.column_stack([np.ones(32), mpg])
+g = vp.stats.glm(vs, X, family="binomial", link="probit",
+                 names=["(Intercept)", "mpg"])
+print(g.summary())`,
+    check: "Checked against R 4.3.3's glm",
+    fig: fig('plot-glm-probit', 0, 'glm'),
+    more: ['/vipyr/gallery/plot-glm-probit', entry('plot-glm-probit').title],
+  },
+  {
+    id: 'ode',
+    label: 'ODEs',
+    code: `import numpy as np
+import vipyr as vp
+
+# Robertson's stiff kinetics: rates 0.04, 1e4 and 3e7,
+# from t = 0 to 1e11
+t_out = np.concatenate([[0.0], np.logspace(-5, 11, 161)])
+# the Bari IVP test set's answer at t = 1e11
+ref = np.array([0.2083340149701255e-07, 0.8333360770334713e-13,
+                0.9999999791665050])
+for method in ("radau", "bdf"):
+    r = vp.ode.solve("robertson", (0.0, 1e11), [1.0, 0.0, 0.0],
+                     method=method, rtol=1e-8, atol=1e-20,
+                     params=[0.04, 1e4, 3e7], t_eval=t_out)
+    err = np.abs(r.y[:, -1] - ref) / ref
+    print("%-6s y(1e11) = %s   largest relative error %.1e"
+          "   max |sum - 1| = %.1e"
+          % (method, np.array2string(r.y[:, -1], precision=10),
+             err.max(), np.abs(r.y.sum(axis=0) - 1).max()))`,
+    check: 'Checked against the Bari IVP test set and SciPy',
+    fig: fig('plot-ode-robertson', 0, 'ode'),
+    more: ['/vipyr/gallery/plot-ode-robertson', entry('plot-ode-robertson').title],
+  },
+  {
+    id: 'power',
+    label: 'Power systems',
+    code: apiCode('power.runpf'),
+    check: 'Checked against a SciPy power flow',
+    fig: fig('plot-case118-voltages', 0, 'pf'),
+    more: ['/vipyr/gallery/plot-case118-voltages', entry('plot-case118-voltages').title],
+  },
+];
+---
+
+<Base
+  title="vipyr and the Viv language"
+  description="Two sides of one project. vipyr: numerical code written in Viv runs from Python, checked against reference codes and designed to give the same bits on every machine. Viv: the small numerical language underneath, which compiles to C99 and WebAssembly and runs in your browser."
+  bleed={true}
+  theme="vipyr">
+  <div class="coinface">
+    <section class="half half-vipyr" data-side="vipyr" aria-labelledby="hero-h">
+      <div class="half-in">
+        <h1 id="hero-h" class="hero-logo">
+          <img class="brand-on-light" src="/brand/vipyr/vipyr-logo-light.svg" alt="vipyr" width="260" height="76" />
+          <img class="brand-on-dark" src="/brand/vipyr/vipyr-logo-dark.svg" alt="vipyr" width="260" height="76" />
+        </h1>
+        <p class="hero-line">Numerical programs written in Viv, run from Python and checked against reference codes.</p>
+        <Code lang="sh" code={(REPO_PUBLIC ? `git clone ${GITHUB} && cd viv\n` : '') + 'cargo build --release -p viv\nPYTHONPATH=python python3 -c "import vipyr as vp"'} />
+        <div class="hero-ex">
+          <div class="tabs" role="tablist" aria-label="Examples by topic">
+            {
+              TABS.map((t, i) => (
+                <button
+                  role="tab"
+                  type="button"
+                  id={`tab-${t.id}`}
+                  aria-controls={`panel-${t.id}`}
+                  aria-selected={i === 0 ? 'true' : 'false'}
+                  tabindex={i === 0 ? 0 : -1}>
+                  {t.label}
+                </button>
+              ))
+            }
+          </div>
+          {
+            TABS.map((t, i) => (
+              <div class="tabpanel" role="tabpanel" id={`panel-${t.id}`} aria-labelledby={`tab-${t.id}`} hidden={i !== 0}>
+                <Code lang="python" code={t.code} />
+                <figure class="tab-fig vfig" set:html={t.fig} />
+                <p class="tab-foot">
+                  <span class="tab-check">{t.check}</span>
+                  <a class="tab-more" href={t.more[0]} title={t.more[1]}>
+                    Full example →
+                  </a>
+                </p>
+              </div>
+            ))
+          }
+        </div>
+        <p class="hero-cta">
+          <a class="btn btn-solid" href="/vipyr/getting-started">Start with vipyr</a>
+          <a class="btn" href="/vipyr/gallery">Gallery</a>
+        </p>
+      </div>
+    </section>
+
+    <section class="half half-viv" data-side="viv" aria-labelledby="viv-h">
+      <div class="half-in">
+        <h2 id="viv-h" class="viv-title">
+          <img class="viv-mark brand-on-light" src="/brand/viv/viv-mark-light.svg" alt="" width="64" height="64" />
+          <img class="viv-mark brand-on-dark" src="/brand/viv/viv-mark-dark.svg" alt="" width="64" height="64" />
+          Viv
+        </h2>
+        <p class="viv-line">
+          Viv is a small language for numerical programs. It compiles to C99 and to WebAssembly.
+        </p>
+        <p class="viv-sub">
+          The program below finds √2 by Newton's method. <code>deriv</code> gives the exact derivative, and the
+          <code>test</code> block checks the answer every time the program runs. Edit it and press Run; the
+          compiler runs in your browser.
+        </p>
+        <div class="viv-cell">
+          <VivCell client:visible idx={0} src={NEWTON} standalone={true} />
+        </div>
+        <p class="hero-cta">
+          <a class="btn btn-solid" href="/tour">Learn Viv</a>
+          <a class="btn" href="/workbench">Workbench</a>
+          <a class="btn" href="/explore">Explore a run</a>
+        </p>
+      </div>
+    </section>
+  </div>
+
+  <section class="story" data-side="viv" aria-labelledby="story-h">
+    <div class="story-in">
+      <h2 id="story-h" class="story-title">A programming language project that got out of hand</h2>
+      <div class="story-grid">
+        <aside class="design" aria-label="Key points of the design">
+          <div class="d-item">
+            <h3><a href="#tri-h">Three engines</a></h3>
+            <dl class="d-engines">
+              <div>
+                <dt>Interpreter</dt>
+                <dd>quicker debugging</dd>
+              </div>
+              <div>
+                <dt>C99</dt>
+                <dd>portability and performance</dd>
+              </div>
+              <div>
+                <dt>WebAssembly</dt>
+                <dd>instant calculations in the browser</dd>
+              </div>
+            </dl>
+          </div>
+          <div class="d-item">
+            <h3><a href="/explore">The code atlas</a></h3>
+            <p>The callgraph native to the IR. Its boxes are the program's defs; a recorded run can be stepped through on it, and each def opens to its documentation.</p>
+          </div>
+          <div class="d-item">
+            <h3><a href="/reference#contracts">Contracts</a></h3>
+            <p>Multiple paths to the same answer. A contract names a problem and the methods that solve it, so one method can be swapped for another.</p>
+          </div>
+          <div class="d-item">
+            <h3><a href="/vipyr">vipyr</a></h3>
+            <p>The language from Python, as a package.</p>
+          </div>
+        </aside>
+        <div class="story-text">
+          {
+            STORY.map((b) =>
+              b.head ? (
+                <h3 class="story-h" data-by="user">{b.head}</h3>
+              ) : (
+                <>
+                  <p data-by="user">{b.p}</p>
+                  {/Model Context Protocol/.test(b.p) && (
+                    <p class="story-link" data-by="claude">
+                      <a href="/agents">Connect Viv to your agent</a>
+                    </p>
+                  )}
+                </>
+              ),
+            )
+          }
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="scn-wrap" data-side="viv" aria-labelledby="scenes-h">
+    <h2 id="scenes-h" class="sr-only">Programs</h2>
+    <Scenes client:visible scenes={HOME_SCENES} extra={{ silicon: si.result }} />
+  </section>
+
+  <section class="band" data-side="vipyr" aria-label="What vipyr covers">
+    <div class="band-in">
+      <div class="doors">
+        {
+          TOPICS.map((t) => {
+            const ex = exampleOf(t.id);
+            return (
+              <div class="door">
+                <h3>
+                  <a href={`/vipyr#${t.id}`}>{t.title}</a>
+                </h3>
+                <p>{t.pitch}</p>
+                {ex ? (
+                  <a class="door-ex" href={`/vipyr/gallery/${ex.slug}`}>
+                    {ex.title}
+                  </a>
+                ) : (
+                  <span class="door-ex">No example yet</span>
+                )}
+              </div>
+            );
+          })
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="band band-viv band-embed" data-side="viv" aria-labelledby="embed-h">
+    <div class="band-in embed-grid">
+      <div class="embed-text">
+        <h2 id="embed-h" class="band-h">Embed Viv in any web page</h2>
+        <p class="band-p">
+          One script tag puts runnable, editable Viv on a web page. The compiler runs in the reader's browser, so there is
+          no server to set up.
+        </p>
+        <Code lang="html" code={EMBED_HTML} />
+        <p class="band-p">
+          The cell shown here is that markup, turned into a cell by the embed script as it would be on your own page.
+          Press Run, or edit it first.
+        </p>
+        <p><a href="/embed">How the embed works →</a></p>
+      </div>
+      <div class="embed-live">
+        <viv-cell set:text={EMBED_SRC} />
+      </div>
+    </div>
+  </section>
+
+  <section class="band band-viv" data-side="viv" aria-labelledby="tri-h">
+    <div class="band-in">
+      <h2 id="tri-h" class="band-h">One program, three engines</h2>
+      <p class="band-p">
+        An interpreter, a C99 backend and a wasm emitter run the same program and print the same digits. Edit it and
+        all three update as you type.
+      </p>
+      <TriView client:visible prebuilt={TRI} />
+      <h2 id="posts-h" class="band-h posts-h">Recent posts</h2>
+      <p class="band-p">Short programs that run in your browser and check their own claims.</p>
+      <ul class="feed-strip">
+        {
+          feed.posts.slice(0, 4).map((p) => (
+            <li>
+              <a href={`/p/${p.slug}`} set:html={p.titleHtml || p.title} />
+              <span>{p.tests.length} {p.tests.length === 1 ? 'test' : 'tests'}</span>
+            </li>
+          ))
+        }
+      </ul>
+      <p><a href="/posts">All {feed.posts.length} posts →</a></p>
+    </div>
+  </section>
+
+  <script>
+    // The embed band. viv-embed.js loads when the band comes near the screen, and
+    // the compiler when the reader presses Run: the page's own copy
+    // (src/lib/vivWasm.js), handed to the script as window.__vivModule, so the
+    // page never fetches viv.wasm twice. The cell follows the site's light/dark theme.
+    import { vivModule } from '../lib/vivWasm.js';
+    (window as any).__vivModule = vivModule;
+    const live = document.querySelector('.embed-live viv-cell');
+    if (live) {
+      const theme = () => live.toggleAttribute('light', document.documentElement.dataset.theme !== 'dark');
+      theme();
+      new MutationObserver(theme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      const io = new IntersectionObserver(
+        (seen) => {
+          if (!seen.some((e) => e.isIntersecting)) return;
+          io.disconnect();
+          const s = document.createElement('script');
+          s.src = '/embed/viv-embed.js';
+          document.head.appendChild(s);
+        },
+        { rootMargin: '600px 0px' },
+      );
+      io.observe(live);
+    }
+  </script>
+
+  <script>
+    // the example tabs: arrow keys move between them (WAI-ARIA tabs pattern)
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>('.tabs [role="tab"]')];
+    const select = (t: HTMLButtonElement) => {
+      for (const o of tabs) {
+        const on = o === t;
+        o.setAttribute('aria-selected', String(on));
+        o.tabIndex = on ? 0 : -1;
+        document.getElementById(o.getAttribute('aria-controls')!)!.hidden = !on;
+      }
+    };
+    tabs.forEach((t, i) => {
+      t.addEventListener('click', () => select(t));
+      t.addEventListener('keydown', (e) => {
+        const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (!d) return;
+        const n = tabs[(i + d + tabs.length) % tabs.length];
+        select(n);
+        n.focus();
+        e.preventDefault();
+      });
+    });
+  </script>
+
+  <style>
+    .coinface {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      border-bottom: 1px solid var(--border);
+    }
+    @media (min-width: 1040px) {
+      .coinface {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }
+    }
+    .half {
+      padding: 3rem var(--gutter) 3.2rem;
+    }
+    .half-in {
+      max-width: 570px;
+    }
+    @media (min-width: 1040px) {
+      .half-vipyr .half-in {
+        margin-left: auto;
+        margin-right: 2.6rem;
+      }
+      .half-viv .half-in {
+        margin-left: 2.6rem;
+      }
+      .half {
+        padding-top: 3.6rem;
+      }
+    }
+    .half-viv {
+      border-top: 1px solid var(--border);
+    }
+    @media (min-width: 1040px) {
+      .half-viv {
+        border-top: 0;
+        border-left: 1px solid var(--border);
+      }
+    }
+    .hero-logo {
+      margin: 0 0 1rem;
+      max-width: none;
+      height: 76px;
+    }
+    .hero-logo img {
+      width: 260px;
+      max-width: 70vw;
+      height: auto;
+    }
+    .hero-line {
+      font-size: clamp(1.15rem, 1.05rem + 0.4vw, 1.3rem);
+      line-height: 1.45;
+      font-weight: 500;
+      color: var(--heading);
+      letter-spacing: -0.01em;
+      margin: 0 0 1.3rem;
+      max-width: 30ch;
+    }
+    .half :global(pre.code) {
+      max-width: none;
+    }
+    .viv-sub {
+      font-size: 0.94rem;
+      color: var(--text-muted);
+    }
+    .hero-cta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 1.6rem 0 0;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      height: 42px;
+      padding: 0 18px;
+      border-radius: 8px;
+      border: 1px solid var(--border-strong);
+      font-weight: 600;
+      font-size: 15px;
+      text-decoration: none;
+      color: var(--heading);
+      background: var(--bg-card);
+    }
+    .btn:hover {
+      border-color: var(--accent-fill);
+      color: var(--accent);
+    }
+    .btn-solid {
+      background: var(--accent-fill);
+      border-color: var(--accent-fill);
+      color: var(--on-accent);
+    }
+    .btn-solid:hover {
+      background: var(--heading);
+      border-color: var(--heading);
+      color: var(--bg);
+    }
+    .hero-ex {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--bg-card);
+      overflow: hidden;
+      margin-top: 1.6rem;
+    }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px;
+      padding: 0 10px;
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .tabs button {
+      font: 500 15px var(--font-sans);
+      color: var(--text-muted);
+      background: none;
+      border: 0;
+      padding: 11px 11px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .tabs button:hover {
+      color: var(--heading);
+    }
+    .tabs button[aria-selected='true'] {
+      color: var(--accent);
+      box-shadow: inset 0 -2px 0 var(--accent-fill);
+    }
+    .tabpanel {
+      padding: 4px 16px 16px;
+    }
+    .tabpanel :global(pre.code) {
+      border: 0;
+      background: none;
+      padding-left: 2ch;
+      margin: 0.5rem 0 0.6rem;
+      font-size: 12.5px;
+    }
+    .tab-fig {
+      margin: 0 0 0.8rem;
+    }
+    /* the gallery's figures are drawn 640 wide; shown at the panel's width
+       their 11-unit ticks came out at 7 to 9 px, so each text size is raised
+       here (the SVG sets sizes as attributes, and CSS takes precedence) */
+    .tab-fig :global(svg text[font-size='11']) {
+      font-size: 14px;
+    }
+    .tab-fig :global(svg text[font-size='11.5']),
+    .tab-fig :global(svg text[font-size='12']) {
+      font-size: 15px;
+    }
+    .tab-fig :global(svg text[font-size='14']) {
+      font-size: 17px;
+    }
+    /* a phone: below 520 px the figure would halve its text again, so it keeps
+       520 px and scrolls sideways in its own box (the page does not) */
+    @media (max-width: 600px) {
+      .tab-fig {
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+      }
+      .tab-fig :global(svg) {
+        min-width: 520px;
+      }
+    }
+    .tab-fig :global(svg) {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    .tab-fig :global(svg > svg > rect:first-child) {
+      stroke: none;
+    }
+    .tab-foot {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.3rem 1rem;
+      margin: 0;
+      max-width: none;
+      font-size: 14px;
+    }
+    .tab-check {
+      color: var(--text-muted);
+    }
+    .tab-more {
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .half-viv .eyebrow {
+      margin-top: 0.4rem;
+    }
+    .viv-title {
+      font: 600 clamp(3rem, 2.4rem + 2.4vw, 4.4rem) / 1 var(--font-display);
+      letter-spacing: -0.03em;
+      margin: 0 0 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.18em;
+    }
+    /* the V mark beside the name, as the header pairs them (public/brand/viv) */
+    .viv-mark {
+      width: 0.95em;
+      height: 0.95em;
+      flex: none;
+    }
+    .viv-line {
+      font-size: 1.12rem;
+      line-height: 1.55;
+      color: var(--text);
+    }
+    .viv-cell {
+      margin-top: 0.8rem;
+    }
+
+    /* the story: the owner's paragraphs with our headings between them, and
+       the key points of the design beside them (above them on a phone) */
+    .story {
+      padding: 3rem var(--gutter) 3.4rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .story-in {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+    .story-title {
+      font: 600 clamp(1.9rem, 1.5rem + 1.6vw, 2.9rem) / 1.12 var(--font-display);
+      letter-spacing: -0.02em;
+      color: var(--heading);
+      margin: 0 0 1.8rem;
+      max-width: 22ch;
+    }
+    .story-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 2rem 4rem;
+      align-items: start;
+    }
+    @media (min-width: 1040px) {
+      .story-grid {
+        grid-template-columns: minmax(0, 360px) minmax(0, 68ch);
+      }
+      .design {
+        position: sticky;
+        top: calc(var(--head-h) + 1.5rem);
+      }
+    }
+    .design {
+      border: 1px solid var(--border);
+      border-radius: var(--radius, 10px);
+      background: var(--bg-card);
+    }
+    .d-item {
+      padding: 1rem 1.15rem 1.05rem;
+    }
+    .d-item + .d-item {
+      border-top: 1px solid var(--border);
+    }
+    .d-item h3 {
+      margin: 0 0 0.35rem;
+      font: 600 1.05rem / 1.3 var(--font-sans);
+    }
+    .d-item h3 a {
+      color: var(--heading);
+      text-decoration: none;
+    }
+    .d-item h3 a::after {
+      content: ' →';
+      color: var(--accent);
+    }
+    .d-item h3 a:hover {
+      color: var(--accent);
+    }
+    .d-item p {
+      margin: 0;
+      font-size: 0.93rem;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+    .d-engines {
+      margin: 0.5rem 0 0;
+      display: grid;
+      gap: 0.4rem;
+    }
+    .d-engines div {
+      display: grid;
+      grid-template-columns: 7.5rem minmax(0, 1fr);
+      gap: 0.6rem;
+      align-items: baseline;
+    }
+    .d-engines dt {
+      font: 500 0.86rem var(--font-mono);
+      color: var(--accent);
+    }
+    .d-engines dd {
+      margin: 0;
+      font-size: 0.93rem;
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+    .story-text p {
+      font-size: 1.06rem;
+      line-height: 1.7;
+      color: var(--text);
+      margin: 0 0 1.4rem;
+      max-width: 68ch;
+    }
+    .story-h {
+      font: 600 1.2rem / 1.3 var(--font-display);
+      color: var(--heading);
+      margin: 0 0 0.45rem;
+    }
+    .story-h:not(:first-child) {
+      margin-top: 2rem;
+    }
+
+    .band {
+      padding: 2.8rem var(--gutter) 3rem;
+    }
+    .band-viv {
+      border-top: 1px solid var(--border);
+    }
+    .band-in {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+    .band-h {
+      margin-top: 0;
+      max-width: none;
+    }
+    .band-p {
+      color: var(--text-muted);
+      max-width: 70ch;
+    }
+    .embed-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 1.2rem 3rem;
+      align-items: start;
+    }
+    @media (min-width: 1040px) {
+      .embed-grid {
+        grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+      }
+    }
+    .embed-text :global(pre.code) {
+      max-width: none;
+    }
+    /* the cell in the site's Viv colors (viv-embed.js reads these variables) */
+    .embed-live :global(viv-cell) {
+      display: block;
+      margin: 0;
+      --viv-cell-accent: var(--accent);
+      --viv-cell-bg: var(--bg-code);
+      --viv-cell-card: var(--bg-card);
+      --viv-cell-border: var(--border);
+      --viv-cell-text: var(--text);
+      --viv-cell-muted: var(--text-muted);
+    }
+    /* until viv-embed.js defines the element, its source is laid out as the cell
+       will be (a 32 px head, then the code at the cell's own size), so the band
+       does not change height when the script arrives */
+    .embed-live :global(viv-cell:not(:defined)) {
+      white-space: pre;
+      overflow-x: auto;
+      padding: 42px 12px 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg-code);
+      color: var(--text);
+      font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .posts-h {
+      margin-top: 3rem;
+    }
+    .doors {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .door {
+      padding: 1.3rem 1.4rem 1.4rem 0;
+      display: flex;
+      flex-direction: column;
+    }
+    /* Side by side, every door has a rule and a gutter on its left, and the
+       grid starts one gutter left of the column and clips it there: the doors
+       that open a row (the first, and the first after each wrap) lose their
+       rule and line up with the text, whatever the number of columns. */
+    @media (min-width: 560px) {
+      .doors {
+        margin-left: calc(-1.4rem - 1px);
+        clip-path: inset(0 0 0 calc(1.4rem + 1px));
+      }
+      .door {
+        padding-left: 1.4rem;
+        border-left: 1px solid var(--border);
+      }
+    }
+    @media (max-width: 559px) {
+      .door + .door {
+        border-top: 1px solid var(--border);
+      }
+    }
+    .door h3 {
+      margin: 0 0 0.4rem;
+      font-size: 1.3rem;
+    }
+    .door h3 a {
+      color: var(--heading);
+      text-decoration: none;
+    }
+    .door h3 a:hover {
+      color: var(--accent);
+    }
+    .door p {
+      margin: 0 0 0.9rem;
+      color: var(--text-muted);
+      font-size: 0.97rem;
+      line-height: 1.55;
+      flex: 1;
+    }
+    .door-ex {
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+    .door-ex::after {
+      content: ' →';
+    }
+  </style>
+</Base>

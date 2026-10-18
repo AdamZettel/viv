@@ -1,0 +1,187 @@
+module lib/optim
+  Optimizers for a model whose parameters are one flat vector with a layout
+  (lib/params): plain gradient descent, momentum, Adam and Muon, one registry
+  of their steps, and the contract every one of them is tested against. And
+  Adam and Muon for a model held as records of matrices, one matrix at a time,
+  applied over the model with `for_leaves`; a test holds them to the flat
+  versions bit for bit.
+
+optimizer  @e6ec446f
+  what  A settings vector: which optimizer, and its constants.
+
+sgd  @77b000d6
+  what  Plain gradient descent at step size `lr`.
+
+momentum  @1ea6fee8
+  what  Gradient descent along a running sum of gradients that decays by `mu` a step.
+
+adam  @0232c997
+  what  Adam, with the decay rates of its two running averages.
+
+muon  @c83819fb
+  what  Muon, with the decay rate of its momentum.
+
+optim_state  @3c184e5c
+  what  The memory an optimizer carries between steps: room for two vectors of the
+        model's layout, the first moment and then the second.
+
+sgd_step  @764522a9
+  what  `theta <- theta - lr g`.
+
+momentum_step  @fb69fb45
+  what  `m <- mu m + g`, then `theta <- theta - lr m`. The momentum is the first vector
+        of the state.
+
+adam_step  @2edd2653
+  what  Adam. Both averages start at zero, so early on they are too small by a factor `1
+        - beta^t`; dividing that out is the bias correction. `eps` keeps a coordinate
+        whose gradient has always been zero from dividing by zero.
+  opt     the settings vector
+  theta   the parameters, changed in place
+  grad    their gradient
+  state   the first moment, then the second
+  layout  the parameters' layout, which Adam does not need
+  beta1   the first moment's decay rate
+  beta2   the second moment's decay rate
+  n       the number of parameters
+  mean    the first moment, bias corrected
+  spread  the root of the second moment, bias corrected
+
+muon_matrix_direction  @c15ef97e
+  what  The direction Muon steps along for one momentum matrix. The Newton-Schulz
+        iteration of `lib/polar` wants at least as many columns as rows, because it
+        multiplies by `X X^T` and that is the smaller product then; a tall matrix
+        goes through transposed and comes back.
+  M     the momentum matrix
+
+muon_step  @6b766902
+  what  Muon: momentum over the whole vector, then, one tensor at a time, step along the
+        orthogonalized momentum of that tensor. A tensor with one row or one column has
+        one singular value, so for it this is a step of fixed length along the momentum.
+  opt        the settings vector
+  theta      the parameters, changed in place
+  grad       their gradient
+  state      the momentum, in its first half
+  layout     the parameters' layout: which numbers make up each matrix
+  n          the number of parameters
+  k          the tensor being stepped
+  direction  its orthogonalized momentum
+
+adam_update  @002ab764
+  what      Adam's update of one matrix: running averages of each entry's
+            gradient and squared gradient, corrected for starting at zero, and a
+            step by their ratio. `for_leaves(adam_update, model, grad, m, v,
+            taken, lr_scale, settings)` updates every matrix of a model held as
+            records.
+  why       Each entry moves at about the rate `lr` whatever the size of its
+            gradient, which suits a table whose rows are used unevenly, such as
+            an embedding.
+  w         the matrix, changed in place
+  g         its gradient
+  m         the running average of the gradient, changed in place
+  v         the running average of the squared gradient, changed in place
+  taken     how many updates have been made, this one included; the bias
+            correction needs it
+  lr_scale  the fraction of the starting step size a schedule allows now
+  s         the step size, the two decay rates and the epsilon
+  mean      the average gradient, bias corrected
+  spread    the root of the average squared gradient, bias corrected
+
+  $$ \theta \gets \theta - \eta \, \frac{\hat m}{\sqrt{\hat v} + \epsilon} $$
+
+muon_update  @dbd6197c
+  what      Muon's update of one matrix: keep a momentum, replace it by a
+            matrix with the same singular vectors and singular values near $1$
+            (`muon_matrix_direction`), and step along that, scaled by
+            $\sqrt{\max(1, \text{rows}/\text{cols})}$ as the nanogpt speedrun
+            does.
+  why       The step has the same size in every direction of the matrix however
+            lopsided the gradient is. For a matrix at least as wide as it is
+            tall the scale is $1$ and this is the flat `muon_step`.
+  w         the matrix, changed in place
+  g         $G$  its gradient
+  mom       $M$  its momentum, changed in place: $M \gets \mu M + G$
+  lr_scale  the fraction of the starting step size a schedule allows now
+  s         the step size and the momentum's decay rate
+  rows      the matrix's rows
+  cols      its columns
+  size      the step length for this matrix
+
+  $$ M \gets \mu M + G, \qquad W \gets W - \eta \sqrt{\max(1, r/c)}\; \mathrm{NS}_5(M) $$
+
+optimizers  @3333f1c2
+  what  Every optimizer, indexed by `SGD`, `MOMENTUM`, `ADAM`, `MUON`.
+
+optimizer_count  @47a5c6bb
+  what  How many optimizers the registry holds.
+
+optim_step  @b9a6d5f5
+  what  One step of whichever optimizer `opt` describes: count it, then move `theta`
+        using `grad` and the optimizer's memory in `state`.
+
+optimizer_of  @c9e638c4
+  what  Optimizer `kind` with the constants it usually runs at: every momentum decays by
+        `0.9` a step, and Adam's second average by `0.999`. The step size starts at zero,
+        because a schedule sets it before every step.
+
+decayed  @e92e5b19
+  what  The step-size schedule the contract runs every optimizer on: `lr` at the start,
+        falling in a straight line toward zero, which it would reach one step after
+        the last. Muon's step has a length it chose, not the gradient's, so without
+        the decay it circles the minimum at a distance of about `lr`.
+
+quadratic_layout  @a5b139ab
+  what  A convex quadratic over two tensors, a `3 x 5` matrix and a `1 x 4` row: `f = 1/2
+        sum_i h_i (theta_i - c_i)^2`, with curvatures `h_i` between `1` and `4`. Its minimum
+        is `theta = c`, where `f = 0`.
+
+quadratic_curvature  @d17c2718
+  what  The curvature of coordinate `i` of the quadratic.
+
+quadratic_center  @ae1eb58e
+  what  The minimizer of the quadratic.
+
+quadratic_gradient  @ce165c4c
+  what  The quadratic's gradient, `h_i (theta_i - c_i)`, written into `grad`.
+
+quadratic_miss  @76cd88ab
+  what  Run `opt` on the quadratic from `theta = 0` for `steps` steps and return the
+        largest distance of any coordinate from its minimizer.
+
+lstsq_inputs  @3f782fd9
+  what  A least-squares problem: find the `4 x 3` matrix `W` that makes `X W` closest to
+        `Y`, with `X` `8 x 4`, measured by `f = |X W - Y|^2 / (2 * 8)`. Eight equations
+        per column and four unknowns, so no `W` fits exactly.
+
+lstsq_targets  @24b3787f
+  what  The targets `Y`, `8 x 3`.
+
+lstsq_layout  @23863ae6
+  what  The layout of the unknown: one `4 x 3` matrix, taller than it is wide, so Muon
+        has to take it through transposed.
+
+lstsq_solution  @ca262af7
+  what  The exact minimizer, from the normal equations `X^T X W = X^T Y`, all three
+        columns in one solve.
+
+lstsq_gradient  @5537cf39
+  what  The gradient of the least-squares loss, `X^T (X W - Y) / 8`.
+
+lstsq_miss  @a6f2a073
+  what  Run `opt` on the least-squares problem from `W = 0` and return the largest
+        distance of any entry of `W` from the exact minimizer.
+
+contract_lr  @7cb3914e
+  what  The starting step size each optimizer runs the contract at, indexed by kind
+        (SGD, momentum, Adam, Muon).
+
+optim_case  @9e781a6b
+  what  Two wide matrices, `2 x 5` and `3 x 4`, cut from a test matrix: a model
+        held as a record, for the test that compares the record optimizers with
+        the flat ones.
+
+optim_case_layout  @f01d9a34
+  what  The layout of the same two matrices in one vector.
+
+optim_case_flat  @c8d22cab
+  what  The record's two matrices written into one vector of that layout.

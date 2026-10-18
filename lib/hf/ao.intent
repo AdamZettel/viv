@@ -1,0 +1,45 @@
+module lib/hf/ao
+  The integrals of one molecule's basis functions, each computed by its
+  production member and called by name: the overlap S, the core Hamiltonian
+  H = T + V, and the electron repulsion integrals, moved to spherical
+  functions when the molecule asks for them. The other members, and the
+  sweeps that require them to agree, live in the verification layer
+  (lib/hf/integrals, lib/hf/hf with `cross_check` on).
+
+ao_c2s  @f39a86e4
+  mol   the molecule
+
+ao_in_run  @5a7e5c77
+  why   Up to p shells the Cartesian and spherical functions are the same, so
+        only a molecule that is spherical and has a d or f shell is moved.
+  X     a one-electron matrix over Cartesian functions, `[nc, nc]`
+  mol   the molecule
+
+ao_overlap  @df6e6056
+  why   S is the metric of the basis: two basis functions on different
+        atoms overlap, so the orbitals solve `F C = S C e` rather than an
+        ordinary eigenproblem.
+  mol   the molecule: atoms, shells and primitives
+
+ao_hcore  @59ea84f7
+  why   The core Hamiltonian is the part of the Fock matrix that does not
+        depend on the density: the kinetic energy of one electron and its
+        attraction to the nuclei.
+  mol   the molecule: atoms, shells and primitives
+  T     the kinetic energy matrix over Cartesian functions, `[nc, nc]`
+  V     the nuclear attraction matrix over Cartesian functions, every nucleus summed
+
+ao_eri  @32366a8f
+  why   The repulsion integrals are the costly stage: `n^4/8` distinct
+        numbers. Packing them by the eight-fold symmetry of `(ij|kl)` keeps
+        one copy of each.
+        They come from the kernels lib/cas generated (lib/hf/mdg_eri). A
+        spherical molecule's pair store holds spherical rows, so each quartet
+        comes out spherical, instead of the larger Cartesian set being built
+        and transformed in a second pass.
+  mol   the molecule: atoms, shells and primitives
+  G     the packed repulsion integrals in the run's functions: `(ij|kl)` is
+        the Coulomb repulsion between the charge distributions `i j` and `k l`
+
+  compute        compute the integrals by McMurchie-Davidson, screened; for a spherical run each quartet is moved to spherical functions as it is computed
+  return the packed integrals

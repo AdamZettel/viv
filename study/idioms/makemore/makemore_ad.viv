@@ -1,0 +1,523 @@
+###
+makemore, the MLP model: a port of karpathy/makemore's `--type mlp` to Viv,
+with its gradient from `value_and_grad` instead of a hand-written backward
+pass (`makemore.viv` has the hand-written one).
+
+A character-level language model after Bengio et al. 2003. To predict the next
+character of a name it looks up an embedding vector for each of the previous
+`BLOCK` characters, concatenates them, and passes the result through one tanh
+hidden layer to 27 logits: the 26 letters and a token 0 that marks the start and
+the end of a name. Training is AdamW on the cross-entropy; sampling feeds each
+drawn character back in until the model draws token 0.
+
+Sizes are shrunk so the interpreter finishes in seconds: the first 300 names,
+8-wide embeddings, 32 hidden units, 300 steps of batches of 16. `reference.py`
+runs makemore's own MLP class at the same size, with the same random stream.
+###
+
+import nn_adjoints
+from nn import cross_entropy, softmax_rows
+from params import (
+    param_count, param_declare, param_get, param_offset, param_set, param_table, param_zeros,
+)
+from optim import adam, optim_state, optim_step
+from random import choice, randint, randn_matrix, randperm
+from names_subset import names_file
+from hand.backward import loss_and_grad
+
+N_EMBD = 8          # numbers per character embedding
+N_EMBD2 = 32        # hidden units
+BATCH = 16          # names per training step
+STEPS = 300
+LR = 0.01
+WD = 0.01           # AdamW's decoupled weight decay
+SEED = 3407
+EVAL_BATCH = 50
+NUM_SAMPLES = 10
+
+NEWLINE = 10
+
+###
+## Reading the file
+
+The data is names.txt, one name per line. The file arrives as an array of
+character codes (see `names_subset.viv`). Split it into lines, strip the
+whitespace from both ends of each, and drop the empty ones.
+###
+
+def is_space(c) -> Bool {
+    return c == 32 or c == 9 or c == 13
+}
+
+#| Find each non-empty stripped line of `text`. Its first and one-past-last
+#| positions go into row n of `spans`; returns how many lines were found.
+def line_spans(text: Arr, spans: Arr) {
+    n = 0
+    start = 0
+    for i to len(text) + 1 {
+        if i == len(text) or text[i] == NEWLINE {
+            lo = start
+            hi = i
+            while lo < hi and is_space(text[lo]) {
+                lo = lo + 1
+            }
+            while hi > lo and is_space(text[hi - 1]) {
+                hi = hi - 1
+            }
+            if hi > lo {
+                spans[n, 0] = lo
+                spans[n, 1] = hi
+                n = n + 1
+            }
+            start = i + 1
+        }
+    }
+    return n
+}
+
+text = names_file()
+spans = zeros(len(text), 2)
+n_words = line_spans(text, spans)
+
+word_len = spans[:, 1] - spans[:, 0]
+max_word_length = max(word_len)
+
+# one row per name, character codes, padded with zeros
+words = zeros(n_words, max_word_length)
+for w to n_words {
+    words[w, :word_len[w]] = text[spans[w, 0]:spans[w, 1]]
+}
+show n_words
+show max_word_length
+
+#| Name `w` as character codes, without the padding.
+def word(w) {
+    return words[w, :word_len[w]]
+}
+
+###
+## The vocabulary
+
+Every distinct character, ascending. Token 0 is reserved for start/end, so the
+character `vocab[i]` is token `i + 1`, and `stoi` maps a code back to its token.
+###
+
+#| The distinct nonzero entries of `a`, ascending.
+def distinct(a: Arr) {
+    flat = zeros(numel(a))
+    n = 0
+    for i to len(a) {
+        for j to shape(a)[1] {
+            if a[i, j] != 0 {
+                flat[n] = a[i, j]
+                n = n + 1
+            }
+        }
+    }
+    sort(flat)
+    # the zero padding sorted to the front; a value counts when it differs
+    # from the one before it, and starting `prev` at 0 skips the padding
+    count = 0
+    prev = 0
+    for i to numel(flat) {
+        if flat[i] != prev {
+            count = count + 1
+            prev = flat[i]
+        }
+    }
+    out = zeros(count)
+    count = 0
+    prev = 0
+    for i to numel(flat) {
+        if flat[i] != prev {
+            out[count] = flat[i]
+            count = count + 1
+            prev = flat[i]
+        }
+    }
+    return out
+}
+
+vocab = distinct(words)
+stoi = zeros(max(vocab) + 1)
+for i to len(vocab) {
+    stoi[vocab[i]] = i + 1
+}
+vocab_size = len(vocab) + 1     # the characters and token 0
+BLANK = vocab_size              # the <BLANK> token for context before the start
+BLOCK = max_word_length + 1   # makemore's block_size; that name is taken by lib/schur, which lib/optim pulls in
+n_chars = len(vocab)
+show n_chars
+text(vocab)
+
+###
+## Train and test split
+
+A tenth of the names, at most 1000, are held out. The shuffle is `lib/random`'s
+`randperm`, Fisher-Yates on Viv's generator (makemore uses `torch.randperm`).
+###
+
+srand(SEED)
+test_set_size = min(1000, floor(n_words * 0.1))
+perm = randperm(n_words)
+n_train = n_words - test_set_size
+train_ids = perm[:n_train]
+test_ids = perm[n_train:]
+show n_train
+show test_set_size
+text(word(test_ids[0]))
+
+###
+## Encoding: makemore's CharDataset
+
+Each name becomes an input row `xs` and a target row `ys`, both `BLOCK`
+long: the input is token 0 followed by the name, the target is the name
+followed by token 0, and the positions after that are -1, which the loss skips.
+###
+
+xs = zeros(n_words, BLOCK)
+ys = zeros(n_words, BLOCK) - 1
+for w to n_words {
+    for k to word_len[w] {
+        xs[w, k + 1] = stoi[words[w, k]]
+        ys[w, k] = stoi[words[w, k]]
+    }
+    ys[w, word_len[w]] = 0
+}
+
+###
+## The model
+
+Five tensors in one flat parameter vector (`lib/params`): the embedding table,
+with one extra row for <BLANK>, then two linear layers with biases. The
+embedding is drawn from N(0, 1) and each linear layer from U(-1/sqrt(fan_in),
+1/sqrt(fan_in)), the distributions torch's defaults use.
+###
+
+model = param_table(5)
+WTE = param_declare(model, vocab_size + 1, N_EMBD)
+W1 = param_declare(model, BLOCK * N_EMBD, N_EMBD2)
+B1 = param_declare(model, 1, N_EMBD2)
+W2 = param_declare(model, N_EMBD2, vocab_size)
+B2 = param_declare(model, 1, vocab_size)
+
+def uniform_matrix(rows, cols, fan_in) {
+    bound = 1.0 / sqrt(fan_in)
+    M = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            M[i, j] = (2.0 * rand() - 1.0) * bound
+        }
+    }
+    return M
+}
+
+theta = param_zeros(model)
+param_set(theta, model, WTE, randn_matrix(vocab_size + 1, N_EMBD))
+fan_in = BLOCK * N_EMBD
+param_set(theta, model, W1, uniform_matrix(fan_in, N_EMBD2, fan_in))
+param_set(theta, model, B1, uniform_matrix(1, N_EMBD2, fan_in))
+param_set(theta, model, W2, uniform_matrix(N_EMBD2, vocab_size, N_EMBD2))
+param_set(theta, model, B2, uniform_matrix(1, vocab_size, N_EMBD2))
+n_params = param_count(model)
+show n_params
+
+###
+## The forward pass
+
+The context of position `t` of a sequence is the tokens at `t`, `t - 1`, ...,
+`t - BLOCK + 1`, with <BLANK> before the start. Only the positions whose
+target is not -1 go through the network: the others would be dropped by the
+loss anyway, so leaving them out changes neither the loss nor its gradient.
+###
+
+#| How many scored positions the sequences `ids` have.
+def count_positions(ids: Arr) {
+    n = 0
+    for b to len(ids) {
+        n = n + word_len[ids[b]] + 1
+    }
+    return n
+}
+
+#| The contexts of every scored position of the sequences `ids`, one row each.
+#| Their targets go into `target`.
+def contexts(ids: Arr, target: Arr) {
+    ctx = zeros(len(target), BLOCK)
+    r = 0
+    for b to len(ids) {
+        w = ids[b]
+        for t to word_len[w] + 1 {
+            for k to BLOCK {
+                ctx[r, k] = BLANK
+                if t - k >= 0 {
+                    ctx[r, k] = xs[w, t - k]
+                }
+            }
+            target[r] = ys[w, t]
+            r = r + 1
+        }
+    }
+    return ctx
+}
+
+#| Look up and concatenate: row r of the result is the embeddings of the
+#| tokens in row r of `ctx`, side by side.
+def embed(theta: Arr, ctx: Arr) {
+    flat = zeros(len(ctx), BLOCK * N_EMBD)
+    for r to len(ctx) {
+        for k to BLOCK {
+            for j to N_EMBD {
+                flat[r, k * N_EMBD + j] = param_offset(model, WTE) + ctx[r, k] * N_EMBD + j
+            }
+        }
+    }
+    return take(theta, flat)
+}
+
+#| A column of ones, whose product with a 1-row bias adds the bias to every row.
+def ones_column(n) {
+    return zeros(n, 1) + 1.0
+}
+
+def hidden(theta: Arr, X: Arr) {
+    ones = ones_column(len(X))
+    return tanh(X @ param_get(theta, model, W1) + ones @ param_get(theta, model, B1))
+}
+
+def output(theta: Arr, H: Arr) {
+    ones = ones_column(len(H))
+    return H @ param_get(theta, model, W2) + ones @ param_get(theta, model, B2)
+}
+
+#| The mean cross-entropy over the scored positions of the sequences `ids`.
+def loss_of(theta: Arr, ids: Arr) {
+    target = zeros(count_positions(ids))
+    ctx = contexts(ids, target)
+    logits = output(theta, hidden(theta, embed(theta, ctx)))
+    return cross_entropy(logits, target)
+}
+
+###
+## Evaluation
+
+The mean of the per-batch losses over a whole split, in batches of
+`EVAL_BATCH` names taken in order.
+###
+
+def evaluate(theta: Arr, ids: Arr) {
+    total = 0.0
+    batches = 0
+    start = 0
+    while start < len(ids) {
+        size = min(EVAL_BATCH, len(ids) - start)
+        batch = ids[start:start + size]
+        total = total + loss_of(theta, batch)
+        batches = batches + 1
+        start = start + size
+    }
+    return total / batches
+}
+
+start_train_loss = evaluate(theta, train_ids)
+start_test_loss = evaluate(theta, test_ids)
+show start_train_loss
+show start_test_loss
+
+###
+## Training
+
+AdamW with betas (0.9, 0.99): `lib/optim`'s Adam step, after the decoupled
+weight decay `theta <- (1 - lr wd) theta` that makes it AdamW. Each batch is
+`BATCH` training names drawn with replacement.
+###
+
+opt = adam(LR, 0.9, 0.99)
+state = optim_state(model)
+losses = zeros(STEPS)
+for step to STEPS {
+    batch = zeros(BATCH)
+    for b to BATCH {
+        batch[b] = train_ids[randint(0, n_train)]
+    }
+    loss, grad = value_and_grad(loss_of, theta, batch)
+    losses[step] = loss
+    # a new array, bound to the same name (`*=` on an array does not write in place)
+    theta *= 1.0 - LR * WD
+    optim_step(opt, theta, grad, state, model)
+}
+
+loss_step_0 = losses[0]
+loss_step_50 = losses[50]
+loss_step_150 = losses[150]
+loss_step_299 = losses[STEPS - 1]
+show loss_step_0
+show loss_step_50
+show loss_step_150
+show loss_step_299
+
+end_train_loss = evaluate(theta, train_ids)
+end_test_loss = evaluate(theta, test_ids)
+show end_train_loss
+show end_test_loss
+
+###
+## Sampling
+
+Start from token 0 and draw one token at a time from the softmax of the
+logits at the last position, until `max_word_length` tokens are drawn. The
+name is everything before the first token 0.
+###
+
+#| A sampled name, as tokens; the end is the first 0.
+def sample(theta: Arr) {
+    seq = zeros(BLOCK)
+    for t to BLOCK - 1 {
+        ctx = zeros(1, BLOCK)
+        for k to BLOCK {
+            ctx[0, k] = BLANK
+            if t - k >= 0 {
+                ctx[0, k] = seq[t - k]
+            }
+        }
+        logits = output(theta, hidden(theta, embed(theta, ctx)))
+        # lib/random's choice inverts the cumulative sum at one uniform draw
+        seq[t + 1] = choice(slab(softmax_rows(logits), 0))
+    }
+    return seq
+}
+
+#| The characters of the tokens `seq` from position 1 up to the first 0.
+def decode(seq: Arr) {
+    n = 0
+    while n + 1 < len(seq) and seq[n + 1] != 0 {
+        n = n + 1
+    }
+    if n == 0 {
+        return chars("(empty)")
+    }
+    out = zeros(n)
+    for k to n {
+        out[k] = vocab[seq[k + 1] - 1]
+    }
+    return out
+}
+
+#| Whether the codes `name` are one of the words `ids`.
+def contains(ids: Arr, name: Arr) -> Bool {
+    for i to len(ids) {
+        w = ids[i]
+        if word_len[w] == len(name) {
+            same = true
+            for k to len(name) {
+                if words[w, k] != name[k] {
+                    same = false
+                }
+            }
+            if same {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+def concat(a: Arr, b: Arr) {
+    out = zeros(len(a) + len(b))
+    for i to len(a) {
+        out[i] = a[i]
+    }
+    for i to len(b) {
+        out[len(a) + i] = b[i]
+    }
+    return out
+}
+
+samples_in_train = 0
+for s to NUM_SAMPLES {
+    name = decode(sample(theta))
+    if contains(train_ids, name) {
+        text(concat(name, chars(" (in train)")))
+        samples_in_train = samples_in_train + 1
+    }
+    else if contains(test_ids, name) {
+        text(concat(name, chars(" (in test)")))
+    }
+    else {
+        text(concat(name, chars(" (new)")))
+    }
+}
+
+###
+## Checks against reference.py
+
+The numbers makemore's own MLP (torch, float64) prints at this size with the
+same random stream. `show` prints six digits; these check to 1e-12.
+###
+
+test "the data: 300 names, longest 10, 26 letters, split 270 / 30" {
+    assert_near(n_words, 300, 0)
+    assert_near(max_word_length, 10, 0)
+    assert_near(n_chars, 26, 0)
+    assert_near(n_train, 270, 0)
+    assert_near(n_params, 3963, 0)
+    assert_true(contains(test_ids, chars("alexis")))
+    assert_near(test_ids[0], perm[270], 0)
+}
+
+test "the loss before training matches makemore's MLP" {
+    assert_near(start_train_loss, 3.314562857124737, 1.0e-12)
+    assert_near(start_test_loss, 3.297041321791764, 1.0e-12)
+}
+
+test "the training losses match step for step" {
+    assert_near(losses[0], 3.350627816161417, 1.0e-12)
+    assert_near(losses[50], 2.286436019745800, 1.0e-12)
+    assert_near(losses[100], 2.246665376762496, 1.0e-12)
+    assert_near(losses[150], 2.002703517030470, 1.0e-12)
+    assert_near(losses[200], 1.813360727397574, 1.0e-12)
+    assert_near(losses[250], 1.965902849094395, 1.0e-12)
+    assert_near(losses[299], 1.631791204023452, 1.0e-12)
+}
+
+test "the loss after training matches, and the model has learned something" {
+    assert_near(end_train_loss, 1.647162050005586, 1.0e-12)
+    assert_near(end_test_loss, 2.529329933150971, 1.0e-12)
+    # well under log(27) = 3.296, the loss of a uniform guess
+    assert_lt(end_train_loss, log(27.0) - 1.0)
+}
+
+test "two of the ten samples are training names, as in the reference" {
+    assert_near(samples_in_train, 2, 0)
+}
+
+###
+## The generated gradient against the hand-written one
+
+At the initial parameters, on the first training batch. The two differ in
+the order of a few sums and in the cross-entropy's max shift, whose
+gradient the hand version drops because it is zero in exact arithmetic;
+both are rounding, so the check is 1e-12 of the gradient's largest entry.
+###
+
+test "value_and_grad matches the hand-written backward pass to 1e-12" {
+    srand(SEED)
+    check_theta = param_zeros(model)
+    param_set(check_theta, model, WTE, randn_matrix(vocab_size + 1, N_EMBD))
+    param_set(check_theta, model, W1, uniform_matrix(fan_in, N_EMBD2, fan_in))
+    param_set(check_theta, model, B1, uniform_matrix(1, N_EMBD2, fan_in))
+    param_set(check_theta, model, W2, uniform_matrix(N_EMBD2, vocab_size, N_EMBD2))
+    param_set(check_theta, model, B2, uniform_matrix(1, vocab_size, N_EMBD2))
+    check_batch = train_ids[:BATCH]
+    hand_grad = param_zeros(model)
+    hand_loss = loss_and_grad(check_theta, check_batch, hand_grad)
+    ad_loss, ad_grad = value_and_grad(loss_of, check_theta, check_batch)
+    assert_near(ad_loss, hand_loss, 0.0)
+    grad_miss = max(abs(ad_grad - hand_grad)) / max(abs(hand_grad))
+    show grad_miss
+    assert_lt(grad_miss, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2022 Andrej Karpathy (karpathy/makemore)
+# SPDX-FileCopyrightText: 2026 The Viv authors

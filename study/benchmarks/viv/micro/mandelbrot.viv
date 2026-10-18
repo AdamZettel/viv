@@ -1,0 +1,52 @@
+# Microbenchmarks: userfunc_mandelbrot. Reference: upstream/Microbenchmarks/julia/perf.jl
+#   function mandel(z)
+#       c = z
+#       maxiter = 80
+#       for n = 1:maxiter
+#           if real(z)*real(z) + imag(z)*imag(z) > 4
+#               return n - 1
+#           end
+#           z = z^2 + c
+#       end
+#       return maxiter
+#   end
+#   mandelperf() = [mandel(complex(r, i)) for i = -1.0:0.1:1.0, r = -2.0:0.1:0.5]
+#   @test sum(mandelperf()) == 14791
+# The grid points are -1.0 + 0.1 * k and -2.0 + 0.1 * k, as the Python version
+# writes them (Julia's ranges compute the same points to within an ulp; the
+# count, 14791, is the check). z^2 is z * z (Julia's literal_pow for Complex).
+
+def mandel(z) {
+    c = z
+    maxiter = 80
+    for n from 1 to maxiter + 1 {
+        if re(z) * re(z) + im(z) * im(z) > 4 {
+            return n - 1
+        }
+        z = z * z + c
+    }
+    return maxiter
+}
+
+def mandelperf() {
+    M = zeros(21, 26)
+    for ri to 26 {
+        for ii to 21 {
+            M[ii, ri] = mandel(complex(-2.0 + 0.1 * ri, -1.0 + 0.1 * ii))
+        }
+    }
+    return M
+}
+
+reps = int(strip(read_text("reps.txt")))
+if sum(mandelperf()) != 14791 {
+    stop("sum(mandelperf()) != 14791")
+}
+acc = 0.0
+for r to reps {
+    acc = acc + sum(mandelperf())
+}
+print("mandelbrot ok", fmt(acc, "d"))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,94 @@
+###
+title: Binder cumulants find the Ising critical point within 1%
+line: The crossings are at 2.263 and 2.269 against Onsager's $T_c = 2.2692$; the susceptibility grows with slope 1.76, near $7/4$.
+claim: In Monte Carlo of the two-dimensional Ising model (Wolff updates on $8 \times 8$, $16 \times 16$ and $32 \times 32$ lattices), the Binder cumulants of successive sizes cross at about 2.263 and 2.269, both within 1% of Onsager's $T_c = 2.2692$, and the susceptibility at $T_c$ grows with the lattice size with a log-log slope of about 1.76, between 1.6 and 1.9, close to the exact $\gamma/\nu = 7/4$.
+topic: science
+section: statistical mechanics
+reference: Onsager's critical temperature $T_c = 2/\ln(1 + \sqrt{2}) = 2.26919$ ($J = k_B = 1$) and the exponent $\gamma/\nu = 7/4$ of the two-dimensional Ising model; Binder, Z. Phys. B 43, 119 (1981), for the crossing of the cumulants $U = 1 - \langle m^4 \rangle / (3\langle m^2 \rangle^2)$ at $T_c$. lib/ising's Wolff and Metropolis runs are checked against the exact $4 \times 4$ enumeration and Kaufman's finite-lattice solution in stat/ising (the Ising gallery entry).
+scope: Wolff cluster updates, fixed seeds, periodic $L \times L$ lattices with $L = 8, 16, 32$; the crossings are located by linear interpolation between the temperatures sampled, so their error includes the statistical error of each run (about 0.5% here). Corrections to scaling at these small sizes are not fitted.
+lane: ai
+by: claude
+cost: heavy
+###
+
+from ising import simulate
+
+SIZES = [8, 16, 32]
+TEMPS = [2.20, 2.24, 2.26919, 2.30, 2.34]
+#: index of T_c in TEMPS
+TC_INDEX: Int = 2
+T_C = 2.269185314213022
+UPDATES: Int = 40000
+THERM: Int = 2000
+BINS: Int = 20
+SEED: Int = 1944
+
+n_sizes: Int = len(SIZES)
+n_temps: Int = len(TEMPS)
+binder = zeros(n_sizes, n_temps)
+chi_at_tc = zeros(n_sizes)
+for si to n_sizes {
+    for ti to n_temps {
+        run = simulate(int(SIZES[si]), 1.0 / TEMPS[ti], 1.0, 0.0, true, UPDATES, THERM, SEED + 100 * si + ti, false, BINS)
+        binder[si, ti] = run.stats.binder
+        if ti == TC_INDEX {
+            chi_at_tc[si] = run.stats.chi
+        }
+    }
+}
+show binder
+show chi_at_tc
+
+#| Where the cumulants of sizes a and b cross: linear interpolation of their difference between sampled temperatures.
+def crossing(a: Int, b: Int) -> Num {
+    for ti from 1 to n_temps {
+        d0 = binder[a, ti - 1] - binder[b, ti - 1]
+        d1 = binder[a, ti] - binder[b, ti]
+        if d0 * d1 <= 0.0 {
+            return TEMPS[ti - 1] + (TEMPS[ti] - TEMPS[ti - 1]) * d0 / (d0 - d1)
+        }
+    }
+    return 0.0
+}
+
+cross_8_16 = crossing(0, 1)
+cross_16_32 = crossing(1, 2)
+show cross_8_16
+show cross_16_32
+lx = log(SIZES * 1.0)
+ly = log(chi_at_tc)
+chi_slope = sum((lx - mean(lx)) * (ly - mean(ly))) / sum((lx - mean(lx)) * (lx - mean(lx)))
+show chi_slope
+TC_SHOWN = 2.2692
+
+#: the figure: the Binder cumulant against temperature for each size, and Onsager's T_c
+fg_u8 = zeros(n_temps)
+fg_u16 = zeros(n_temps)
+fg_u32 = zeros(n_temps)
+for fg_t to n_temps {
+    fg_u8[fg_t] = binder[0, fg_t]
+    fg_u16[fg_t] = binder[1, fg_t]
+    fg_u32[fg_t] = binder[2, fg_t]
+}
+figure("Binder cumulant of the 2D Ising model", "temperature T", "U_4")
+plot([T_C, T_C], [min(binder), max(binder)], "Onsager T_c")
+style("Onsager T_c", "dash s6 nomarker thin")
+plot(TEMPS, fg_u8, "8 x 8")
+style("8 x 8", "s4 circle")
+plot(TEMPS, fg_u16, "16 x 16")
+style("16 x 16", "s2 square")
+plot(TEMPS, fg_u32, "32 x 32")
+style("32 x 32", "s1 cross")
+
+test "both crossings are within 1% of T_c" {
+    assert_lt(abs(cross_8_16 - T_C) / T_C, 0.01)
+    assert_lt(abs(cross_16_32 - T_C) / T_C, 0.01)
+    assert_near(TC_SHOWN, T_C, 0.00005)
+}
+test "the susceptibility at T_c grows with slope between 1.6 and 1.9" {
+    assert_gt(chi_slope, 1.6)
+    assert_lt(chi_slope, 1.9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

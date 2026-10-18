@@ -1,0 +1,119 @@
+###
+The comparisons of the legacy copies (lib/algo/legacy/*.viv), each a def so that the
+interpreter's call graph counts it (tools/algo/check.py reads the counts from the
+`__graph__` line), and so that McIlroy's adversary can stand in for them.
+
+With LG_MODE[0] == 0 each def is the operator it is named for, so a legacy copy computes
+exactly what the corpus code it was copied from computes. With LG_MODE[0] == 1 the
+values compared are item ids 0 .. n-1, and the result comes from McIlroy's adversary
+(M. D. McIlroy, "A killer adversary for quicksort", Software: Practice and Experience
+29(4), 1999): every item starts as "gas", worth more than any frozen item; a comparison
+of two gas items freezes one of them at the next smallest value, choosing the item that
+was compared last (the likely pivot). The values frozen during one sort are an input on
+which that sort makes the comparisons it made under the adversary.
+###
+
+LG_MODE = zeros(1)
+LG_VAL = zeros(1)
+# LG_STATE: the number of items frozen, the pivot candidate, the value of gas
+LG_FROZEN = 0
+LG_CANDIDATE = 1
+LG_GAS = 2
+LG_STATE = zeros(LG_GAS + 1)
+
+#| Start the adversary on the n items of LG_VAL, which the caller sizes first
+#| (`LG_VAL = zeros(n)`): all gas, none frozen.
+def lg_adversary_start() {
+    n = len(LG_VAL)
+    LG_MODE[0] = 1
+    for i to n {
+        LG_VAL[i] = n
+    }
+    LG_STATE[LG_FROZEN] = 0
+    LG_STATE[LG_CANDIDATE] = 0
+    LG_STATE[LG_GAS] = n
+}
+
+#| Stop the adversary; the values it froze are LG_VAL.
+def lg_adversary_stop() {
+    LG_MODE[0] = 0
+}
+
+def lg_freeze(x) {
+    LG_VAL[x] = LG_STATE[LG_FROZEN]
+    LG_STATE[LG_FROZEN] = LG_STATE[LG_FROZEN] + 1
+}
+
+#| The adversary's comparison of items x and y: negative, zero or positive.
+def lg_adversary(x, y) {
+    gas = LG_STATE[LG_GAS]
+    if LG_VAL[x] == gas and LG_VAL[y] == gas {
+        if x == LG_STATE[LG_CANDIDATE] {
+            lg_freeze(x)
+        }
+        else {
+            lg_freeze(y)
+        }
+    }
+    if LG_VAL[x] == gas {
+        LG_STATE[LG_CANDIDATE] = x
+    }
+    else if LG_VAL[y] == gas {
+        LG_STATE[LG_CANDIDATE] = y
+    }
+    return LG_VAL[x] - LG_VAL[y]
+}
+
+def lg_lt(x, y) {
+    if LG_MODE[0] == 1 {
+        return lg_adversary(x, y) < 0
+    }
+    return x < y
+}
+
+def lg_le(x, y) {
+    if LG_MODE[0] == 1 {
+        return lg_adversary(x, y) <= 0
+    }
+    return x <= y
+}
+
+def lg_gt(x, y) {
+    if LG_MODE[0] == 1 {
+        return lg_adversary(x, y) > 0
+    }
+    return x > y
+}
+
+def lg_eq(x, y) {
+    if LG_MODE[0] == 1 {
+        return lg_adversary(x, y) == 0
+    }
+    return x == y
+}
+
+def lg_ne(x, y) {
+    if LG_MODE[0] == 1 {
+        return lg_adversary(x, y) != 0
+    }
+    return x != y
+}
+
+test "with the adversary off, each comparison is its operator" {
+    assert_true(lg_lt(1.0, 2.0) and not lg_lt(2.0, 2.0) and lg_le(2.0, 2.0))
+    assert_true(lg_gt(3.0, 2.0) and lg_eq(-0.0, 0.0) and not lg_lt(0.0 / 0.0, 1.0) and lg_ne(1.0, 2.0))
+}
+
+test "the adversary freezes the item compared last and keeps its answers consistent" {
+    items = [0.0, 1.0, 2.0, 3.0]
+    LG_VAL = zeros(len(items))
+    lg_adversary_start()
+    first = lg_lt(0, 1)
+    again = lg_lt(0, 1)
+    lg_adversary_stop()
+    assert_true(first == again)
+    assert_near(LG_STATE[LG_FROZEN], 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

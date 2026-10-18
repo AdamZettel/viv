@@ -1,0 +1,96 @@
+###
+post: Atoms from XYZ text
+agent: claude
+
+`parse_xyz(text)` reads a molecule's atoms into a `Geometry`: each atom's
+symbol, its atomic number, and the positions as an n x 3 array, in the text's
+unit (angstroms, in an XYZ file). lib/hf/mole builds a Hartree-Fock
+`Molecule` from the same text.
+
+It takes the XYZ format (a line with the number of atoms, a comment line, then
+one `symbol x y z` line per atom) and the same atoms with no header, one per
+line or separated by semicolons, as PySCF's `atom=` string writes them:
+`"O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587"`. A symbol may be written in
+either case (`o`, `O`). A count that does not match the atoms, a line that is
+not a symbol and three numbers, or a symbol that is not an element stops the
+run and says which.
+
+Used with `import xyz`.
+###
+
+#| The elements through krypton, by atomic number minus one.
+ELEMENTS = ["H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr"]
+
+#| A molecule's atoms: symbols, atomic numbers, and positions (one row per atom).
+record Geometry {
+    symbols: [Str]
+    z: Arr
+    xyz: Arr
+}
+
+#| The atomic number of an element symbol, in either case ("o" is oxygen).
+def atomic_number(sym: Str) {
+    s = sym[:1].upper() + sym[1:].lower()
+    if s not in ELEMENTS {
+        stop(f"unknown element {sym!r}: the elements known here are H to Kr")
+    }
+    return index(ELEMENTS, s) + 1
+}
+
+#| The atoms of `text`: XYZ with its two header lines, or atoms alone,
+#| separated by newlines or semicolons.
+def parse_xyz(text: Str) -> Geometry {
+    lines = text.splitlines()
+    first = 0
+    declared = -1
+    # the XYZ header: a count, then a comment line, which is not read
+    if len(lines) >= 2 and lines[0].strip().isdigit() {
+        declared = int(lines[0])
+        first = 2
+    }
+    symbols = []
+    z = []
+    xyz = []
+    for i from first to len(lines) {
+        for atom in lines[i].split(";") {
+            f = atom.split()
+            if len(f) == 0 {
+                continue
+            }
+            if len(f) != 4 {
+                stop(f"line {i + 1:d}: an atom is a symbol and three numbers, not {atom.strip()!r}")
+            }
+            symbols = append(symbols, f[0])
+            z = append(z, atomic_number(f[0]))
+            xyz = append(xyz, [float(f[1]), float(f[2]), float(f[3])])
+        }
+    }
+    if declared >= 0 and declared != len(symbols) {
+        stop(f"the header says {declared:d} atoms and the text has {len(symbols):d}")
+    }
+    return Geometry { symbols: symbols, z: z, xyz: xyz }
+}
+
+test "water from an XYZ file" {
+    m = parse_xyz("3\nwater, from the NIST geometry\nO   0.000000   0.000000   0.117300\nH   0.000000   0.757200  -0.469200\nH   0.000000  -0.757200  -0.469200\n")
+    assert_true(m.symbols == ["O", "H", "H"])
+    assert_true(all(m.z == [8.0, 1.0, 1.0]))
+    assert_true(all(shape(m.xyz) == [3.0, 3.0]))
+    assert_true(m.xyz[0, 2] == 0.1173 and m.xyz[1, 1] == 0.7572 and m.xyz[2, 1] == -0.7572)
+}
+
+test "the same atoms as PySCF writes them" {
+    m = parse_xyz("o 0 0 0.1173; H 0 0.7572 -0.4692; h 0 -0.7572 -0.4692")
+    assert_true(m.symbols == ["o", "H", "h"])
+    assert_true(all(m.z == [8.0, 1.0, 1.0]))
+    assert_true(m.xyz[2, 2] == -0.4692)
+}
+
+test "blank lines and a carbon" {
+    m = parse_xyz("\nC 1.5 -2 3e-1\n\nKr 0 0 0\n")
+    assert_true(all(m.z == [6.0, 36.0]))
+    assert_true(m.xyz[0, 0] == 1.5 and m.xyz[0, 2] == 0.3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

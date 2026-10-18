@@ -1,0 +1,65 @@
+# The first polarization functions: water and hydrogen fluoride in 6-31G*,
+# with six Cartesian d functions (6D) and with five spherical ones (5D).
+#
+# The d shell is where the normalization conventions of lib/hf
+# start to matter: the kernels work in unit-normalized Cartesian components,
+# PySCF's Cartesian AOs differ from those by the factor F (F^2 = 4 pi / 5 for
+# xx, 4 pi / 15 for xy), and its spherical AOs are M^T X M. All four ERI
+# members are swept over the whole integral set of each molecule; the
+# consensus must match PySCF's full sets in both conventions within 1e-12,
+# and the RHF energies built on it must match within 1e-9:
+#
+#     water 6D  -76.01049616963635     water 5D  -76.0090991085974
+#     HF    6D  -100.00286265223036    HF    5D  -100.000746998235
+#
+#     tools/both-engines.sh scf lock_631gs
+from hf.hf import hf_blob, hf_lock_full, hf_setup, hf_step
+from hf.molecule import molecule_packs
+from hf.scf_loop import scf_opts
+from hf.opts import scf_checked
+from hf.density import den_stack1
+from hf.integrals import int_jk
+from hf.sweep import sw_rep_new, SW_REP_NSTRAT, SW_REP_WORST
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, WATER631GS_CART_E_RHF, water631gs_cart_eri8_cart,
+    water631gs_cart_prims, water631gs_cart_s_unit, water631gs_cart_shells,
+    water631gs_cart_t_unit, water631gs_cart_v_unit,
+)
+from hfref.water_631gs_sph import (
+    water631gs_sph_atoms, WATER631GS_SPH_E_RHF, water631gs_sph_eri8_sph, water631gs_sph_prims,
+    water631gs_sph_rhf_d, water631gs_sph_s_sph, water631gs_sph_shells, water631gs_sph_t_sph,
+    water631gs_sph_v_sph,
+)
+from hfref.hf_631gs import (
+    hf_631gs_atoms, HF_631GS_E_RHF, HF_631GS_E_RHF_CART, hf_631gs_eri8_cart, hf_631gs_eri8_sph,
+    hf_631gs_prims, hf_631gs_s_sph, hf_631gs_s_unit, hf_631gs_shells, hf_631gs_t_sph,
+    hf_631gs_t_unit, hf_631gs_v_sph, hf_631gs_v_unit,
+)
+
+test "water 6-31G*: all five ERI members, then RHF 6D -76.01049616963635 and 5D -76.0090991085974" {
+    lk6_e6, lk6_e5 = hf_lock_full(molecule_packs(water631gs_cart_atoms(), water631gs_cart_shells(), water631gs_cart_prims()), water631gs_cart_eri8_cart(), water631gs_sph_eri8_sph(), water631gs_cart_s_unit(), water631gs_cart_t_unit() + water631gs_cart_v_unit(), water631gs_sph_s_sph(), water631gs_sph_t_sph() + water631gs_sph_v_sph(), WATER631GS_CART_E_RHF, WATER631GS_SPH_E_RHF, 0)
+    assert_lt(abs(lk6_e6), 1.0e-9)
+    assert_lt(abs(lk6_e5), 1.0e-9)
+}
+
+test "hydrogen fluoride 6-31G*: all five ERI members, then RHF 6D -100.00286265223036 and 5D -100.000746998235" {
+    lk6_e6, lk6_e5 = hf_lock_full(molecule_packs(hf_631gs_atoms(), hf_631gs_shells(), hf_631gs_prims()), hf_631gs_eri8_cart(), hf_631gs_eri8_sph(), hf_631gs_s_unit(), hf_631gs_t_unit() + hf_631gs_v_unit(), hf_631gs_s_sph(), hf_631gs_t_sph() + hf_631gs_v_sph(), HF_631GS_E_RHF_CART, HF_631GS_E_RHF, 0)
+    assert_lt(abs(lk6_e6), 1.0e-9)
+    assert_lt(abs(lk6_e5), 1.0e-9)
+}
+
+test "water 6-31G* 5D: PySCF's density is a fixed point, and all four J/K members agree on it" {
+    lk6_m = molecule_packs(water631gs_sph_atoms(), water631gs_sph_shells(), water631gs_sph_prims())
+    lk6_p = hf_setup(lk6_m, scf_checked())
+    lk6_D = water631gs_sph_rhf_d()
+    lk6_f = hf_step(lk6_p, lk6_D * 0.5, lk6_D * 0.5)
+    assert_lt(abs(lk6_f.energy - WATER631GS_SPH_E_RHF), 1.0e-10)
+    assert_lt(max(abs(lk6_f.density - lk6_D)), 1.0e-6)
+    lk6_rep = sw_rep_new()
+    lk6_JK = int_jk(lk6_p.eri, hf_blob(lk6_m), den_stack1(lk6_D), scf_opts(lk6_p), 0, lk6_rep)
+    assert_near(lk6_rep[SW_REP_NSTRAT], 5, 0.0)
+    assert_lt(lk6_rep[SW_REP_WORST], 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

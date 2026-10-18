@@ -1,0 +1,128 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// The DFT solver's source, as it is written in Viv: /dft/source/<file>.
+//
+// Two views of the same file. "As written" is the file itself, colored by the
+// site's tokenizer, annotations and all. "Annotated" is what `viv doc` -- the
+// compiler's own annotation extractor -- makes of it: the annotation lines
+// lifted out of the code and attached to the lines they describe.
+import { REPO_PUBLIC, GITHUB } from '../../../lib/repo.js';
+import Base from '../../../layouts/Base.astro';
+import AnnotatedCode from '../../../components/AnnotatedCode.astro';
+import { highlight } from '../../../lib/highlight.js';
+import data from '../../../data/dftSource.json';
+import '../../../styles/dft.css';
+
+export function getStaticPaths() {
+  return data.sources.map((f) => ({ params: { slug: f.slug }, props: { file: f } }));
+}
+const { file } = Astro.props;
+const groups = [...new Set(data.sources.map((f) => f.group))];
+const rows = highlight(file.raw.replace(/\n$/, ''), 'viv').split('\n');
+const fns = file.doc ? file.doc.functions : [];
+const glossary = file.doc ? [...file.doc.vars, ...fns.flatMap((f) => f.vars)] : [];
+const annotated = !!(file.doc && (fns.length || file.doc.lineNotes.length));
+---
+
+<Base
+  title={`${file.file} · the DFT solver's source · Viv`}
+  description={`${file.title}: ${file.blurb}`}
+  eyebrow="The DFT solver, as written"
+  heading={file.file}>
+  <div class="src">
+    <nav class="src-files" aria-label="Source files">
+      <a class="src-back" href="/dft">← the band-structure page</a>
+      {
+        groups.map((g) => (
+          <div>
+            <h4>{g}</h4>
+            <ul>
+              {data.sources.filter((f) => f.group === g).map((f) => (
+                <li>
+                  <a href={`/dft/source/${f.slug}`} aria-current={f.slug === file.slug ? 'page' : undefined}>
+                    <code>{f.file}</code>
+                    <span>{f.lines}</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      }
+    </nav>
+
+    <div class="src-main">
+      <p class="lede">{file.blurb}</p>
+
+      {
+        fns.length > 0 && (
+          <details class="src-outline" open>
+            <summary>{fns.length} functions</summary>
+            <ol>
+              {fns.map((f) => (
+                <li>
+                  <a href={`#R${f.rawLine}`}><code>{f.name}</code></a>
+                  <span>{f.what || '—'}</span>
+                </li>
+              ))}
+            </ol>
+          </details>
+        )
+      }
+
+      <div class="src-tabs" role="tablist" aria-label="View">
+        <button type="button" role="tab" aria-selected="true" data-view="raw">As written</button>
+        {annotated && <button type="button" role="tab" aria-selected="false" data-view="doc">Annotated by <code>viv doc</code></button>}
+        {REPO_PUBLIC && <a class="src-rawlink" href={`${GITHUB}/blob/main/${file.path || `dft/${file.file}`}`}>View on GitHub</a>}
+      </div>
+
+      <div class="src-view" data-view="raw">
+        <div class="src-listing">
+          {rows.map((html, i) => (
+            <div class="src-row" id={`R${i + 1}`}>
+              <a class="src-ln" href={`#R${i + 1}`} aria-hidden="true" tabindex="-1">{i + 1}</a>
+              <code set:html={html || '&nbsp;'} />
+            </div>
+          ))}
+        </div>
+      </div>
+      {
+        annotated && (
+          <div class="src-view" data-view="doc" hidden>
+            <p class="src-docnote">
+              This is the output of <code>viv doc {file.file}</code>, unchanged. The compiler lifts every
+              <code>#|</code> (what), <code>#||</code> (how) and <code>#|||</code> (why) line out of the code and
+              attaches it to the line it describes — so the line numbers here count code only.
+              {glossary.length > 0 && ` Its glossary holds ${glossary.length} variables; ask for one with viv whatis.`}
+            </p>
+            <AnnotatedCode doc={file.doc} />
+          </div>
+        )
+      }
+    </div>
+  </div>
+</Base>
+
+<script is:inline>
+  // two views of one file; the choice survives navigation between files
+  (() => {
+    const tabs = [...document.querySelectorAll('.src-tabs [role=tab]')];
+    const views = [...document.querySelectorAll('.src-view')];
+    const show = (name) => {
+      for (const t of tabs) t.setAttribute('aria-selected', String(t.dataset.view === name));
+      for (const v of views) v.hidden = v.dataset.view !== name;
+    };
+    let want = 'raw';
+    try { want = sessionStorage.getItem('dft-src-view') || 'raw'; } catch {}
+    if (location.hash.startsWith('#R')) want = 'raw';
+    if (!tabs.some((t) => t.dataset.view === want)) want = 'raw';
+    show(want);
+    for (const t of tabs) {
+      t.addEventListener('click', () => {
+        show(t.dataset.view);
+        try { sessionStorage.setItem('dft-src-view', t.dataset.view); } catch {}
+      });
+    }
+  })();
+</script>

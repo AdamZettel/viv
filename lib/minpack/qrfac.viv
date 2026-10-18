@@ -1,0 +1,180 @@
+###
+post: MINPACK's qrfac, QR factorization with column pivoting
+agent: claude
+
+A port of `qrfac.f` from netlib MINPACK (lib/minpack/ref). The explanation
+is in lib/minpack/qrfac.intent.
+
+Differences from the Fortran, none of which changes an operation: indices
+count from 0, so `ipvt` holds 0-based column numbers; `a` is an `m x n` array
+instead of a leading-dimension array; and the column pieces the Fortran hands
+to enorm as `a(j,j)` (a pointer into the column) are copied into `col` first,
+because Viv has no view of part of a column.
+
+Used with `import minpack.qrfac`.
+###
+
+from minpack.enorm import enorm, EPSMCH
+
+def qrfac(m, n, a: Arr, pivot: Bool, ipvt: Arr, rdiag: Arr, acnorm: Arr, wa: Arr) {
+    col = zeros(m)
+    step norms {
+        for j to n {
+            for i to m {
+                col[i] = a[i, j]
+            }
+            acnorm[j] = enorm(m, col)
+            rdiag[j] = acnorm[j]
+            wa[j] = rdiag[j]
+            if pivot {
+                ipvt[j] = j
+            }
+        }
+    }
+    minmn = min(m, n)
+    step reduce {
+        for j to minmn {
+            if pivot {
+                kmax = j
+                for kk to n - j {
+                    k = j + kk
+                    if rdiag[k] > rdiag[kmax] {
+                        kmax = k
+                    }
+                }
+                if kmax != j {
+                    for i to m {
+                        temp = a[i, j]
+                        a[i, j] = a[i, kmax]
+                        a[i, kmax] = temp
+                    }
+                    rdiag[kmax] = rdiag[j]
+                    wa[kmax] = wa[j]
+                    k = ipvt[j]
+                    ipvt[j] = ipvt[kmax]
+                    ipvt[kmax] = k
+                }
+            }
+            for ii to m - j {
+                col[ii] = a[j + ii, j]
+            }
+            ajnorm = enorm(m - j, col)
+            if ajnorm != 0.0 {
+                if a[j, j] < 0.0 {
+                    ajnorm = -ajnorm
+                }
+                for ii to m - j {
+                    a[j + ii, j] = a[j + ii, j] / ajnorm
+                }
+                a[j, j] = a[j, j] + 1.0
+                for kk to n - j - 1 {
+                    k = j + 1 + kk
+                    sum = 0.0
+                    for ii to m - j {
+                        sum = sum + a[j + ii, j] * a[j + ii, k]
+                    }
+                    temp = sum / a[j, j]
+                    for ii to m - j {
+                        a[j + ii, k] = a[j + ii, k] - temp * a[j + ii, j]
+                    }
+                    if pivot and rdiag[k] != 0.0 {
+                        temp = a[j, k] / rdiag[k]
+                        rdiag[k] = rdiag[k] * sqrt(max(0.0, 1.0 - temp * temp))
+                        q = rdiag[k] / wa[k]
+                        if 0.05 * (q * q) <= EPSMCH {
+                            for ii to m - j - 1 {
+                                col[ii] = a[j + 1 + ii, k]
+                            }
+                            rdiag[k] = enorm(m - j - 1, col)
+                            wa[k] = rdiag[k]
+                        }
+                    }
+                }
+            }
+            rdiag[j] = -ajnorm
+        }
+    }
+    return 0
+}
+
+# ---- tests --------------------------------------------------------------
+
+# Q R P^T rebuilt from qrfac's output: the Householder vectors below the
+# diagonal, R above it and `rdiag` on it. Returns the largest difference from
+# the matrix that was factored.
+#~ test
+def qf_rebuild_error(m, n, orig: Arr, a: Arr, ipvt: Arr, rdiag: Arr) {
+    # R, n x n upper triangle, with rdiag on the diagonal
+    worst = 0.0
+    for c to n {
+        # column c of Q R: apply the reflectors to column c of [R; 0], last first
+        v = zeros(m)
+        for i to c {
+            v[i] = a[i, c]
+        }
+        v[c] = rdiag[c]
+        for kk to n {
+            k = n - 1 - kk
+            if a[k, k] != 0.0 {
+                s = 0.0
+                for i to m - k {
+                    s = s + a[k + i, k] * v[k + i]
+                }
+                t = s / a[k, k]
+                for i to m - k {
+                    v[k + i] = v[k + i] - t * a[k + i, k]
+                }
+            }
+        }
+        for i to m {
+            worst = max(worst, abs(v[i] - orig[i, ipvt[c]]))
+        }
+    }
+    return worst
+}
+
+test "Q R reproduces the matrix with its columns permuted by ipvt" {
+    A = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0], [1.0, -1.0, 2.0], [0.5, 3.0, -2.0]]
+    dims = shape(A)
+    m = dims[0]
+    n = dims[1]
+    a = zeros(m, n)
+    for i to m {
+        for j to n {
+            a[i, j] = A[i, j]
+        }
+    }
+    ipvt = zeros(n)
+    rdiag = zeros(n)
+    acnorm = zeros(n)
+    wa = zeros(n)
+    qrfac(m, n, a, true, ipvt, rdiag, acnorm, wa)
+    assert_lt(qf_rebuild_error(m, n, A, a, ipvt, rdiag), 1.0e-14)
+}
+
+test "pivoting puts the diagonal of R in order of decreasing size" {
+    A = [[1.0, 20.0, 3.0], [1.0, 21.0, 4.0], [1.0, 22.0, 6.0], [1.0, 23.0, 9.0]]
+    dims = shape(A)
+    m = dims[0]
+    n = dims[1]
+    a = zeros(m, n)
+    for i to m {
+        for j to n {
+            a[i, j] = A[i, j]
+        }
+    }
+    ipvt = zeros(n)
+    rdiag = zeros(n)
+    acnorm = zeros(n)
+    wa = zeros(n)
+    qrfac(m, n, a, true, ipvt, rdiag, acnorm, wa)
+    assert_near(ipvt[0], 1.0, 0.0)
+    assert_gt(abs(rdiag[0]), abs(rdiag[1]))
+    assert_gt(abs(rdiag[1]), abs(rdiag[2]))
+    assert_near(acnorm[1], sqrt(20.0 * 20.0 + 21.0 * 21.0 + 22.0 * 22.0 + 23.0 * 23.0), 1.0e-13)
+    assert_lt(qf_rebuild_error(m, n, A, a, ipvt, rdiag), 1.0e-13)
+}
+
+# SPDX-License-Identifier: LicenseRef-Minpack
+# SPDX-FileCopyrightText: 1999 University of Chicago (Argonne National Laboratory, MINPACK)
+# SPDX-FileCopyrightText: 2026 The Viv authors

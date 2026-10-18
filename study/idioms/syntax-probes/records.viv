@@ -1,0 +1,106 @@
+###
+Records in all three engines (gap R1): a literal, a field read, a write
+into an array field, a record passed to a def and returned from one. A copy
+of a record copies its numbers and shares its arrays.
+###
+
+record Vec3 { x: Num, y: Num, z: Num }
+record Buf { v: Arr, n: Num }
+record Seg { a: Vec3, b: Vec3, w: Num }
+
+def add3(p: Vec3, q: Vec3) -> Vec3 {
+    return Vec3 { x: p.x + q.x, y: p.y + q.y, z: p.z + q.z }
+}
+
+def scale(p: Vec3, s) -> Vec3 {
+    return Vec3 { x: s * p.x, y: s * p.y, z: s * p.z }
+}
+
+def squares(b: Buf) {
+    for i to b.n {
+        b.v[i] = i * i
+    }
+}
+
+def length(s: Seg) {
+    dx = s.b.x - s.a.x
+    dy = s.b.y - s.a.y
+    dz = s.b.z - s.a.z
+    return s.w * sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+def make_buf(n) -> Buf {
+    return Buf { v: zeros(n), n: n }
+}
+
+a = Vec3 { x: 1, y: 2, z: 3 }
+b = Vec3 { z: 30, x: 10, y: 20 }
+c = add3(a, b)
+show c.x
+show c.y
+show c.z
+
+buf = make_buf(5)
+squares(buf)
+show buf.v
+
+s = Seg { a: a, b: scale(a, 3), w: 0.5 }
+show length(s)
+show s.b.z
+
+test "a literal's fields, in any order" {
+    p = Vec3 { y: 5, z: 6, x: 4 }
+    assert_near(p.x, 4, 0)
+    assert_near(p.y, 5, 0)
+    assert_near(p.z, 6, 0)
+}
+
+test "a copy shares its array fields" {
+    b1 = Buf { v: zeros(3), n: 3 }
+    b2 = b1
+    b2.v[1] = 9
+    b2.v[2] += 4
+    assert_near(b1.v[1], 9, 0)
+    assert_near(b1.v[2], 4, 0)
+}
+
+test "a def cannot change the caller's numbers" {
+    p = Vec3 { x: 1, y: 1, z: 1 }
+    q = scale(p, 10)
+    assert_near(p.x, 1, 0)
+    assert_near(q.x, 10, 0)
+}
+
+test "records nest and rebind in a loop" {
+    acc = Vec3 { x: 0, y: 0, z: 0 }
+    step = Vec3 { x: 1, y: 2, z: 3 }
+    for i to 4 {
+        acc = add3(acc, step)
+    }
+    assert_near(acc.z, 12, 0)
+    seg = Seg { a: acc, b: step, w: 1 }
+    assert_near(seg.a.y, 8, 0)
+}
+
+test "a def reads a global record" {
+    assert_near(glob_x(), 1, 0)
+}
+
+def glob_x() {
+    return a.x
+}
+
+# values that draw are written in declaration order (`Vec3 { z: rand(), y:
+# rand(), ... }` is refused), so the order written is the order they run
+test "the fields of a literal run in the order written" {
+    srand(3)
+    r1 = rand()
+    r2 = rand()
+    srand(3)
+    p = Vec3 { x: rand(), y: rand(), z: rand() }
+    assert_near(p.x, r1, 0)
+    assert_near(p.y, r2, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

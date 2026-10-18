@@ -1,0 +1,1436 @@
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* The explorer's reading view (src/components/ReadView.jsx): the code on the
+   left, the notes that explain it on the right, a row for each line that has
+   notes. Every color is a token from viv.css, so light and dark follow the
+   site's theme. */
+
+.rv {
+  margin-top: 0.4rem;
+}
+
+/* ---- the bar: how to read, which pass, where you are ------------------ */
+/* Opaque, so the code scrolling under it does not show through; the outline
+   in the page's color fills the gap under the site header. */
+.rv-bar {
+  position: sticky;
+  top: calc(var(--head-h, 56px) + 4px);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  background: var(--bg);
+  outline: 6px solid var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 18px;
+}
+.rv-modes {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.rv .rv-modes button {
+  font: 600 13px/1 var(--font-sans);
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.rv .rv-modes button + button {
+  border-left: 1px solid var(--border-strong);
+}
+.rv .rv-modes button.on {
+  background: var(--accent);
+  color: var(--bg);
+}
+.rv-modes button:focus-visible,
+.rv-bar select:focus-visible,
+.rv-bar button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.rv-count {
+  font-weight: 400;
+  opacity: 0.8;
+  margin-left: 4px;
+}
+.rv-passsel {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font: 13px/1.2 var(--font-mono);
+  color: var(--heading);
+}
+.rv-passsel select {
+  font: inherit;
+  color: var(--heading);
+  background: var(--bg-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 3px 4px;
+}
+.rv .rv-passsel .rv-step,
+.rv .rv-jumpbtn {
+  font: 14px/1 var(--font-sans);
+  min-width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  color: var(--text);
+  cursor: pointer;
+}
+.rv .rv-passsel .rv-step:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.rv-trial {
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+.rv-of {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.rv-jumpwrap {
+  position: relative;
+}
+.rv .rv-jumpbtn {
+  padding: 0 10px;
+  font-size: 13px;
+}
+.rv-jump {
+  position: absolute;
+  top: 34px;
+  left: 0;
+  z-index: 8;
+  width: min(440px, calc(100vw - 48px));
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--heading) 18%, transparent);
+  padding: 6px;
+}
+.rv-jump ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.rv .rv-jump button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: 13px/1.4 var(--font-sans);
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.rv .rv-jump button:hover,
+.rv .rv-jump button:focus-visible {
+  background: var(--bg-soft);
+}
+.rv-n {
+  display: inline-block;
+  min-width: 1.6em;
+  font: 600 12px var(--font-mono);
+  color: var(--accent);
+}
+.rv-crumb {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.rv-crumb ol {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  margin: 0;
+  padding: 0;
+  font: 12px/1.5 var(--font-mono);
+  color: var(--text-muted);
+}
+.rv-crumb li {
+  overflow-wrap: anywhere;
+}
+.rv-crumb li + li::before {
+  content: '›';
+  color: var(--text-faint);
+  margin-right: 4px;
+}
+.rv-crumb li.on {
+  color: var(--heading);
+  font-weight: 600;
+}
+.rv-wait {
+  margin: 0 0 1rem;
+}
+
+/* ---- prose -------------------------------------------------------------- */
+.rv-p {
+  margin: 0 0 0.55rem;
+  line-height: 1.6;
+  max-width: 72ch;
+}
+.rv-lead {
+  font-size: 1.02rem;
+  color: var(--text);
+}
+.rv-what {
+  color: var(--text);
+}
+.rv-label {
+  font-weight: 600;
+  color: var(--heading);
+}
+.rv-codesays {
+  color: var(--text-muted);
+  font-size: 0.93rem;
+}
+.rv-ph {
+  margin: 1rem 0 0.4rem;
+  font-size: 1rem;
+}
+
+/* ---- a file, a def ------------------------------------------------------ */
+.rv-file {
+  margin: 0 0 3rem;
+}
+.rv-filehead h2 {
+  margin: 0 0 0.2rem;
+  font-size: 1.15rem;
+  overflow-wrap: anywhere;
+}
+.rv-filehead > .rv-of {
+  margin: 0 0 0.6rem;
+}
+.rv-about,
+.rv-hw {
+  margin: 0.2rem 0 0.8rem;
+}
+.rv-about summary,
+.rv-hw summary,
+.rv-collapsed summary,
+.rv-skip summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+.rv-about[open] summary,
+.rv-hw[open] summary {
+  margin-bottom: 0.5rem;
+}
+.rv-def {
+  margin: 1.6rem 0 0;
+}
+.rv-defhead {
+  padding: 0.9rem 0 0.4rem;
+  border-top: 1px solid var(--border);
+}
+.rv-defhead h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.98rem;
+  overflow-wrap: anywhere;
+}
+.rv-defhead h3 code,
+.rv-collapsed summary code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.rv-prose {
+  margin: 0.8rem 0;
+  max-width: 72ch;
+}
+.rv-collapsed {
+  margin: 0.6rem 0;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.rv-collapsed[open] > .rv-code {
+  margin-top: 8px;
+}
+
+/* ---- the annotated code ------------------------------------------------- */
+.rv-code {
+  font-size: 12.5px;
+}
+.rv-row {
+  display: grid;
+  grid-template-columns: minmax(0, 57fr) minmax(0, 43fr);
+}
+.rv-row.has {
+  border-top: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+}
+.rv-src {
+  background: var(--bg-soft);
+  border-left: 3px solid transparent;
+  padding: 2px 0;
+  font: 12.5px/1.6 var(--font-mono);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+.rv-row:first-child .rv-src {
+  padding-top: 8px;
+}
+.rv-row:last-child .rv-src {
+  padding-bottom: 8px;
+}
+.rv-row.cur .rv-src {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-soft));
+}
+.rv-cl {
+  display: grid;
+  grid-template-columns: 3.2em minmax(0, 1fr);
+  padding-right: 10px;
+}
+.rv .rv-cl code {
+  font: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  /* never cut off: long lines wrap, with a hanging indent */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-left: 2ch;
+  text-indent: -2ch;
+  color: var(--text);
+}
+.rv-gap {
+  padding-left: 3.2em;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.rv-ln {
+  color: var(--text-faint);
+  text-align: right;
+  padding-right: 0.9em;
+  user-select: none;
+}
+.rv-comment {
+  background: var(--bg-soft);
+  padding: 6px 0 0;
+  font: 12.5px/1.6 var(--font-mono);
+}
+.rv-comment .rv-cl {
+  border-left: 3px solid transparent;
+}
+
+/* the notes: they fill in as their row reaches the lower part of the screen */
+.rv-notes {
+  padding: 4px 4px 8px 14px;
+  font: 13px/1.5 var(--font-sans);
+  color: var(--text);
+  min-width: 0;
+}
+.rv-notes > * {
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+.rv-row:not(.seen) .rv-notes > * {
+  opacity: 0.08;
+  transform: translateY(6px);
+}
+.rv-still .rv-notes > *,
+.rv-still .rv-row:not(.seen) .rv-notes > * {
+  transition: none;
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rv-notes > *,
+  .rv-row:not(.seen) .rv-notes > * {
+    transition: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+.rv-note {
+  margin: 4px 0 8px;
+}
+.rv-note + .rv-note {
+  margin-top: 6px;
+}
+.rv-doc {
+  line-height: 1.5;
+}
+.rv-dname {
+  font-weight: 600;
+  color: var(--heading);
+}
+.rv-dname code {
+  font-size: 0.95em;
+}
+.rv-doc.reuse {
+  padding-left: 8px;
+  border-left: 2px solid var(--s3);
+}
+.rv-now {
+  font-weight: 400;
+  font-style: italic;
+  color: var(--s3);
+}
+.rv-doc.early .rv-dname::after {
+  content: ' (first met here on the path)';
+  font-weight: 400;
+  font-size: 0.85em;
+  color: var(--text-faint);
+}
+.rv-dtext {
+  color: var(--text);
+}
+.rv-val {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font: 12px/1.6 var(--font-mono);
+  color: var(--heading);
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.rv-eqs {
+  color: var(--text-faint);
+}
+.rv-passtag {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-left: 2px;
+}
+.rv-stepnote {
+  padding: 4px 0 2px;
+}
+.rv-steph {
+  margin: 0 0 4px;
+  font-weight: 500;
+  color: var(--heading);
+}
+.rv-kw {
+  font: 600 11px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+.rv-notes .rv-p {
+  margin-bottom: 0.3rem;
+}
+.rv-field {
+  margin: 0.2rem 0 0.4rem;
+}
+
+/* equations, with their checks in the margin */
+.rv-eq {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0.5rem 0 0.7rem;
+  min-width: 0;
+}
+.rv-eqbox {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  color: var(--heading);
+}
+.rv-eqbox.wide {
+  -webkit-mask-image: linear-gradient(to right, #000 88%, transparent);
+  mask-image: linear-gradient(to right, #000 88%, transparent);
+}
+.rv-eqbox .katex-display {
+  margin: 0.2rem 0;
+}
+.rv-marks {
+  flex: none;
+  display: inline-flex;
+  gap: 3px;
+}
+.rv .rv-check {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  min-width: 0;
+  margin: 0 1px;
+  padding: 0;
+  vertical-align: 1px;
+  border: 1px solid color-mix(in srgb, var(--ok) 55%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--ok);
+  font: 700 11px/1 var(--font-sans);
+  cursor: help;
+}
+.rv .rv-check.bad {
+  color: var(--s6);
+  border-color: var(--s6);
+  background: color-mix(in srgb, var(--s6) 12%, transparent);
+}
+.rv .rv-check.none,
+.rv .rv-check.wait {
+  color: var(--text-faint);
+  border-color: var(--border-strong);
+  background: transparent;
+}
+.rv-check:hover::after,
+.rv-check:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 9;
+  top: calc(100% + 6px);
+  right: -6px;
+  width: max-content;
+  max-width: min(300px, 70vw);
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--heading) 16%, transparent);
+  color: var(--text);
+  font: 400 12px/1.45 var(--font-sans);
+  text-align: left;
+  white-space: normal;
+}
+.rv-check:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* predict, then what the run did */
+.rv-predict {
+  margin: 0.6rem 0 0.8rem;
+  padding: 8px 12px;
+  border-left: 3px solid var(--s3);
+  background: color-mix(in srgb, var(--s3) 8%, transparent);
+  border-radius: 0 8px 8px 0;
+  max-width: 72ch;
+}
+.rv-predict p {
+  margin: 0 0 0.4rem;
+  line-height: 1.55;
+}
+.rv .rv-reveal {
+  font: 600 12.5px var(--font-sans);
+  color: var(--s3);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--s3) 60%, transparent);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.rv-predict .rv-answer {
+  margin-top: 0.5rem;
+}
+.rv-run {
+  line-height: 1.6;
+  margin: 0.4rem 0 0.6rem;
+  max-width: 72ch;
+}
+.rv-runval {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--heading);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+.rv-missing {
+  font-family: var(--font-mono);
+  color: var(--s6);
+}
+
+/* ---- the core path -------------------------------------------------------- */
+.rv-pathhead {
+  margin: 0 0 1.4rem;
+}
+.rv-pathhead h2 {
+  margin: 0 0 0.4rem;
+}
+.rv-stop {
+  margin: 2.6rem 0 0;
+  scroll-margin-top: 140px;
+}
+.rv-stophead {
+  padding: 1rem 0 0.8rem;
+  border-top: 2px solid var(--border);
+}
+.rv-stophead.withfig {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 24px;
+  align-items: start;
+}
+.rv-stophead:not(.withfig) .rv-narr {
+  max-width: 780px;
+}
+.rv-more {
+  margin: 0.1rem 0 0.4rem;
+}
+.rv-more summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12.5px;
+}
+.rv-more[open] summary {
+  margin-bottom: 0.3rem;
+}
+.rv-kicker {
+  margin: 0 0 0.3rem;
+  font: 12px/1.4 var(--font-mono);
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+.rv-stophead h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1.3rem;
+}
+.rv-figs {
+  min-width: 0;
+}
+.rv-fig {
+  margin: 0 0 1rem;
+  min-width: 0;
+}
+.rv-fig figcaption {
+  font-size: 12px;
+  margin-top: 4px;
+}
+.rv-skip {
+  margin: 2rem 0 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  font-size: 0.92rem;
+}
+.rv-skip summary {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.rv-skip[open] summary {
+  margin-bottom: 10px;
+}
+.rv-skip .rv-code + .rv-code {
+  margin-top: 10px;
+}
+.rv-end {
+  margin: 3rem 0 2rem;
+}
+
+/* math sizes inside the notes */
+.rv-notes .katex {
+  font-size: 1.02em;
+}
+.rv-texsrc {
+  font-size: 0.9em;
+}
+
+/* ---- one column ------------------------------------------------------------ */
+@media (max-width: 899px) {
+  .rv-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rv-row.has {
+    border-top: 0;
+  }
+  .rv-notes {
+    padding: 6px 4px 10px 12px;
+    border-left: 3px solid var(--border);
+    margin: 0 0 6px;
+  }
+  .rv-notes:empty {
+    display: none;
+  }
+  .rv-stophead.withfig {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rv-bar {
+    gap: 6px 10px;
+    padding: 6px 8px;
+  }
+  .rv-passsel {
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+  .rv-trial {
+    padding-left: 6px;
+  }
+  .rv-crumb {
+    flex: 1 1 140px;
+  }
+  .rv .rv-modes button {
+    padding: 7px 10px;
+  }
+  .rv-cl {
+    grid-template-columns: 2.4em minmax(0, 1fr);
+  }
+  .rv-code,
+  .rv-src {
+    font-size: 12px;
+  }
+}
+
+/* the whole program as a graph (ProgramGraph.jsx), above the code: the
+   picture on the left, what the reader picked on the right; on a narrow
+   screen the picture stays at the top while the panel scrolls under it */
+.pg {
+  margin: 0 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  padding: 10px 12px 12px;
+  scroll-margin-top: calc(var(--head-h, 56px) + 8px);
+}
+.pg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin-bottom: 8px;
+}
+.pg-head .ex-h {
+  margin: 0;
+}
+.pg-head p {
+  flex: 1 1 320px;
+  margin: 0;
+  font-size: 0.86rem;
+}
+.pg-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) 12px minmax(300px, 1fr);
+  height: clamp(480px, calc(100vh - var(--head-h, 56px) - 120px), 920px);
+}
+.pg-left {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.pg-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.pg-search {
+  position: relative;
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.pg-search input {
+  width: 100%;
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 4px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+.pg-results {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 6;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--bg) 60%, transparent);
+}
+.pg-results li {
+  padding: 4px 9px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pg-results li.on {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.pg-tag {
+  margin-left: 6px;
+  font-size: 0.75rem;
+  color: var(--text-faint);
+}
+.pg-btns {
+  display: flex;
+  gap: 4px;
+}
+.pg-btns button,
+.pg-btn {
+  font: inherit;
+  font-size: 0.85rem;
+  min-width: 32px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.pg-btns button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.pg-stamp:empty {
+  display: none;
+}
+.pg-stamp {
+  position: absolute;
+  right: 6px;
+  bottom: 4px;
+  margin: 0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  font: 11px var(--font-mono);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.pg-canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  touch-action: none;
+  cursor: grab;
+}
+.pg-canvas:active {
+  cursor: grabbing;
+}
+.pg-canvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.pg-canvas svg {
+  display: block;
+  font-family: var(--font-sans);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.pg-canvas .dg-box,
+.pg-canvas .dg-arrow {
+  cursor: pointer;
+}
+.pg-canvas [data-id$='#more'],
+.pg-canvas [data-id$='#less'] {
+  cursor: pointer;
+}
+.pg-canvas [data-id$='#more']:hover,
+.pg-canvas [data-id$='#less']:hover {
+  fill: var(--accent);
+  text-decoration: underline;
+}
+.pg-canvas .dg-box,
+.pg-canvas .dg-arrow,
+.pg-canvas .dg-note {
+  transition: opacity 0.12s;
+}
+.pg-canvas svg.pg-dimming .dg-arrow:not(.pg-lit) {
+  opacity: 0.1;
+}
+.pg-canvas svg.pg-dimming .dg-box:not(.pg-lit) {
+  opacity: 0.35;
+}
+.pg-canvas svg.pg-dimming .dg-note:not(.pg-lit) {
+  opacity: 0.28;
+}
+.pg-canvas svg.pg-dimming .dg-arrow.pg-lit path:not(.dg-hit) {
+  stroke-width: 2.2;
+}
+.pg-canvas .dg-ol {
+  pointer-events: none;
+}
+.pg-canvas .dg-ol-sel {
+  stroke: var(--accent);
+  stroke-width: 2.6;
+}
+.pg-canvas .dg-ol-near {
+  stroke: var(--hot);
+  stroke-width: 1.8;
+  stroke-dasharray: 5 3;
+}
+.pg-canvas .dg-hl {
+  pointer-events: none;
+}
+.pg-tip {
+  position: absolute;
+  z-index: 4;
+  max-width: min(360px, 80%);
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: 12px/1.45 var(--font-mono);
+  white-space: pre-line;
+  pointer-events: none;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--bg) 55%, transparent);
+}
+.pg-err {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--s6);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.pg-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  margin: 0;
+}
+
+/* the walkthrough: its bar over the picture and the panel, and a stop in the panel */
+.pg-tour {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0 0 8px;
+  min-height: 32px;
+}
+.pg-tour-say {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.86rem;
+}
+.pg-tour .pg-run {
+  min-width: 6.5em;
+  font-weight: 600;
+  color: var(--accent);
+}
+.pg-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8rem;
+}
+.pg-speed select {
+  font: 12px var(--font-sans);
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 4px;
+}
+.pg-scrub {
+  flex: 1 1 160px;
+  min-width: 100px;
+  accent-color: var(--accent);
+}
+.pg-count {
+  font: 12px var(--font-mono);
+  min-width: 4.5em;
+}
+.pg-tourstop .pg-where {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+}
+.pg-stopn {
+  font-variant-numeric: tabular-nums;
+}
+.pg-narr {
+  min-height: 9.5em;
+  line-height: 1.55;
+}
+.pg-narr pre {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  font: 12.5px/1.5 var(--font-mono);
+  color: var(--text);
+}
+.pg-narr pre code {
+  font: inherit;
+  white-space: pre;
+}
+.pg-vals {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 4px 0 8px;
+  font-size: 0.9rem;
+}
+.pg-vals div {
+  display: contents;
+}
+.pg-vals dt code {
+  font-size: 0.88em;
+}
+.pg-vals dd {
+  margin: 0;
+}
+.pg-val {
+  font: 13px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--heading);
+}
+.pg-valmore {
+  grid-column: 1 / -1;
+  font-size: 0.8rem;
+}
+.pg-sparks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 6px 0 8px;
+}
+.pg-spark {
+  margin: 0;
+}
+.pg-spark svg {
+  display: block;
+  overflow: visible;
+}
+.pg-spark-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.pg-spark-dot {
+  fill: var(--hot);
+  stroke: var(--bg-card);
+  stroke-width: 1;
+}
+.pg-spark figcaption {
+  font-size: 0.78rem;
+  max-width: 190px;
+}
+.pg-holds {
+  margin: 4px 0 8px;
+  padding: 0;
+  list-style: none;
+  font-size: 0.88rem;
+}
+.pg-holds li.ok span:first-child {
+  color: var(--ok);
+}
+.pg-holds li.bad span:first-child {
+  color: var(--hot);
+}
+.pg-holdsum {
+  margin: 4px 0 8px;
+  font-size: 0.88rem;
+}
+.pg-holdsum summary {
+  cursor: pointer;
+}
+.pg-holdsum .ok {
+  color: var(--ok);
+}
+.pg-holdsum .bad {
+  color: var(--hot);
+}
+.pg-hot {
+  line-height: 1.9;
+  font-size: 0.88rem;
+}
+.pg-loops {
+  margin: 4px 0 8px;
+  padding-left: 1.2em;
+  font-size: 0.9rem;
+}
+.pg-tourcode .pg-code {
+  position: relative;
+  max-height: min(46vh, 460px);
+  overflow: auto;
+}
+.pg-tourback {
+  margin: 0 0 6px;
+}
+
+/* the divider between the picture and the panel: drag it, or focus it and use the arrow keys */
+.pg-divider {
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+}
+.pg-divider::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--border);
+}
+.pg-divider:hover::after,
+.pg-divider:focus-visible::after,
+.pg-divider.on::after {
+  background: var(--accent);
+}
+.pg-divider:focus-visible {
+  outline: none;
+}
+
+/* the panel: what the reader picked */
+.pg-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 4px 12px 6px;
+  font-size: 0.92rem;
+}
+.pg-panel p {
+  margin: 0 0 0.6em;
+}
+.pg-where {
+  font-size: 0.8rem;
+  margin: 2px 0 4px !important;
+}
+.pg-title {
+  margin: 0 0 6px;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+.pg .pg-panel .pg-title code {
+  color: var(--heading);
+  background: none;
+  border: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+.pg-what {
+  color: var(--text);
+}
+.pg-explain {
+  margin: 0 0 8px;
+  line-height: 1.55;
+}
+.pg-explain .pg-what {
+  display: inline;
+}
+.pg-explain .pg-what + .pg-morebtn {
+  font: 600 0.85em var(--font-sans);
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+.pg-morebtn:hover,
+.pg-morebtn:focus-visible {
+  text-decoration: underline;
+}
+.pg-k {
+  display: inline-block;
+  margin: 0 6px 2px 0;
+  font: 600 11px var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.pg-names {
+  margin: 0 0 6px;
+  line-height: 1.8;
+}
+.pg-names code {
+  margin: 0 4px 0 0;
+  font-size: 0.85em;
+}
+.pg-chips .pg-chip,
+.pg-chips .pg-link {
+  display: inline-block;
+  margin: 0 4px 4px 0;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-soft);
+  line-height: 1.6;
+}
+.pg-chips .pg-link:hover,
+.pg-chips .pg-link:focus-visible {
+  border-color: var(--accent);
+}
+.pg-link {
+  font: inherit;
+  margin: 0 3px 3px 0;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+.pg-link:hover,
+.pg-link:focus-visible {
+  border-color: var(--border-strong);
+}
+.pg .pg-link code {
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 0.88em;
+}
+.pg-n {
+  margin-left: 3px;
+  font-size: 0.8em;
+  color: var(--text-faint);
+}
+.pg-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.pg-quiet {
+  color: var(--text-muted);
+}
+.pg-rel p {
+  margin: 0 0 4px !important;
+  line-height: 1.6;
+}
+.pg-gloss {
+  margin: 0 0 8px;
+  font-size: 0.88rem;
+}
+.pg-gloss div {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px;
+}
+.pg-gloss dd {
+  margin: 0;
+}
+.pg-check {
+  color: var(--ok);
+  cursor: help;
+}
+/* the code: a code block that scrolls sideways rather than breaking a line */
+.pg-codebox {
+  margin: 12px 0 0;
+}
+.pg-codebar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 4px;
+  font: 12px var(--font-mono);
+  color: var(--text-faint);
+}
+.pg-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 12px var(--font-sans);
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.pg-toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.pg-code {
+  overflow-x: auto;
+  padding: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  font: 13px/1.55 var(--font-mono);
+  tab-size: 4;
+}
+.pg-lines {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+}
+.pg-cl {
+  display: grid;
+  grid-template-columns: 4em max-content;
+  padding-right: 14px;
+  border-left: 3px solid transparent;
+}
+.pg-cl.on {
+  border-left-color: var(--hot);
+  background: color-mix(in srgb, var(--hot) 12%, transparent);
+}
+.pg .pg-panel .pg-cl code {
+  font: inherit;
+  background: transparent;
+  border: 0;
+  padding: 0 0 0 0.3em;
+  white-space: pre;
+  color: var(--text);
+}
+.pg-cl.pg-prose code {
+  opacity: 0.8;
+}
+.pg-ln {
+  position: sticky;
+  left: 0;
+  color: var(--text-faint);
+  background: var(--bg-soft);
+  text-align: right;
+  padding-right: 0.9em;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.pg-cl.on .pg-ln {
+  background: color-mix(in srgb, var(--hot) 12%, var(--bg-soft));
+}
+.pg-gap {
+  display: grid;
+  grid-template-columns: 4em max-content;
+  padding-left: 3px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: default;
+}
+.pg-gap .pg-ln {
+  letter-spacing: 0.1em;
+}
+.pg-more {
+  padding: 4px 10px 0;
+  font-size: 0.8rem;
+}
+.pg-intro details {
+  margin: 8px 0;
+}
+.pg-intro summary {
+  cursor: pointer;
+}
+.pg-notrun-mod {
+  margin: 4px 0 4px 12px !important;
+}
+.pg-notrun-list {
+  line-height: 1.8;
+}
+
+@media (max-width: 899px) {
+  .pg {
+    padding: 8px;
+  }
+  .pg-split {
+    display: block;
+    height: auto;
+  }
+  .pg-left {
+    position: sticky;
+    top: var(--head-h, 56px);
+    z-index: 3;
+    height: 46svh;
+    padding-bottom: 6px;
+    background: var(--bg-card);
+  }
+  .pg-panel {
+    overflow: visible;
+    padding: 10px 0 0;
+    border-top: 1px solid var(--border);
+  }
+  .pg-divider {
+    display: none;
+  }
+  .pg-tourcode .pg-code {
+    max-height: 32svh;
+  }
+  /* the walk on a phone: its buttons in the sticky part, the search and zoom out of the way */
+  .pg-left.touring .pg-tools,
+  .pg-left.touring .pg-scrub,
+  .pg-left.touring .pg-speed span {
+    display: none;
+  }
+  .pg-tour {
+    gap: 4px 6px;
+    margin-bottom: 6px;
+  }
+  .pg-tour .pg-btn {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .pg-tour-say {
+    display: none;
+  }
+  .pg-narr {
+    min-height: 0;
+  }
+}
+
+/* a multi-path in the panel */
+.pg-mp-score {
+  margin: 4px 0 8px;
+}
+.pg-mp-members {
+  width: 100%;
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.pg-mp-members th {
+  text-align: left;
+  font: 600 11px var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 2px 6px 4px 0;
+}
+.pg-mp-members td {
+  padding: 2px 6px 2px 0;
+  border-top: 1px solid var(--border);
+}
+.pg-mp-members tr.on td {
+  background: color-mix(in srgb, var(--s3) 10%, transparent);
+}
+.pg-mp-ties {
+  margin: 0 0 8px;
+  font-size: 0.88rem;
+}
+.pg-mp-cite {
+  display: inline-block;
+  margin: 0 8px 4px 0;
+  font-size: 0.88rem;
+}
+.pg-mp-list {
+  margin: 4px 0 0;
+  padding-left: 1.1em;
+  font-size: 0.9rem;
+}
+.pg-mp-list li {
+  margin: 0 0 3px;
+}

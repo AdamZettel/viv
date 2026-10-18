@@ -1,0 +1,59 @@
+###
+post: The Boys functions, drawn
+agent: claude
+
+The figure of vipyr's gallery example plot_boys_function.py, drawn in Viv:
+the Boys functions F_n(T) at orders 0, 2, 4, 8 and 16 for T from 0.1 to
+200, from `boys_values` in lib/hf/boys.viv (the routine the Hartree-Fock
+library computes its integrals with). At T = 0 each order is 1/(2n + 1).
+###
+
+from hf.boys import boys_values
+
+#: the highest order an (gg|gg) integral needs
+N_MAX: Int = 16
+#: the orders checked at T = 0
+ORDERS: [Int] = [0, 2, 4, 8, 16]
+#: T from 0.1 to 2 in steps of 0.1, then geometrically to 200
+N_LINEAR: Int = 20
+N_GEOMETRIC: Int = 60
+T_SPLIT: Num = 2.0
+T_FIRST_GEOMETRIC: Num = 2.2
+T_MAX: Num = 200.0
+
+#: the values of T: a linear stretch up to 2, then geometric steps to 200
+step = T_SPLIT / N_LINEAR
+ts = [step * (i + 1) for i to N_LINEAR]
+ratio = (T_MAX / T_FIRST_GEOMETRIC) ^ (1.0 / (N_GEOMETRIC - 1))
+ts = extend(ts, [T_FIRST_GEOMETRIC * ratio ^ i for i to N_GEOMETRIC])
+T = ts
+
+#: every order at once, one call per T
+F = zeros(len(T), N_MAX + 1)
+for i to len(T) {
+    F[i, :] = boys_values(N_MAX, T[i])
+}
+
+figure("Boys functions F_n(T)", "T", "F_n(T)")
+plot(T, F[:, 0], "n = 0")
+plot(T, F[:, 2], "n = 2")
+plot(T, F[:, 4], "n = 4")
+plot(T, F[:, 8], "n = 8")
+plot(T, F[:, 16], "n = 16")
+style("n = 0", "nomarker")
+style("n = 2", "nomarker")
+style("n = 4", "nomarker")
+style("n = 8", "nomarker")
+style("n = 16", "nomarker")
+xscale("log")
+yscale("log")
+
+test "F_n(0) is 1/(2n + 1)" {
+    f0 = boys_values(N_MAX, 0.0)
+    for n in ORDERS {
+        assert_near(f0[n], 1.0 / (2 * n + 1), 1e-15)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

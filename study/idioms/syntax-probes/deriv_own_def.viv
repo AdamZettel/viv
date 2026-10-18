@@ -1,0 +1,46 @@
+###
+`deriv` and a program's own def of a builtin's name. A program's own def
+wins over a builtin everywhere, and `deriv` differentiates a closure by the
+builtins' rules (`exp`, `sqrt`, `pow` with a constant exponent, `sin`,
+`cos`, `log`, `tan`). Inside a `deriv` closure a call to `pow` used to be
+differentiated as the builtin even when the program had its own `pow`, so
+the derivative was of a function the program never calls. Now every engine
+refuses that closure with an error at the call, as it refuses a call to any
+other def:
+
+    error: `deriv` cannot differentiate through `pow`: this program defines
+    its own `pow`, and `deriv` knows only the builtins' derivatives
+
+This probe defines its own `pow` and checks what still holds: the def is the
+one called, and `deriv` over the builtins the program did not redefine is
+exact.
+###
+
+# the program's own pow: a product, not a power
+def pow(x, y) {
+    return x * y
+}
+
+X0 = 0.5
+own = pow(3.0, 4.0)
+# d/dx of exp(x) sqrt(x) = exp(x) sqrt(x) (1 + 1 / (2x))
+d_exp_sqrt = deriv(fn(x) -> exp(x) * sqrt(x), X0)
+exact_exp_sqrt = exp(X0) * sqrt(X0) * (1.0 + 1.0 / (2.0 * X0))
+# d/dx of sin(x) / x, written without pow
+d_sinc = deriv(fn(x) -> sin(x) / x, X0)
+exact_sinc = (X0 * cos(X0) - sin(X0)) / (X0 * X0)
+show own
+show d_exp_sqrt
+show d_sinc
+
+test "the program's pow is the one called" {
+    assert_near(own, 12.0, 0.0)
+}
+
+test "deriv over builtins the program did not redefine is exact" {
+    assert_near(d_exp_sqrt, exact_exp_sqrt, 1.0e-15)
+    assert_near(d_sinc, exact_sinc, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

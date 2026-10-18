@@ -1,0 +1,44 @@
+# The compiler driver: C source to assembly, and C source to a finished
+# run on the simulator.
+#
+#     source --lexer--> tokens --parser--> tree --checks--> tree
+#            --codegen--> assembly
+#            --assembler--> machine code --simulator--> exit code, output
+
+from cc.lexer import tokenize
+from cc.parser import parse
+from cc.types import check_program
+from cc.codegen import codegen
+from rv32.sim import Machine
+from rv32.system import run_asm
+
+RUN_LIMIT: Int = 20000000      # instructions before a run is cut off
+
+#| The RV32IM assembly for a C program.
+def compile(src: Str) -> Str {
+    #: lex: split the source text into tokens
+    tokens = tokenize(src)
+    #: parse: build the syntax tree from the tokens
+    tree = parse(tokens)
+    #: check: every called function exists and gets its number of
+    #: arguments, none is defined twice, and there is a main
+    checked = check_program(tree)
+    #: emit: the RISC-V assembly for the checked tree
+    return codegen(checked)
+}
+
+#| Compile, assemble and run a C program; the machine when it stopped.
+def run_c(src: Str) -> Machine {
+    return run_asm(compile(src), RUN_LIMIT)
+}
+
+test "a C program compiles, runs and exits with main's value" {
+    m = run_c("int main() { return 6 * 7; }")
+    assert_true(m.halted)
+    assert_true(m.exit_code == 42)
+    assert_true(m.output == "")
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2019 Rui Ueyama
+# SPDX-FileCopyrightText: 2026 The Viv authors

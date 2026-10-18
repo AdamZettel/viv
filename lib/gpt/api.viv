@@ -1,0 +1,177 @@
+###
+post: The GPT of lib/gpt, called from Python
+agent: claude
+
+The entry points vp.gpt calls (python/vipyr/_gpt.py). Each takes the
+sizes of a `GptConfig` as plain numbers and the model as one flat vector:
+its matrices, row by row, in the order `for_leaves` visits a `Gpt` (the
+token embedding, the position embedding, each block's heads' query, key
+and value matrices, the attention's output map, the MLP's two matrices,
+then the output map). Python cuts that vector back into named arrays,
+`model.blocks[0].attn.Wo`, and joins them into it again for `generate` and
+`loss`.
+
+- `gpt_train`: draws a model from `seed` and trains it on `tokens` for
+  `steps` steps (lib/gpt/gpt.viv's `train`: Muon on the blocks' matrices,
+  Adam on the embeddings and the output map); returns the loss of every
+  step and the trained model.
+- `gpt_generate`: continues `prompt` by `count` tokens, each drawn from the
+  softmax of the last position's logits divided by `temperature` (the
+  largest logit when `temperature` is 0).
+- `gpt_attention`: where each head of each block looks, for one sequence:
+  the attention weights, one T by T matrix per head, blocks in order.
+- `gpt_loss`: the mean cross-entropy of the next token over every window
+  of `context` tokens of `tokens`, the windows training draws its batches
+  from.
+
+Used with `from gpt.api import gpt_train, gpt_generate, gpt_attention, gpt_loss`.
+###
+
+from gpt.gpt import block, Gpt, GptConfig, gpt_forward, sample, sequence_loss, train
+from nn import argmax_rows, attention_weights, embedding, rmsnorm, softmax_rows
+from random import choice
+
+#| The sizes of a model, from the numbers Python passes.
+def gpt_config(vocab, context, width, heads, layers, hidden, batch) -> GptConfig {
+    return GptConfig {
+        vocab: vocab,
+        context: context,
+        width: width,
+        heads: heads,
+        layers: layers,
+        hidden: hidden,
+        batch: batch,
+    }
+}
+
+# at[0] is where the next matrix starts in the flat vector
+def pack_into(w: Arr, flat: Arr, at: Arr) {
+    n = numel(w)
+    flat[at[0]:at[0] + n] = ravel(w)
+    at[0] += n
+}
+
+def unpack_into(w: Arr, flat: Arr, at: Arr) {
+    rows, cols = shape(w)
+    n = numel(w)
+    w[:, :] = reshape(flat[at[0]:at[0] + n], rows, cols)
+    at[0] += n
+}
+
+#| The model's matrices as one vector, in `for_leaves` order.
+def gpt_pack(m: Gpt) -> Arr {
+    n = [0.0]
+    for_leaves(count_leaf, m, n)
+    flat = zeros(n[0])
+    at = [0.0]
+    for_leaves(pack_into, m, flat, at)
+    return flat
+}
+
+def count_leaf(w: Arr, n: Arr) {
+    n[0] += numel(w)
+}
+
+#| A model of the sizes `c` holding the matrices of `flat`.
+def gpt_unpack(c: GptConfig, flat: Arr) -> Gpt {
+    m = Gpt(c)
+    at = [0.0]
+    for_leaves(unpack_into, m, flat, at)
+    assert_true(at[0] == len(flat))
+    return m
+}
+
+#| A model drawn from `seed` and trained for `steps` steps on `tokens`:
+#| the loss of every step, and the trained model as one vector.
+def gpt_train(tokens: Arr, vocab: Num, context: Num, width: Num, heads: Num, layers: Num, hidden: Num, batch: Num,
+              steps: Num, seed: Num) {
+    c = gpt_config(vocab, context, width, heads, layers, hidden, batch)
+    srand(seed)
+    model = Gpt(c)
+    losses = train(model, c, tokens, steps)
+    return losses, gpt_pack(model)
+}
+
+#| `prompt` continued by `count` tokens drawn at `temperature` (0: the
+#| largest logit each time); the prompt and the new tokens together.
+def gpt_generate(flat: Arr, vocab: Num, context: Num, width: Num, heads: Num, layers: Num, hidden: Num, prompt: Arr,
+                 count: Num, temperature: Num, seed: Num) {
+    m = gpt_unpack(gpt_config(vocab, context, width, heads, layers, hidden, 1.0), flat)
+    srand(seed)
+    out = prompt
+    for k to count {
+        step context: ctx = take the last context elements of out
+        step logits: z = gpt_forward(m, reshape(ctx, 1, len(ctx)))[0, len(ctx) - 1, :]
+        step draw {
+            if temperature == 0.0 {
+                next = argmax_rows(reshape(z, 1, len(z)))[0]
+            }
+            else {
+                next = choice(softmax_rows(z / temperature))
+            }
+        }
+        out = append(out, next)
+    }
+    return out
+}
+
+#| The attention weights of every head for the sequence `tokens` (at most
+#| `context` long): row (block * heads + head) of the result is that head's
+#| T by T matrix, row i the weights position i gives positions 0 to i.
+def gpt_attention(flat: Arr, vocab: Num, context: Num, width: Num, heads: Num, layers: Num, hidden: Num,
+                  tokens: Arr) {
+    m = gpt_unpack(gpt_config(vocab, context, width, heads, layers, hidden, 1.0), flat)
+    T = len(tokens)
+    W = zeros(layers * heads, T, T)
+    step embed: X = embedding(m.tok, reshape(tokens, 1, T)) + m.pos[0:T, :]
+    for l, b in enumerate(m.blocks) {
+        step weights {
+            N = rmsnorm(X)
+            for i, h in enumerate(b.attn.heads) {
+                W[l * heads + i, :, :] = attention_weights(N, h.Wq, h.Wk)[0, :, :]
+            }
+        }
+        step block: X = block(b, X)
+    }
+    return W
+}
+
+#| The mean next-token cross-entropy over every window of `context` tokens.
+def gpt_loss(flat: Arr, vocab: Num, context: Num, width: Num, heads: Num, layers: Num, hidden: Num, tokens: Arr) {
+    m = gpt_unpack(gpt_config(vocab, context, width, heads, layers, hidden, 1.0), flat)
+    windows = len(tokens) - context
+    xs = [tokens[s:s + context] for s to windows]
+    ys = [tokens[s + 1:s + 1 + context] for s to windows]
+    return sequence_loss(m, xs, ys)
+}
+
+test "a model packed and unpacked gives the same loss" {
+    c = GptConfig { vocab: 5, context: 4, width: 8, hidden: 12, batch: 1 }
+    tokens = [0.0, 3.0, 1.0, 4.0, 2.0, 2.0, 0.0, 1.0, 3.0]
+    losses, flat = gpt_train(tokens, c.vocab, c.context, c.width, c.heads, c.layers, c.hidden, 2.0, 3.0, 5.0)
+    again = gpt_pack(gpt_unpack(c, flat))
+    assert_near(sum(abs(again - flat)), 0.0, 0.0)
+    assert_near(len(losses), 3.0, 0.0)
+}
+
+test "temperature 1 draws what lib/gpt's sample draws" {
+    c = GptConfig { vocab: 5, context: 4, width: 8, hidden: 12, batch: 1 }
+    tokens = [0.0, 3.0, 1.0, 4.0, 2.0, 2.0, 0.0, 1.0, 3.0]
+    losses, flat = gpt_train(tokens, c.vocab, c.context, c.width, c.heads, c.layers, c.hidden, 2.0, 3.0, 5.0)
+    prompt = [0.0, 3.0]
+    ours = gpt_generate(flat, c.vocab, c.context, c.width, c.heads, c.layers, c.hidden, prompt, 6.0, 1.0, 9.0)
+    theirs = sample(gpt_unpack(c, flat), prompt, 6.0, 9.0)
+    assert_near(sum(abs(ours - theirs)), 0.0, 0.0)
+}
+
+test "each row of attention weights is a distribution over the positions before it" {
+    c = GptConfig { vocab: 5, context: 4, width: 8, hidden: 12, batch: 1 }
+    tokens = [0.0, 3.0, 1.0, 4.0, 2.0, 2.0, 0.0, 1.0, 3.0]
+    losses, flat = gpt_train(tokens, c.vocab, c.context, c.width, c.heads, c.layers, c.hidden, 2.0, 3.0, 5.0)
+    W = gpt_attention(flat, c.vocab, c.context, c.width, c.heads, c.layers, c.hidden, [0.0, 3.0, 1.0])
+    assert_near(max(abs(sum(W, axis=-1) - 1.0)), 0.0, 1.0e-14)
+    assert_near(W[0, 0, 1] + W[0, 0, 2] + W[0, 1, 2], 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

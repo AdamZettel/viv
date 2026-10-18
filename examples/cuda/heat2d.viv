@@ -1,0 +1,155 @@
+#| The 2-D heat equation u_t = u_xx + u_yy on a W by H grid, explicit Euler
+#| with the edges held, r = dt / dx^2 (stable for r <= 1/4). The grid is one
+#| flat array, row by row. The time loop runs inside `on device u, v`:
+#| the two arrays go to the device once, every
+#| step is one launch that reads u and writes v, the swap exchanges the two
+#| device buffers, and the result comes back once. The reference is the same
+#| step written with 2-D slices on the host, whose operations are the
+#| kernel's in the same order, so the two agree bit for bit.
+
+#| The threads of a block: TX along a row, TY rows (2-D grids).
+TX: Int = 32
+TY: Int = 8
+
+#| One step on a 2-D grid: each thread computes one grid point of v from u,
+#| its column and row read from the block and thread numbers.
+kernel def heat2d(u: Arr, v: Arr, w: Int, h: Int, r: Num) {
+    col = block_id(0) * block_size(0) + thread_id(0)
+    row = block_id(1) * block_size(1) + thread_id(1)
+    if col < w and row < h {
+        i = row * w + col
+        if row == 0 or col == 0 or row == h - 1 or col == w - 1 {
+            v[i] = u[i]
+        }
+        else {
+            v[i] = u[i] + r * (u[i - 1] + u[i + 1] + u[i - w] + u[i + w] - 4.0 * u[i])
+        }
+    }
+}
+schedule heat2d(threads = [TX, TY], cover = [w, h])
+
+#| The same step on a 1-D grid: each thread finds its row and column by
+#| dividing its flat index by the width.
+kernel def heat2d_flat(u: Arr, v: Arr, w: Int, r: Num) {
+    i = block_id() * block_size() + thread_id()
+    if i < len(u) {
+        h = len(u) // w
+        row = i // w
+        col = i % w
+        if row == 0 or col == 0 or row == h - 1 or col == w - 1 {
+            v[i] = u[i]
+        }
+        else {
+            v[i] = u[i] + r * (u[i - 1] + u[i + 1] + u[i - w] + u[i + w] - 4.0 * u[i])
+        }
+    }
+}
+
+#| The time loop on the device: two copies in, `steps` launches, two copies out.
+def heat2d_device(u0: Arr, w: Int, r: Num, steps: Int) -> Arr {
+    h: Int = len(u0) // w
+    u = copy(u0)
+    v = copy(u0)
+    on device u, v {
+        for s to steps {
+            v = heat2d(u, v, w, h, r)
+            u, v = v, u
+        }
+    }
+    return u
+}
+
+#| The same loop with the 1-D kernel.
+def heat2d_flat_device(u0: Arr, w: Int, r: Num, steps: Int) -> Arr {
+    u = copy(u0)
+    v = copy(u0)
+    on device u, v {
+        for s to steps {
+            v = heat2d_flat(u, v, w, r)
+            u, v = v, u
+        }
+    }
+    return u
+}
+
+#| The same loop with every launch copying its arrays in and out (Phase 1).
+def heat2d_copies(u0: Arr, w: Int, r: Num, steps: Int) -> Arr {
+    h: Int = len(u0) // w
+    u = copy(u0)
+    v = copy(u0)
+    for s to steps {
+        v = heat2d(u, v, w, h, r)
+        u, v = v, u
+    }
+    return u
+}
+
+#| The reference: one step with 2-D slices, the kernel's sum in its order.
+def heat2d_slices(u: Arr, w: Int, r: Num) -> Arr {
+    h = len(u) // w
+    U = reshape(u, h, w)
+    V = copy(U)
+    V[1:h - 1, 1:w - 1] = U[1:h - 1, 1:w - 1] + r * (U[1:h - 1, 0:w - 2] + U[1:h - 1, 2:w] + U[0:h - 2, 1:w - 1] + U[2:h, 1:w - 1] - 4.0 * U[1:h - 1, 1:w - 1])
+    return ravel(V)
+}
+
+def heat2d_host(u0: Arr, w: Int, r: Num, steps: Int) -> Arr {
+    u = copy(u0)
+    for s to steps {
+        u = heat2d_slices(u, w, r)
+    }
+    return u
+}
+
+#| 16 x (1 - x) y (1 - y) on the unit square: zero on the edges, 1 in the
+#| middle, made with + - * / only, so every engine and the GPU host make the
+#| same bits.
+def initial(w: Int, h: Int) -> Arr {
+    u = zeros(w * h)
+    for row to h {
+        for col to w {
+            x = col / (w - 1)
+            y = row / (h - 1)
+            u[row * w + col] = 16.0 * x * (1.0 - x) * y * (1.0 - y)
+        }
+    }
+    return u
+}
+
+W: Int = 24
+H: Int = 16
+R = 0.2
+STEPS: Int = 1000
+COPY_STEPS: Int = 10
+u0 = initial(W, H)
+before = device_transfers()
+u = heat2d_device(u0, W, R, STEPS)
+moved = device_transfers() - before
+show moved
+show u[(H // 2) * W + W // 2]
+show sum(u)
+before = device_transfers()
+c = heat2d_copies(u0, W, R, COPY_STEPS)
+copied = device_transfers() - before
+show copied
+flat = heat2d_flat_device(u0, W, R, COPY_STEPS)
+
+test "on the device: one copy in and one out per array, one launch per step" {
+    assert_allclose(moved, [2.0, 2.0, STEPS], 0.0)
+}
+
+test "a copy in and out on every launch without the block" {
+    assert_allclose(copied, [2.0 * COPY_STEPS, COPY_STEPS, COPY_STEPS], 0.0)
+}
+
+test "the device loop equals the host's slices bit for bit" {
+    assert_near(max(abs(u - heat2d_host(u0, W, R, STEPS))), 0.0, 0.0)
+    assert_near(max(abs(c - heat2d_host(u0, W, R, COPY_STEPS))), 0.0, 0.0)
+}
+
+test "the 1-D grid's kernel equals the 2-D grid's bit for bit" {
+    assert_near(max(abs(flat - heat2d_host(u0, W, R, COPY_STEPS))), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

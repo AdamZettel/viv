@@ -1,0 +1,143 @@
+###
+Block averages and their errors, as every simulation program of Allen and
+Tildesley accumulates them. A run is split into blocks of equal length;
+each block's average of each variable is kept, and the run average is the
+mean of the block averages, with the standard error of that mean,
+
+    err = sqrt( (<b^2> - <b>^2) / nblock ),
+
+as its error bar. That error is right when the blocks are long compared
+with the variable's correlation time (analysis.viv's blocking shows how to
+check). A variable can instead be a mean-square deviation within each
+block, <x^2> - <x>^2 (plus a constant), which is how fluctuation formulas
+for heat capacities come out of a run.
+###
+# Derived from averages_module.f90 of
+# https://github.com/Allen-Tildesley/examples (commit 4818bc82), by Michael P.
+# Allen and Dominic J. Tildesley, CC0-1.0; see ports/liquids/LICENSE.
+# Upstream prints the table as it goes; here it is kept in arrays and the
+# programs return it.
+
+#| How a variable is averaged in a block: its mean; its mean-square
+#| deviation <x^2> - <x>^2 plus `add`; or, for the heat capacity of an NVE
+#| run, the mean-square deviation of the kinetic energy turned into C_v by
+#| Lebowitz, Percus and Verlet's formula (upstream's avg, msd and cke).
+AVG: Int = 0
+MSD: Int = 1
+CKE: Int = 2
+
+#| One run's accumulators: per variable its method and constant, the
+#| running sums of the current block, every finished block's average (one
+#| row per block), and how many steps went into the current block.
+record Averages {
+    method: [Int]
+    add: Arr
+    blk_sum: Arr
+    blk_sq: Arr
+    blk_n: Arr
+    blocks: Arr
+    nblock_done: [Int]
+    t_kin: Int
+}
+
+#| Accumulators for nblock blocks of the variables with these methods;
+#| t_kin is the index of the kinetic temperature, which CKE needs (or -1).
+def averages(method: [Int], add: Arr, nblock: Int, t_kin: Int) -> Averages {
+    nv: Int = len(method)
+    return Averages { method: method, add: add, blk_sum: zeros(nv), blk_sq: zeros(nv), blk_n: zeros(1),
+                      blocks: zeros(nblock, nv), nblock_done: int_zeros(1), t_kin: t_kin }
+}
+
+def blk_begin(a: Averages) {
+    nv: Int = len(a.method)
+    for k to nv {
+        a.blk_sum[k] = 0.0
+        a.blk_sq[k] = 0.0
+    }
+    a.blk_n[0] = 0.0
+}
+
+#| One step's values into the current block.
+def blk_add(a: Averages, vals: Arr) {
+    nv: Int = len(a.method)
+    for k to nv {
+        a.blk_sum[k] = a.blk_sum[k] + vals[k]
+        a.blk_sq[k] = a.blk_sq[k] + vals[k] * vals[k]
+    }
+    a.blk_n[0] = a.blk_n[0] + 1.0
+}
+
+#| Closes the current block: its averages become the next row of blocks.
+def blk_end(a: Averages) {
+    nv: Int = len(a.method)
+    b: Int = a.nblock_done[0]
+    if a.blk_n[0] < 0.5 {
+        stop("a block ended with no steps in it")
+    }
+    for k to nv {
+        avg = a.blk_sum[k] / a.blk_n[0]
+        msd = a.blk_sq[k] / a.blk_n[0]
+        if a.method[k] == MSD or a.method[k] == CKE {
+            avg = a.add[k] + msd - avg * avg
+        }
+        a.blocks[b, k] = avg
+    }
+    for k to nv {
+        if a.method[k] == CKE {
+            t = a.blocks[b, a.t_kin]
+            a.blocks[b, k] = 9.0 / (6.0 - 4.0 * a.blocks[b, k] / (t * t))
+        }
+    }
+    a.nblock_done[0] = b + 1
+}
+
+#| The run averages and their standard errors, from the block averages.
+def run_end(a: Averages) {
+    nv: Int = len(a.method)
+    nb: Int = a.nblock_done[0]
+    if nb < 1 {
+        stop("the run ended with no blocks")
+    }
+    avg = zeros(nv)
+    err = zeros(nv)
+    nrm = 0.0
+    for b to nb {
+        for k to nv {
+            avg[k] = avg[k] + a.blocks[b, k]
+            err[k] = err[k] + a.blocks[b, k] * a.blocks[b, k]
+        }
+        nrm = nrm + 1.0
+    }
+    for k to nv {
+        avg[k] = avg[k] / nrm
+        err[k] = err[k] / nrm
+        err[k] = err[k] - avg[k] * avg[k]
+        if err[k] > 0.0 {
+            err[k] = sqrt(err[k] / nrm)
+        }
+    }
+    return avg, err
+}
+
+test "the blocks of a known sequence: averages, mean-square deviations and the error of the mean" {
+    meth: [Int] = [AVG, MSD]
+    a = averages(meth, [0.0, 0.5], 2, -1)
+    vals = [1.0, 2.0, 3.0, 4.0]
+    for b to 2 {
+        blk_begin(a)
+        for s to 2 {
+            x = vals[2 * b + s]
+            blk_add(a, [x, x])
+        }
+        blk_end(a)
+    }
+    avg, err = run_end(a)
+    assert_near(a.blocks[0, 0], 1.5, 0.0)
+    assert_near(a.blocks[1, 1], 0.5 + 0.25, 0.0)
+    assert_near(avg[0], 2.5, 0.0)
+    assert_near(err[0], 1.0 / sqrt(2.0), 1.0e-15)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

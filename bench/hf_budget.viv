@@ -1,0 +1,55 @@
+# The browser budget for Hartree-Fock posts. A post runs in viv.wasm, the
+# interpreter compiled to WebAssembly, and the feed refuses a post that takes
+# longer than 10 s (BUDGET_SECONDS in www/src/lib/postCheck.js). This program
+# is the release-mode workload of the two water posts, and the timing tool
+# holds it to that budget:
+#
+#     node tools/hf_wasm_time.mjs --runs 3 bench/hf_budget.viv
+#
+# One release-mode energy (production member at every stage: MD integrals,
+# gs_avg guess, CDIIS, canonical orthogonalization, packed J/K), measured on
+# 2026-09-24 as best of 3, viv.wasm under Node 26 against native Viv -> C
+# (tools/race.sh), same machine:
+#
+#     water basis          AOs   viv.wasm   native    fits in 10 s
+#     STO-3G                 7     0.54 s    0.004 s   yes
+#     6-31G                 13     2.11 s    0.007 s   yes
+#     6-31G* Cartesian      19     5.31 s    0.011 s   yes, alone
+#     6-31G* spherical      18     4.90 s    0.011 s   yes, alone
+#     cc-pVDZ spherical     24    14.18 s    0.025 s   no
+#
+# The interpreter runs these 130 to 570 times slower than the native build,
+# and building the molecule from the lib/basis tables costs under 0.01 s: the time is the
+# integrals and the SCF. So a post can afford one 6-31G* energy, or a handful
+# of 6-31G ones, and cc-pVDZ belongs in a native build. Sweeping a stage over
+# more members multiplies its cost: Head-Gordon-Pople takes about twice as
+# long as McMurchie-Davidson in the interpreter.
+#
+# Both energies are held to PySCF 2.5.0 within 1e-9.
+from hf.scf import rhf
+from hf.molecule import Molecule, molecule_from
+from basis.basis import Basis
+from basis.sto3g import basis_sto3g
+from basis.pople631g import basis_631g
+from hfref.water_sto3g import WATERSTO3G_E_RHF
+from hfref.water_631g import WATER631G_E_RHF
+
+#| Water as tools/hf_reference.py gives it to PySCF, in basis `b`.
+def hfbud_water(b: Basis) -> Molecule {
+    return molecule_from([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]], b)
+}
+
+hfbud_e_sto3g = rhf(hfbud_water(basis_sto3g())).energy
+hfbud_e_631g = rhf(hfbud_water(basis_631g())).energy
+show hfbud_e_sto3g
+show hfbud_e_631g
+
+test "water STO-3G and 6-31G in release mode are PySCF's energies within 1e-9" {
+    assert_near(hfbud_e_sto3g, WATERSTO3G_E_RHF, 1.0e-9)
+    assert_near(hfbud_e_631g, WATER631G_E_RHF, 1.0e-9)
+    assert_near(WATERSTO3G_E_RHF, -74.9630631297292, 1.0e-12)
+    assert_near(WATER631G_E_RHF, -75.98394849810573, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

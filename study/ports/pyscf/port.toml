@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# P0: lib/hf against PySCF 2.5.0.
+#
+# Every case is one molecule, one basis and one method. port.py reads this
+# file to write the oracle (PySCF's run), the Viv programs (viv/<case>.viv
+# for verification, viv/<case>_t.viv for timing) and the timing table.
+
+[original]
+name = "PySCF"
+version = "2.5.0"
+license = "Apache-2.0"
+language = "Python, with libcint (C), libcvhf (C) and NumPy/SciPy (OpenBLAS)"
+
+# Verification: both sides converge tightly, and Viv must match PySCF's
+# energy and orbital energies within the tolerances below (NOTES.md says
+# where the numbers come from).
+[verify]
+pyscf_conv_tol = 1e-12
+pyscf_conv_tol_grad = 1e-8
+viv_e_tol = 1e-12
+viv_grad_tol = 1e-9
+energy_tol = 1e-10
+mo_energy_tol = 1e-8
+
+# Timing: the plan's settings. PySCF conv_tol 1e-10 with its default
+# gradient threshold sqrt(conv_tol) = 1e-5; Viv the same two numbers. Both
+# start from the core-Hamiltonian guess (PySCF "1e", Viv GS_CORE) and use
+# CDIIS over 8 Fock matrices. A timing run's energy must still match the
+# oracle within timing_energy_tol, or the time does not count.
+[timing]
+pyscf_conv_tol = 1e-10
+viv_e_tol = 1e-10
+viv_grad_tol = 1e-5
+timing_energy_tol = 1e-8
+reps_warm = 5
+reps_cold = 3
+load_limit = 2.0
+
+# The water geometry of tools/pyscf_reference.py and scf/ (angstrom).
+[geometry]
+water = "O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587"
+# test_bz.py's benzene (scf/suite/gen_ref.py, BENZENE)
+benzene = "C -0.65830719 0.61123287 -0.00800148; C 0.73685281 0.61123287 -0.00800148; C 1.43439081 1.81898387 -0.00800148; C 0.73673681 3.02749287 -0.00920048; C -0.65808819 3.02741487 -0.00967948; C -1.35568919 1.81920887 -0.00868348; H -1.20806619 -0.34108413 -0.00755148; H 1.28636081 -0.34128013 -0.00668648; H 2.53407081 1.81906387 -0.00736748; H 1.28693681 3.97963587 -0.00925948; H -1.20821019 3.97969587 -0.01063248; H -2.45529319 1.81939187 -0.00886348"
+# (H2O)n for the scaling series: the water above, copied to the corners of
+# a cube with 3.0 angstrom edges, in this order, the first n corners
+cluster_spacing = 3.0
+cluster_corners = [[0,0,0],[1,0,0],[0,1,0],[1,1,0],[0,0,1],[1,0,1],[0,1,1],[1,1,1]]
+
+# The cases. `jk = "direct"` runs J and K from the basis every iteration on
+# both sides (Viv INT_JK_DIRECT; PySCF with the in-core ERI store refused, so
+# get_jk takes its direct, screened path); Viv needs it once the packed ERIs
+# pass 16,000,000 values, the array size limit of every engine (benzene
+# cc-pVDZ has 21.1 million, (H2O)8 6-31G* 54.5 million). The timing also
+# runs PySCF in core on those cases, as a second column. `parity = true` marks the sizes at which all three engines
+# (interpreter, native, wasm) are run and must print the same bytes.
+# `engines` lists the engines timed. `reps` overrides the timing section's
+# reps_warm for a long case (one timed run per engine, no warm-up run).
+[[case]]
+name = "water_sto3g"
+geometry = "water"
+basis = "sto-3g"
+method = "rhf"
+parity = true
+engines = ["native", "release", "fast", "wasm", "interp"]
+
+[[case]]
+name = "water_631g"
+geometry = "water"
+basis = "6-31g"
+method = "rhf"
+parity = true
+engines = ["native", "release", "fast", "wasm", "interp"]
+
+[[case]]
+name = "water_ccpvdz"
+geometry = "water"
+basis = "cc-pvdz"
+method = "rhf"
+engines = ["native", "release", "fast", "wasm"]
+
+[[case]]
+name = "water_ccpvtz"
+geometry = "water"
+basis = "cc-pvtz"
+method = "rhf"
+engines = ["native", "release", "fast", "wasm"]
+
+[[case]]
+name = "benzene_ccpvdz"
+jk = "direct"
+reps = 1
+geometry = "benzene"
+basis = "cc-pvdz"
+method = "rhf"
+engines = ["native", "release", "fast", "wasm"]
+
+[[case]]
+name = "water1_631gs"
+geometry = "cluster1"
+basis = "6-31g*"
+method = "rhf"
+engines = ["native", "release", "fast", "wasm"]
+
+[[case]]
+name = "water2_631gs"
+geometry = "cluster2"
+basis = "6-31g*"
+method = "rhf"
+engines = ["native", "release", "fast", "wasm"]
+
+[[case]]
+name = "water4_631gs"
+geometry = "cluster4"
+basis = "6-31g*"
+method = "rhf"
+engines = ["native", "release", "fast", "wasm"]
+
+[[case]]
+name = "water8_631gs"
+jk = "direct"
+reps = 1
+geometry = "cluster8"
+basis = "6-31g*"
+method = "rhf"
+engines = ["native", "release"]
+
+[[case]]
+name = "watercat_631g_uhf"
+geometry = "water"
+basis = "6-31g"
+method = "uhf"
+charge = 1
+spin = 1
+parity = true
+engines = ["native", "release", "fast", "wasm", "interp"]
+
+[[case]]
+name = "watercat_ccpvdz_uhf"
+geometry = "water"
+basis = "cc-pvdz"
+method = "uhf"
+charge = 1
+spin = 1
+engines = ["native", "release", "fast", "wasm"]

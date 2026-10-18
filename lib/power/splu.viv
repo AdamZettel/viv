@@ -1,0 +1,459 @@
+###
+post: Sparse LU with a minimum-degree ordering and threshold pivoting
+agent: claude
+
+`splu(n, colptr, rowind, vals, q, tol)` factors a square sparse matrix A,
+given in compressed sparse column form, as P A Q = L U: L unit lower
+triangular, U upper triangular, Q the column order `q` and P the row order
+chosen while factoring. `lu_solve(f, b)` then solves A x = b.
+
+The factorization is left-looking, column by column (Gilbert and Peierls,
+"Sparse partial pivoting in time proportional to arithmetic operations",
+SIAM Journal on Scientific and Statistical Computing 9 (1988) 862-874). Column k of L and U is the
+solution of a triangular system with the L found so far; its nonzeros are
+the rows reachable from the nonzeros of A's column through the graph of L,
+found by a depth-first search, so the work is proportional to the
+arithmetic, never to n per column.
+
+The pivot of column k is the entry of largest magnitude among the rows not
+yet pivotal (partial pivoting), except that the diagonal entry, row q[k],
+is kept when its magnitude is at least `tol` times that largest one
+(threshold pivoting, as UMFPACK and SuperLU do). With tol = 1 this is
+partial pivoting; with tol = 0.001 the diagonal is kept almost always, so
+the order chosen to limit fill survives.
+
+`mindeg_order(n, colptr, rowind)` chooses q: the minimum-degree ordering of
+the graph of A + A^T, by explicit elimination (each eliminated node's
+neighbors become a clique). It is the exact minimum degree that AMD
+approximates; on power-network matrices, whose fill is small, the explicit
+graph stays small.
+###
+
+record SpLU {
+    n: Int
+    lp: [Int]
+    li: [Int]
+    lx: Arr
+    up: [Int]
+    ui: [Int]
+    ux: Arr
+    pinv: [Int]
+    q: [Int]
+}
+
+UNSET: Int = -1
+
+#| The minimum-degree order of the symmetric pattern of A + A^T, ties to the
+#| node that most recently reached the lowest degree.
+def mindeg_order(n: Int, colptr: [Int], rowind: [Int]) -> [Int] {
+    #: the adjacency of A + A^T without the diagonal, deduplicated
+    deg = int_zeros(n)
+    for j to n {
+        for p from colptr[j] to colptr[j + 1] {
+            i = rowind[p]
+            if i != j {
+                deg[i] += 1
+                deg[j] += 1
+            }
+        }
+    }
+    start = int_zeros(n)
+    cap = int_zeros(n)
+    used: Int = 0
+    for v to n {
+        start[v] = used
+        cap[v] = 2 * deg[v] + 2
+        used += cap[v]
+    }
+    pool = int_zeros(used)
+    ln = int_zeros(n)
+    mark = int_zeros(n)
+    for v to n {
+        mark[v] = UNSET
+    }
+    stamp: Int = 0
+    for j to n {
+        for p from colptr[j] to colptr[j + 1] {
+            i = rowind[p]
+            if i != j {
+                pool[start[i] + ln[i]] = j
+                ln[i] += 1
+                pool[start[j] + ln[j]] = i
+                ln[j] += 1
+            }
+        }
+    }
+    for v to n {
+        stamp += 1
+        k: Int = 0
+        for t to ln[v] {
+            w = pool[start[v] + t]
+            if mark[w] != stamp {
+                mark[w] = stamp
+                pool[start[v] + k] = w
+                k += 1
+            }
+        }
+        ln[v] = k
+    }
+
+    #: degree buckets: doubly linked lists, one per degree
+    head = int_zeros(n + 1)
+    nxt = int_zeros(n)
+    prv = int_zeros(n)
+    for d to n + 1 {
+        head[d] = UNSET
+    }
+    for v to n {
+        _bucket_push(head, nxt, prv, ln[v], v)
+    }
+    alive = int_zeros(n)
+    for v to n {
+        alive[v] = 1
+    }
+    order = int_zeros(n)
+    mind: Int = 0
+    nbr = int_zeros(n)
+
+    for step to n {
+        #: take a node of least degree
+        while head[mind] == UNSET {
+            mind += 1
+        }
+        piv = head[mind]
+        _bucket_remove(head, nxt, prv, ln[piv], piv)
+        alive[piv] = 0
+        order[step] = piv
+        nn: Int = ln[piv]
+        for t to nn {
+            nbr[t] = pool[start[piv] + t]
+        }
+
+        #: its neighbors become a clique; each loses piv
+        for t to nn {
+            u = nbr[t]
+            _bucket_remove(head, nxt, prv, ln[u], u)
+            stamp += 1
+            k: Int = 0
+            for s to ln[u] {
+                w = pool[start[u] + s]
+                if w != piv {
+                    pool[start[u] + k] = w
+                    mark[w] = stamp
+                    k += 1
+                }
+            }
+            ln[u] = k
+            mark[u] = stamp
+            for s to nn {
+                w = nbr[s]
+                if mark[w] != stamp {
+                    if ln[u] == cap[u] {
+                        #: the list is full: move it to the pool's free end, twice as long;
+                        #: the pool itself doubles when that end is reached
+                        newcap = 2 * cap[u] + 2
+                        if used + newcap > len(pool) {
+                            old: Int = int(len(pool))
+                            grown: [Int] = [pool[r] if r < old else UNSET for r to 2 * (used + newcap)]
+                            pool = grown
+                        }
+                        for r to ln[u] {
+                            pool[used + r] = pool[start[u] + r]
+                        }
+                        start[u] = used
+                        cap[u] = newcap
+                        used += newcap
+                    }
+                    pool[start[u] + ln[u]] = w
+                    ln[u] += 1
+                    mark[w] = stamp
+                }
+            }
+            _bucket_push(head, nxt, prv, ln[u], u)
+            if ln[u] < mind {
+                mind = ln[u]
+            }
+        }
+    }
+    return order
+}
+
+def _bucket_push(head: [Int], nxt: [Int], prv: [Int], d: Int, v: Int) {
+    nxt[v] = head[d]
+    prv[v] = UNSET
+    if head[d] != UNSET {
+        prv[head[d]] = v
+    }
+    head[d] = v
+}
+
+def _bucket_remove(head: [Int], nxt: [Int], prv: [Int], d: Int, v: Int) {
+    if prv[v] != UNSET {
+        nxt[prv[v]] = nxt[v]
+    }
+    else {
+        head[d] = nxt[v]
+    }
+    if nxt[v] != UNSET {
+        prv[nxt[v]] = prv[v]
+    }
+}
+
+#| P A Q = L U by left-looking sparse LU with threshold pivoting: A in
+#| compressed sparse column form, q the column order, tol the diagonal
+#| preference (1: partial pivoting).
+def splu(n: Int, colptr: [Int], rowind: [Int], vals: Arr, q: [Int], tol: Num) -> SpLU {
+    lp = int_zeros(n + 1)
+    up = int_zeros(n + 1)
+    li: [Int] = []
+    ui: [Int] = []
+    lx = []
+    ux = []
+    pinv = int_zeros(n)
+    mark = int_zeros(n)
+    for i to n {
+        pinv[i] = UNSET
+        mark[i] = UNSET
+    }
+    x = zeros(n)
+    xi = int_zeros(n)
+    stk = int_zeros(n)
+    pst = int_zeros(n)
+
+    for k to n {
+        col = q[k]
+        lp[k] = len(li)
+        up[k] = len(ui)
+
+        #: the rows reachable from A's column through L, in topological order
+        top: Int = n
+        for p from colptr[col] to colptr[col + 1] {
+            r = rowind[p]
+            if mark[r] != k {
+                #: depth-first search from row r
+                hd: Int = 0
+                stk[0] = r
+                while hd >= 0 {
+                    j = stk[hd]
+                    jc = pinv[j]
+                    if mark[j] != k {
+                        mark[j] = k
+                        pst[hd] = 0
+                        if jc != UNSET {
+                            pst[hd] = lp[jc] + 1
+                        }
+                    }
+                    pend: Int = 0
+                    if jc != UNSET {
+                        pend = lp[jc + 1]
+                    }
+                    pushed = false
+                    while pst[hd] < pend {
+                        i = li[pst[hd]]
+                        pst[hd] += 1
+                        if mark[i] != k {
+                            hd += 1
+                            stk[hd] = i
+                            pushed = true
+                            break
+                        }
+                    }
+                    if not pushed {
+                        hd -= 1
+                        top -= 1
+                        xi[top] = j
+                    }
+                }
+            }
+        }
+
+        #: x = L \ A[:, col] on those rows
+        for t from top to n {
+            x[xi[t]] = 0.0
+        }
+        for p from colptr[col] to colptr[col + 1] {
+            x[rowind[p]] += vals[p]
+        }
+        for t from top to n {
+            i = xi[t]
+            j = pinv[i]
+            if j != UNSET {
+                xj = x[i]
+                for p from lp[j] + 1 to lp[j + 1] {
+                    x[li[p]] -= lx[p] * xj
+                }
+            }
+        }
+
+        #: the pivot: the diagonal if it is within tol of the largest candidate
+        big = -1.0
+        ipiv: Int = UNSET
+        for t from top to n {
+            i = xi[t]
+            if pinv[i] == UNSET {
+                a = abs(x[i])
+                if a > big {
+                    big = a
+                    ipiv = i
+                }
+            }
+            else {
+                ui = append(ui, pinv[i])
+                ux = append(ux, x[i])
+            }
+        }
+        if ipiv == UNSET or big <= 0.0 {
+            stop(f"splu: the matrix is singular at column {k}")
+        }
+        if pinv[col] == UNSET and mark[col] == k and abs(x[col]) >= tol * big {
+            ipiv = col
+        }
+        pivot = x[ipiv]
+        ui = append(ui, k)
+        ux = append(ux, pivot)
+        pinv[ipiv] = k
+
+        #: L's column: the pivot row first, then the rest divided by the pivot
+        li = append(li, ipiv)
+        lx = append(lx, 1.0)
+        for t from top to n {
+            i = xi[t]
+            if pinv[i] == UNSET {
+                li = append(li, i)
+                lx = append(lx, x[i] / pivot)
+            }
+        }
+    }
+    lp[n] = len(li)
+    up[n] = len(ui)
+    #: L's rows renumbered by pivot step, so L is lower triangular
+    for p to len(li) {
+        li[p] = pinv[li[p]]
+    }
+    return SpLU { n: n, lp: lp, li: li, lx: lx, up: up, ui: ui, ux: ux, pinv: pinv, q: q }
+}
+
+#| x with A x = b, from the factors of splu.
+def lu_solve(f: SpLU, b: Arr) -> Arr {
+    n = f.n
+    y = zeros(n)
+    for i to n {
+        y[f.pinv[i]] = b[i]
+    }
+    #: L y = P b, column by column (L has a unit diagonal, stored first)
+    for j to n {
+        yj = y[j]
+        for p from f.lp[j] + 1 to f.lp[j + 1] {
+            y[f.li[p]] -= f.lx[p] * yj
+        }
+    }
+    #: U z = y, from the last column back (the diagonal is stored last)
+    for j to n reversed {
+        dpos = f.up[j + 1] - 1
+        y[j] = y[j] / f.ux[dpos]
+        yj = y[j]
+        for p from f.up[j] to dpos {
+            y[f.ui[p]] -= f.ux[p] * yj
+        }
+    }
+    x = zeros(n)
+    for k to n {
+        x[f.q[k]] = y[k]
+    }
+    return x
+}
+
+#| The number of stored entries of L and U (the diagonal counted once).
+def lu_nnz(f: SpLU) -> Int {
+    return len(f.li) + len(f.ui) - f.n
+}
+
+#| The natural order 0, 1, ..., n - 1.
+def natural_order(n: Int) -> [Int] {
+    q = int_zeros(n)
+    for k to n {
+        q[k] = k
+    }
+    return q
+}
+
+#| The compressed sparse column arrays of a dense matrix, zeros dropped.
+def csc_from_dense(M: Arr) {
+    n: Int = int(shape(M)[0])
+    m: Int = int(shape(M)[1])
+    colptr = int_zeros(m + 1)
+    rowind: [Int] = []
+    vals = []
+    for j to m {
+        colptr[j] = len(rowind)
+        for i to n {
+            if M[i, j] != 0.0 {
+                rowind = append(rowind, i)
+                vals = append(vals, M[i, j])
+            }
+        }
+    }
+    colptr[m] = len(rowind)
+    return colptr, rowind, vals
+}
+
+test "splu solves a nonsymmetric system that needs row pivoting" {
+    A = [[0.0, 2.0, 0.0, 1.0], [3.0, 0.0, 0.0, 0.0], [0.0, 1.0, 4.0, 0.0], [1.0, 0.0, 2.0, 5.0]]
+    colptr, rowind, vals = csc_from_dense(A)
+    n: Int = 4
+    for tol in [1.0, 0.001] {
+        f = splu(n, colptr, rowind, vals, mindeg_order(n, colptr, rowind), tol)
+        b = [1.0, 2.0, 3.0, 4.0]
+        x = lu_solve(f, b)
+        assert_allclose(A @ x, b, 1e-14)
+    }
+}
+
+test "the minimum-degree order of an arrow matrix keeps the hub to the end" {
+    #: a hub joined to every node: eliminated first, it fills the whole matrix
+    n: Int = 6
+    A = eye(6) * 4.0
+    for i from 1 to n {
+        A[0, i] = 1.0
+        A[i, 0] = 1.0
+    }
+    colptr, rowind, vals = csc_from_dense(A)
+    q = mindeg_order(n, colptr, rowind)
+    #: when two nodes are left they tie, so the hub is one of the last two
+    assert_true(q[n - 1] == 0 or q[n - 2] == 0)
+    f = splu(n, colptr, rowind, vals, q, 0.001)
+    assert_true(lu_nnz(f) == len(rowind))
+    nat = splu(n, colptr, rowind, vals, natural_order(n), 0.001)
+    assert_true(lu_nnz(nat) == n * n)
+    b = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert_allclose(A @ lu_solve(f, b), b, 1e-14)
+}
+
+test "a grid Laplacian, whose elimination outgrows the first adjacency lists" {
+    side: Int = 8
+    n: Int = side * side
+    A = eye(n) * 4.0
+    for i to side {
+        for j to side {
+            k = i * side + j
+            if j + 1 < side {
+                A[k, k + 1] = -1.0
+                A[k + 1, k] = -1.0
+            }
+            if i + 1 < side {
+                A[k, k + side] = -1.0
+                A[k + side, k] = -1.0
+            }
+        }
+    }
+    colptr, rowind, vals = csc_from_dense(A)
+    q = mindeg_order(n, colptr, rowind)
+    f = splu(n, colptr, rowind, vals, q, 0.001)
+    b = [sin(1.0 * k) for k to n]
+    assert_allclose(A @ lu_solve(f, b), b, 1e-12)
+    #: the order beats the natural (banded) one on fill
+    assert_true(lu_nnz(f) < lu_nnz(splu(n, colptr, rowind, vals, natural_order(n), 0.001)))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

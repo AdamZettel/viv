@@ -1,0 +1,229 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: the jobs read the repository and upload artifacts, and
+# write nothing back to GitHub.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compiler:
+    name: cargo test (kit + all four languages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+  examples:
+    name: every example compiles to C, and the C runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p viv
+      # The parity claim: every program in the repo lowers to C99 that a C
+      # compiler accepts. A program that stopped compiling would otherwise only
+      # be caught by someone opening its page.
+      - name: compile every example
+        run: |
+          fail=0
+          for f in lang/viv/examples/*.viv; do
+            if ./target/release/viv "$f" -o /tmp/out.c >/dev/null 2>/tmp/err; then
+              if cc -std=c99 -O1 /tmp/out.c -lm -o /tmp/out 2>/tmp/cerr; then
+                echo "ok   $f"
+              else
+                echo "FAIL $f  generated C did not compile"; sed 's/^/     /' /tmp/cerr | head -5; fail=1
+              fi
+            else
+              echo "FAIL $f  did not lower"; sed 's/^/     /' /tmp/err | head -5; fail=1
+            fi
+          done
+          exit $fail
+      # The headline numbers, run natively. These are the values the site prints.
+      - name: the validated results
+        run: |
+          set -e
+          check() {
+            ./target/release/viv "$1" -o /tmp/p.c
+            cc -std=c99 -O2 /tmp/p.c -lm -o /tmp/p
+            out=$(/tmp/p)
+            if echo "$out" | grep -q "$2"; then
+              echo "ok   $1 -> $2"
+            else
+              echo "FAIL $1  expected $2"; echo "$out" | tail -20; exit 1
+            fi
+          }
+          # A `test` block reports under its NAME, so these check the claim
+          # the program's author actually wrote, not just "something passed".
+          check lang/viv/examples/h2_sto3g.viv  'E_total: -1.11671'
+          check lang/viv/examples/h2_sto3g.viv  'PASS H2/STO-3G total energy'
+          check lang/viv/examples/annotated.viv 'PASS self-overlap of a normalized primitive is 1'
+          check lang/viv/examples/mini_cas.viv  'PASS symbolic derivative matches finite difference'
+      # Intent coverage: no module's share of
+      # explained defs, steps or glossary terms may fall below what
+      # lens_coverage.json records, and no stale entry, dead def or `serves` of
+      # nothing may appear. `viv lens coverage --update` records a gain.
+      - name: intent coverage holds its ratchet
+        run: ./target/release/viv lens coverage --check > /dev/null
+      # The architecture lens: no new layer
+      # violation, no budget that is over its limit growing, no stage with
+      # fewer independent implementations seen agreeing than arch_ratchet.json
+      # records. `viv arch check --update` records a gain.
+      - name: the architecture lens holds its ratchet
+        run: ./target/release/viv arch check --check > /dev/null
+          # fem_poisson's validation is its CONVERGENCE RATE, which needs the
+          # program run at several mesh sizes. That sweep is
+          # lang/viv/tests/fem_poisson.rs, so `cargo test` above gates it.
+
+  dft:
+    name: plane-wave DFT reproduces its numpy references and the literature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p viv
+      # Si, Al, Ge, C and GaAs, each compiled to C and run on BOTH engines: the
+      # dense one against a numpy twin (same energy to 1e-8 Ha, same iteration
+      # count), the iterative one against that same dense reference (1e-7 Ha),
+      # and both against published LDA band energies.
+      - name: silicon, germanium, diamond, gallium arsenide, aluminum
+        run: dft/check.sh
+      # ~1400 plane waves and 128 k-points: the iterative engine only.
+      - name: copper
+        run: dft/check.sh cu
+      # The website runs COMPILED wasm modules that are committed (building them
+      # needs emscripten). Regenerate the C each claims to be compiled from and
+      # compare hashes: a module may not fall behind its program.
+      - name: the committed wasm modules are built from these sources
+        run: dft/build-wasm.sh --check
+
+  pde:
+    name: PDE solvers and posts pass their tests in both engines, with identical output
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p viv
+      # Each solver through the interpreter and through Viv -> C -> native: every
+      # test passes in each, and the two print the same thing line for line.
+      - run: pde/check.sh
+      # ... and the same for every post in the feed.
+      - run: posts/check.sh
+      # ... and for the engines (the programs /engines/<name> runs on a reader's file).
+      - run: engines/check.sh
+
+  memcheck:
+    name: every program under ASan and UBSan, memory flat in the loop length, parallel races refused, the runtime fuzzed
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p viv
+      # every program in posts, lib, pde,
+      # engines, scf, the dft checks, study/compare and the syntax probes,
+      # compiled checked and run with AddressSanitizer and
+      # UndefinedBehaviorSanitizer (zero reports is the gate); the leak probes
+      # at two loop lengths (nothing may grow); the three racing `parallel
+      # for` programs refused and a parallel pass's arrays freed under OpenMP;
+      # the C runtime fuzzed against the interpreter. `tools/memcheck/ci.sh
+      # --quick` is the same in a few minutes, for a local check.
+      - run: JOBS=4 FUZZ_SECONDS=300 tools/memcheck/ci.sh target/memcheck-ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: memcheck
+          path: target/memcheck-ci
+          retention-days: 7
+
+  compare:
+    name: the Python/Viv pairs of /compare print the same output
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # NumPy 1.24.4: lib/nprandom reproduces that version's draws
+      - run: pip install numpy==1.24.4 matplotlib
+      - run: cargo build --release -p viv
+      # the third engine (Viv -> wasm) runs against the runtime in viv.wasm
+      - run: sh ./www/build-wasm.sh
+      # viv lint; every pair's regions line up and its two programs print the
+      # same output (after the lines its notes name); the recorded outputs the
+      # site is built from are current; every Viv program in three engines
+      - run: study/compare/check.sh
+      # lib/algo: every postcondition in lib/algo/algo.spec checked on
+      # generated inputs in Viv and in Python, the results compared with Python and NumPy
+      # byte for byte, comparison counts held to the stated bounds (McIlroy's adversary
+      # included), and every generated program identical in the three engines
+      - run: python3 tools/algo/check.py --run
+
+  website:
+    name: site builds, docs match the compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The browser compiler is built from the sources next to the site, so the
+      # docs cannot describe a compiler that is not in this commit.
+      - run: sh ./www/build-wasm.sh
+      - run: npm ci --prefix www || npm install --prefix www
+      # doctest: every documented output is the compiler's real output.
+      # tourtest: every tour prefix runs clean.
+      # programtest: every program compiles; the ones that interpret, interpret.
+      - run: npm run --prefix www check
+      # every code block on the site goes through one tokenizer, which must never
+      # change the text it colors
+      - run: node www/scripts/highlighttest.mjs
+      # Ladders: every rung's tests pass, every earlier test survives, and every
+      # function a rung did not declare it edits keeps its CONTENT ADDRESS.
+      - run: node www/scripts/ladder-build.mjs
+      # PDE solvers: each one runs in the interpreter a reader's tab uses, every
+      # test passes, every formula in its prose typesets, and it draws a figure.
+      - run: node www/scripts/pde-build.mjs
+      # The feed: a post that fails a test, draws nothing, or runs too long for a
+      # reader to wait is not published.
+      - run: node www/scripts/feed-build.mjs
+      # The feed's server: the ledger invariant, and the API over a socket with
+      # posts verified by the same viv.wasm.
+      - run: npm test --prefix server
+      # The DFT flagship through BOTH browser engines, as a tab runs them -- the
+      # compiled wasm modules and the interpreter: five materials, every test
+      # passing, each inside the time a person will wait.
+      - run: npm run --prefix www dfttest
+      - run: npm run --prefix www build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: www/dist
+          retention-days: 7

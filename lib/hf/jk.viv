@@ -1,0 +1,262 @@
+###
+post: Coulomb and exchange matrices from packed integrals, three ways
+agent: claude
+
+The two-electron part of the Fock matrix is built from two contractions of
+the electron repulsion integrals `(ij|kl)` (chemist's notation) with a
+density `D`:
+
+    J_ij = sum_kl (ij|kl) D_kl        Coulomb: the field of the whole density
+    K_ik = sum_jl (ij|kl) D_jl        exchange: the same integrals, indices crossed
+
+A closed shell uses `F = H + J - K/2` with the total density; UHF uses
+`F_s = H + J(Da) + J(Db) - K(D_s)` for each spin.
+
+The integrals are stored once per 8-fold symmetry class (`lib/hf/eri_store`),
+so for `n = 19` there are 18,145 values instead of 130,321. The members:
+
+- `jk_packed` (member 0, production): one pass over the packed vector. Each
+  stored value stands for up to 8 index orders; it is scaled by 1/2 for each
+  coincidence (`i = j`, `k = l`, `ij = kl`), which leaves exactly one unit of
+  weight per distinct order, and then added in all 8 orders. That touches
+  each stored value once and needs no branch per order.
+- `jk_pairs`: the integrals as an `npair x npair` matrix. `J` is a
+  matrix-vector product over pairs; `K` reads the matrix through a table of
+  pair indices, one term per `(i, j, k, l)`.
+- `jk_dense`: unpack to the full `[n, n, n, n]` tensor and apply the
+  definitions above literally. It costs `n^4` memory and time and exists to
+  be obviously right.
+
+Member signature, frozen:
+`(X1, X2, X3, D, opts) -> [2 ndens, n, n]`, where `X1` is the packed vector
+for these in-core members (`X2`, `X3` and `opts` are not read), `D` is
+`[ndens, n, n]` and the result holds `J(D_0), K(D_0), J(D_1), K(D_1)`. A
+direct member, which computes integrals on the fly, would take the atoms,
+shells and prims packs in `X1..X3` instead; that is why the signature has
+three slots.
+
+None of the members assumes `D` is symmetric.
+
+`jk_of(Gp, D, opts)` runs the member `opts[OPT_JK]` names: these three, or
+the direct member `int_jk_direct` (lib/hf/jk_direct), which reads a basis
+blob in `Gp` instead of packed integrals. It calls each by name, the
+production member `jk_packed` when the option is left at its default, so the
+SCF reaches J and K without a registry. `jk_methods()` lists the three
+in-core members for the tests and sweeps that run them side by side;
+`int_jk_methods()` (lib/hf/integrals) adds the direct one.
+
+Used with `import hf.jk`.
+###
+
+from hf.opts import opt_array, OPT_JK, scf_defaults, ScfOptions
+from hf.eri_store import es_pair, es_unpack8
+from hf.density import den_energy, den_fock, den_stack1, den_stack2
+from hf.jk_direct import INT_JK_DIRECT, int_jk_direct, INT_JK_DIRECT_FULL, int_jk_direct_full
+
+# the members (ScfOptions.jk); INT_JK_DIRECT and INT_JK_DIRECT_FULL
+# (lib/hf/jk_direct) are the fourth and fifth
+JK_PACKED = 0
+JK_PAIRS = 1
+JK_DENSE = 2
+
+#| Member `JK_PACKED`, the production one: one pass over the packed vector.
+def jk_packed(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    sh = shape(D)
+    nd = sh[0]
+    n = sh[1]
+    R = zeros(2 * nd, n, n)
+    for d to nd {
+        #: halve once per equal index pair, so the eight orders count each integral once
+        Dd = slab(D, d)
+        Ds = Dd + transpose(Dd)
+        J = zeros(n, n)
+        K = zeros(n, n)
+        p = 0
+        for i to n {
+            for j to i + 1 {
+                for k to i + 1 {
+                    lmax = k + 1
+                    if k == i {
+                        lmax = j + 1
+                    }
+                    for l to lmax {
+                        g = X1[p]
+                        p = p + 1
+                        if i == j {
+                            g = 0.5 * g
+                        }
+                        if k == l {
+                            g = 0.5 * g
+                        }
+                        if i == k and j == l {
+                            g = 0.5 * g
+                        }
+                        dkl = g * Ds[k, l]
+                        dij = g * Ds[i, j]
+                        J[i, j] = J[i, j] + dkl
+                        J[j, i] = J[j, i] + dkl
+                        J[k, l] = J[k, l] + dij
+                        J[l, k] = J[l, k] + dij
+                        K[i, k] = K[i, k] + g * Dd[j, l]
+                        K[j, k] = K[j, k] + g * Dd[i, l]
+                        K[i, l] = K[i, l] + g * Dd[j, k]
+                        K[j, l] = K[j, l] + g * Dd[i, k]
+                        K[k, i] = K[k, i] + g * Dd[l, j]
+                        K[l, i] = K[l, i] + g * Dd[k, j]
+                        K[k, j] = K[k, j] + g * Dd[l, i]
+                        K[l, j] = K[l, j] + g * Dd[k, i]
+                    }
+                }
+            }
+        }
+        setslab(R, 2 * d, J)
+        setslab(R, 2 * d + 1, K)
+    }
+    return R
+}
+
+#| Member `JK_PAIRS`: the integrals as a pair matrix.
+def jk_pairs(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    sh = shape(D)
+    nd = sh[0]
+    n = sh[1]
+    np = n * (n + 1) / 2
+    P = zeros(n, n)
+    for i to n {
+        for j to n {
+            P[i, j] = es_pair(i, j)
+        }
+    }
+    G = zeros(np, np)
+    for a to np {
+        for b to a + 1 {
+            v = X1[a * (a + 1) / 2 + b]
+            G[a, b] = v
+            G[b, a] = v
+        }
+    }
+    R = zeros(2 * nd, n, n)
+    dv = zeros(np)
+    for d to nd {
+        # the density folded onto pairs: D_kl + D_lk off the diagonal
+        for k to n {
+            for l to k + 1 {
+                if k == l {
+                    dv[P[k, l]] = D[d, k, k]
+                }
+                else {
+                    dv[P[k, l]] = D[d, k, l] + D[d, l, k]
+                }
+            }
+        }
+        Jv = G @ dv
+        for i to n {
+            for j to n {
+                R[2 * d, i, j] = Jv[P[i, j]]
+            }
+        }
+        #: K[i, k] = sum_jl (ij|kl) D[j, l]
+        for i to n {
+            for k to n {
+                s = 0.0
+                for j to n {
+                    a = P[i, j]
+                    for l to n {
+                        s = s + G[a, P[k, l]] * D[d, j, l]
+                    }
+                }
+                R[2 * d + 1, i, k] = s
+            }
+        }
+    }
+    return R
+}
+
+#| Member `JK_DENSE`: the dense tensor and the definitions as written.
+def jk_dense(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    sh = shape(D)
+    nd = sh[0]
+    n = sh[1]
+    G = es_unpack8(X1, n)
+    R = zeros(2 * nd, n, n)
+    for d to nd {
+        Dd = slab(D, d)
+        for i to n {
+            for j to n {
+                R[2 * d, i, j] = sum(G[i, j, :, :] * Dd)
+                R[2 * d + 1, i, j] = sum(G[i, :, j, :] * Dd)
+            }
+        }
+    }
+    return R
+}
+
+#| The J/K registry, production member first.
+def jk_methods() {
+    return [jk_packed, jk_pairs, jk_dense]
+}
+
+#| J and K of the densities `D[ndens, n, n]`, `[2 ndens, n, n]`, by the member
+#| `opts[OPT_JK]` names: `jk_packed` (the production member), `jk_pairs`,
+#| `jk_dense`, or `int_jk_direct`, which reads the basis blob in `Gp`.
+def jk_of(Gp: Arr, D: Arr, opts: Arr) -> Arr {
+    k = round(opts[OPT_JK])
+    if k == JK_PAIRS {
+        return jk_pairs(Gp, Gp, Gp, D, opts)
+    }
+    if k == JK_DENSE {
+        return jk_dense(Gp, Gp, Gp, D, opts)
+    }
+    if k == INT_JK_DIRECT {
+        return int_jk_direct(Gp, Gp, Gp, D, opts)
+    }
+    if k == INT_JK_DIRECT_FULL {
+        return int_jk_direct_full(Gp, Gp, Gp, D, opts)
+    }
+    return jk_packed(Gp, Gp, Gp, D, opts)
+}
+
+#| J and K of the densities `D` from those of the densities `Dlast` they
+#| were last built from: `JKlast + JK(D - Dlast)`. J and K are linear in the
+#| density, so this is the whole build up to rounding and to what screening
+#| drops, and the direct member's density screening (lib/hf/md_direct)
+#| skips most quartets of a small change. The incremental Fock build of the
+#| SCF loop (lib/hf/scf_loop) calls it by name; PySCF's direct SCF builds its
+#| potential from `dm - dm_last` the same way (`get_veff`).
+def jk_update(Gp: Arr, D: Arr, Dlast: Arr, JKlast: Arr, opts: Arr) -> Arr {
+    return JKlast + jk_of(Gp, D - Dlast, opts)
+}
+
+#| J and K of the densities `D` from the whole density, the last build
+#| unused: what `jk_update` is held to.
+def jk_rebuild(Gp: Arr, D: Arr, Dlast: Arr, JKlast: Arr, opts: Arr) -> Arr {
+    return jk_of(Gp, D, opts)
+}
+
+#| The ways to build the next J and K, the incremental one first.
+def jk_build_methods() {
+    return [jk_update, jk_rebuild]
+}
+
+#| The options array with J/K member `k` and the defaults.
+def jk_t_opts(k) {
+    return opt_array(ScfOptions { jk: k, ..scf_defaults() }, 0, 0, 0.0)
+}
+
+#| The RHF energy of a reference total density, with J/K from member k:
+#| E_nuc + (1/2) Tr D (2H + J - K/2).
+def jk_rhf_energy(Gp: Arr, H: Arr, D2: Arr, enuc, k) {
+    D = den_stack1(D2)
+    JK = jk_of(Gp, D, jk_t_opts(k))
+    return den_energy(H, den_fock(H, JK, 1), D, 1, enuc)
+}
+
+#| The UHF energy of reference spin densities, with J/K from member k.
+def jk_uhf_energy(Gp: Arr, H: Arr, Da: Arr, Db: Arr, enuc, k) {
+    D = den_stack2(Da, Db)
+    JK = jk_of(Gp, D, jk_t_opts(k))
+    return den_energy(H, den_fock(H, JK, 2), D, 2, enuc)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

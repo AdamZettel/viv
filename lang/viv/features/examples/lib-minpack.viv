@@ -1,0 +1,30 @@
+# lib/minpack: MINPACK's lmder1 (Levenberg-Marquardt), here on Rosenbrock's
+# residuals f = (10 (x1 - x0^2), 1 - x0), whose least-squares minimum is (1, 1).
+from minpack.lmder import H_X, lmder1
+
+def rosen(data: Arr, x: Arr, fvec: Arr, fjac: Arr, iflag) {
+    if iflag == 1 {
+        fvec[0] = 10.0 * (x[1] - x[0] * x[0])
+        fvec[1] = 1.0 - x[0]
+    }
+    if iflag == 2 {
+        fjac[0, 0] = -20.0 * x[0]
+        fjac[0, 1] = 10.0
+        fjac[1, 0] = -1.0
+        fjac[1, 1] = 0.0
+    }
+    return iflag
+}
+
+x = [-1.2, 1.0]
+fvec = zeros(2)
+fjac = zeros(2, 2)
+counts = zeros(2)
+info = lmder1(rosen, [0.0], x, fvec, fjac, 1.0e-10, zeros(2), counts, zeros(1, H_X + 2))
+show info, x, counts
+test "lmder1 reaches (1, 1)" {
+    assert_allclose(x, [1.0, 1.0], 1.0e-10)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

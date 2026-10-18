@@ -1,0 +1,271 @@
+#! pde The Euler equations of gas dynamics
+#! equation \partial_t \begin{pmatrix} \rho \\ \rho u \\ E \end{pmatrix} + \partial_x \begin{pmatrix} \rho u \\ \rho u^2 + p \\ (E + p)\,u \end{pmatrix} = 0
+#! kind hyperbolic
+#! method finite volumes with the HLL approximate Riemann flux, first order; the exact solution is computed alongside
+#! checks Sod's shock tube: the exact solution against the jump conditions, then the computed plateau, shock position, conservation and L1 convergence against it
+#! | Mass, momentum and energy of a compressible gas, with $p = (\gamma - 1)(E - \tfrac12\rho u^2)$.
+#! | Sod's problem is a membrane at $x = \tfrac12$ with dense, high-pressure gas on the left; at $t = 0$
+#! | it bursts. Three waves come out: a rarefaction fan moving left, a contact discontinuity
+#! | (density jumps, pressure and velocity do not) and a shock, both moving right.
+#! |
+#! | Finite volumes store cell *averages* and move them by the fluxes through the cell walls, so
+#! | whatever leaves one cell enters the next and the totals are conserved to rounding -- which is
+#! | what puts shocks at the right speed. The flux at a wall is a Riemann problem between the two
+#! | neighbors. HLL does not solve it; it keeps only the fastest left- and right-going signal speeds
+#! | $s_L, s_R$ and the one averaged state between them, which gives
+#! | $F = (s_R^+ F_L - s_L^- F_R + s_L^- s_R^+ (q_R - q_L)) / (s_R^+ - s_L^-)$, with $s^+ = \max(s, 0)$, $s^- = \min(s, 0)$.
+#! |
+#! | The exact solution needs one number, the pressure $p^*$ between the waves, which solves
+#! | $f_L(p) + f_R(p) + u_R - u_L = 0$; $f$ is a shock branch or a rarefaction branch depending on
+#! | the side of $p_K$ that $p$ falls. It is monotone, so bisection finds it. Everything else follows
+#! | in closed form. The jump conditions across the shock are tested directly from the
+#! | conservation laws, so the exact solution is not taken on trust either.
+#! |
+#! | A first-order scheme smears the contact over many cells (like $\sqrt{t}$) and the shock over
+#! | a few, so in the L1 norm it converges at an order below one. That is measured, not hidden.
+
+G = 1.4                 #: G  ratio of specific heats, gamma
+RHO_L = 1.0
+P_L = 1.0
+RHO_R = 0.125
+P_R = 0.1
+T_END = 0.2
+X_MEMBRANE = 0.5
+NVAR = 3.0              #: NVAR  conserved variables per cell: rho, rho u, E
+STAR_BISECTIONS = 80.0  #: STAR_BISECTIONS  halvings of the bracket around the star pressure
+
+#| One side's term in the pressure equation: a shock if p is above that side's pressure, a rarefaction if below.
+def pressure_term(p, rho_k, p_k) {
+    a_k = sqrt(G * p_k / rho_k)
+    if p > p_k {
+        return (p - p_k) * sqrt((2.0 / ((G + 1.0) * rho_k)) / (p + (G - 1.0) / (G + 1.0) * p_k))
+    }
+    return 2.0 * a_k / (G - 1.0) * (pow(p / p_k, (G - 1.0) / (2.0 * G)) - 1.0)
+}
+
+#| The pressure between the waves, by bisection. Both gases start at rest.
+def star_pressure() {
+    lo = 1.0e-9
+    hi = P_L
+    for it to STAR_BISECTIONS {
+        mid = 0.5 * (lo + hi)
+        if pressure_term(mid, RHO_L, P_L) + pressure_term(mid, RHO_R, P_R) > 0.0 {
+            hi = mid
+        }
+        else {
+            lo = mid
+        }
+    }
+    return 0.5 * (lo + hi)
+}
+
+P_STAR = star_pressure()
+U_STAR = 0.5 * (pressure_term(P_STAR, RHO_R, P_R) - pressure_term(P_STAR, RHO_L, P_L))
+A_L = sqrt(G * P_L / RHO_L)
+A_R = sqrt(G * P_R / RHO_R)
+RHO_STAR_L = RHO_L * pow(P_STAR / P_L, 1.0 / G)                  # isentropic, through the fan
+GM = (G - 1.0) / (G + 1.0)
+RHO_STAR_R = RHO_R * (P_STAR / P_R + GM) / (GM * P_STAR / P_R + 1.0)      # across the shock
+SHOCK_SPEED = A_R * sqrt((G + 1.0) / (2.0 * G) * P_STAR / P_R + (G - 1.0) / (2.0 * G))
+TAIL_SPEED = U_STAR - A_L * pow(P_STAR / P_L, (G - 1.0) / (2.0 * G))
+show P_STAR
+show U_STAR
+show RHO_STAR_L
+show RHO_STAR_R
+show SHOCK_SPEED
+
+#| The exact density at the points x, at time t: left state, fan, two plateaus, right state.
+def exact_density(x, t) {
+    n = len(x)
+    rho = zeros(n)
+    for i to n {
+        xi = (x[i] - X_MEMBRANE) / t
+        if xi < -A_L {
+            rho[i] = RHO_L
+        }
+        else if xi < TAIL_SPEED {
+            rho[i] = RHO_L * pow(2.0 / (G + 1.0) - GM * xi / A_L, 2.0 / (G - 1.0))
+        }
+        else if xi < U_STAR {
+            rho[i] = RHO_STAR_L
+        }
+        else if xi < SHOCK_SPEED {
+            rho[i] = RHO_STAR_R
+        }
+        else {
+            rho[i] = RHO_R
+        }
+    }
+    return rho
+}
+
+#| Pressure from the conserved variables, a 3 x m array of (rho, rho u, E).
+def pressure(q) {
+    mom = slab(q, 1.0)
+    return (G - 1.0) * (slab(q, 2.0) - 0.5 * mom * mom / slab(q, 0.0))
+}
+
+#| The physical flux of each cell's state.
+def physical_flux(q) {
+    rho = slab(q, 0.0)
+    mom = slab(q, 1.0)
+    p = pressure(q)
+    u = mom / rho
+    f = zeros(NVAR, len(rho))
+    setslab(f, 0.0, mom)
+    setslab(f, 1.0, mom * u + p)
+    setslab(f, 2.0, (slab(q, 2.0) + p) * u)
+    return f
+}
+
+#| The HLL flux through every cell's RIGHT wall (column i: between cells i and i + 1).
+def hll_flux(q) {
+    rho = slab(q, 0.0)
+    u = slab(q, 1.0) / rho
+    a = sqrt(G * pressure(q) / rho)
+    s_left = min(min(u - a, roll(u - a, -1.0)), 0.0)
+    s_right = max(max(u + a, roll(u + a, -1.0)), 0.0)
+    f = physical_flux(q)
+    f_next = roll(f, -1.0, 1.0)
+    q_next = roll(q, -1.0, 1.0)
+    out = zeros(NVAR, len(rho))
+    for k to NVAR {
+        fl = slab(f, k)
+        fr = slab(f_next, k)
+        dq = slab(q_next, k) - slab(q, k)
+        setslab(out, k, (s_right * fl - s_left * fr + s_left * s_right * dq) / (s_right - s_left))
+    }
+    return out
+}
+
+#| Sod's initial state on n cells plus one ghost cell at each end.
+def initial_state(n) {
+    dx = 1.0 / n
+    q = zeros(NVAR, n + 2.0)
+    for i to n + 2.0 {
+        x = (i - 0.5) * dx
+        if x < X_MEMBRANE {
+            q[0, i] = RHO_L
+            q[2, i] = P_L / (G - 1.0)
+        }
+        else {
+            q[0, i] = RHO_R
+            q[2, i] = P_R / (G - 1.0)
+        }
+    }
+    return q
+}
+
+#| March n cells to T_END at a Courant number of 0.9. The ghost cells copy their neighbors.
+def solve_sod(n) {
+    dx = 1.0 / n
+    q = initial_state(n)
+    t = 0.0
+    while t < T_END {
+        rho = slab(q, 0.0)
+        speed = max(abs(slab(q, 1.0) / rho) + sqrt(G * pressure(q) / rho))
+        dt = min(0.9 * dx / speed, T_END - t)
+        f = hll_flux(q)
+        q = q - (dt / dx) * (f - roll(f, 1.0, 1.0))
+        for k to NVAR {
+            q[k, 0] = q[k, 1]
+            q[k, n + 1.0] = q[k, n]
+        }
+        t = t + dt
+    }
+    return q
+}
+
+#| Cell centers, ghosts included.
+def centers(n) {
+    dx = 1.0 / n
+    return linspace(-0.5 * dx, 1.0 + 0.5 * dx, n + 2.0)
+}
+
+#| L1 error of the density over the interior cells.
+def density_error(n) {
+    d = abs(slab(solve_sod(n), 0.0) - exact_density(centers(n), T_END))
+    return (sum(d) - d[0] - d[n + 1.0]) / n
+}
+
+N = 400
+X = centers(N)
+Q = solve_sod(N)
+RHO = slab(Q, 0.0)
+VEL = slab(Q, 1.0) / RHO
+PRS = pressure(Q)
+
+# conservation: nothing has reached the walls, so interior mass and energy cannot have changed
+mass = (sum(RHO) - RHO[0] - RHO[N + 1.0]) / N
+energy = (sum(slab(Q, 2.0)) - Q[2, 0] - Q[2, N + 1.0]) / N
+mass_0 = 0.5 * (RHO_L + RHO_R)
+energy_0 = 0.5 * (P_L + P_R) / (G - 1.0)
+momentum = (sum(slab(Q, 1.0)) - Q[1, 0] - Q[1, N + 1.0]) / N
+show mass
+show energy
+show momentum
+
+# the plateau between contact and shock, sampled at its middle
+x_contact = X_MEMBRANE + U_STAR * T_END
+x_shock = X_MEMBRANE + SHOCK_SPEED * T_END
+i_mid = round(0.5 * (x_contact + x_shock) * N + 0.5)
+plateau_u = VEL[i_mid]
+plateau_p = PRS[i_mid]
+show plateau_u
+show plateau_p
+
+# the computed shock: where the density crosses halfway between the two states it separates
+found_shock = 0.0
+for i to N {
+    half = 0.5 * (RHO_STAR_R + RHO_R)
+    if RHO[i] >= half and RHO[i + 1.0] < half {
+        found_shock = X[i] + (X[i + 1.0] - X[i]) * (RHO[i] - half) / (RHO[i] - RHO[i + 1.0])
+    }
+}
+show x_shock
+show found_shock
+
+err_200 = density_error(200.0)
+err_400 = density_error(400.0)
+l1_order = log(err_200 / err_400) / log(2.0)
+show err_200
+show err_400
+show l1_order
+
+figure("Sod's shock tube at t = 0.2: fan, contact, shock", "x", "density")
+plot(X, exact_density(X, T_END), "exact")
+plot(X, RHO, "HLL, 400 cells")
+style("exact", "dash")
+
+test "the exact shock obeys the jump conditions: mass and momentum through it balance" {
+    mass_in = RHO_R * (0.0 - SHOCK_SPEED)
+    mass_out = RHO_STAR_R * (U_STAR - SHOCK_SPEED)
+    assert_near(mass_in, mass_out, 1.0e-12)
+    assert_near(mass_out * U_STAR + P_STAR, P_R, 1.0e-12)
+}
+test "and energy: (E + p)(u - S) + p S balances across it" {
+    e_star = P_STAR / (G - 1.0) + 0.5 * RHO_STAR_R * U_STAR * U_STAR
+    e_right = P_R / (G - 1.0)
+    assert_near(e_star * (U_STAR - SHOCK_SPEED) + P_STAR * U_STAR, e_right * (0.0 - SHOCK_SPEED), 1.0e-12)
+}
+test "mass and energy are conserved to rounding" {
+    assert_near(mass, mass_0, 1.0e-13)
+    assert_near(energy, energy_0, 1.0e-13)
+}
+test "momentum grows by exactly the pressure difference times the time" {
+    assert_near(momentum, (P_L - P_R) * T_END, 1.0e-13)
+}
+test "between contact and shock the computed velocity and pressure sit on the exact plateau" {
+    assert_near(plateau_u, U_STAR, 0.005)
+    assert_near(plateau_p, P_STAR, 0.002)
+}
+test "the shock is where the exact solution puts it, to within a cell" {
+    assert_near(found_shock, x_shock, 1.0 / N)
+}
+test "the density converges in L1, at an order below one: the contact smears like sqrt(t)" {
+    assert_gt(l1_order, 0.5)
+    assert_lt(l1_order, 1.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,31 @@
+#! timing
+# PolyBench/C 4.2.1 covariance: the sample covariance matrix of M variables
+# observed N times.
+# Reference: upstream/polybench-c-4.2.1/datamining/covariance/covariance.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+M = 28
+N = 32
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    return [[(i * j) / M for j to M] for i to N]
+}
+
+def kernel(data, float_n) {
+    D = data - sum(data, axis=0) / float_n
+    return (transpose(D) @ D) / (float_n - 1.0)
+}
+
+data = init()
+t0 = clock()
+cov = kernel(data, N)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("cov", cov)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

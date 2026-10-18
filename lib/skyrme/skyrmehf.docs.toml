@@ -1,0 +1,255 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference text of vp.nuclear.skyrme_hf (viv-lang.org/vipyr and
+# help()), read by python/vipyr/_spec.py. skyrmehf.export.toml declares the
+# parameters and results; this file adds the prose. Each example runs when
+# `python -m vipyr.docs` writes the pages.
+
+summary = "The Skyrme-Hartree-Fock ground state of a spherical closed-shell nucleus: binding energy, radii, single-particle levels and densities, with the forces SLy4, SLy5, SIII or SkM*."
+
+description = '''
+Give it a nucleus whose protons and neutrons both fill whole shells, such as
+`"16O"`, `"40Ca"`, `"48Ca"`, `"56Ni"`, `"90Zr"`, `"132Sn"` or `"208Pb"`, and a
+Skyrme force. It returns the self-consistent mean-field ground state: the
+total energy and the energy per nucleon, the proton, neutron and charge
+radii, the energy of every occupied orbital with its name (`"n 3p1/2"`), the
+other bound orbitals of the final mean field, and the densities on the
+radial mesh.
+
+This is the textbook calculation of nuclear structure (Vautherin and Brink,
+1972): each nucleon moves in a field made by all the others, and the
+equations are solved until the field and the orbitals agree. Lead-208 takes
+about 0.09 s on 186 mesh points.
+
+It does not do open-shell nuclei. A nucleus whose last orbital would be
+partly filled, such as calcium-44, is refused with the name of that orbital:
+treating it needs pairing (BCS or Hartree-Fock-Bogoliubov), which this
+solver does not have.
+'''
+
+notes = '''
+### The energy functional
+
+The energy is the integral of a local density
+$E = \int \mathcal{H}(\mathbf r)\, d^3 r$ built from three densities of each
+kind of nucleon $q \in \{n, p\}$: the number density $\rho_q$, the
+kinetic-energy density $\tau_q$ and the spin-orbit density $J_q$. Without a
+subscript, $\rho = \rho_n + \rho_p$ and likewise for $\tau$ and $J$:
+
+$$
+\begin{aligned}
+\mathcal H ={}& \frac{\hbar^2}{2m}\Big(1 - \frac1A\Big)\tau
+ + \frac{t_0}{2}\Big[\Big(1 + \frac{x_0}{2}\Big)\rho^2 - \Big(x_0 + \frac12\Big)\sum_q \rho_q^2\Big] \\
+&+ \frac{t_1}{4}\Big[\Big(1 + \frac{x_1}{2}\Big)\Big(\rho\tau + \frac34 (\nabla\rho)^2\Big) - \Big(x_1 + \frac12\Big)\sum_q\Big(\rho_q\tau_q + \frac34 (\nabla\rho_q)^2\Big)\Big] \\
+&+ \frac{t_2}{4}\Big[\Big(1 + \frac{x_2}{2}\Big)\Big(\rho\tau - \frac14 (\nabla\rho)^2\Big) + \Big(x_2 + \frac12\Big)\sum_q\Big(\rho_q\tau_q - \frac14 (\nabla\rho_q)^2\Big)\Big] \\
+&+ \frac{t_3}{12}\rho^\alpha\Big[\Big(1 + \frac{x_3}{2}\Big)\rho^2 - \Big(x_3 + \frac12\Big)\sum_q \rho_q^2\Big]
+ + \frac{W_0}{2}\Big(J\,\nabla\rho + \sum_q J_q\,\nabla\rho_q\Big) \\
+&+ \frac{t_1 - t_2}{16}\sum_q J_q^2 - \frac{t_1 x_1 + t_2 x_2}{16} J^2
+ + \frac{e^2}{2}\rho_p(\mathbf r)\int\frac{\rho_p(\mathbf r')}{|\mathbf r - \mathbf r'|}d^3r'
+ - \frac34 e^2\Big(\frac3\pi\Big)^{1/3}\rho_p^{4/3}.
+\end{aligned}
+$$
+
+The two $J^2$ terms are kept for SLy5 and SIII and dropped for SLy4 and SkM*,
+as each force was fitted (the `j2` parameter). The last two terms are the
+direct Coulomb energy and its exchange in the Slater approximation. The
+factor $1 - 1/A$ is the one-body center-of-mass correction, which all four
+forces use; it multiplies $\hbar^2/2m$ in the energy and in the equations
+below.
+
+### The Hartree-Fock equations
+
+For a spherical nucleus each orbital is $R_{nlj}(r)$ times a spinor
+spherical harmonic, and making $E$ stationary under changes of the orbitals
+gives, for $u = rR$,
+
+$$
+-\big(B_q u'\big)' + \Big[B_q\frac{l(l+1)}{r^2} + \frac{B_q'}{r} + U_q + \delta_{qp} V_C
+ + \langle\boldsymbol\sigma\cdot\mathbf l\rangle \frac{W_q}{r}\Big] u = \varepsilon\, u,
+\qquad \langle\boldsymbol\sigma\cdot\mathbf l\rangle = j(j+1) - l(l+1) - \tfrac34,
+$$
+
+with the effective mass $B_q = \hbar^2/2m^*_q$, the central field $U_q$, the
+spin-orbit field $W_q$ and the Coulomb field $V_C$:
+
+$$
+\begin{aligned}
+B_q ={}& \frac{\hbar^2}{2m}\Big(1 - \frac1A\Big) + \frac18\big[t_1(2 + x_1) + t_2(2 + x_2)\big]\rho
+ + \frac18\big[t_2(1 + 2x_2) - t_1(1 + 2x_1)\big]\rho_q, \\
+U_q ={}& t_0\Big[\Big(1 + \frac{x_0}{2}\Big)\rho - \Big(x_0 + \frac12\Big)\rho_q\Big]
+ + \frac{t_1}{4}\Big[\Big(1 + \frac{x_1}{2}\Big)\Big(\tau - \frac32\Delta\rho\Big) - \Big(x_1 + \frac12\Big)\Big(\tau_q - \frac32\Delta\rho_q\Big)\Big] \\
+&+ \frac{t_2}{4}\Big[\Big(1 + \frac{x_2}{2}\Big)\Big(\tau + \frac12\Delta\rho\Big) + \Big(x_2 + \frac12\Big)\Big(\tau_q + \frac12\Delta\rho_q\Big)\Big] \\
+&+ \frac{t_3}{12}\Big[\Big(1 + \frac{x_3}{2}\Big)(2 + \alpha)\rho^{\alpha + 1}
+ - \Big(x_3 + \frac12\Big)\big(2\rho^\alpha\rho_q + \alpha\rho^{\alpha - 1}(\rho_n^2 + \rho_p^2)\big)\Big]
+ - \frac{W_0}{2}\nabla\cdot(J + J_q), \\
+W_q ={}& \frac{W_0}{2}\big(\rho' + \rho_q'\big) + \frac{t_1 - t_2}{8}J_q - \frac{t_1x_1 + t_2x_2}{8}J
+ \quad(\text{the } J \text{ terms only with } j2), \\
+V_C ={}& e^2\int\frac{\rho_p(\mathbf r')}{|\mathbf r - \mathbf r'|}d^3r' - e^2\Big(\frac3\pi\Big)^{1/3}\rho_p^{1/3}.
+\end{aligned}
+$$
+
+The occupied orbitals make the densities,
+$\rho_q = \sum \frac{2j + 1}{4\pi}R^2$,
+$\tau_q = \sum \frac{2j + 1}{4\pi}\big[R'^2 + \frac{l(l + 1)}{r^2}R^2\big]$ and
+$J_q = \sum \frac{2j + 1}{4\pi}\langle\boldsymbol\sigma\cdot\mathbf l\rangle\frac{R^2}{r}$,
+the sums running over the occupied $(n, l, j)$ of kind $q$.
+
+### Discretization
+
+The mesh is $r_i = (i + 1)h$ for $i < \mathrm{round}(\text{box}/h)$, with
+$u = 0$ at the origin and one step past the last point. The kinetic term is
+written in conservative form with $B_q$ at the midpoints (past the last point
+it is the free value), so each $(l, j)$ block is a symmetric tridiagonal
+matrix. Derivatives of the densities and fields are centered differences
+inside and second-order one-sided differences at the ends; integrals are the
+trapezoid rule; the direct Coulomb potential sums the charge inside and
+outside each mesh point.
+
+Everything is second order in $h$. Halving the spacing from 0.1 fm to 0.05
+fm raises E/A by 0.014 to 0.019 MeV across the seven nuclei and four forces.
+For lead-208 with SLy4 the changes from 0.1 to 0.05 fm and from 0.05 to 0.025
+fm are in the ratio 4.005, and the Richardson value $(4E(h/2) - E(h))/3$
+from either pair agrees to $7 \times 10^{-6}$ MeV per nucleon. Run two
+spacings and extrapolate when the third decimal of E/A matters.
+
+The default box is 15 fm, or $1.2A^{1/3} + 11.5$ fm when that is wider
+(18.6 fm for lead-208). Widening it to 30 fm changes E/A by less than
+$2 \times 10^{-7}$ MeV for calcium-48, tin-132 and lead-208. Orbitals within
+about 1 MeV of zero in the spectrum feel the box more than that.
+
+### Solving
+
+The iteration starts from Woods-Saxon densities (radius $1.2A^{1/3}$ fm,
+diffuseness 0.6 fm) and $\tau = J = 0$. Each pass computes the fields from
+the densities, builds the matrix of every block with $l \le 7$, finds the
+occupied orbitals, builds new densities and mixes them with the old ones
+(Pulay's mixing by default, below). It stops when the energy changes by
+less than `e_tol` between passes (after at least four). With the defaults
+the seven nuclei above take 22 to 32 passes with each of the four forces
+(37 to 66 with `mixing="linear"`).
+
+The loop is lib/scf/loop.viv, with this mesh as its basis, and the mixing
+is the contract `mix_densities` of lib/scf/mix.viv. `mixing="pulay"` (Pulay's
+mixing, the default) and `mixing="broyden"` (Johnson's modified Broyden)
+combine the last `history` passes; `history` applies to those two only.
+`mixing="linear"` keeps a fraction `mix` of the new densities. For calcium-40 with SLy4 at
+`e_tol=1e-10` linear mixing takes 40 passes, Pulay 32 and Broyden 24
+(gallery/science/plot_scf_mixers.py). Stopped there, the three differ in
+$r_{ch}$ by up to $2 \times 10^{-9}$ fm, because the energy settles before
+the densities do; at `e_tol=1e-13` they agree to $2 \times 10^{-13}$ fm and
+$2 \times 10^{-14}$ MeV in E/A. At the defaults (`e_tol=1e-9`), oxygen-16
+with SLy5 by Pulay's mixing is within $7 \times 10^{-11}$ MeV in E/A and
+$1 \times 10^{-12}$ fm in $r_{ch}$ of the run to `e_tol=1e-13`; by linear
+mixing, $5 \times 10^{-11}$ MeV and $1 \times 10^{-9}$ fm.
+
+The occupation is chosen by energy. In pass 1 every bound state of
+every block is found by Sturm-sequence bisection, and the $Z$ protons (and
+$N$ neutrons) go into the lowest orbitals, $2j + 1$ to each. Later passes
+refine each occupied orbital by inverse iteration from its previous vector,
+then use Sturm counts to confirm that it is still the same state of its
+block and that no empty orbital has dropped below the highest occupied one.
+When either check fails the occupation is chosen again; `refills` counts
+those passes. Calcium-40's $2s_{1/2}$, the second orbital of its block, is
+found the same way as the first.
+
+### Limits
+
+- Spherical symmetry and closed shells only: no pairing and no deformation.
+  A nucleus whose last proton or neutron orbital would be partly filled is
+  refused with the name of that orbital. A closed $j$ subshell counts as
+  closed: carbon-12 (six of each in $1s_{1/2}$ and $1p_{3/2}$) runs and
+  converges, as a spherical nucleus.
+- Bound orbitals only: a nucleus whose occupied orbitals reach zero energy
+  (past a drip line) is refused.
+- Blocks up to $l = 7$ and at most four occupied orbitals per block, which
+  covers lead-208 (its $3s_{1/2}$ protons are the third of their block).
+  `spectrum` lists bound orbitals within those bounds.
+- The charge radius folds the proton density with a Gaussian of range 0.65
+  fm, $r_{ch}^2 = r_p^2 + \tfrac32(0.65)^2$, as skyrme_rpa does; it has no
+  neutron or spin-orbit contributions to the charge density.
+- The constants are skyrme_rpa's: $\hbar c = 197.327053$ MeV fm, the
+  nucleon mass the average of 938.27231 and 939.56563 MeV, and
+  $e^2 = 1.43986$ MeV fm.
+
+### Verification
+
+- Against an independent numpy solver (the reference below, its constants
+  set to these) for all 28 pairs of nucleus and force on meshes of 0.1 and
+  0.05 fm: E/A agrees to $4 \times 10^{-14}$ MeV, the radii to
+  $9 \times 10^{-13}$ fm and the occupied levels to $2 \times 10^{-11}$ MeV,
+  in the same number of passes, both mixing linearly. That solver diagonalizes each block densely
+  and fills shells in a prescribed order, so the agreement also checks the
+  filling by energy.
+- Oxygen-16 with SLy5 and `mixing="linear"` gives the bits of the
+  oxygen-16 solver in lib/skyrme/skyrme.viv. Extrapolated to $h \to 0$ it gives E/A = −8.0250
+  MeV and $r_{ch}$ = 2.7993 fm, against −8.0261 MeV and 2.7991 fm in the
+  sample output of skyrme_rpa (Colò et al. 2013).
+- The exported library, a native build and Viv's interpreter give the same
+  result bits for every case in `skyrmehf.cases.json`.
+'''
+
+see_also = ["nuclear.shell_model"]
+
+references = [
+  { key = "VB1972", text = "D. Vautherin and D. M. Brink, Hartree-Fock calculations with Skyrme's interaction. I. Spherical nuclei, Phys. Rev. C 5, 626 (1972).", doi = "10.1103/PhysRevC.5.626" },
+  { key = "Chabanat1998", text = "E. Chabanat, P. Bonche, P. Haensel, J. Meyer and R. Schaeffer, A Skyrme parametrization from subnuclear to neutron star densities. Part II. Nuclei far from stabilities, Nucl. Phys. A 635, 231 (1998); erratum Nucl. Phys. A 643, 441 (1998). SLy4 and SLy5.", doi = "10.1016/S0375-9474(98)00180-8" },
+  { key = "Beiner1975", text = "M. Beiner, H. Flocard, Nguyen Van Giai and P. Quentin, Nuclear ground-state properties and self-consistent calculations with the Skyrme interaction. (I). Spherical description, Nucl. Phys. A 238, 29 (1975). SIII.", doi = "10.1016/0375-9474(75)90338-3" },
+  { key = "Bartel1982", text = "J. Bartel, P. Quentin, M. Brack, C. Guet and H.-B. Håkansson, Towards a better parametrisation of Skyrme-like effective forces: a critical study of the SkM force, Nucl. Phys. A 386, 79 (1982). SkM*.", doi = "10.1016/0375-9474(82)90403-1" },
+  { key = "Colo2013", text = "G. Colò, L. Cao, N. Van Giai and L. Capelli, Self-consistent RPA calculations with Skyrme-type interactions: The skyrme_rpa program, Comput. Phys. Commun. 184, 142 (2013). The constants and the charge folding used here, and the oxygen-16 check.", doi = "10.1016/j.cpc.2012.07.016" },
+]
+
+
+[[examples]]
+caption = "Calcium-40 with SLy4: the energy per nucleon, the charge radius and the occupied orbitals. Its $2s_{1/2}$ orbitals are the second state of the $(l, j) = (0, 1/2)$ block."
+code = '''
+import vipyr as vp
+
+r = vp.nuclear.skyrme_hf(nucleus="40Ca", force="SLy4")
+print(f"E/A = {r.e_per_a:.4f} MeV, r_ch = {r.r_ch:.4f} fm, {r.iterations} passes")
+for label, e in zip(r.labels.split(","), r.levels):
+    print(f"{label:9s} {e:8.3f}")
+# E/A = -8.6293 MeV, r_ch = 3.5087 fm, 27 passes
+# n 1s1/2    -48.337
+# ...
+# n 2s1/2    -17.272
+# n 1d3/2    -15.313
+# p 1s1/2    -40.323
+# ...
+# p 1d3/2     -8.359
+'''
+
+[[examples]]
+caption = "Lead-208 with the four forces, extrapolated to zero mesh spacing. The error of each run goes as $h^2$, so $(4E(h/2) - E(h))/3$ removes it. The measured values are E/A = −7.867 MeV and $r_{ch}$ = 5.501 fm."
+code = '''
+import vipyr as vp
+
+for force in ["SLy4", "SLy5", "SIII", "SkM*"]:
+    a = vp.nuclear.skyrme_hf(nucleus="208Pb", force=force, spacing=0.1)
+    b = vp.nuclear.skyrme_hf(nucleus="208Pb", force=force, spacing=0.05)
+    e = (4 * b.e_per_a - a.e_per_a) / 3
+    rch = (4 * b.r_ch - a.r_ch) / 3
+    print(f"{force:5s} E/A {e:8.4f} MeV   r_ch {rch:.4f} fm   r_n - r_p {b.r_n - b.r_p:.3f} fm")
+# SLy4  E/A  -7.8640 MeV   r_ch 5.5154 fm   r_n - r_p 0.160 fm
+# SLy5  E/A  -7.8662 MeV   r_ch 5.5073 fm   r_n - r_p 0.162 fm
+# SIII  E/A  -7.8395 MeV   r_ch 5.5813 fm   r_n - r_p 0.125 fm
+# SkM*  E/A  -7.8667 MeV   r_ch 5.5093 fm   r_n - r_p 0.169 fm
+'''
+
+[[examples]]
+caption = "The neutron orbitals of lead-208 around the gap at N = 126, occupied and empty, from `spectrum`."
+code = '''
+import vipyr as vp
+
+r = vp.nuclear.skyrme_hf(nucleus="208Pb", force="SkM*")
+for label, e, occ in zip(r.spectrum_labels.split(","), r.spectrum, r.spectrum_occ):
+    if label.startswith("n") and -12.0 < e < -2.0:
+        print(f"{label[2:]:7s} {e:8.3f} MeV  {'occupied' if occ else 'empty'}")
+# 2f7/2    -11.913 MeV  occupied
+# 1h9/2    -11.414 MeV  occupied
+# 1i13/2   -10.233 MeV  occupied
+# 3p3/2     -9.195 MeV  occupied
+# 2f5/2     -8.892 MeV  occupied
+# 3p1/2     -8.082 MeV  occupied
+# 2g9/2     -4.186 MeV  empty
+# 1j15/2    -2.332 MeV  empty
+'''

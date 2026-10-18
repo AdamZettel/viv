@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# kernels/k1/k1.export.toml -- kernel collection K1.
+#
+# The kernel-track manifest (
+# the per-kernel fields follow the earlier draft's kernels.toml, commit
+# 49037ae, section 2.1).
+#
+#     viv export kernels/k1/k1.export.toml -o DIR
+#
+# writes k1.c (one entry point per kernel, vkern_<name>), k1.h, k1.py (a
+# function per kernel), README.md, test_k1.py, and copies k1.cases.json and
+# k1.exact_hashes.json. kernels/k1/test_k1.py holds the exported module to
+# SciPy and mpmath at the tolerances below (K1_DIST=DIR), and `--record`
+# holds it to the interpreter bit for bit.
+#
+# Fields of a [kernels.<name>] table:
+#   viv        the adapter def, "file:def"; its signature is the Python one.
+#              The export checks the args against the def's parameters (names,
+#              order, annotated types) and the results against what it returns
+#   source     the library code the adapter calls, which export does not change
+#   args       in order: name, Viv type, and the checks made at the entry (min,
+#              max, min_exclusive, max_exclusive, rank, square, nonfinite);
+#              NaN and infinity are refused unless `nonfinite = true`
+#   results    in order: name and Viv type; two or more are a tuple in Python
+#   writes     parameters written in place (none in K1; not built)
+#   reference  what the result is checked against
+#   compare    how: relative error, or a residual where the answer is not unique
+#   tolerance  stated before the test is run; `why` gives the reason
+#   reasons    why the kernel belongs (design section 8.1 of 49037ae):
+#              U unique, R reproducible bits, S speed at small sizes, D documentation
+
+name = "k1"
+kind = "kernels"
+about = "Special functions, a safe norm and control-theory solvers from Viv's library, as C entry points with NumPy-style signatures"
+files = ["kernels/k1/special.viv", "kernels/k1/norms.viv", "kernels/k1/control.viv"]
+prefix = "vkern_"                  # C entry points: vkern_boys, vkern_plasma_z, ...
+abi = 1
+cases = "kernels/k1/k1.cases.json"   # the fixed cases of test_k1.py, for the exported test
+
+[kernels.boys]
+viv = "kernels/k1/special.viv:boys"
+source = "lib/hf/boys.viv:boys_values"
+args = [{ name = "n_max", type = "Int", min = 0, max = 16 }, { name = "T", type = "Num", min = 0.0 }]
+results = [{ name = "F", type = "Arr", shape = "n_max + 1" }]
+writes = []
+reference = "mpmath at 50 digits: F_n(T) = T^-(n+1/2) gammainc(n+1/2, 0, T) / 2, and F_n(0) = 1/(2n+1)"
+compare = "relative error, worst over every order"
+tolerance = { rel = 5.0e-15 }
+why = "lib/hf/boys measures 1.7e-15 against its own mpmath table on [0, 200]; 5e-15 allows for arguments off that table"
+reasons = ["U", "R"]
+
+[kernels.plasma_z]
+viv = "kernels/k1/special.viv:plasma_z"
+source = "lib/zfunc.viv:zf_z, zf_zprime"
+args = [{ name = "zeta", type = "Complex" }]
+results = [{ name = "Z", type = "Complex" }, { name = "Zp", type = "Complex" }]
+writes = []
+reference = "Z = 1j*sqrt(pi)*scipy.special.wofz(zeta); Z' = -2*(1 + zeta*Z) from that Z"
+compare = "relative error |a - b| / |b|, Z and Z' separately"
+domain = "-6 <= Re zeta <= 6, -1 <= Im zeta <= 4: the region lib/zfunc_ref.py measured"
+tolerance = { rel = 2.0e-14, rel_prime = 1.0e-12 }
+why = "w is 1e-14 relative on the domain (lib/zfunc_ref.py); Z' = -2(1 + zeta Z) cancels where Z ~ -1/zeta, which multiplies Z's error by up to 2|zeta|^2 = 104 on the domain"
+reasons = ["U", "R"]
+
+[kernels.faddeeva_w]
+viv = "kernels/k1/special.viv:faddeeva_w"
+source = "lib/zfunc.viv:zf_w"
+args = [{ name = "z", type = "Complex" }]
+results = [{ name = "w", type = "Complex" }]
+writes = []
+reference = "scipy.special.wofz"
+compare = "relative error |a - b| / |b|"
+domain = "-6 <= Re z <= 6, -1 <= Im z <= 4"
+tolerance = { rel = 2.0e-14 }
+why = "Weideman's expansion with N = 40 terms is 1e-14 relative on the domain (lib/zfunc_ref.py); wofz itself is good to a few ulps"
+reasons = ["R"]
+
+[kernels.enorm]
+viv = "kernels/k1/norms.viv:enorm"
+source = "lib/minpack/enorm.viv:enorm"
+args = [{ name = "x", type = "Arr", rank = 1 }]
+results = [{ name = "norm", type = "Num" }]
+writes = []
+reference = "mpmath at 50 digits, sqrt(sum x_i^2), at every scale from subnormal to 1e300; scipy.linalg.norm where no partial sum overflows"
+compare = "relative error"
+tolerance = { rel = 1.0e-14, vs_scipy = 1.0e-14 }
+why = "a sum of n <= 100 squares in three scaled accumulators, then a square root: the summation bound is about n u / 2 = 1.1e-14 at n = 100, for enorm and for SciPy's norm alike"
+reasons = ["R", "D"]
+
+[kernels.schur]
+viv = "kernels/k1/control.viv:schur"
+source = "lib/schur.viv:schur"
+args = [{ name = "A", type = "Arr", rank = 2, square = true }]
+results = [{ name = "T", type = "Arr" }, { name = "Z", type = "Arr" }]
+writes = []
+reference = "scipy.linalg.schur(A, output='real') and scipy.linalg.eigvals(A)"
+compare = "residuals: max|A - Z T Z^T| / max|A|, max|Z^T Z - I|, T quasi-triangular; eigenvalues of T's blocks against eigvals, relative to max|A|. Never T entry by entry: it is not unique"
+tolerance = { residual = 2.0e-13, orthogonality = 2.0e-13, eigenvalues = 1.0e-10 }
+why = "backward stable: residuals of a modest multiple of n u (n <= 12 here); eigenvalues of a nonnormal matrix move by the residual times their condition number"
+reasons = ["R", "D"]
+
+[kernels.solve_care]
+viv = "kernels/k1/control.viv:solve_care"
+source = "lib/are.viv:are_solve"
+args = [{ name = "A", type = "Arr", rank = 2, square = true }, { name = "B", type = "Arr", rank = 2 }, { name = "Q", type = "Arr", rank = 2, square = true }, { name = "R", type = "Arr", rank = 2, square = true }]
+results = [{ name = "X", type = "Arr" }]
+writes = []
+reference = "scipy.linalg.solve_continuous_are(A, B, Q, R)"
+compare = "relative residual of A^T X + X A - X B R^-1 B^T X + Q, scaled by 2|A||X| + |X|^2 |B R^-1 B^T| + |Q| (lib/are's are_residual_rel); the difference from SciPy's X is reported against a looser tolerance"
+tolerance = { residual = 1.0e-13, vs_reference = 1.0e-8 }
+why = "lib/are holds the relative residual under 4e-15 on its test systems; X itself depends on the problem's conditioning, so agreement with SciPy is a weaker claim"
+reasons = ["R", "S", "D"]
+
+[kernels.solve_lyapunov]
+viv = "kernels/k1/control.viv:solve_lyapunov"
+source = "lib/lyap.viv:lyap_solve"
+args = [{ name = "A", type = "Arr", rank = 2, square = true }, { name = "Q", type = "Arr", rank = 2, square = true }]
+results = [{ name = "X", type = "Arr" }]
+writes = []
+reference = "scipy.linalg.solve_continuous_lyapunov(A, Q), which solves A X + X A^T = Q"
+compare = "relative residual of A X + X A^T - Q, scaled by 2|A||X| + |Q|; the difference from SciPy's X against a looser tolerance"
+tolerance = { residual = 1.0e-13, vs_reference = 1.0e-9 }
+why = "Bartels-Stewart is backward stable in the residual; X's agreement depends on the separation of A's spectrum from -A's"
+reasons = ["R", "S"]
+
+[kernels.lqr]
+viv = "kernels/k1/control.viv:lqr"
+source = "lib/are.viv:are_solve, are_gains (lib/lqr.viv is the single-input front end over the same solver)"
+args = [{ name = "A", type = "Arr", rank = 2, square = true }, { name = "B", type = "Arr", rank = 2 }, { name = "Q", type = "Arr", rank = 2, square = true }, { name = "R", type = "Arr", rank = 2, square = true }]
+results = [{ name = "K", type = "Arr" }, { name = "P", type = "Arr" }]
+writes = []
+reference = "P = scipy.linalg.solve_continuous_are(A, B, Q, R), K = scipy.linalg.solve(R, B^T P)"
+compare = "max|K - K_ref| / max|K_ref|; the closed loop A - B K must be stable"
+tolerance = { rel = 1.0e-9 }
+why = "K inherits the Riccati solution's conditioning; on the well-conditioned test systems both solvers agree far below this"
+reasons = ["S", "D"]

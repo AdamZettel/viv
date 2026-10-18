@@ -1,0 +1,206 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// Posts. Every card is scripts/feed-build.mjs's reading of one program in
+// posts/: the words are its `#!` header, the figure is its build-time run, and
+// Run does that run again in the reader's tab.
+import Base from '../layouts/Base.astro';
+import FeedPost, { Avatar } from '../components/FeedPost.jsx';
+import FeedLive from '../components/FeedLive.jsx';
+import feed from '../data/feed.json';
+import { LANE_NOTES, AI_LANE_INVITE } from '../lib/postCheck.js';
+import { cardProps as card, dayLabel as day } from '../lib/feedCards.js';
+import { PUBLIC_SITE } from '../lib/repo.js';
+import { figureBoxes } from '../lib/figureBoxes.js';
+import '../styles/feed.css';
+import 'katex/dist/katex.min.css';
+
+const { author, posts, channels } = feed;
+const nClaims = posts.filter((p) => p.kind === 'claim').length;
+// only the lanes that hold posts; Reviewed and Published fill through reviews, which need the server
+const LANES = ['published', 'reviewed', 'draft', 'ai'].filter((l) => posts.some((p) => (p.lane || 'draft') === l));
+const LANE_LABELS = { published: 'Published', reviewed: 'Reviewed', draft: 'Draft', ai: 'AI' };
+const laneCount = (l: string) => posts.filter((p) => (p.lane || 'draft') === l).length;
+// with no lane in the address, the page opens on the highest lane that fills
+// the first screen (FIRST cards); when none does, on the lane with the most posts
+const FIRST = 4;
+const firstLane = LANES.find((l) => laneCount(l) >= FIRST) || [...LANES].sort((a, b) => laneCount(b) - laneCount(a))[0] || 'draft';
+const topics = Object.entries(posts.flatMap((p) => p.tags).reduce((acc: Record<string, number>, t) => ((acc[t] = (acc[t] || 0) + 1), acc), {}))
+  .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+const NOTE = PUBLIC_SITE ? LANE_NOTES : { ...LANE_NOTES, ai: `${LANE_NOTES.ai} ${AI_LANE_INVITE}` };
+// The first cards of each lane are in the page; the others are stubs that load
+// their card as they scroll near (src/lib/feedCards.js), which keeps the page
+// small enough to open quickly (FIRST, above).
+const rank = new Map<string, number>();
+for (const l of LANES) posts.filter((p) => (p.lane || 'draft') === l).forEach((p, i) => rank.set(p.slug, i));
+---
+
+<Base
+  title="Posts · Viv"
+  description="Short Viv programs that run in your browser and test their own results; most draw a figure.">
+  <h1 class="sr-only">Posts</h1>
+  {/* The build's channels and rendered equations go to the live feed too: a
+      server that has not imported the latest posts must not make the site's own
+      channels vanish, or show an equation as raw LaTeX. */}
+  {!PUBLIC_SITE && <FeedLive
+    client:load
+    staticSelector=".feed-static"
+    buildChannels={channels.map((c) => ({ slug: c.slug, title: c.title, summary: c.summary, posts: c.posts }))}
+    buildEquations={Object.fromEntries(posts.filter((p) => p.equationHtml).map((p) => [p.slug, p.equationHtml]))}
+    buildClaims={posts.filter((p) => p.kind === 'claim').map(card)}
+    author={author}
+  />}
+  <div class="feed-grid feed-static">
+    <aside class="feed-rail feed-left" aria-label="Author and channels">
+      <section class="rail-card profile">
+        <Avatar author={author} size={44} />
+        <h2><a href={author.url} rel="noopener">{author.name}</a></h2>
+        <p class="profile-handle">@{author.handle}</p>
+        {author.tagline && <p class="profile-tagline">{author.tagline}</p>}
+        <dl class="profile-stats">
+          <div><dt>Posts</dt><dd>{posts.length}</dd></div>
+        </dl>
+      </section>
+      <section class="rail-card">
+        <h2>Channels</h2>
+        <ul class="channels">
+          <li><a href="/posts" aria-current="true">Everything</a><span>{posts.length}</span></li>
+          {channels.map((c) => (
+            <li><a href={`/c/${c.slug}`} title={c.summary}>{c.title}</a><span>{c.posts}</span></li>
+          ))}
+        </ul>
+        <p class="rail-small">Each channel groups its posts by subject.</p>
+      </section>
+    </aside>
+
+    <div class="feed-main">
+      <section class="composer">
+        <p>
+          <strong>A post is one program</strong> that tests its own result; demos and articles also draw a figure.
+          {!PUBLIC_SITE && <>Write one in the composer, or commit a <code>.viv</code> file to <code>posts/</code>. </>}It is posted only if its tests pass, except a problem, whose tests must fail until someone solves it.
+        </p>
+        {!PUBLIC_SITE && <a class="composer-cta" href="/compose">Write a post</a>}
+      </section>
+
+      <nav class="feed-kinds" aria-label="Posts or claims">
+        <a href="?kind=all" data-kind="all">All<span>{posts.length}</span></a>
+        <a href="?kind=posts" data-kind="posts" title="demos, articles, ladders, problems and solutions">Posts<span>{posts.length - nClaims}</span></a>
+        <a href="?kind=claims" data-kind="claims" title="bounded statements, each checked by a Viv program and its vipyr twin">Claims<span>{nClaims}</span></a>
+      </nav>
+      <nav class="feed-lanes" aria-label="Filter by review status" data-first={firstLane}>
+        {LANES.map((l) => (
+          <a href={`#${l}`} id={`lane-${l}`} title={NOTE[l]}>{LANE_LABELS[l]}<span>{laneCount(l)}</span></a>
+        ))}
+        <span class="feed-lanes-note" id="lane-note"></span>
+      </nav>
+      <p class="feed-filter" id="feed-filter" hidden>
+        Showing <strong id="feed-filter-name"></strong> <a href="#">Show everything</a>
+      </p>
+      <p class="feed-filter" id="feed-empty" hidden></p>
+
+      {posts.map((p) => (
+        rank.get(p.slug)! < FIRST ? (
+          <div class="feed-item" data-tags={p.tags.join('|')} data-lane={p.lane || 'draft'} data-kind={p.kind === 'claim' ? 'claims' : 'posts'}>
+            {/* hydrated a screen before it scrolls in: until then a figure is the
+                server's drawing at 640 px, scaled to the card, and a phone would
+                show its labels at a third of their size */}
+            <FeedPost client:visible={{ rootMargin: '1000px' }} post={card(p)} author={author} dateLabel={day(p.date)} />
+          </div>
+        ) : (
+          <div class="feed-item feed-lazy" data-slug={p.slug} data-tags={p.tags.join('|')} data-lane={p.lane || 'draft'} data-kind={p.kind === 'claim' ? 'claims' : 'posts'}>
+            {/* the card as static HTML with its figures as empty boxes of their
+                own proportions, so the page keeps its layout when it loads */}
+            <FeedPost post={card(p)} author={author} dateLabel={day(p.date)} boxes={figureBoxes(p.figure, p.kind === 'claim' ? 1 : Infinity)} />
+          </div>
+        )
+      ))}
+    </div>
+
+    <aside class="feed-rail feed-right" aria-label="About posts">
+      <section class="rail-card">
+        <h2>About posts</h2>
+        <p>
+          A post is one short program that tests its own result; demos and articles also draw a figure.
+          <strong>Run</strong> runs it in your browser. <strong>Code</strong> opens the program in the card,
+          editable.{!PUBLIC_SITE && <> <strong>Fork</strong> copies it into the composer, linked to the original.</>}
+        </p>
+        <p class="rail-small"><a href="/feed.xml">Subscribe (Atom)</a></p>
+      </section>
+      <section class="rail-card">
+        <h2>Topics</h2>
+        <ul class="topics">
+          {topics.map(([t, n]) => (
+            <li><a href={`#tag=${encodeURIComponent(t)}`}>#{t.replace(/\s+/g, '-')}</a><span>{n}</span></li>
+          ))}
+        </ul>
+      </section>
+    </aside>
+  </div>
+
+  <script>
+    import { mountLazyCards } from '../lib/feedCards.js';
+    mountLazyCards(JSON.parse(document.getElementById('feed-author')!.textContent || '{}'));
+  </script>
+  <script type="application/json" id="feed-author" set:html={JSON.stringify(author).replace(/</g, '\\u003c')} />
+  <script is:inline define:vars={{ NOTE, LANES }}>
+    // Four lanes (#published #reviewed #draft #ai) and a topics filter (#tag=<name>).
+    (() => {
+      const LABEL = { published: 'Published', reviewed: 'Reviewed', draft: 'Draft', ai: 'AI' };
+      const nav = document.querySelector('.feed-lanes');
+      // All / Posts / Claims: ?kind= in the address wins, then what this reader
+      // chose last (kept in this browser), then All
+      const KINDS = ['all', 'posts', 'claims'];
+      const kindOf = () => {
+        const q = new URLSearchParams(location.search).get('kind');
+        if (KINDS.includes(q)) return q;
+        let k = null;
+        try { k = localStorage.getItem('viv.feed.kind'); } catch { k = null; }
+        return KINDS.includes(k) ? k : 'all';
+      };
+      let kind = kindOf();
+      const items = () => [...document.querySelectorAll('.feed-static .feed-item')];
+      const ofKind = (el) => kind === 'all' || el.dataset.kind === kind;
+      for (const a of document.querySelectorAll('.feed-kinds a')) {
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          kind = a.dataset.kind;
+          try { localStorage.setItem('viv.feed.kind', kind); } catch { /* the address still says it */ }
+          const u = new URL(location.href);
+          if (kind === 'all') u.searchParams.delete('kind'); else u.searchParams.set('kind', kind);
+          // the lane goes with it unless the reader picked one: the first lane that has this kind
+          if (LANES.includes(u.hash.slice(1))) u.hash = '';
+          history.replaceState(null, '', u);
+          apply();
+        });
+      }
+      const apply = () => {
+        const m = decodeURIComponent(location.hash).match(/^#tag=(.+)$/);
+        const tag = m ? m[1] : null;
+        const firstOfKind = LANES.find((l) => items().some((el) => el.dataset.lane === l && ofKind(el)));
+        const lane = LANES.find((l) => location.hash === '#' + l) || (kind === 'all' ? nav.dataset.first : firstOfKind || nav.dataset.first);
+        for (const a of document.querySelectorAll('.feed-kinds a')) a.toggleAttribute('aria-current', a.dataset.kind === kind);
+        let shown = 0;
+        for (const el of items()) {
+          el.hidden = (el.dataset.lane || 'draft') !== lane || !ofKind(el) || (!!tag && !el.dataset.tags.split('|').includes(tag));
+          if (!el.hidden) shown++;
+        }
+        for (const l of LANES) document.getElementById('lane-' + l)?.toggleAttribute('aria-current', lane === l);
+        document.getElementById('lane-note').textContent = NOTE[lane];
+        const bar = document.getElementById('feed-filter');
+        bar.hidden = !tag;
+        if (tag) document.getElementById('feed-filter-name').textContent = '#' + tag.replace(/\s+/g, '-');
+        const empty = document.getElementById('feed-empty');
+        empty.hidden = shown > 0;
+        const elsewhere = LANES.filter((l) => l !== lane).map((l) => [l, items().filter((el) => el.dataset.lane === l && ofKind(el)).length]).filter(([, n]) => n > 0);
+        // The tag comes from the address (#tag=...), which anyone can write, so
+        // it is escaped before it goes into the markup.
+        const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        empty.innerHTML = 'Nothing' + (kind === 'claims' ? ' of the claims' : kind === 'posts' ? ' but claims' : '') + ' in ' + LABEL[lane] + (tag ? ' tagged #' + esc(tag.replace(/\s+/g, '-')) : '') + ' yet.'
+          + elsewhere.map(([l]) => ' <a href="#' + l + '">See ' + LABEL[l] + '</a>.').join('');
+        for (const a of document.querySelectorAll('.topics a')) a.toggleAttribute('aria-current', a.getAttribute('href') === location.hash);
+      };
+      addEventListener('hashchange', apply);
+      apply();
+    })();
+  </script>
+</Base>

@@ -1,0 +1,293 @@
+###
+post: Graphene's Dirac cones
+date: 2026-09-25
+kind: demo
+channel: physics
+tags: graphene, tight binding, band structure, dirac cones, fermi velocity
+lane: ai
+equation: E_\pm(\mathbf k) = \pm t\,\Bigl|\sum_{j=1}^{3} e^{i\mathbf k\cdot\boldsymbol\delta_j}\Bigr|, \qquad v_F = \frac{3ta}{2\hbar}
+summary: An electron hopping between neighboring carbon atoms of a honeycomb has two energy bands, and they touch at the corners of the Brillouin zone. Near a corner the energy rises in a straight line in every direction, a cone, with slope $v_F = 3ta/2\hbar$. A centered finite difference at the corner gives $1.5$ to eight digits in every direction.
+
+Units: energies in $t$ (the hopping energy, fitted to experiment; the model
+does not need its value), lengths in $a$ (the carbon-carbon distance), and
+$\hbar = 1$, so the Fermi velocity is predicted to be $3/2$ exactly. The
+reference, in `posts/refs/graphenes-dirac-cones.py`, builds the 2 by 2 Hamiltonian as
+a complex matrix and diagonalizes it with `numpy.linalg.eigvalsh`, where
+the post uses the closed form $\pm|f|$; it finds the slope at K by a
+least-squares line through 20 points in each of 12 directions. The geometry
+follows Castro Neto et al., Rev. Mod. Phys. 81, 109 (2009).
+###
+
+###
+## The model
+
+Graphene is a single sheet of carbon atoms in a honeycomb. The honeycomb is
+not itself a lattice with one atom per cell: its atoms come in two kinds, A
+and B, and every A atom has three B neighbors, at the vectors
+$\boldsymbol\delta_1 = (\tfrac12, \tfrac{\sqrt3}{2})$,
+$\boldsymbol\delta_2 = (\tfrac12, -\tfrac{\sqrt3}{2})$ and
+$\boldsymbol\delta_3 = (-1, 0)$ in units of $a$.
+
+*Tight binding* keeps one orbital per atom and lets an electron hop only
+to a nearest neighbor, with energy $-t$. A wave with *crystal momentum*
+$\mathbf k$ has an amplitude on the A atoms and one on the B atoms, so the
+Hamiltonian at each $\mathbf k$ is 2 by 2:
+
+$$H(\mathbf k) = \begin{pmatrix} 0 & f(\mathbf k) \\ f^*(\mathbf k) & 0 \end{pmatrix},
+\qquad f(\mathbf k) = -t\sum_j e^{i\mathbf k\cdot\boldsymbol\delta_j}.$$
+
+Its eigenvalues are $\pm|f(\mathbf k)|$: two bands, mirror images of each
+other. With one electron per carbon, the lower band is full and the upper
+one empty, so everything interesting happens where they come closest.
+###
+
+S3 = sqrt(3.0)
+PI = 3.141592653589793
+DX = [0.5, 0.5, -1.0]
+DY = [0.5 * S3, -0.5 * S3, 0.0]
+
+#| |f(k)|/t = |∑ⱼ exp(i·k·δⱼ)|, with δⱼ = (DX[j], DY[j]): the
+#| upper band at (kx, ky); the lower band is its negative.
+def upper_band(kx, ky) {
+    sum_re = 0.0
+    sum_im = 0.0
+    for j to len(DX) {
+        ph = kx * DX[j] + ky * DY[j]
+        sum_re += cos(ph)
+        sum_im += sin(ph)
+    }
+    return sqrt(sum_re * sum_re + sum_im * sum_im)
+}
+
+# the three corners of the path: the zone center, a zone corner, an edge middle
+GX = 0.0
+GY = 0.0
+KX = 2.0 * PI / 3.0
+KY = 2.0 * PI / (3.0 * S3)
+MX = 2.0 * PI / 3.0
+MY = 0.0
+
+e_gamma = upper_band(GX, GY)
+e_m = upper_band(MX, MY)
+e_k = upper_band(KX, KY)
+e_km = upper_band(0.5 * (KX + MX), 0.5 * (KY + MY))
+show e_gamma
+show e_m
+show e_k
+show e_km
+
+test "the upper band is 3t at Gamma, t at M and zero at K" {
+    # numpy.linalg.eigvalsh (posts/refs/graphenes-dirac-cones.out): 3.0, 1.0000000000000002, 3.9e-16
+    assert_near(e_gamma, 3.0, 1.0e-14)
+    assert_near(e_m, 1.0, 1.0e-14)
+    assert_lt(e_k, 1.0e-12)
+}
+
+test "halfway from K to M it is sqrt(3) - 1, as numpy finds" {
+    # posts/refs/graphenes-dirac-cones.out: 0.7320508075688774
+    assert_near(e_km, 0.7320508075688774, 1.0e-14)
+    assert_near(e_km, S3 - 1.0, 1.0e-14)
+}
+
+# the phase k·δⱼ of each neighbor's term at K, in degrees
+ph_k = zeros(len(DX))
+for j to len(DX) {
+    ph_k[j] = (KX * DX[j] + KY * DY[j]) * 180.0 / PI
+}
+show ph_k
+
+test "at K the three phases are 120, 0 and -120 degrees: three arrows 120 degrees apart" {
+    assert_near(ph_k[0] - ph_k[1], 120.0, 1.0e-12)
+    assert_near(ph_k[1] - ph_k[2], 120.0, 1.0e-12)
+}
+
+###
+At the center of the zone, $\Gamma$, all three phases are 1 and the bands
+are at $\pm 3t$. At the middle of an edge, M, they are at $\pm t$. At the
+corner K the three phases are $1$, $e^{2\pi i/3}$ and $e^{-2\pi i/3}$,
+three unit arrows at 120° to each other, which add to zero: the bands touch.
+
+## The bands along a path
+
+The standard picture follows the straight lines $\Gamma \to$ K $\to$ M
+$\to \Gamma$ through the zone. Before running: near K, will the bands
+approach zero like a parabola, as the edge of a band usually does, or
+some other way?
+###
+
+# points along the path; each leg gets a share in proportion to its length
+N_PATH = 150
+leg1 = sqrt((KX - GX) * (KX - GX) + (KY - GY) * (KY - GY))
+leg2 = sqrt((MX - KX) * (MX - KX) + (MY - KY) * (MY - KY))
+leg3 = sqrt((GX - MX) * (GX - MX) + (GY - MY) * (GY - MY))
+total = leg1 + leg2 + leg3
+path_s = linspace(0.0, total, N_PATH)
+upper = zeros(N_PATH)
+lower = zeros(N_PATH)
+for n to N_PATH {
+    s = path_s[n]
+    kx = 0.0
+    ky = 0.0
+    if s <= leg1 {
+        kx = GX + (KX - GX) * s / leg1
+        ky = GY + (KY - GY) * s / leg1
+    }
+    else if s <= leg1 + leg2 {
+        kx = KX + (MX - KX) * (s - leg1) / leg2
+        ky = KY + (MY - KY) * (s - leg1) / leg2
+    }
+    else {
+        kx = MX + (GX - MX) * (s - leg1 - leg2) / leg3
+        ky = MY + (GY - MY) * (s - leg1 - leg2) / leg3
+    }
+    upper[n] = upper_band(kx, ky)
+    lower[n] = -upper[n]
+}
+
+figure("Graphene's two bands, nearest-neighbor tight binding", "crystal momentum along the path", "energy E / t")
+plot(path_s, upper, "upper band")
+plot(path_s, lower, "lower band")
+hline("E = 0", 0.0)
+xtick("Γ", 0.0)
+xtick("K", leg1)
+xtick("M", leg1 + leg2)
+xtick("Γ", total)
+
+###
+At K the two bands meet in a V: the energy rises linearly with the distance
+from K, not quadratically. The same happens in every direction, so in the
+plane of $\mathbf k$ the two bands form a pair of cones touching at their
+tips, called *Dirac cones* because a massless relativistic particle obeying
+the Dirac equation has the same linear relation between energy and
+momentum.
+
+The map below shows the upper band over the plane. The *Brillouin zone* is
+the hexagon of momenta closer to $\Gamma$, the center of the map, than to
+any other point of the reciprocal lattice, drawn dashed, and the band
+reaches zero at its six corners, the dark spots around the center. The four dark spots near the
+map's left and right edges are corners of the neighboring hexagons.
+###
+
+# grid of the band map, and its half-width in k (units of 1/a)
+N_MAP = 61
+K_MAP = 4.5
+# map values rounded to 1e-3 of t, far below a color step, to keep the figure small
+ROUND = 1000.0
+kgrid = linspace(-K_MAP, K_MAP, N_MAP)
+band_map = zeros(N_MAP, N_MAP)
+for i to N_MAP {
+    for j to N_MAP {
+        band_map[i, j] = round(upper_band(kgrid[j], kgrid[i]) * ROUND) / ROUND
+    }
+}
+# the picture's edges are half a cell beyond the outer cell centers, so a
+# point is drawn where its k is
+EDGE = K_MAP + K_MAP / (N_MAP - 1)
+figure("The upper band over the k plane", "$k_x a$", "$k_y a$", -EDGE, EDGE, -EDGE, EDGE)
+plot2d(band_map, "E / t")
+origin("lower")
+colormap("viridis")
+
+# the Brillouin zone: its six corners are K turned about Gamma by multiples of 60 degrees
+N_SIDES = 6
+K_RADIUS = sqrt(KX * KX + KY * KY)
+K_ANGLE = atan2(KY, KX)
+zone_x = zeros(N_SIDES + 1)
+zone_y = zeros(N_SIDES + 1)
+for c to N_SIDES + 1 {
+    angle = K_ANGLE + 2.0 * PI * c / N_SIDES
+    zone_x[c] = K_RADIUS * cos(angle)
+    zone_y[c] = K_RADIUS * sin(angle)
+}
+for c to N_SIDES {
+    segment("zone edge", zone_x[c], zone_y[c], zone_x[c + 1], zone_y[c + 1])
+}
+corner_worst = 0.0
+for c to N_SIDES {
+    corner_worst = max(corner_worst, upper_band(zone_x[c], zone_y[c]))
+}
+show corner_worst
+
+test "the band is zero at all six corners of the zone drawn on the map" {
+    assert_lt(corner_worst, 1.0e-12)
+}
+###
+## The slope of the cone
+
+Near K, write $\mathbf k = \mathbf K + \mathbf q$. Expanding each phase to
+first order in $\mathbf q$ gives $|f| \approx \tfrac{3}{2} t a |\mathbf q|$,
+so $E = \pm \hbar v_F |\mathbf q|$ with
+$v_F = 3ta/2\hbar$, the *Fermi velocity*: the speed of the electrons at the
+energy where the full band meets the empty one.
+
+The program measures the slope with a centered difference across K,
+$\bigl(E(\mathbf K + h\mathbf u) + E(\mathbf K - h\mathbf u)\bigr)/2h$,
+along twelve directions $\mathbf u$. The next term of the expansion is
+proportional to $q^2\cos 3\varphi$, which changes sign between $\mathbf u$
+and $-\mathbf u$, so the centered difference cancels it and leaves an error
+of order $h^2$.
+###
+
+# the step for the centered difference, and the directions tried
+H_FD = 1.0e-4
+N_DIR = 12
+slopes = zeros(N_DIR)
+worst = 0.0
+for d to N_DIR {
+    phi = 2.0 * PI * d / N_DIR
+    ux = cos(phi)
+    uy = sin(phi)
+    slopes[d] = (upper_band(KX + H_FD * ux, KY + H_FD * uy) + upper_band(KX - H_FD * ux, KY - H_FD * uy)) / (2.0 * H_FD)
+    worst = max(worst, abs(slopes[d] - 1.5))
+}
+show slopes
+show worst
+
+test "the slope at K is 3/2 (v_F = 3ta / 2 hbar) in all twelve directions, to 1e-7" {
+    # the analytic 3/2; the reference's least-squares slope is 1.4999998 with a
+    # spread of 8e-4 over directions, from the q^2 term it does not cancel
+    assert_lt(worst, 1.0e-7)
+}
+
+###
+Every direction gives $1.5$, the worst off by $1.9\times10^{-9}$ (`worst`):
+the cone is round to first order, and its slope is $3ta/2\hbar$.
+
+It is not round to second order. Going one way from K, toward M, the band
+rises a little slower than the straight line, and going toward $\Gamma$ a
+little faster. The next cell measures that correction, $(E - \tfrac32
+q)/q^2$, one step $q = 10^{-3}$ out in each direction; the expansion to
+second order says it is $\mp\tfrac38$.
+###
+
+Q_WARP = 1.0e-3
+# unit vectors from K toward M and toward Gamma
+to_m_x = (MX - KX) / leg2
+to_m_y = (MY - KY) / leg2
+to_g_x = (GX - KX) / leg1
+to_g_y = (GY - KY) / leg1
+warp_m = (upper_band(KX + Q_WARP * to_m_x, KY + Q_WARP * to_m_y) - 1.5 * Q_WARP) / (Q_WARP * Q_WARP)
+warp_g = (upper_band(KX + Q_WARP * to_g_x, KY + Q_WARP * to_g_y) - 1.5 * Q_WARP) / (Q_WARP * Q_WARP)
+show warp_m
+show warp_g
+
+test "the second-order term is -3/8 toward M and +3/8 toward Gamma, as numpy measures at q = 1e-3" {
+    # posts/refs/graphenes-dirac-cones.out: -0.375187 and 0.374812 (eigvalsh, same q)
+    assert_near(warp_m, -0.375187, 1.0e-5)
+    assert_near(warp_g, 0.374812, 1.0e-5)
+    # the q^3 term moves each by about 2e-4 at this q
+    assert_near(warp_m, -0.375, 5.0e-4)
+    assert_near(warp_g, 0.375, 5.0e-4)
+}
+
+###
+The correction is $-0.3752$ toward M and $+0.3748$ toward $\Gamma$
+(`warp_m`, `warp_g`), $\mp\tfrac38$ up to a term of order $q$. Cut a cone of
+this band at a fixed energy and the circle is a slightly rounded triangle;
+this *trigonal warping* grows with the distance from K, and it is why the
+centered difference, which cancels it, agrees with $3/2$ so much more
+closely than the one-sided fit in the reference does.
+###
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

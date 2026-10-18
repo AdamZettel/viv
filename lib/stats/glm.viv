@@ -1,0 +1,304 @@
+###
+post: Generalized linear models by iteratively reweighted least squares
+agent: claude
+
+`glm_irls(y, X, w, offset, family, link, ...)` is R's glm.fit step for
+step: the same starting means, the same working response and weights, each
+weighted least-squares step by lib/stats/linmod.viv's pivoted QR (R's
+tolerance min(1e-7, epsilon / 1000)), the same clamps in the link functions
+(logit at |eta| = 30, probit at Phi^-1(eps), the log link's mean at least
+eps), and R's stopping rule |dev - dev_old| / (|dev| + 0.1) < epsilon.
+
+The families and their links: binomial (logit, probit), Poisson (log),
+Gamma (inverse, log), Gaussian (identity). For binomial, y is the
+proportion of successes and w the number of trials.
+
+The covariance it returns is R's: (X^T W X)^-1 from the last step's
+factors, W the working weights (Fisher's expected information).
+`glm_newton` is the slot's other method: Newton steps with the observed
+information, from one IRLS step. `glm_observed_cov` gives the inverse of the observed information instead:
+the negative Hessian of the log-likelihood, X^T diag(-d s / d eta) X, with
+the derivative of each observation's score s(eta) taken by `deriv`
+(forward-mode, exact). For the canonical links (logit, log for Poisson,
+inverse for Gamma, identity) the two are the same matrix.
+
+Used with `from stats.glm import ...`.
+###
+
+from stats.linmod import lstsq_qr
+from stats.special import ndtr, ndtri
+
+EPS = 2.220446049250313e-16
+FAM_GAUSSIAN = 0
+FAM_BINOMIAL = 1
+FAM_POISSON = 2
+FAM_GAMMA = 3
+LINK_IDENTITY = 0
+LINK_LOGIT = 1
+LINK_PROBIT = 2
+LINK_LOG = 3
+LINK_INVERSE = 4
+# R's logit clamp, binomial()$linkinv: THRESH = 30, MTHRESH = -30
+LOGIT_THRESH = 30.0
+# step halvings when the deviance is not finite
+MAX_HALVINGS = 30
+SQRT_2PI = 2.5066282746310002
+
+def linkfun(link, mu) {
+    if link == LINK_LOGIT {
+        return log(mu / (1.0 - mu))
+    }
+    if link == LINK_PROBIT {
+        return ndtri(mu)
+    }
+    if link == LINK_LOG {
+        return log(mu)
+    }
+    if link == LINK_INVERSE {
+        return 1.0 / mu
+    }
+    return mu
+}
+
+def linkinv(link, eta) {
+    if link == LINK_LOGIT {
+        t = EPS if eta < -LOGIT_THRESH else (1.0 / EPS if eta > LOGIT_THRESH else exp(eta))
+        return t / (1.0 + t)
+    }
+    if link == LINK_PROBIT {
+        th = -ndtri(EPS)
+        return ndtr(min(max(eta, -th), th))
+    }
+    if link == LINK_LOG {
+        return max(exp(eta), EPS)
+    }
+    if link == LINK_INVERSE {
+        return 1.0 / eta
+    }
+    return eta
+}
+
+# d mu / d eta
+def mu_eta(link, eta) {
+    if link == LINK_LOGIT {
+        o = exp(-abs(eta))
+        return max(o / ((1.0 + o) * (1.0 + o)), EPS)
+    }
+    if link == LINK_PROBIT {
+        return max(exp(-0.5 * eta * eta) / SQRT_2PI, EPS)
+    }
+    if link == LINK_LOG {
+        return max(exp(eta), EPS)
+    }
+    if link == LINK_INVERSE {
+        return -1.0 / (eta * eta)
+    }
+    return 1.0
+}
+
+def variance(family, mu) {
+    if family == FAM_BINOMIAL {
+        return mu * (1.0 - mu)
+    }
+    if family == FAM_POISSON {
+        return mu
+    }
+    if family == FAM_GAMMA {
+        return mu * mu
+    }
+    return 1.0
+}
+
+# y log(y / mu), 0 at y = 0
+def ylogy(y, mu) {
+    return y * log(y / mu) if y > 0.0 else 0.0
+}
+
+#| One observation's deviance (R's family()$dev.resids).
+def unit_deviance(family, y, mu, w) {
+    if family == FAM_BINOMIAL {
+        return 2.0 * w * (ylogy(y, mu) + ylogy(1.0 - y, 1.0 - mu))
+    }
+    if family == FAM_POISSON {
+        if y > 0.0 {
+            return 2.0 * w * (y * log(y / mu) - (y - mu))
+        }
+        return 2.0 * mu * w
+    }
+    if family == FAM_GAMMA {
+        lr = log(y / mu) if y != 0.0 else 0.0
+        return -2.0 * w * (lr - (y - mu) / mu)
+    }
+    return w * (y - mu) * (y - mu)
+}
+
+def deviance(family, y: Arr, mu: Arr, w: Arr) {
+    return sum([unit_deviance(family, y[i], mu[i], w[i]) for i to len(y)])
+}
+
+def mustart(family, y, w) {
+    if family == FAM_BINOMIAL {
+        return (w * y + 0.5) / (w + 1.0)
+    }
+    if family == FAM_POISSON {
+        return y + 0.1
+    }
+    return y
+}
+
+#| IRLS as R's glm.fit. Returns the coefficients, R's unscaled covariance,
+#| the deviance, the null deviance, the iterations, whether it converged,
+#| the fitted means, the linear predictor, the working weights and the rank.
+def glm_irls(y: Arr, X: Arr, w: Arr, offset: Arr, family, link, intercept, epsilon, maxit) {
+    n, p = shape(X)
+    tol = min(1e-7, epsilon / 1000.0)
+    eta = zeros(n)
+    mu = zeros(n)
+    for i to n {
+        eta[i] = linkfun(link, mustart(family, y[i], w[i]))
+        mu[i] = linkinv(link, eta[i])
+    }
+    devold = deviance(family, y, mu, w)
+    coef = zeros(p)
+    cov = zeros(p, p)
+    rank = 0.0
+    wt = zeros(n)
+    iters = 0.0
+    conv = false
+    for it to maxit {
+        iters += 1.0
+        Xw = zeros(n, p)
+        zw = zeros(n)
+        for i to n {
+            me = mu_eta(link, eta[i])
+            z = eta[i] - offset[i] + (y[i] - mu[i]) / me
+            wt[i] = sqrt(w[i] * me * me / variance(family, mu[i]))
+            Xw[i, :] = X[i, :] * wt[i]
+            zw[i] = z * wt[i]
+        }
+        newcoef, rank, piv, cov = lstsq_qr(Xw, zw, tol, 0.0)
+        eta_new = X @ newcoef + offset
+        dev = 0.0
+        for half to MAX_HALVINGS {
+            for i to n {
+                mu[i] = linkinv(link, eta_new[i])
+            }
+            dev = deviance(family, y, mu, w)
+            if dev == dev and dev < inf {
+                break
+            }
+            newcoef = 0.5 * (newcoef + coef)
+            eta_new = X @ newcoef + offset
+        }
+        coef = newcoef
+        eta = eta_new
+        if abs(dev - devold) / (abs(dev) + 0.1) < epsilon {
+            conv = true
+            break
+        }
+        devold = dev
+    }
+    # R's null deviance: the weighted mean of y with an intercept, else linkinv(offset)
+    mu0 = zeros(n)
+    wy = sum(w * y) / sum(w)
+    for i to n {
+        mu0[i] = wy if intercept == 1.0 else linkinv(link, offset[i])
+    }
+    nulldev = deviance(family, y, mu0, w)
+    return coef, cov, deviance(family, y, mu, w), nulldev, iters, (1.0 if conv else 0.0), mu, eta, wt * wt, rank
+}
+
+# minus the derivative of one observation's score s(eta) = d loglik / d eta,
+# by forward-mode deriv; per unit dispersion and per trial
+def neg_score_slope(family, link, y, eta, w) {
+    if family == FAM_BINOMIAL and link == LINK_PROBIT {
+        # deriv has no rule for erf; Phi enters through its tangent at eta,
+        # Phi(eta) + phi(eta) (e - eta), which has Phi's value and slope there,
+        # so the derivative at e = eta is exact
+        P = ndtr(eta)
+        ph = exp(-0.5 * eta * eta) / SQRT_2PI
+        d = deriv(fn(e) -> (y - (P + ph * (e - eta))) * exp(-0.5 * e * e) / SQRT_2PI / ((P + ph * (e - eta)) * (1.0 - (P + ph * (e - eta)))), eta)
+        return -w * d
+    }
+    if family == FAM_GAMMA and link == LINK_LOG {
+        return -w * deriv(fn(e) -> y * exp(-e) - 1.0, eta)
+    }
+    # a canonical link: the observed information is the expected one
+    me = mu_eta(link, eta)
+    return w * me * me / variance(family, linkinv(link, eta))
+}
+
+# one observation's score d loglik / d eta, per unit dispersion
+def score(family, link, y, eta, w) {
+    m = linkinv(link, eta)
+    return w * (y - m) * mu_eta(link, eta) / variance(family, m)
+}
+
+# X^T diag(-d s / d eta) X, the observed information per unit dispersion
+def observed_info(y: Arr, X: Arr, w: Arr, eta: Arr, family, link) {
+    n, p = shape(X)
+    ns = [neg_score_slope(family, link, y[i], eta[i], w[i]) for i to n]
+    return transpose(X) @ (X * reshape(ns, n, 1))
+}
+
+#| (X^T diag(-d s / d eta) X)^-1, the inverse of the observed information
+#| (per unit dispersion) at the linear predictor eta.
+def glm_observed_cov(y: Arr, X: Arr, w: Arr, eta: Arr, family, link) {
+    n, p = shape(X)
+    return inv(observed_info(y, X, w, eta, family, link))
+}
+
+#| Newton's method with the observed information, the other fitting method of
+#| the slot: one IRLS step from R's starting means, then steps
+#| beta += H^-1 X^T s with H = X^T diag(-d s / d eta) X, stopped by R's rule.
+#| Returns what glm_irls returns, the covariance being H^-1 at the end.
+def glm_newton(y: Arr, X: Arr, w: Arr, offset: Arr, family, link, intercept, epsilon, maxit) {
+    n, p = shape(X)
+    coef, cov, devold, nulldev, iters, conv0, mu, eta, wt, rank = glm_irls(y, X, w, offset, family, link, intercept, epsilon, 1.0)
+    conv = false
+    for it to maxit {
+        iters += 1.0
+        s = [score(family, link, y[i], eta[i], w[i]) for i to n]
+        coef = coef + lin_solve(observed_info(y, X, w, eta, family, link), transpose(X) @ s)
+        eta = X @ coef + offset
+        for i to n {
+            mu[i] = linkinv(link, eta[i])
+        }
+        dev = deviance(family, y, mu, w)
+        if abs(dev - devold) / (abs(dev) + 0.1) < epsilon {
+            conv = true
+            break
+        }
+        devold = dev
+    }
+    cov = glm_observed_cov(y, X, w, eta, family, link)
+    wt = [neg_score_slope(family, link, y[i], eta[i], w[i]) for i to n]
+    return coef, cov, deviance(family, y, mu, w), nulldev, iters, (1.0 if conv else 0.0), mu, eta, wt, rank
+}
+
+test "Newton and IRLS reach the same probit fit" {
+    X = [[1.0, -1.0], [1.0, -0.5], [1.0, 0.0], [1.0, 0.5], [1.0, 1.0], [1.0, 1.5]]
+    y = [0.0, 1.0, 0.0, 1.0, 1.0, 1.0]
+    one = ones(6)
+    b1, c1, d1, n1, i1, ok1, m1, e1, w1, r1 = glm_irls(y, X, one, zeros(6), FAM_BINOMIAL, LINK_PROBIT, 1.0, 1e-14, 100.0)
+    b2, c2, d2, n2, i2, ok2, m2, e2, w2, r2 = glm_newton(y, X, one, zeros(6), FAM_BINOMIAL, LINK_PROBIT, 1.0, 1e-14, 100.0)
+    # the deviance stops both at 1e-14 relative; the coefficients then agree
+    # to about its square root
+    assert_allclose(b2, b1, 1e-6)
+    assert_near(d2, d1, 1e-12)
+}
+
+test "a Poisson fit through its own means converges in a few steps" {
+    X = [[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0]]
+    y = [1.0, 2.0, 4.0, 8.0]
+    one = ones(4)
+    coef, cov, dev, nulldev, iters, conv, mu, eta, wts, rank = glm_irls(y, X, one, zeros(4), FAM_POISSON, LINK_LOG, 1.0, 1e-12, 50.0)
+    assert_true(conv == 1.0)
+    # the score equations: X^T (y - mu) = 0
+    assert_allclose(transpose(X) @ (y - mu), zeros(2), 1e-9)
+    # the observed and expected informations agree for the canonical link
+    assert_allclose(glm_observed_cov(y, X, one, eta, FAM_POISSON, LINK_LOG), cov, 1e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

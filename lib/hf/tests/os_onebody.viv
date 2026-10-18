@@ -1,0 +1,170 @@
+# The tests of lib/hf/os_onebody that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/os_onebody does not load the references.
+from hf.os_onebody import (
+    os_kinetic, os_kinetic_block, os_nuclear, os_nuclear_block, os_overlap, os_overlap_block,
+    OS_PS_ROWS,
+)
+from hf.basis import (
+    AT_CHG, AT_LEN, AT_X, AT_Y, AT_Z, bas_contract, bas_ncart, bas_nsph, PR_COEF, PR_EXP,
+    PR_LEN, SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+)
+from hfref.prims import (
+    prims_charge_at, PRIMS_NCASE, PRIMS_NPICK, prims_picks, prims_s, prims_shells, prims_t,
+    prims_v,
+)
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_prims, water631gs_cart_s_unit,
+    water631gs_cart_shells, water631gs_cart_t_unit, water631gs_cart_v_unit,
+)
+from hfref.water_tzvp import (
+    watertzvp_atoms, watertzvp_prims, watertzvp_s_unit, watertzvp_shells, watertzvp_t_unit,
+    watertzvp_v_unit,
+)
+
+#| Test helper: the largest gaps between the (a, b) blocks of S, T and V and
+#| the eight picks of every prims case.
+def os_t_prims_gaps() {
+    SH = prims_shells()
+    CA = prims_charge_at()
+    PK = prims_picks()
+    RS = prims_s()
+    RT = prims_t()
+    RV = prims_v()
+    at = zeros(OS_PS_ROWS + 1, AT_LEN)
+    sh = zeros(OS_PS_ROWS, SH_LEN)
+    pr = zeros(OS_PS_ROWS, PR_LEN)
+    ws = 0.0
+    wt = 0.0
+    wv = 0.0
+    for k to PRIMS_NCASE {
+        os_t_prims_case(SH, CA, k, at, sh, pr)
+        cn = bas_contract(sh, pr)
+        bs = os_overlap_block(at, sh, pr, cn, 0, 1)
+        bt = os_kinetic_block(at, sh, pr, cn, 0, 1)
+        bv = os_nuclear_block(at, sh, pr, cn, 0, 1)
+        for p to PRIMS_NPICK {
+            q = PRIMS_NPICK * k + p
+            ws = max(ws, abs(bs[PK[q, 0], PK[q, 1]] - RS[q]))
+            wt = max(wt, abs(bt[PK[q, 0], PK[q, 1]] - RT[q]))
+            wv = max(wv, abs(bv[PK[q, 0], PK[q, 1]] - RV[q]))
+        }
+    }
+    return ws, wt, wv
+}
+
+#| Test helper: the largest abs(A - B) over two square matrices.
+def os_t_gap(A: Arr, B: Arr) {
+    return max(abs(A - B))
+}
+
+#| Test helper: fill `atoms`, `shells` and `prims` with case `k` of
+#| lib/hfref/prims: four single-primitive shells on their own centers (rows 0
+#| to 3, charge 0) and the unit point charge at row 4.
+def os_t_prims_case(SH: Arr, CA: Arr, k, atoms: Arr, shells: Arr, prims: Arr) {
+    c0 = 0
+    for r to OS_PS_ROWS {
+        row = OS_PS_ROWS * k + r
+        atoms[r, AT_CHG] = 0.0
+        atoms[r, AT_X] = SH[row, 2]
+        atoms[r, AT_Y] = SH[row, 3]
+        atoms[r, AT_Z] = SH[row, 4]
+        shells[r, SH_ATOM] = r
+        shells[r, SH_L] = SH[row, 0]
+        shells[r, SH_NPRIM] = 1
+        shells[r, SH_P0] = r
+        shells[r, SH_CART0] = c0
+        shells[r, SH_NCART] = bas_ncart(SH[row, 0])
+        shells[r, SH_NSPH] = bas_nsph(SH[row, 0])
+        prims[r, PR_EXP] = SH[row, 1]
+        prims[r, PR_COEF] = 1.0
+        c0 = c0 + bas_ncart(SH[row, 0])
+    }
+    atoms[OS_PS_ROWS, AT_CHG] = 1.0
+    atoms[OS_PS_ROWS, AT_X] = CA[k, 0]
+    atoms[OS_PS_ROWS, AT_Y] = CA[k, 1]
+    atoms[OS_PS_ROWS, AT_Z] = CA[k, 2]
+    return 0.0
+}
+
+test "S, T and V match water 6-31G* (Cartesian d) from PySCF within 1e-12" {
+    os_at = water631gs_cart_atoms()
+    os_sh = water631gs_cart_shells()
+    os_pr = water631gs_cart_prims()
+    # measured: 6.7e-16, 8.9e-16, 6.2e-14
+    assert_lt(os_t_gap(os_overlap(os_at, os_sh, os_pr), water631gs_cart_s_unit()), 1.0e-12)
+    assert_lt(os_t_gap(os_kinetic(os_at, os_sh, os_pr), water631gs_cart_t_unit()), 1.0e-12)
+    assert_lt(os_t_gap(os_nuclear(os_at, os_sh, os_pr), water631gs_cart_v_unit()), 1.0e-12)
+}
+
+test "S, T and V match water def2-TZVP, with its f shells, within 1e-12" {
+    os_at = watertzvp_atoms()
+    os_sh = watertzvp_shells()
+    os_pr = watertzvp_prims()
+    # measured: 1.0e-15, 2.8e-14, 1.1e-13
+    assert_lt(os_t_gap(os_overlap(os_at, os_sh, os_pr), watertzvp_s_unit()), 1.0e-12)
+    assert_lt(os_t_gap(os_kinetic(os_at, os_sh, os_pr), watertzvp_t_unit()), 1.0e-12)
+    assert_lt(os_t_gap(os_nuclear(os_at, os_sh, os_pr), watertzvp_v_unit()), 1.0e-12)
+}
+
+test "every single-primitive pair up to (f|f) in prims matches within 1e-12" {
+    os_ws, os_wt, os_wv = os_t_prims_gaps()
+    # measured: S 6.7e-16, T 4.0e-15, V 2.4e-14 absolute. Relative to the
+    # value, V reaches 1.9e-11 on an entry of size 1e-3 that is a difference
+    # of much larger terms, so the gate is absolute, as in the water tests.
+    assert_lt(os_ws, 1.0e-12)
+    assert_lt(os_wt, 1.0e-12)
+    assert_lt(os_wv, 1.0e-12)
+}
+
+test "the (b, a) block is the transpose of the (a, b) block" {
+    # the horizontal step runs in the other direction, so this is a check on
+    # the recurrences and not a copy
+    os_at = watertzvp_atoms()
+    os_sh = watertzvp_shells()
+    os_pr = watertzvp_prims()
+    os_cn = bas_contract(os_sh, os_pr)
+    os_worst = 0.0
+    for os_sa to len(os_sh) {
+        for os_sb to os_sa {
+            os_b1 = os_nuclear_block(os_at, os_sh, os_pr, os_cn, os_sa, os_sb)
+            os_b2 = os_nuclear_block(os_at, os_sh, os_pr, os_cn, os_sb, os_sa)
+            os_b3 = os_kinetic_block(os_at, os_sh, os_pr, os_cn, os_sa, os_sb)
+            os_b4 = os_kinetic_block(os_at, os_sh, os_pr, os_cn, os_sb, os_sa)
+            os_worst = max(os_worst, max(abs(os_b1 - transpose(os_b2))))
+            os_worst = max(os_worst, max(abs(os_b3 - transpose(os_b4))))
+        }
+    }
+    assert_lt(os_worst, 1.0e-13)
+}
+
+test "a ghost atom adds nothing to V, and V is linear in the charges" {
+    os_at = water631gs_cart_atoms()
+    os_sh = water631gs_cart_shells()
+    os_pr = water631gs_cart_prims()
+    os_v = os_nuclear(os_at, os_sh, os_pr)
+    # a fourth atom with Z = 0, placed off the molecule
+    os_ghost = zeros(AT_LEN)
+    os_ghost[AT_X:AT_Z + 1] = [0.7, -0.3, 1.9]
+    assert_near(os_t_gap(os_nuclear(vcat(os_at, os_ghost), os_sh, os_pr), os_v), 0.0, 0.0)
+    # doubling every charge doubles V
+    os_at2 = copy(os_at)
+    os_at2[:, AT_CHG] = 2.0 * os_at[:, AT_CHG]
+    assert_lt(os_t_gap(os_nuclear(os_at2, os_sh, os_pr), os_v * 2.0), 1.0e-13)
+}
+
+test "moving the whole molecule leaves S, T and V unchanged" {
+    os_at = watertzvp_atoms()
+    os_sh = watertzvp_shells()
+    os_pr = watertzvp_prims()
+    os_mv = copy(os_at)
+    os_mv[:, AT_X] = os_at[:, AT_X] + 0.37
+    os_mv[:, AT_Y] = os_at[:, AT_Y] - 1.21
+    os_mv[:, AT_Z] = os_at[:, AT_Z] + 2.05
+    assert_lt(os_t_gap(os_overlap(os_mv, os_sh, os_pr), os_overlap(os_at, os_sh, os_pr)), 1.0e-13)
+    assert_lt(os_t_gap(os_kinetic(os_mv, os_sh, os_pr), os_kinetic(os_at, os_sh, os_pr)), 1.0e-13)
+    assert_lt(os_t_gap(os_nuclear(os_mv, os_sh, os_pr), os_nuclear(os_at, os_sh, os_pr)), 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,839 @@
+###
+post: The expression store of lib/cas, one node per distinct expression
+agent: claude
+
+An expression is a number, the id of a node in one store. The store keeps
+one node per distinct `(kind, payload, children)`: making a node looks its key
+up in a map and returns the id already there, so two equal expressions have
+the same id and equality is `a == b`.
+
+| kind | payload | children |
+|---|---|---|
+| `K_NUM` | the rational `p/q` | none |
+| `K_SYM` | the name's id | none |
+| `K_ADD` | | the terms, numeric term first, then by the term order |
+| `K_MUL` | | the factors, numeric coefficient first, then by the term order |
+| `K_POW` | | base, exponent |
+| `K_FN` | the head's name id | the argument |
+| `K_FAIL` | the reason's id | none |
+
+Subtraction is `a + (-1) b` and division `a b^{-1}`, so there is one form to
+match. `sqrt(u)` is `u^{1/2}`. A `K_FAIL` node is a refusal with its reason:
+every constructor given one returns it, so a refusal deep inside an
+expression reaches the top with its words, never as a wrong number.
+
+**Automatic normal form**, applied by every
+constructor and nothing else: flatten nested sums and products; add and
+multiply the numbers exactly; collect `2x + 3x = 5x` and `x^2 x^3 = x^5`
+(integer exponents, or any rational exponent of a positive number); drop
+`x + 0`, `1 x`, `x^1`, `x^0`; order the arguments; and the exact values
+`exp(0) = 1`, `log(1) = 0`, sine and cosine at multiples of
+$\pi/6$ and $\pi/4$, `log(exp(u)) = u`. Nothing expands: `2 (x + 1)` stays a
+product until `cas_expand` (lib/cas/calculus) is asked.
+
+**Term order.** Numbers first, by value; every other node by its base and
+then its exponent (`x` is `x^1`), bases compared by kind (symbol, function,
+power, product, sum) and then by name or children. It is a total order on
+these keys, so a sum or a product built in any order sorts to the same
+children and the same node.
+
+**Why the tables are maps.** Viv has no arrays of records, and a module's
+array cannot grow inside a def (`append` rebinds a name, and a def cannot
+rebind a module's name), so each field of a node is a map from id to value
+and the children of all nodes sit in one map, `CAS_CH`, by offset. An
+integer type, records in arrays and maps with structural keys would replace
+this.
+
+Used with `import cas.store`.
+###
+from cas.rational import (
+    rat_add, rat_bad, rat_cmp, rat_imul, rat_iroot, rat_mul, rat_norm, rat_pow, rat_square_part,
+    rat_sub,
+)
+
+# node kinds
+K_NUM = 0
+K_SYM = 1
+K_ADD = 2
+K_MUL = 3
+K_POW = 4
+K_FN = 5
+K_FAIL = 6
+# the rank of each kind in the term order, indexed by kind
+K_RANK = [0, 1, 6, 5, 4, 2, 7]
+
+# the fields of node i, and the children of every node by offset
+CAS_KIND = map()
+CAS_P = map()
+CAS_Q = map()
+CAS_C0 = map()
+CAS_CN = map()
+CAS_CH = map()
+# the hash-cons table: a node's key to its id
+CAS_HC = map()
+# names of symbols, function heads and refusal reasons, by id, and back
+CAS_NAMES = map()
+CAS_NAME_ID = map()
+# [0] nodes made, [1] child slots used
+CAS_COUNT = zeros(2)
+
+# the function heads the CAS knows; `sqrt` is a power and `ln` is `log`
+CAS_HEADS = ["exp", "log", "sin", "cos", "tan", "sinh", "cosh", "tanh", "asin", "acos", "atan", "erf", "abs"]
+
+#| The id of a name, made the first time it is seen.
+def cas_name(s) {
+    if has(CAS_NAME_ID, s) {
+        return CAS_NAME_ID[s]
+    }
+    id = len(CAS_NAMES)
+    CAS_NAMES[id] = s
+    CAS_NAME_ID[s] = id
+    return id
+}
+
+#| The node `(kind, p, q, kids)`: the one already in the store, or a new one.
+def cas_node(kind, p, q, kids) {
+    key = fmt(kind, "d") + ":" + fmt(p, ".17g") + ":" + fmt(q, ".17g")
+    for i to len(kids) {
+        key = key + "," + fmt(kids[i], "d")
+    }
+    if has(CAS_HC, key) {
+        return CAS_HC[key]
+    }
+    id = CAS_COUNT[0]
+    c0 = CAS_COUNT[1]
+    CAS_KIND[id] = kind
+    CAS_P[id] = p
+    CAS_Q[id] = q
+    CAS_C0[id] = c0
+    CAS_CN[id] = len(kids)
+    for i to len(kids) {
+        CAS_CH[c0 + i] = kids[i]
+    }
+    CAS_COUNT[0] = id + 1
+    CAS_COUNT[1] = c0 + len(kids)
+    CAS_HC[key] = id
+    return id
+}
+
+def cas_kind(e) {
+    return CAS_KIND[e]
+}
+def cas_nk(e) {
+    return CAS_CN[e]
+}
+def cas_kid(e, k) {
+    return CAS_CH[CAS_C0[e] + k]
+}
+#| The children of `e` as a vector.
+def cas_kids(e) {
+    out = []
+    for k to CAS_CN[e] {
+        out = append(out, CAS_CH[CAS_C0[e] + k])
+    }
+    return out
+}
+def cas_np(e) {
+    return CAS_P[e]
+}
+def cas_nq(e) {
+    return CAS_Q[e]
+}
+#| The name of a symbol, the head of a function, the reason of a refusal.
+def cas_name_of(e) {
+    return CAS_NAMES[CAS_P[e]]
+}
+def cas_size() {
+    return CAS_COUNT[0]
+}
+
+# ---- leaves ----------------------------------------------------------------------
+
+#| A refusal, with the reason in words.
+def cas_fail(why) {
+    return cas_node(K_FAIL, cas_name(why), 0, [])
+}
+def cas_isfail(e) {
+    return CAS_KIND[e] == K_FAIL
+}
+
+#| The exact number `p/q`; a refusal when it left the exact range of doubles.
+def cas_num(p, q) {
+    a, b = rat_norm(p, q)
+    if rat_bad(a) {
+        return cas_fail("a coefficient passed 2^53 or divided by zero; exact big integers are not built yet")
+    }
+    return cas_node(K_NUM, a, b, [])
+}
+def cas_int(n) {
+    return cas_num(n, 1)
+}
+def cas_sym(name) {
+    return cas_node(K_SYM, cas_name(name), 0, [])
+}
+
+C_ZERO = cas_int(0)
+C_ONE = cas_int(1)
+C_MONE = cas_int(-1)
+C_HALF = cas_num(1, 2)
+C_PI = cas_sym("pi")
+
+def cas_isnum(e) {
+    return CAS_KIND[e] == K_NUM
+}
+def cas_isint(e) {
+    return CAS_KIND[e] == K_NUM and CAS_Q[e] == 1
+}
+#| Whether `e` is a symbol other than the constant pi.
+def cas_isvar(e) {
+    return CAS_KIND[e] == K_SYM and e != C_PI
+}
+
+# ---- the term order --------------------------------------------------------------
+
+#| The base of `e` in the term order: a power's base, else `e`.
+def cas_base(e) {
+    if CAS_KIND[e] == K_POW {
+        return cas_kid(e, 0)
+    }
+    return e
+}
+#| The exponent of `e` in the term order: a power's exponent, else 1.
+def cas_expo(e) {
+    if CAS_KIND[e] == K_POW {
+        return cas_kid(e, 1)
+    }
+    return C_ONE
+}
+
+#| -1, 0 or 1: `a` before, equal to or after `b` in the term order.
+def cas_cmp(a, b) {
+    if a == b {
+        return 0
+    }
+    ka = CAS_KIND[a]
+    kb = CAS_KIND[b]
+    if ka == K_NUM and kb == K_NUM {
+        return rat_cmp(CAS_P[a], CAS_Q[a], CAS_P[b], CAS_Q[b])
+    }
+    if ka == K_NUM {
+        return -1
+    }
+    if kb == K_NUM {
+        return 1
+    }
+    ba = cas_base(a)
+    bb = cas_base(b)
+    if ba != bb {
+        return cas_cmp_shape(ba, bb)
+    }
+    return cas_cmp(cas_expo(a), cas_expo(b))
+}
+
+#| The term order on two different nodes by their own shape: kind, then name,
+#| then children in order, then the number of children.
+def cas_cmp_shape(a, b) {
+    ka = CAS_KIND[a]
+    kb = CAS_KIND[b]
+    if ka != kb {
+        if K_RANK[ka] < K_RANK[kb] {
+            return -1
+        }
+        return 1
+    }
+    if ka == K_NUM {
+        return rat_cmp(CAS_P[a], CAS_Q[a], CAS_P[b], CAS_Q[b])
+    }
+    if ka == K_SYM or ka == K_FN or ka == K_FAIL {
+        na = cas_name_of(a)
+        nb = cas_name_of(b)
+        if na < nb {
+            return -1
+        }
+        if na > nb {
+            return 1
+        }
+    }
+    n = min(CAS_CN[a], CAS_CN[b])
+    for k to n {
+        c = cas_cmp(cas_kid(a, k), cas_kid(b, k))
+        if c != 0 {
+            return c
+        }
+    }
+    if CAS_CN[a] < CAS_CN[b] {
+        return -1
+    }
+    if CAS_CN[a] > CAS_CN[b] {
+        return 1
+    }
+    return 0
+}
+
+#| `v` sorted by `keys` in the term order (insertion sort; `keys[i]` is the
+#| key of `v[i]`). The lists are short: the terms of one sum.
+def cas_sort_by(v, keys) {
+    a = copy(v)
+    k = copy(keys)
+    n = len(a)
+    for i from 1 to n {
+        x = a[i]
+        kx = k[i]
+        j = i - 1
+        moving = true
+        while moving {
+            if j < 0 {
+                moving = false
+            } else if cas_cmp(k[j], kx) > 0 {
+                a[j + 1] = a[j]
+                k[j + 1] = k[j]
+                j = j - 1
+            } else {
+                moving = false
+            }
+        }
+        a[j + 1] = x
+        k[j + 1] = kx
+    }
+    return a
+}
+
+# ---- coefficient and monomial ------------------------------------------------------
+
+#| The numeric coefficient of a term, as `p, q`.
+def cas_coeff(e) {
+    k = CAS_KIND[e]
+    if k == K_NUM {
+        return CAS_P[e], CAS_Q[e]
+    }
+    if k == K_MUL {
+        f = cas_kid(e, 0)
+        if CAS_KIND[f] == K_NUM {
+            return CAS_P[f], CAS_Q[f]
+        }
+    }
+    return 1, 1
+}
+
+#| A term without its numeric coefficient (1 for a number).
+def cas_mono(e) {
+    k = CAS_KIND[e]
+    if k == K_NUM {
+        return C_ONE
+    }
+    if k == K_MUL {
+        if CAS_KIND[cas_kid(e, 0)] == K_NUM {
+            n = CAS_CN[e]
+            if n == 2 {
+                return cas_kid(e, 1)
+            }
+            rest = []
+            for i from 1 to n {
+                rest = append(rest, cas_kid(e, i))
+            }
+            return cas_node(K_MUL, 0, 0, rest)
+        }
+    }
+    return e
+}
+
+#| The term `(p/q) m` for a monomial `m`, in normal form.
+def cas_scale(p, q, m) {
+    if rat_bad(p) {
+        return cas_num(p, q)
+    }
+    if p == 0 {
+        return C_ZERO
+    }
+    if m == C_ONE {
+        return cas_num(p, q)
+    }
+    if p == q {
+        return m
+    }
+    c = cas_num(p, q)
+    if CAS_KIND[m] == K_MUL {
+        kids = [c]
+        for i to CAS_CN[m] {
+            kids = append(kids, cas_kid(m, i))
+        }
+        return cas_node(K_MUL, 0, 0, kids)
+    }
+    return cas_node(K_MUL, 0, 0, [c, m])
+}
+
+# ---- sums ----------------------------------------------------------------------------
+
+#| The sum of the expressions in `v`, in normal form.
+def cas_addv(v) {
+    flat = []
+    for i to len(v) {
+        e = v[i]
+        if CAS_KIND[e] == K_FAIL {
+            return e
+        }
+        if CAS_KIND[e] == K_ADD {
+            for k to CAS_CN[e] {
+                flat = append(flat, cas_kid(e, k))
+            }
+        } else {
+            flat = append(flat, e)
+        }
+    }
+    np = 0
+    nq = 1
+    monos = []
+    cps = map()
+    cqs = map()
+    for i to len(flat) {
+        t = flat[i]
+        if CAS_KIND[t] == K_NUM {
+            np, nq = rat_add(np, nq, CAS_P[t], CAS_Q[t])
+        } else {
+            m = cas_mono(t)
+            tp, tq = cas_coeff(t)
+            if has(cps, m) {
+                sp, sq = rat_add(cps[m], cqs[m], tp, tq)
+                cps[m] = sp
+                cqs[m] = sq
+            } else {
+                monos = append(monos, m)
+                cps[m] = tp
+                cqs[m] = tq
+            }
+        }
+    }
+    if rat_bad(np) {
+        return cas_num(np, nq)
+    }
+    terms = []
+    keys = []
+    for i to len(monos) {
+        m = monos[i]
+        if rat_bad(cps[m]) {
+            return cas_num(cps[m], cqs[m])
+        }
+        if cps[m] != 0 {
+            terms = append(terms, cas_scale(cps[m], cqs[m], m))
+            keys = append(keys, m)
+        }
+    }
+    terms = cas_sort_by(terms, keys)
+    if np != 0 {
+        lead = [cas_num(np, nq)]
+        terms = concat(lead, terms)
+    }
+    if len(terms) == 0 {
+        return C_ZERO
+    }
+    if len(terms) == 1 {
+        return terms[0]
+    }
+    return cas_node(K_ADD, 0, 0, terms)
+}
+
+def cas_add(a, b) {
+    return cas_addv([a, b])
+}
+def cas_neg(a) {
+    return cas_mulv([C_MONE, a])
+}
+def cas_sub(a, b) {
+    return cas_addv([a, cas_neg(b)])
+}
+
+# ---- products ------------------------------------------------------------------------
+
+#| Whether `b^x * b^y` may become `b^(x + y)`: integer exponents, or rational
+#| exponents of a positive number or of pi.
+def cas_joinable(b, x, y) {
+    if CAS_KIND[x] != K_NUM or CAS_KIND[y] != K_NUM {
+        return false
+    }
+    if CAS_Q[x] == 1 and CAS_Q[y] == 1 {
+        return true
+    }
+    if b == C_PI {
+        return true
+    }
+    return CAS_KIND[b] == K_NUM and CAS_P[b] > 0
+}
+
+#| The product of the expressions in `v`, in normal form.
+def cas_mulv(v) {
+    flat = []
+    for i to len(v) {
+        e = v[i]
+        if CAS_KIND[e] == K_FAIL {
+            return e
+        }
+        if CAS_KIND[e] == K_MUL {
+            for k to CAS_CN[e] {
+                flat = append(flat, cas_kid(e, k))
+            }
+        } else {
+            flat = append(flat, e)
+        }
+    }
+    cp = 1
+    cq = 1
+    bases = []
+    exps = []
+    for i to len(flat) {
+        f = flat[i]
+        if CAS_KIND[f] == K_NUM {
+            cp, cq = rat_mul(cp, cq, CAS_P[f], CAS_Q[f])
+        } else {
+            b = cas_base(f)
+            x = cas_expo(f)
+            joined = false
+            for j to len(bases) {
+                if not joined and bases[j] == b and cas_joinable(b, exps[j], x) {
+                    exps[j] = cas_add(exps[j], x)
+                    joined = true
+                }
+            }
+            if not joined {
+                bases = append(bases, b)
+                exps = append(exps, x)
+            }
+        }
+    }
+    if rat_bad(cp) {
+        return cas_num(cp, cq)
+    }
+    if cp == 0 {
+        return C_ZERO
+    }
+    factors = []
+    again = false
+    for j to len(bases) {
+        f = cas_pow(bases[j], exps[j])
+        if CAS_KIND[f] == K_FAIL {
+            return f
+        }
+        if CAS_KIND[f] == K_NUM or CAS_KIND[f] == K_MUL {
+            again = true
+        }
+        if f != C_ONE {
+            factors = append(factors, f)
+        }
+    }
+    if again {
+        # a power that became a number or a product ((2 x)^2 = 4 x^2): once more
+        return cas_mulv(concat([cas_num(cp, cq)], factors))
+    }
+    factors = cas_sort_by(factors, factors)
+    if cp == cq {
+        if len(factors) == 0 {
+            return C_ONE
+        }
+        if len(factors) == 1 {
+            return factors[0]
+        }
+        return cas_node(K_MUL, 0, 0, factors)
+    }
+    if len(factors) == 0 {
+        return cas_num(cp, cq)
+    }
+    return cas_node(K_MUL, 0, 0, concat([cas_num(cp, cq)], factors))
+}
+
+def cas_mul(a, b) {
+    return cas_mulv([a, b])
+}
+def cas_div(a, b) {
+    return cas_mulv([a, cas_pow(b, C_MONE)])
+}
+
+# ---- powers --------------------------------------------------------------------------
+
+#| `b^e` in normal form.
+def cas_pow(b, e) {
+    if CAS_KIND[b] == K_FAIL {
+        return b
+    }
+    if CAS_KIND[e] == K_FAIL {
+        return e
+    }
+    if e == C_ZERO {
+        return C_ONE
+    }
+    if e == C_ONE {
+        return b
+    }
+    if CAS_KIND[b] == K_NUM {
+        if b == C_ONE {
+            return C_ONE
+        }
+        if b == C_ZERO {
+            if CAS_KIND[e] == K_NUM and CAS_P[e] < 0 {
+                return cas_fail("division by zero: 0 to a negative power")
+            }
+            if CAS_KIND[e] == K_NUM {
+                return C_ZERO
+            }
+        }
+        if cas_isint(e) {
+            p, q = rat_pow(CAS_P[b], CAS_Q[b], CAS_P[e])
+            return cas_num(p, q)
+        }
+        if CAS_KIND[e] == K_NUM and CAS_P[b] > 0 {
+            # an exact root of a positive rational: (a/c)^(p/q) with a, c perfect q-th powers
+            ra = rat_iroot(CAS_P[b], CAS_Q[e])
+            rc = rat_iroot(CAS_Q[b], CAS_Q[e])
+            if ra >= 0 and rc >= 0 {
+                p, q = rat_pow(ra, rc, CAS_P[e])
+                return cas_num(p, q)
+            }
+            if CAS_Q[e] == 2 {
+                return cas_surd(CAS_P[b], CAS_Q[b], CAS_P[e])
+            }
+        }
+        return cas_node(K_POW, 0, 0, [b, e])
+    }
+    if CAS_KIND[b] == K_POW and cas_isint(e) {
+        return cas_pow(cas_kid(b, 0), cas_mul(cas_kid(b, 1), e))
+    }
+    if CAS_KIND[b] == K_MUL and cas_isint(e) {
+        fs = []
+        for k to CAS_CN[b] {
+            fs = append(fs, cas_pow(cas_kid(b, k), e))
+        }
+        return cas_mulv(fs)
+    }
+    return cas_node(K_POW, 0, 0, [b, e])
+}
+
+#| `(a/c)^(n/2)` for a positive rational `a/c` and an odd `n`, as a rational
+#| times the square root of a square-free integer: `sqrt(8) = 2 sqrt(2)`,
+#| `1/sqrt(2) = sqrt(2)/2`, so equal surds are equal nodes.
+def cas_surd(a, c, n) {
+    k = rat_imul(a, c)
+    if rat_bad(k) {
+        return cas_node(K_POW, 0, 0, [cas_num(a, c), cas_num(n, 2)])
+    }
+    s, kf = rat_square_part(k)
+    # (a/c)^(n/2) = (a/c)^((n-1)/2) * s sqrt(kf) / c
+    rp, rq = rat_pow(a, c, (n - 1) / 2)
+    rp, rq = rat_mul(rp, rq, s, c)
+    if rat_bad(rp) {
+        return cas_num(rp, rq)
+    }
+    if kf == 1 {
+        return cas_num(rp, rq)
+    }
+    root = cas_node(K_POW, 0, 0, [cas_int(kf), C_HALF])
+    if rp == rq {
+        return root
+    }
+    return cas_node(K_MUL, 0, 0, [cas_num(rp, rq), root])
+}
+
+def cas_sqrt(a) {
+    return cas_pow(a, C_HALF)
+}
+
+# ---- functions -----------------------------------------------------------------------
+
+#| `sin(r pi)` for a rational `r` when it is one of 0, 1/2, sqrt(2)/2, sqrt(3)/2,
+#| 1 or their negatives; -1 (no node) otherwise.
+def cas_sinpi(p, q) {
+    # r mod 2, in [0, 2)
+    k = floor(p / q / 2)
+    rp, rq = rat_sub(p, q, 2 * k, 1)
+    while rp < 0 {
+        rp, rq = rat_add(rp, rq, 2, 1)
+    }
+    while rat_cmp(rp, rq, 2, 1) >= 0 {
+        rp, rq = rat_sub(rp, rq, 2, 1)
+    }
+    sign = 1
+    if rat_cmp(rp, rq, 1, 1) >= 0 {
+        sign = -1
+        rp, rq = rat_sub(rp, rq, 1, 1)
+    }
+    # now r in [0, 1): sin(r pi) = sin((1 - r) pi)
+    if rat_cmp(rp, rq, 1, 2) > 0 {
+        rp, rq = rat_sub(1, 1, rp, rq)
+    }
+    v = -1
+    if rp == 0 {
+        v = C_ZERO
+    } else if rq == 6 and rp == 1 {
+        v = C_HALF
+    } else if rq == 4 and rp == 1 {
+        v = cas_mul(C_HALF, cas_sqrt(cas_int(2)))
+    } else if rq == 3 and rp == 1 {
+        v = cas_mul(C_HALF, cas_sqrt(cas_int(3)))
+    } else if rq == 2 and rp == 1 {
+        v = C_ONE
+    }
+    if v < 0 {
+        return -1
+    }
+    if sign < 0 {
+        return cas_neg(v)
+    }
+    return v
+}
+
+#| The rational `r` with `a = r pi`, as `p, q`; `0, 0` when `a` is not one.
+def cas_pi_multiple(a) {
+    if a == C_PI {
+        return 1, 1
+    }
+    if a == C_ZERO {
+        return 0, 1
+    }
+    if CAS_KIND[a] == K_MUL and CAS_CN[a] == 2 and cas_kid(a, 1) == C_PI and CAS_KIND[cas_kid(a, 0)] == K_NUM {
+        c = cas_kid(a, 0)
+        return CAS_P[c], CAS_Q[c]
+    }
+    return 0, 0
+}
+
+#| The exact value of `atan`, `asin` or `acos` at the arguments whose angle is
+#| a multiple of pi/12 that sin and cos take exact values at; -1 otherwise.
+def cas_arc_value(h, a) {
+    s2 = cas_mul(C_HALF, cas_sqrt(cas_int(2)))
+    s3 = cas_mul(C_HALF, cas_sqrt(cas_int(3)))
+    r3 = cas_sqrt(cas_int(3))
+    if h == "atan" {
+        # atan: 1/sqrt(3), 1, sqrt(3) are pi/6, pi/4, pi/3
+        args = [cas_div(C_ONE, r3), C_ONE, r3]
+        angs = [cas_num(1, 6), cas_num(1, 4), cas_num(1, 3)]
+    } else {
+        # asin: 1/2, sqrt(2)/2, sqrt(3)/2, 1 are pi/6, pi/4, pi/3, pi/2
+        args = [C_HALF, s2, s3, C_ONE]
+        angs = [cas_num(1, 6), cas_num(1, 4), cas_num(1, 3), C_HALF]
+    }
+    for i to len(args) {
+        for sign to 2 {
+            arg = args[i]
+            ang = angs[i]
+            if sign == 1 {
+                arg = cas_neg(arg)
+                ang = cas_neg(ang)
+            }
+            if a == arg {
+                if h == "acos" {
+                    # acos(u) = pi/2 - asin(u)
+                    return cas_mul(cas_sub(C_HALF, ang), C_PI)
+                }
+                return cas_mul(ang, C_PI)
+            }
+        }
+    }
+    return -1
+}
+
+#| `head(a)` in normal form; `sqrt` is a power, `ln` is `log`, and a head the
+#| CAS does not know is a refusal that names it.
+def cas_fn(head: Str, a) {
+    if CAS_KIND[a] == K_FAIL {
+        return a
+    }
+    h = head
+    if h == "sqrt" {
+        return cas_sqrt(a)
+    }
+    if h == "ln" {
+        h = "log"
+    }
+    if h not in CAS_HEADS {
+        return cas_fail(f"the CAS has no function `{head}`")
+    }
+    if a == C_ZERO {
+        if h == "exp" or h == "cos" or h == "cosh" {
+            return C_ONE
+        }
+        if h == "sin" or h == "tan" or h == "sinh" or h == "tanh" or h == "asin" or h == "atan" or h == "erf" or h == "abs" {
+            return C_ZERO
+        }
+        if h == "log" {
+            return cas_fail("log(0) is not a number")
+        }
+    }
+    if a == C_ONE {
+        if h == "log" or h == "acos" {
+            return C_ZERO
+        }
+    }
+    if h == "atan" or h == "asin" or h == "acos" {
+        v = cas_arc_value(h, a)
+        if v >= 0 {
+            return v
+        }
+    }
+    if h == "abs" and CAS_KIND[a] == K_NUM {
+        return cas_num(abs(CAS_P[a]), CAS_Q[a])
+    }
+    if h == "log" and CAS_KIND[a] == K_FN and cas_name_of(a) == "exp" {
+        return cas_kid(a, 0)
+    }
+    if h == "sin" or h == "cos" or h == "tan" {
+        pp, pq = cas_pi_multiple(a)
+        if pq != 0 {
+            s = cas_sinpi(pp, pq)
+            cp, cq = rat_add(pp, pq, 1, 2)
+            c = cas_sinpi(cp, cq)
+            if h == "sin" and s >= 0 {
+                return s
+            }
+            if h == "cos" and c >= 0 {
+                return c
+            }
+            if h == "tan" and s >= 0 and c >= 0 and c != C_ZERO {
+                return cas_div(s, c)
+            }
+        }
+    }
+    return cas_node(K_FN, cas_name(h), 0, [a])
+}
+
+test "equal expressions are one node" {
+    x = cas_sym("x")
+    y = cas_sym("y")
+    a = cas_add(cas_mul(x, y), C_ONE)
+    b = cas_add(C_ONE, cas_mul(y, x))
+    assert_near(a, b, 0)
+    assert_near(cas_add(x, x), cas_mul(cas_int(2), x), 0)
+}
+
+test "the automatic normal form collects, cancels and folds numbers" {
+    x = cas_sym("x")
+    # 2x + 3x - 5x = 0
+    s = cas_addv([cas_mul(cas_int(2), x), cas_mul(cas_int(3), x), cas_mul(cas_int(-5), x)])
+    assert_near(s, C_ZERO, 0)
+    # x^2 x^3 = x^5; x x^-1 = 1
+    assert_near(cas_mul(cas_pow(x, cas_int(2)), cas_pow(x, cas_int(3))), cas_pow(x, cas_int(5)), 0)
+    assert_near(cas_div(x, x), C_ONE, 0)
+    # 1/3 + 1/6 = 1/2, sqrt(9/4) = 3/2, (2 x)^2 = 4 x^2
+    assert_near(cas_add(cas_num(1, 3), cas_num(1, 6)), C_HALF, 0)
+    assert_near(cas_sqrt(cas_num(9, 4)), cas_num(3, 2), 0)
+    assert_near(cas_pow(cas_mul(cas_int(2), x), cas_int(2)), cas_mul(cas_int(4), cas_pow(x, cas_int(2))), 0)
+    # sqrt(2) sqrt(2) = 2, sqrt(x) sqrt(x) is not folded (x might be negative)
+    assert_near(cas_mul(cas_sqrt(cas_int(2)), cas_sqrt(cas_int(2))), cas_int(2), 0)
+    assert_true(cas_mul(cas_sqrt(x), cas_sqrt(x)) != x)
+    # sqrt(8) = 2 sqrt(2), 1/sqrt(2) = sqrt(2)/2
+    assert_near(cas_sqrt(cas_int(8)), cas_mul(cas_int(2), cas_sqrt(cas_int(2))), 0)
+    assert_near(cas_pow(cas_int(2), cas_num(-1, 2)), cas_mul(C_HALF, cas_sqrt(cas_int(2))), 0)
+}
+
+test "exact function values, and a refusal that carries its reason" {
+    assert_near(cas_fn("exp", C_ZERO), C_ONE, 0)
+    assert_near(cas_fn("sin", C_PI), C_ZERO, 0)
+    assert_near(cas_fn("cos", C_PI), C_MONE, 0)
+    assert_near(cas_fn("sin", cas_mul(cas_num(1, 6), C_PI)), C_HALF, 0)
+    assert_near(cas_fn("cos", cas_mul(cas_num(2, 3), C_PI)), cas_num(-1, 2), 0)
+    assert_near(cas_fn("atan", C_ONE), cas_mul(cas_num(1, 4), C_PI), 0)
+    assert_near(cas_fn("acos", C_HALF), cas_mul(cas_num(1, 3), C_PI), 0)
+    bad = cas_fn("boys", cas_sym("x"))
+    assert_true(cas_isfail(bad))
+    assert_true(cas_isfail(cas_add(cas_sym("y"), bad)))
+    assert_true(cas_isfail(cas_mul(cas_num(94906267, 1), cas_num(94906267, 1))))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

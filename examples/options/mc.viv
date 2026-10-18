@@ -1,0 +1,306 @@
+#|| Monte Carlo for path-dependent options, on a counter-based generator:
+#|| Philox4x32-10 (Salmon, Moraes, Dror and Shaw, "Parallel random numbers:
+#|| as easy as 1, 2, 3", SC11). The normals of path p come from the counter
+#|| (p, block) under the key (seed, stream), so a path's numbers do not
+#|| depend on which thread draws it or in what order: the paths are drawn in
+#|| a `parallel for`, each writes only its own slots, and every sum is taken
+#|| afterwards, in path order. The bits are the same with one thread or many.
+#||
+#|| - asian_call: the arithmetic-average Asian call, with the geometric-
+#||   average call (closed form, Kemna and Vorst 1990) as a control variate;
+#|| - lsm_american_put: Longstaff and Schwartz's least-squares Monte Carlo
+#||   (Rev. Financial Studies 14, 2001).
+
+TWO32 = 4294967296.0
+PI = 3.141592653589793
+
+#| Philox4x32-10: the four 32-bit words the counter (c0, c1, c2, c3) maps to
+#| under the key (k0, k1), as Random123's philox4x32 computes them.
+def philox4x32(c0: Int, c1: Int, c2: Int, c3: Int, k0: Int, k1: Int) {
+    x0 = c0
+    x1 = c1
+    x2 = c2
+    x3 = c3
+    ka = k0
+    kb = k1
+    for round to 10 {
+        if round > 0 {
+            ka = (ka + 2654435769) % 4294967296
+            kb = (kb + 3144134277) % 4294967296
+        }
+        # the two 64-bit products, split into high and low words inline (a
+        # call per product costs more than the product)
+        p0 = wrap_mul(3528531795, x0)
+        l0 = p0 % 4294967296
+        h0 = (p0 - l0) // 4294967296
+        if h0 < 0 {
+            h0 = h0 + 4294967296
+        }
+        p1 = wrap_mul(3449720151, x2)
+        l1 = p1 % 4294967296
+        h1 = (p1 - l1) // 4294967296
+        if h1 < 0 {
+            h1 = h1 + 4294967296
+        }
+        y0 = int(bxor(bxor(float(h1), float(x1)), float(ka)))
+        y2 = int(bxor(bxor(float(h0), float(x3)), float(kb)))
+        x0 = y0
+        x1 = l1
+        x2 = y2
+        x3 = l0
+    }
+    return x0, x1, x2, x3
+}
+
+# a uniform in (0, 1) from two words: 53 bits, offset by half a step so
+# neither 0 nor 1 comes out
+def _unif(a: Int, b: Int) -> Num {
+    hi = float(a // 32)
+    lo = float(b // 64)
+    return (hi * 67108864.0 + lo + 0.5) / 9007199254740992.0
+}
+
+#| Normal draws 2 * block and 2 * block + 1 of path p, by Box-Muller from
+#| one Philox block.
+def normal_pair(p: Int, block: Int, seed: Int, stream: Int) {
+    w0, w1, w2, w3 = philox4x32(p % 4294967296, p // 4294967296, block, 0, seed, stream)
+    u1 = _unif(w0, w1)
+    u2 = _unif(w2, w3)
+    rad = sqrt(-2.0 * log(u1))
+    return rad * cos(2.0 * PI * u2), rad * sin(2.0 * PI * u2)
+}
+
+#| Fills z (npaths by nsteps) with the normals of each path, in parallel.
+def normals(npaths: Int, nsteps: Int, seed: Int, stream: Int) -> Arr {
+    z = zeros(npaths, nsteps)
+    nb: Int = (nsteps + 1) // 2
+    parallel for p to npaths {
+        for b to nb {
+            g0, g1 = normal_pair(p, b, seed, stream)
+            z[p, 2 * b] = g0
+            if 2 * b + 1 < nsteps {
+                z[p, 2 * b + 1] = g1
+            }
+        }
+    }
+    return z
+}
+
+# the normal CDF from erf: the control variate's mean needs a few digits only
+def _ncdf(x: Num) -> Num {
+    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+}
+
+#| The price of the call on the geometric average of the n prices at
+#| T/n, 2T/n, ..., T: log G is normal with mean log S + nu T (n + 1) / (2n)
+#| and variance sigma^2 T (n + 1)(2n + 1) / (6 n^2), nu = r - q - sigma^2 / 2.
+def geometric_asian_call(S: Num, K: Num, T: Num, r: Num, q: Num, sigma: Num, n: Int) -> Num {
+    nu = r - q - 0.5 * sigma * sigma
+    mu = log(S) + nu * T * (n + 1) / (2.0 * n)
+    sg = sigma * sqrt(T * (n + 1) * (2 * n + 1) / (6.0 * n * n))
+    d2 = (mu - log(K)) / sg
+    return exp(-r * T) * (exp(mu + 0.5 * sg * sg) * _ncdf(d2 + sg) - K * _ncdf(d2))
+}
+
+#| The arithmetic-average Asian call over n monitoring dates, from npaths
+#| paths. Returns the control-variate estimate, its standard error, the
+#| plain estimate and its standard error, and the geometric call's Monte
+#| Carlo estimate (to set against its closed form). The coefficient beta is
+#| the sample regression of the arithmetic payoff on the geometric one.
+def asian_call(S: Num, K: Num, T: Num, r: Num, q: Num, sigma: Num, n: Int, npaths: Int, seed: Int) {
+    dt = T / n
+    drift = (r - q - 0.5 * sigma * sigma) * dt
+    vol = sigma * sqrt(dt)
+    disc = exp(-r * T)
+    ya = zeros(npaths)
+    yg = zeros(npaths)
+    nb: Int = (n + 1) // 2
+    parallel for p to npaths {
+        x = log(S)
+        sa = 0.0
+        sl = 0.0
+        for b to nb {
+            g0, g1 = normal_pair(p, b, seed, 0)
+            x += drift + vol * g0
+            sa += exp(x)
+            sl += x
+            if 2 * b + 1 < n {
+                x += drift + vol * g1
+                sa += exp(x)
+                sl += x
+            }
+        }
+        ya[p] = disc * max(sa / n - K, 0.0)
+        yg[p] = disc * max(exp(sl / n) - K, 0.0)
+    }
+    # every sum in path order, after the parallel loop
+    ma = 0.0
+    mg = 0.0
+    for p to npaths {
+        ma += ya[p]
+        mg += yg[p]
+    }
+    ma = ma / npaths
+    mg = mg / npaths
+    saa = 0.0
+    sgg = 0.0
+    sag = 0.0
+    for p to npaths {
+        da = ya[p] - ma
+        dg = yg[p] - mg
+        saa += da * da
+        sgg += dg * dg
+        sag += da * dg
+    }
+    beta = sag / sgg
+    exact_g = geometric_asian_call(S, K, T, r, q, sigma, n)
+    cv = ma - beta * (mg - exact_g)
+    var_cv = (saa - 2.0 * beta * sag + beta * beta * sgg) / (npaths - 1)
+    return cv, sqrt(var_cv / npaths), ma, sqrt(saa / (npaths - 1) / npaths), mg
+}
+
+# solves the 3 by 3 system m x = v by Gaussian elimination with partial pivoting
+def _solve3(m: Arr, v: Arr) -> Arr {
+    a = copy(m)
+    y = copy(v)
+    for c to 3 {
+        piv = c
+        for i from c + 1 to 3 {
+            if abs(a[i, c]) > abs(a[piv, c]) {
+                piv = i
+            }
+        }
+        if piv != c {
+            for j to 3 {
+                t = a[c, j]
+                a[c, j] = a[piv, j]
+                a[piv, j] = t
+            }
+            t = y[c]
+            y[c] = y[piv]
+            y[piv] = t
+        }
+        for i from c + 1 to 3 {
+            f = a[i, c] / a[c, c]
+            for j from c to 3 {
+                a[i, j] = a[i, j] - f * a[c, j]
+            }
+            y[i] = y[i] - f * y[c]
+        }
+    }
+    x = zeros(3)
+    for i from 0 to 3 reversed {
+        s = y[i]
+        for j from i + 1 to 3 {
+            s = s - a[i, j] * x[j]
+        }
+        x[i] = s / a[i, i]
+    }
+    return x
+}
+
+#| Longstaff-Schwartz American put: npaths paths with nsteps exercise dates
+#| on (0, T]; at each date, backward, the discounted future cash flow of
+#| the in-the-money paths is regressed on 1, x, x^2 (x = S / K), and a path
+#| exercises where its payoff beats the fitted continuation. Returns the
+#| price and its standard error.
+def lsm_american_put(S: Num, K: Num, T: Num, r: Num, q: Num, sigma: Num, nsteps: Int, npaths: Int, seed: Int) {
+    dt = T / nsteps
+    drift = (r - q - 0.5 * sigma * sigma) * dt
+    vol = sigma * sqrt(dt)
+    z = normals(npaths, nsteps, seed, 1)
+    # the prices at dates 1..nsteps (column j is date j + 1)
+    st = zeros(npaths, nsteps)
+    parallel for p to npaths {
+        x = log(S)
+        for j to nsteps {
+            x += drift + vol * z[p, j]
+            st[p, j] = exp(x)
+        }
+    }
+    cf = zeros(npaths)
+    tex = zeros(npaths)
+    for p to npaths {
+        cf[p] = max(K - st[p, nsteps - 1], 0.0)
+        tex[p] = float(nsteps)
+    }
+    m = zeros(3, 3)
+    v = zeros(3)
+    for j from 1 to nsteps reversed {
+        # date j is column j - 1
+        for a to 3 {
+            v[a] = 0.0
+            for b to 3 {
+                m[a, b] = 0.0
+            }
+        }
+        nitm = 0
+        for p to npaths {
+            ex = K - st[p, j - 1]
+            if ex > 0.0 {
+                x = st[p, j - 1] / K
+                y = cf[p] * exp(-r * dt * (tex[p] - j))
+                f0 = 1.0
+                f1 = x
+                f2 = x * x
+                m[0, 0] += f0 * f0
+                m[0, 1] += f0 * f1
+                m[0, 2] += f0 * f2
+                m[1, 1] += f1 * f1
+                m[1, 2] += f1 * f2
+                m[2, 2] += f2 * f2
+                v[0] += f0 * y
+                v[1] += f1 * y
+                v[2] += f2 * y
+                nitm += 1
+            }
+        }
+        if nitm >= 3 {
+            m[1, 0] = m[0, 1]
+            m[2, 0] = m[0, 2]
+            m[2, 1] = m[1, 2]
+            beta = _solve3(m, v)
+            for p to npaths {
+                ex = K - st[p, j - 1]
+                if ex > 0.0 {
+                    x = st[p, j - 1] / K
+                    cont = beta[0] + beta[1] * x + beta[2] * x * x
+                    if ex > cont {
+                        cf[p] = ex
+                        tex[p] = float(j)
+                    }
+                }
+            }
+        }
+    }
+    s1 = 0.0
+    s2 = 0.0
+    for p to npaths {
+        y = cf[p] * exp(-r * dt * tex[p])
+        s1 += y
+        s2 += y * y
+    }
+    mean = s1 / npaths
+    se = sqrt((s2 / npaths - mean * mean) / (npaths - 1))
+    return max(mean, K - S), se
+}
+
+test "Philox4x32-10's known-answer vectors (Random123, kat_vectors)" {
+    a0, a1, a2, a3 = philox4x32(0, 0, 0, 0, 0, 0)
+    assert_true(a0 == 1713891541 and a1 == 3781805453 and a2 == 3159862348 and a3 == 2600524760)
+    m: Int = 4294967295
+    b0, b1, b2, b3 = philox4x32(m, m, m, m, m, m)
+    assert_true(b0 == 1083123565 and b1 == 1103641358 and b2 == 2718681030 and b3 == 1834242557)
+    c0, c1, c2, c3 = philox4x32(608135816, 2242054355, 320440878, 57701188, 2752067618, 698298832)
+    assert_true(c0 == 3513581065 and c1 == 2499661035 and c2 == 1342301216 and c3 == 605187745)
+}
+
+test "the geometric Asian call: Monte Carlo against its closed form" {
+    cv, se, plain, pse, g = asian_call(100.0, 100.0, 1.0, 0.05, 0.0, 0.2, 12, 20000, 7)
+    exact = geometric_asian_call(100.0, 100.0, 1.0, 0.05, 0.0, 0.2, 12)
+    assert_true(abs(g - exact) < 4.0 * pse)
+    assert_true(se < 0.1 * pse)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

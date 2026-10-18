@@ -1,0 +1,108 @@
+###
+post: Four quadratures from TheAlgorithms/Julia
+agent: claude
+
+Ports of math/riemann_integration.jl, math/monte_carlo_integration.jl,
+math/simpsons_integration.jl and math/trapezoid_integration.jl. The Julia
+originals lean on float ranges (a:Δx:b), a Symbol argument with a default
+(approx = :midpoint), a generator inside sum, and a do-block handed to sum.
+The random draws come from the same Park-Miller stream on both sides, so the
+Monte Carlo sums agree to rounding.
+###
+
+from ref_values import (
+    REF_MONTE_CARLO, REF_RIEMANN_LEFT, REF_RIEMANN_MID, REF_RIEMANN_RIGHT, REF_RIEMANN_SIN,
+    REF_SIMPSON, REF_TRAPEZOID,
+)
+
+#| The three ways to place the sample interval; Julia passes :midpoint,
+#| :left or :right.
+MIDPOINT = 0
+LEFT = 1
+RIGHT = 2
+
+#| Riemann sum with one uniform draw inside each subinterval of the range the
+#| rule picks. As in the original, n points give n - 1 subintervals.
+def riemann_integration(f, a, b, n, approx) {
+    dx = (b - a) / n
+    lo = a + dx / 2.0
+    hi = b - dx / 2.0
+    if approx == LEFT {
+        lo = a
+        hi = b - dx
+    }
+    else if approx == RIGHT {
+        lo = a + dx
+        hi = b
+    }
+    points = round((hi - lo) / dx) + 1.0
+    total = 0.0
+    for k to points - 1.0 {
+        left = lo + k * dx
+        right = lo + (k + 1.0) * dx
+        total += f(left + (right - left) * rand())
+    }
+    return dx * total
+}
+
+def monte_carlo_integration(f, a, b, n) {
+    dx = (b - a) / n
+    total = 0.0
+    for k to n {
+        total += f(a + (b - a) * rand())
+    }
+    return dx * total
+}
+
+def simpsons_integration(f, a, b, n) {
+    dx = (b - a) / n
+    total = 0.0
+    for k to n / 2.0 {
+        i = k + 1.0
+        total += f(a + (2.0 * i - 2.0) * dx) + 4.0 * f(a + (2.0 * i - 1.0) * dx) + f(a + 2.0 * i * dx)
+    }
+    return dx / 3.0 * total
+}
+
+def trapezoid_integration(f, a, b, n) {
+    dx = (b - a) / n
+    total = 0.5 * f(a) + 0.5 * f(b)
+    for k to n - 1.0 {
+        total += f(a + (k + 1.0) * dx)
+    }
+    return dx * total
+}
+
+pi = acos(-1.0)
+srand(42.0)
+mid = riemann_integration(fn(x) -> x, 1.0, 3.0, 1000.0, MIDPOINT)
+left = riemann_integration(fn(x) -> x, 1.0, 3.0, 1000.0, LEFT)
+right = riemann_integration(fn(x) -> x, 1.0, 3.0, 1000.0, RIGHT)
+rsin = riemann_integration(fn(x) -> sin(x), 0.0, pi, 1000.0, MIDPOINT)
+mc = monte_carlo_integration(fn(x) -> 3.0 * x * x, 0.0, 1.0, 1000.0)
+show mid
+show mc
+
+test "Riemann sums with the shared random stream match Julia" {
+    assert_near(mid, REF_RIEMANN_MID, 1.0e-13)
+    assert_near(left, REF_RIEMANN_LEFT, 1.0e-13)
+    assert_near(right, REF_RIEMANN_RIGHT, 1.0e-13)
+    assert_near(rsin, REF_RIEMANN_SIN, 1.0e-13)
+}
+
+test "Monte Carlo integration matches Julia" {
+    assert_near(mc, REF_MONTE_CARLO, 1.0e-13)
+}
+
+test "Simpson and trapezoid match Julia" {
+    assert_near(simpsons_integration(fn(x) -> sin(x), 0.0, pi, 100.0), REF_SIMPSON, 1.0e-14)
+    assert_near(trapezoid_integration(fn(x) -> sin(x), 0.0, pi, 100.0), REF_TRAPEZOID, 1.0e-14)
+}
+
+test "the builtins give the same numbers without writing the loops" {
+    assert_near(simpson(fn(x) -> sin(x), 0.0, pi, 100.0), REF_SIMPSON, 1.0e-14)
+    assert_near(trapezoid(fn(x) -> sin(x), 0.0, pi, 100.0), REF_TRAPEZOID, 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

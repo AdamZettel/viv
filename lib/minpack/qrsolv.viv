@@ -1,0 +1,191 @@
+###
+post: MINPACK's qrsolv, the damped least-squares system from a QR factorization
+agent: claude
+
+A port of `qrsolv.f` from netlib MINPACK (lib/minpack/ref). The explanation
+is in lib/minpack/qrsolv.intent. Indices count from 0: `ipvt` holds 0-based
+column numbers, as qrfac writes them. The Fortran names its rotation `sin`,
+`cos`, `tan` and `cotan`; here they are `sn`, `cs`, `tn` and `ctn`, because
+the first three are Viv builtins.
+
+Used with `import minpack.qrsolv`.
+###
+
+from minpack.qrfac import qrfac
+
+def qrsolv(n, r: Arr, ipvt: Arr, diag: Arr, qtb: Arr, x: Arr, sdiag: Arr, wa: Arr) {
+    step copy {
+        for j to n {
+            for ii to n - j {
+                r[j + ii, j] = r[j, j + ii]
+            }
+            x[j] = r[j, j]
+            wa[j] = qtb[j]
+        }
+    }
+    step eliminate {
+        for j to n {
+            l = ipvt[j]
+            if diag[l] != 0.0 {
+                for kk to n - j {
+                    sdiag[j + kk] = 0.0
+                }
+                sdiag[j] = diag[l]
+                qtbpj = 0.0
+                for kk to n - j {
+                    k = j + kk
+                    if sdiag[k] != 0.0 {
+                        if abs(r[k, k]) >= abs(sdiag[k]) {
+                            tn = sdiag[k] / r[k, k]
+                            cs = 0.5 / sqrt(0.25 + 0.25 * (tn * tn))
+                            sn = cs * tn
+                        } else {
+                            ctn = r[k, k] / sdiag[k]
+                            sn = 0.5 / sqrt(0.25 + 0.25 * (ctn * ctn))
+                            cs = sn * ctn
+                        }
+                        r[k, k] = cs * r[k, k] + sn * sdiag[k]
+                        temp = cs * wa[k] + sn * qtbpj
+                        qtbpj = -(sn * wa[k]) + cs * qtbpj
+                        wa[k] = temp
+                        for ii to n - k - 1 {
+                            i = k + 1 + ii
+                            temp = cs * r[i, k] + sn * sdiag[i]
+                            sdiag[i] = -(sn * r[i, k]) + cs * sdiag[i]
+                            r[i, k] = temp
+                        }
+                    }
+                }
+            }
+            sdiag[j] = r[j, j]
+            r[j, j] = x[j]
+        }
+    }
+    step solve {
+        nsing = n
+        for j to n {
+            if sdiag[j] == 0.0 and nsing == n {
+                nsing = j
+            }
+            if nsing < n {
+                wa[j] = 0.0
+            }
+        }
+        for kk to nsing {
+            j = nsing - 1 - kk
+            sum = 0.0
+            for ii to nsing - j - 1 {
+                i = j + 1 + ii
+                sum = sum + r[i, j] * wa[i]
+            }
+            wa[j] = (wa[j] - sum) / sdiag[j]
+        }
+    }
+    step permute {
+        for j to n {
+            l = ipvt[j]
+            x[l] = wa[j]
+        }
+    }
+    return 0
+}
+
+# ---- tests --------------------------------------------------------------
+
+# The damped least-squares problem qrsolv answers, solved the plain way:
+# minimize |A x - b|^2 + |D x|^2 through its normal equations
+# (A^T A + D^2) x = A^T b.
+#~ test
+def qs_normal_solve(m, n, A: Arr, b: Arr, d: Arr, x: Arr) {
+    N = zeros(n, n)
+    rhs = zeros(n)
+    for i to n {
+        for j to n {
+            s = 0.0
+            for k to m {
+                s = s + A[k, i] * A[k, j]
+            }
+            N[i, j] = s
+        }
+        N[i, i] = N[i, i] + d[i] * d[i]
+        s = 0.0
+        for k to m {
+            s = s + A[k, i] * b[k]
+        }
+        rhs[i] = s
+    }
+    lin_solve(N, rhs, x)
+    return 0
+}
+
+# Factor A with qrfac, form Q^T b as lmder does, and hand the triangle to
+# qrsolv with the diagonal d; x receives qrsolv's answer.
+#~ test
+def qs_via_qr(m, n, A: Arr, b: Arr, d: Arr, x: Arr, sdiag: Arr) {
+    a = zeros(m, n)
+    for i to m {
+        for j to n {
+            a[i, j] = A[i, j]
+        }
+    }
+    ipvt = zeros(n)
+    rdiag = zeros(n)
+    acnorm = zeros(n)
+    wa = zeros(n)
+    qrfac(m, n, a, true, ipvt, rdiag, acnorm, wa)
+    # Q^T b, the first n entries, as lmder forms qtf
+    w = zeros(m)
+    for i to m {
+        w[i] = b[i]
+    }
+    qtb = zeros(n)
+    for j to n {
+        if a[j, j] != 0.0 {
+            s = 0.0
+            for i to m - j {
+                s = s + a[j + i, j] * w[j + i]
+            }
+            t = -s / a[j, j]
+            for i to m - j {
+                w[j + i] = w[j + i] + a[j + i, j] * t
+            }
+        }
+        a[j, j] = rdiag[j]
+        qtb[j] = w[j]
+    }
+    qrsolv(n, a, ipvt, d, qtb, x, sdiag, wa)
+    return 0
+}
+
+test "qrsolv solves the damped problem that the normal equations solve" {
+    A = [[1.0, 2.0, 0.5], [0.0, 1.0, 3.0], [2.0, -1.0, 1.0], [1.0, 1.0, 1.0], [0.3, 0.0, -2.0]]
+    b = [1.0, 2.0, -1.0, 0.5, 3.0]
+    d = [0.7, 1.5, 0.2]
+    m = len(b)
+    n = len(d)
+    x = zeros(n)
+    sdiag = zeros(n)
+    qs_via_qr(m, n, A, b, d, x, sdiag)
+    y = zeros(n)
+    qs_normal_solve(m, n, A, b, d, y)
+    for j to n {
+        assert_near(x[j], y[j], 1.0e-14)
+    }
+}
+
+test "with d = 0 qrsolv returns the ordinary least-squares solution" {
+    A = [[1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0]]
+    b = [6.0, 5.0, 7.0, 10.0]
+    m = len(b)
+    n = shape(A)[1]
+    x = zeros(n)
+    sdiag = zeros(n)
+    qs_via_qr(m, n, A, b, zeros(n), x, sdiag)
+    # the line through the four points: intercept 3.5, slope 1.4
+    assert_near(x[0], 3.5, 1.0e-14)
+    assert_near(x[1], 1.4, 1.0e-14)
+}
+
+# SPDX-License-Identifier: LicenseRef-Minpack
+# SPDX-FileCopyrightText: 1999 University of Chicago (Argonne National Laboratory, MINPACK)
+# SPDX-FileCopyrightText: 2026 The Viv authors

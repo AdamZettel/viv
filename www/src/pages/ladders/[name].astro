@@ -1,0 +1,73 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// A ladder: a program taught by building it, one rung at a time. Everything
+// here is scripts/ladder-build.mjs's output for one file in ladders/: the
+// intro is the file's `#! |` paragraphs, the list under it the rung titles,
+// and each rung shows the whole program at that rung beside its prose.
+import Base from '../../layouts/Base.astro';
+import LadderRungs from '../../components/LadderRungs.jsx';
+import data from '../../data/ladders.json';
+import '../../styles/ladder.css';
+import 'katex/dist/katex.min.css';
+
+export function getStaticPaths() {
+  return data.ladders.map((l) => ({ params: { name: l.name }, props: { ladder: l } }));
+}
+const { ladder } = Astro.props;
+const openHref = (r) => (r.file ? `/workbench?open=${r.file}` : null);
+const strip = (html) => html.replace(/<[^>]+>/g, '');
+---
+
+<Base
+  title={`${ladder.title} · Viv ladders`}
+  description={ladder.intro.length ? strip(ladder.intro[0]) : `${ladder.title}, built in ${ladder.rungs.length} steps. Each step is a complete program that runs.`}
+  eyebrow="Ladder"
+  heading={ladder.title}
+  width="wide">
+  <div class="ld-intro">
+    {ladder.intro.map((html) => <p set:html={html} />)}
+    <ol class="ld-plan">
+      {ladder.rungs.map((r) => <li><a href={`#rung-${r.n}`} set:html={r.titleHtml} /></li>)}
+    </ol>
+  </div>
+
+  <LadderRungs rungs={ladder.rungs} openHref={openHref} />
+
+  <p class="ld-actions ld-whole">
+    <a href={`/workbench?open=ladders/${ladder.file}`}>Open the ladder file in the workbench</a>
+  </p>
+</Base>
+
+<script>
+  // Wide screens: two columns, and the pane on the right shows the program of
+  // the rung being read. A rung counts as being read when its text crosses a
+  // line 40% of the way down the window. Each pane opens on the first line
+  // its rung added.
+  const steps = document.querySelector<HTMLElement>('.ld-steps');
+  const panes = new Map([...document.querySelectorAll<HTMLElement>('.ld-side')].map((p) => [p.dataset.n, p]));
+  const placed = new Set<HTMLElement>();
+
+  function toFirstChange(pre: HTMLElement) {
+    if (placed.has(pre) || pre.scrollHeight <= pre.clientHeight + 4) return;
+    const first = pre.querySelector<HTMLElement>('.ll-add, .ll-edit');
+    if (!first) return;
+    placed.add(pre);
+    pre.scrollTop = Math.max(0, first.offsetTop - 3 * (first.offsetHeight || 20));
+  }
+  function show(n: string) {
+    for (const [k, p] of panes) p.classList.toggle('is-active', k === n);
+    const pre = panes.get(n)?.querySelector<HTMLElement>('.ld-code');
+    if (pre) toFirstChange(pre);
+  }
+
+  if (steps) {
+    steps.classList.add('ld-live');
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) show((e.target as HTMLElement).dataset.n || '1');
+    }, { rootMargin: '-40% 0px -59% 0px' });
+    document.querySelectorAll<HTMLElement>('.ld-text').forEach((t) => io.observe(t));
+    // stacked (narrow) layout shows every pane: place each one now
+    document.querySelectorAll<HTMLElement>('.ld-code').forEach(toFirstChange);
+  }
+</script>

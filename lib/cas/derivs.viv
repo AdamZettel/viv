@@ -1,0 +1,31 @@
+###
+post: The derivative table, as the CAS reads it
+agent: claude
+
+Generated from `lib/cas/rules/derivatives.toml` by `viv cas derivs`; edit the TOML file and run
+`viv cas derivs > lib/cas/derivs.viv`. grad.rs reads the same file
+(lang/viv/src/derivs.rs), so the reverse-mode gradient and the CAS's `diff`
+use one derivative for each head.
+
+`CAS_DERIV_ADJ[i]` is the adjoint of `CAS_DERIV_HEAD[i]` in `g`, `u` and `y`;
+the CAS reads it with `g = 1`, which is the derivative of `head(u)` with
+respect to `u`. The test here reads every adjoint; lib/cas/calculus's test
+holds each derivative to a central difference at the table's points.
+
+Used with `import cas.derivs`.
+###
+from cas.parse import cas
+from cas.store import cas_isfail
+
+CAS_DERIV_ID = ["diff.exp", "diff.log", "diff.ln", "diff.sqrt", "diff.sin", "diff.cos", "diff.tan", "diff.tanh", "diff.sinh", "diff.cosh", "diff.asin", "diff.acos", "diff.atan", "diff.erf"]
+CAS_DERIV_HEAD = ["exp", "log", "ln", "sqrt", "sin", "cos", "tan", "tanh", "sinh", "cosh", "asin", "acos", "atan", "erf"]
+CAS_DERIV_ADJ = ["g * y", "g / u", "g / u", "g / (2 * y)", "g * cos(u)", "-(g * sin(u))", "g * (1 + y * y)", "g * (1 - y * y)", "g * cosh(u)", "g * sinh(u)", "g / sqrt(1 - u * u)", "-(g / sqrt(1 - u * u))", "g / (1 + u * u)", "g * (2 / sqrt(pi) * exp(-(u * u)))"]
+# the points each row is tested at: the row, and x
+CAS_DERIV_AT_RULE = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10, 11, 11, 11, 12, 12, 12, 13, 13, 13]
+CAS_DERIV_AT_X = [-1.5, 0.25, 2.0, 0.3, 1.0, 4.5, 0.3, 1.0, 4.5, 0.3, 1.0, 4.5, -1.5, 0.25, 2.0, -1.5, 0.25, 2.0, -1.2, 0.25, 1.0, -1.5, 0.25, 2.0, -1.5, 0.25, 2.0, -1.5, 0.25, 2.0, -0.7, 0.25, 0.9, -0.7, 0.25, 0.9, -1.5, 0.25, 2.0, -1.5, 0.25, 2.0]
+
+test "every adjoint in the table reads as an expression in g, u and y" {
+    for i to len(CAS_DERIV_ADJ) {
+        assert_true(not cas_isfail(cas(CAS_DERIV_ADJ[i])))
+    }
+}

@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The Landau-damping program as one C file and a Python wrapper:
+# `viv export plasma/vlasov.export.toml`. Paths are
+# under the repository root. A parameter left out of a run keeps its deck's
+# value; each parameter's meaning is the `#:` line above it in the deck.
+#
+# The bounds are what the program can run, not what its checks pass: the
+# checks hold at the decks' settings and finer (a smaller DT, more NV).
+# ALPHA is capped at 0.01 because the checks compare with the linear theory;
+# a nonlinear run (ALPHA = 0.5, the strong Landau damping benchmark) needs a
+# deck and checks of its own. K0, VT, VMAX and DT must be positive; `min` admits
+# its bound, so plasma/landau.viv checks that and stops. The deck parameter is
+# `setup`, not `case`: a C keyword there wrote `int case;` into the header (B280).
+name = "vlasov"
+about = "plasma/landau.intent"
+files = ["plasma/landau.viv"]
+deck_param = "setup"
+
+[decks]
+k05 = { deck = "plasma/k05.viv", checks = "plasma/landau_check.viv" }
+k04 = { deck = "plasma/k04.viv", checks = "plasma/landau_check.viv" }
+
+[params]
+NX = { type = "Int", min = 4, max = 4096 }
+NV = { type = "Int", min = 16, max = 16384 }
+VMAX = { type = "Num", min = 0.0, doc = "the velocity grid's edge; 6 VT or more, so the Maxwellian's tail does not wrap around (must be positive)" }
+VT = { type = "Num", min = 0.0, doc = "the electrons' thermal speed, which is also the Debye length in these units (must be positive)" }
+K0 = { type = "Num", min = 0.0, doc = "the perturbation's wavenumber; the box is 2 pi / K0 (must be positive)" }
+ALPHA = { type = "Num", min = 0.0, max = 0.01 }
+DT = { type = "Num", min = 0.0, doc = "the time step, in units of the inverse plasma frequency (must be positive)" }
+T_END = { type = "Num", min = 0.0 }
+T_FIT0 = { type = "Num", min = 0.0, doc = "the fit window's start: late enough that the faster-damped roots of the dispersion relation have died away (each deck says why its value)" }
+T_FIT1 = { type = "Num", min = 0.0 }
+
+[results]
+GAMMA = { type = "Num", doc = "the damping rate fitted to the field energy's peaks (negative: damped), in units of the plasma frequency" }
+OMEGA = { type = "Num", doc = "the frequency from the peaks' spacing, in units of the plasma frequency" }
+GAMMA_EXACT = { type = "Num", doc = "the imaginary part of the exact Landau root at k lambda_D = K0 VT" }
+OMEGA_EXACT = { type = "Num", doc = "the real part of the exact Landau root" }
+GAMMA_ERR = { type = "Num", doc = "|GAMMA - GAMMA_EXACT| / |GAMMA_EXACT|" }
+OMEGA_ERR = { type = "Num", doc = "|OMEGA - OMEGA_EXACT| / OMEGA_EXACT" }
+NPEAKS = { type = "Int", doc = "how many field-energy peaks the fit used" }
+FIT_RMS = { type = "Num", doc = "rms distance of the peaks of log W from the fitted line" }
+TIME = { type = "Arr", doc = "the time of each field-energy sample, (n + 1/2) DT" }
+WFIELD = { type = "Arr", doc = "the field energy, integral of E^2 / 2 dx, at each TIME" }
+MASS_DRIFT = { type = "Num", doc = "the largest relative change of the particle count over the run" }
+L2_DRIFT = { type = "Num", doc = "the relative change of the integral of f^2 over the run" }
+ENERGY_DRIFT = { type = "Num", doc = "the change of kinetic plus field energy over the run, in units of the initial field energy" }
+
+[reference]
+program = "the exact root of the Langmuir dispersion relation for a Maxwellian, from the plasma dispersion function (plasma/landau_check.viv)"
+cases = "the decks k05 (k lambda_D = 0.5) and k04 (0.4)"
+gamma_tol = "8e-4 relative, the damping rate"
+omega_tol = "2e-4 relative, the frequency"

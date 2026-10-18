@@ -1,0 +1,174 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// How to connect an agent to the MCP endpoint (server/mcp, served at /mcp by a
+// Netlify Function). Every client's steps and syntax come from the vendors'
+// pages as read on 2026-09-24 (server/mcp/README.md); a step those pages did
+// not record is marked as such rather than guessed. Every code block gets the layout's copy button
+// (src/lib/chrome.js); this page keeps the buttons visible and announces a copy.
+import Base from '../layouts/Base.astro';
+import Code from '../components/Code.astro';
+import Toc from '../components/Toc.astro';
+import PACK from '../data/promptPack.json';
+
+const URL = 'https://viv-lang.org/mcp';
+const TOC: [string, string][] = [
+  ['endpoint', 'The endpoint'],
+  ['claude-code', 'Claude Code'],
+  ['claude', 'Claude'],
+  ['cursor', 'Cursor'],
+  ['vscode', 'VS Code'],
+  ['chatgpt', 'ChatGPT'],
+  ['no-mcp', 'Without MCP'],
+  ['tools', 'What to ask'],
+  ['limits', 'Limits'],
+];
+
+const CURSOR = JSON.stringify({ mcpServers: { viv: { url: URL } } }, null, 2);
+const VSCODE = JSON.stringify({ servers: { viv: { type: 'http', url: URL } } }, null, 2);
+
+const TOOLS: { name: string; what: string; prompt: string }[] = [
+  {
+    name: 'search',
+    what: 'Searches the published posts, the example programs, the lib/ modules, the builtins and the documented examples.',
+    prompt: 'Search Viv for a module that solves a symmetric eigenvalue problem, and show me how to import it.',
+  },
+  {
+    name: 'get_post',
+    what: 'Returns a published post: its source, its tests, its lane and the other versions in its family.',
+    prompt: 'Get the Viv post runge-phenomenon and explain what its tests check.',
+  },
+  {
+    name: 'viv_reference',
+    what: 'Returns the language reference: the grammar, the Python habits that fail, the builtins, the examples by topic.',
+    prompt: 'Read the Viv reference, then write a Viv program that integrates sin from 0 to pi with the trapezoid rule and tests the answer.',
+  },
+];
+---
+
+<Base
+  title="Use Viv with your agent · Viv"
+  description="Connect Claude Code, Claude, Cursor, VS Code or ChatGPT to Viv's MCP server at https://viv-lang.org/mcp: three read-only tools to search the site's programs and modules, read a post and read the language reference. No sign-in."
+  eyebrow="Agents"
+  heading="Use Viv with your agent">
+  <div class="withtoc agents">
+    <div>
+      <p class="lede">
+        Viv has an MCP server. Add one URL to your agent and it can search the site's programs and
+        modules, read a post, and read the language reference. Every tool only reads, so there is
+        no account and no sign-in. To run a program, paste it into the <a href="/workbench">workbench</a>
+        or build Viv from the repository.
+      </p>
+
+      <h2 id="endpoint">The endpoint</h2>
+      <Code code={URL} />
+      <p>
+        It speaks the Streamable HTTP transport, revisions 2025-03-26 through 2026-07-28. Most
+        clients need only this URL. Pick yours below and copy the line.
+      </p>
+
+      <h2 id="claude-code">Claude Code</h2>
+      <Code lang="sh" code={`claude mcp add --transport http viv ${URL}`} />
+      <p>Then type <code>/mcp</code> in a session to see the server and its tools. <a href="https://code.claude.com/docs/en/mcp">Claude Code's MCP docs</a> cover the rest.</p>
+
+      <h2 id="claude">Claude (claude.ai and Desktop)</h2>
+      <ol>
+        <li>Open <b>Customize</b>, then <b>Connectors</b>, then <b>Add custom connector</b>.</li>
+        <li>Paste the URL and leave the OAuth fields under Advanced settings empty.</li>
+      </ol>
+      <Code code={URL} />
+      <p class="note">
+        On Team and Enterprise plans an owner adds the connector in Organization settings. A free
+        account gets one custom connector. <a href="https://support.claude.com/en/articles/11175166">Anthropic's help article</a> has the details.
+      </p>
+
+      <h2 id="cursor">Cursor</h2>
+      <p>Add the server to Cursor's <code>mcp.json</code>:</p>
+      <Code lang="json" code={CURSOR} />
+      <p class="note">The file is <code>.cursor/mcp.json</code> in a project, or <code>~/.cursor/mcp.json</code> for every project. <a href="https://cursor.com/docs/context/mcp">Cursor's MCP docs</a> have the rest.</p>
+
+      <h2 id="vscode">VS Code (Copilot agent mode)</h2>
+      <p>Add the server to VS Code's <code>mcp.json</code>:</p>
+      <Code lang="json" code={VSCODE} />
+      <p class="note">The file is <code>.vscode/mcp.json</code> in a workspace; the command <b>MCP: Open User Configuration</b> opens the one for every workspace. <a href="https://code.visualstudio.com/docs/copilot/customization/mcp-servers">VS Code's MCP docs</a> have the rest.</p>
+
+      <h2 id="chatgpt">ChatGPT</h2>
+      <ol>
+        <li>On the web, open the <a href="https://chatgpt.com/plugins">Plugins</a> page, press the plus button and choose <b>Add custom MCP server</b>.</li>
+        <li>Give it a name, enter this URL under Connection, choose no authentication, and create it as a plugin.</li>
+      </ol>
+      <Code code={URL} />
+      <p class="note">OpenAI's page on <a href="https://developers.openai.com/apps-sdk/deploy/connect-chatgpt">connecting an MCP server to ChatGPT</a> has these steps and says which account and workspace policies apply.</p>
+
+      <h2 id="no-mcp">Without MCP</h2>
+      <p>
+        An agent that cannot use MCP can still read the language. The prompt pack is the grammar,
+        the Python habits that fail and every documented example with its output, about {PACK.kTokens}k
+        tokens. Paste it into the conversation, or give the agent the link:
+      </p>
+      <Code code="https://viv-lang.org/viv-prompt-pack.md" />
+      <p>The full reference adds the command line, the backend matrix and the engines that run each builtin:</p>
+      <Code code="https://viv-lang.org/llms-full.txt" />
+      <p>
+        Both are plain files: <a href="/viv-prompt-pack.md">viv-prompt-pack.md</a> and
+        <a href="/llms-full.txt">llms-full.txt</a>. The MCP server serves the same two as the
+        resources <code>viv://prompt-pack</code> and <code>viv://llms-full</code>.
+      </p>
+
+      <h2 id="tools">What to ask</h2>
+      <p>One prompt per tool, to try once the server is connected. The agent picks the tool.</p>
+      {
+        TOOLS.map((t) => (
+          <div class="tool">
+            <h3><code>{t.name}</code></h3>
+            <p>{t.what}</p>
+            <Code code={t.prompt} />
+          </div>
+        ))
+      }
+
+      <h2 id="limits">Limits</h2>
+      <ul>
+        <li>Requests are rate limited per address.</li>
+        <li>The posts the tools see are the ones published when the site was last built.</li>
+        <li>A solution post is never returned or searched, so a problem's answers stay hidden.</li>
+      </ul>
+      <p class="note">
+        The client steps above come from each vendor's documentation as read on 2026-09-24, with Cursor's, VS Code's and ChatGPT's read again on 2026-10-16. The
+        server was tested with direct requests for every tool; none of these clients has been tried
+        against it yet.
+      </p>
+      <p class="sr-only" aria-live="polite" id="copy-status"></p>
+    </div>
+    <Toc items={TOC} />
+  </div>
+
+  <style>
+    h2 {
+      scroll-margin-top: 72px;
+    }
+    .agents :global(.copy-btn) {
+      opacity: 1;
+    }
+    .agents :global(pre.code) {
+      padding-right: 5.5rem;
+    }
+    .agents ol,
+    .agents ul {
+      max-width: var(--measure);
+      padding-left: 1.3rem;
+    }
+    .agents li {
+      margin: 0.3rem 0;
+    }
+    .tool h3 {
+      margin-bottom: 0.2rem;
+    }
+    .tool p {
+      margin-top: 0.2rem;
+    }
+  </style>
+
+  <!-- a file, not an inline script, so the Content-Security-Policy needs no new hash -->
+  <script is:inline src="/agents-copy.js" defer></script>
+</Base>

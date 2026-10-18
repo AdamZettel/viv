@@ -1,0 +1,84 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/install: the core, the extras, and running from a checkout.
+import { REPO_PUBLIC, GITHUB } from '../../lib/repo.js';
+import DocPage from '../../layouts/DocPage.astro';
+import Code from '../../components/Code.astro';
+import data from '../../data/vipyr.json';
+import { vipyrTree } from '../../lib/site';
+
+// a family is listed once at least one of its functions is built
+const fns = Object.values(data.functions) as any[];
+const builtFamily = (id: string) => fns.some((x) => x.family === id && x.kind !== 'coming');
+const fams = data.fields.filter((f: any) => builtFamily(f.id));
+const dists = data.dists.filter((d: any) => fams.some((f: any) => f.dist === d.name));
+const famList = (dist: string) => fams.filter((f: any) => f.dist === dist);
+const core = famList('vipyr');
+---
+<DocPage
+  title="Install · vipyr"
+  icon="/brand/vipyr/vipyr-icon.svg"
+  description="Run vipyr from a checkout of the Viv repository; pip packages for the core and the domain extras are planned."
+  tree={vipyrTree(Astro.url.pathname)}
+  toc={[['checkout', 'From a checkout'], ['dists', 'The distributions'], ['requirements', 'Requirements']]}>
+  <h1>Install</h1>
+  <h2 id="checkout">From a checkout</h2>
+  <p>
+    The packages are not on PyPI yet. Run vipyr from a checkout of the Viv repository: nothing needs installing,
+    because <code>vipyr._packages</code> finds every distribution under <code>packages/</code> and
+    <code>ports/</code> by itself.
+  </p>
+  {!REPO_PUBLIC && <p class="note">The repository is not public yet; these commands run in a checkout of it.</p>}
+  <Code
+    lang="console"
+    code={`${REPO_PUBLIC ? `$ git clone ${GITHUB} && cd viv\n` : ''}$ cargo build --release -p viv
+$ PYTHONPATH=python python3 -c "import vipyr as vp; print(vp.scf.run().e_tot)"
+-74.96306312972935`}
+  />
+  <p>By convention vipyr is imported as <code>vp</code>:</p>
+  <Code lang="python" code="import vipyr as vp" />
+
+  <h2 id="dists">The distributions</h2>
+  <p>
+    vipyr is split into distributions, so that a domain's code and license travel together. The core,
+    <code>vipyr</code>, carries the <code>viv</code> compiler, the tools for your own <code>.viv</code> files, and
+    {core.length} families:{' '}
+    {/* separator and link on one line: a line break between them would render as a space before the comma */}
+    {core.map((f: any, i: number) => (
+      <>{i > 0 && (i === core.length - 1 ? ' and ' : ', ')}<a href={`/vipyr/${f.id}`}>{f.title.toLowerCase()}</a></>
+    ))}. The others each carry one domain. From a checkout all of them are importable at once. The pip commands
+    in the table are planned and do not work yet.
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Distribution</th><th>Families</th><th>License</th><th>Planned install</th></tr>
+      </thead>
+      <tbody>
+        {
+          dists.map((d: any) => (
+            <tr>
+              <td><code>{d.name}</code></td>
+              <td>
+                {famList(d.name).map((f: any, i: number) => (
+                  <>{i > 0 && ', '}<a href={`/vipyr/${f.id}`}><code>vp.{f.id}</code></a></>
+                ))}
+              </td>
+              <td>{d.license}</td>
+              <td><code>{d.extra ? `pip install "vipyr[${d.extra}]"` : `pip install ${d.name}`}</code></td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="requirements">Requirements</h2>
+  <ul>
+    <li>Python 3.11, or 3.9 and 3.10 with <code>tomli</code>.</li>
+    <li>NumPy. pandas for <code>vp.features</code>.</li>
+    <li>A C compiler (<code>cc</code>, or <code>$CC</code>): each program compiles once to a shared library and is cached.</li>
+    <li>The programs' sources, read from the checkout (<code>$VIV_ROOT</code> points elsewhere).</li>
+  </ul>
+</DocPage>

@@ -1,0 +1,530 @@
+# Coverage: which strategy has been checked on which class of input.
+#
+# A sweep that agrees proves little about an input class it never saw. This
+# program runs every registry of the Hartree-Fock code on one input per
+# class and counts, for each class, the members that agree with the
+# consensus (the elementwise median) within the stage's tolerance. The gate
+# (sw_cov_gate) then requires at least 2 agreeing members on every class
+# that was covered. The classes:
+#
+#     stage 1   contraction          l = 0..3                           3 members
+#     stage 2   Boys F_n(x)          n = 0..16 by 8 x-bins              4 members
+#     stage 3   S, T, V              (la, lb), l <= 3                   3, 3, 2
+#     stage 4   ERI                  (la lb|lc ld), every class l <= 3  3 families
+#     stage 5   c2s, M^T X M, ERIs   l = 0..3; bases up to p, d, f      2 each
+#     stage 6   orthogonalizer       water 6-31G, 6D and 5D             4 members
+#     stage 7   eigensolver          random symmetric, water H_core     3 members
+#     stage 8   J/K                  1 or 2 densities, 6D or 5D         4 members
+#     stage 10  SCF regime           RHF, UHF closed, UHF open, ROHF    3 accelerators / 4 couplings
+#
+# The ERI stage runs single shell quartets: McMurchie-Davidson
+# (mderi_quartet), HGP (hgp_block) and Rys (rys_shell_quartet), each on four
+# shells of two primitives on four centers. The last test plants a 1e-10
+# error in one member of the full ERI registry and checks through
+# sw_check3_arr that the sweep names that member and that entry.
+#
+#     tools/both-engines.sh scf coverage
+from hf.hf import hf_scf
+from hf.basis import (
+    bas_contract, bas_nao_cart, bas_nao_sph, bas_ncart, bas_nsph, PR_COEF, PR_EXP, SH_ATOM,
+    SH_L, SH_NCART, SH_NPRIM, SH_P0,
+)
+from hf.md_onebody import md1_s
+from hf.boys import boys_methods
+from hf.md_eri import mderi_full, mderi_quartet, mderi_screened
+from hf.eri_store import es_len8
+from hf.cart2sph import c2s_basis
+from hf.transform import tr2_blocks, tr4_blocks
+from hf.scf_loop import scf_setup, ScfSetup
+from hf.opts import opt_array, opt_new, scf_defaults, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.eigen import eig_methods, eig_random_sym, eig_values
+from hf.orthogonalize import orth_of, orth_symm
+from hf.jk_direct import int_basis_blob
+from hf.md_direct import mdjk_rand_dens
+from hf.accelerate import accel_methods
+from hf.coupling import rohf_couplings
+from hf.integrals import (
+    int_c2s_methods, int_contract_methods, int_jk_methods, int_kinetic_methods,
+    int_nuclear_methods, int_overlap_methods, INT_TOL_C2S, INT_TOL_CN, INT_TOL_ERI, INT_TOL_JK,
+    INT_TOL_ONE, INT_TOL_TR, int_tr2_methods, int_tr4_methods,
+)
+from hf.sweep import (
+    sw_check3_arr, sw_cls_boys, sw_cls_eri, sw_cov_covered, sw_cov_gate, sw_cov_hit,
+    sw_cov_min_strat, sw_cov_new, sw_cov_report, sw_flat_index, SW_NCLS_BOYS, SW_NCLS_ERI,
+    SW_NCLS_SCF, SW_REP_INDEX, sw_rep_new, SW_REP_STRAT, SW_REP_WORST,
+)
+from hf.hgp_eri import hgp_block, hgp_ctab_for, hgp_eri
+from hf.rys_eri import rys_applicable, rys_eri, RYS_NROOT_MAX, rys_shell_quartet, rys_work_new
+from hf.fuzz import hfz_offsets
+from hfref.water_sto3g import watersto3g_atoms, watersto3g_prims, watersto3g_shells
+from hfref.water_631g import (
+    WATER631G_CATION_ROHF_NALPHA, WATER631G_CATION_ROHF_NBETA, WATER631G_E_NUC,
+    water631g_eri8_cart, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, water631g_s_unit,
+    water631g_t_unit, water631g_v_unit,
+)
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_eri8_cart, water631gs_cart_prims,
+    water631gs_cart_s_unit, water631gs_cart_shells,
+)
+
+COV_NSTAGE = 16
+# the iteration limit of the accelerator runs: plain iteration needs more than the default
+COV_SCF_MAXIT = 300
+
+# ---- agreement per member ---------------------------------------------------------
+
+#| Each member's largest deviation from the elementwise median of the rows
+#| of `T` (`nm` by `N`): `abs(v - med) / (1 + abs(med))` when `rel` is 0,
+#| `abs(v - med) / abs(med)` when it is 1.
+def cov_devs(T: Arr, nm, N, rel) {
+    col = zeros(nm)
+    dev = zeros(nm)
+    for i to N {
+        for m to nm {
+            col[m] = T[m, i]
+        }
+        sort(col)
+        med = col[floor(nm / 2.0)]
+        den = 1.0 + abs(med)
+        if rel > 0.5 {
+            den = abs(med)
+        }
+        for m to nm {
+            if den > 0.0 {
+                dev[m] = max(dev[m], abs(T[m, i] - med) / den)
+            }
+        }
+    }
+    return dev
+}
+
+#| Count a hit on class `cls` for every member within `tol`; returns the
+#| number of members that agreed.
+def cov_hits(cov: Arr, cls, dev: Arr, tol) {
+    k = 0
+    for m to len(dev) {
+        if dev[m] < tol {
+            sw_cov_hit(cov, cls, m)
+            k = k + 1
+        }
+    }
+    return k
+}
+
+#| One row of the stage summary: [stage, covered classes, fewest agreeing
+#| members over them]. Stage 3.1/3.2/3.3 are S, T, V; 5.1/5.2/5.3 are M_l,
+#| the one-electron transform and the ERI transform.
+def cov_line(stage, cov: Arr) {
+    cov_stage = [stage, sw_cov_covered(cov), sw_cov_min_strat(cov)]
+    show cov_stage
+    return sw_cov_min_strat(cov)
+}
+
+# ---- small bases ----------------------------------------------------------------
+
+#| Four centers, not in one plane, 1.3 to 1.9 bohr apart; charges 8, 1, 7, 1.
+def cov_atoms() {
+    return [[8.0, 0.0, 0.0, 0.0], [1.0, 1.4, 0.3, -0.2], [7.0, -0.4, 1.5, 0.6], [1.0, 0.5, -0.6, 1.4]]
+}
+
+#| One shell per entry of `ls`, shell k on atom k, two primitives each
+#| (exponents 1.3 and 0.35, coefficients 0.45 and 0.7).
+def cov_shells(ls: Arr) {
+    sh = zeros(len(ls), 8)
+    for k to len(ls) {
+        sh[k, SH_ATOM] = k
+        sh[k, SH_L] = ls[k]
+        sh[k, SH_NPRIM] = 2
+        sh[k, SH_P0] = 2 * k
+    }
+    hfz_offsets(sh)
+    return sh
+}
+
+def cov_prims(nsh) {
+    pr = zeros(2 * nsh, 2)
+    for k to nsh {
+        pr[2 * k, PR_EXP] = 1.3
+        pr[2 * k, PR_COEF] = 0.45
+        pr[2 * k + 1, PR_EXP] = 0.35
+        pr[2 * k + 1, PR_COEF] = 0.7
+    }
+    return pr
+}
+
+#| The first `n` atoms of `cov_atoms`.
+def cov_atoms_n(n) {
+    return cov_atoms()[0:n, :]
+}
+
+# ---- stage members that are not whole-basis registries ------------------------------
+
+#| (01|23) of a four-shell basis, flat in ((a nb + b) nc + c) nd + d order.
+def cov_eri_md(at: Arr, sh: Arr, pr: Arr) -> Arr {
+    return mderi_quartet(at, sh, pr, 0, 1, 2, 3)
+}
+
+def cov_eri_hgp(at: Arr, sh: Arr, pr: Arr) -> Arr {
+    return hgp_block(at, sh, pr, bas_contract(sh, pr), hgp_ctab_for(sh), 0, 1, 2, 3)
+}
+
+def cov_eri_rys(at: Arr, sh: Arr, pr: Arr) -> Arr {
+    n = 1
+    for k to 4 {
+        n = n * sh[k, SH_NCART]
+    }
+    blk = zeros(n)
+    rys_shell_quartet(at, sh, pr, bas_contract(sh, pr), 0, 1, 2, 3, rys_work_new(), zeros(3, RYS_NROOT_MAX), zeros(2, RYS_NROOT_MAX), blk)
+    return blk
+}
+
+#| `X X^T` from orthogonalizer member `k` (equal to `S^-1` when no vector
+#| is dropped, whichever member built X).
+def cov_orth_inverse(S: Arr, k) {
+    X = orth_of(S, opt_array(ScfOptions { orthogonalizer: k, ..scf_defaults() }, 0, 0, 0.0))
+    return X @ transpose(X)
+}
+
+# ---- one def per stage ------------------------------------------------------------
+
+#| Stage 1: `cn` of one shell of each l, three primitives.
+def cov_contract(cov: Arr) {
+    for l to 4 {
+        sh = zeros(1, 8)
+        sh[0, SH_L] = l
+        sh[0, SH_NPRIM] = 3
+        hfz_offsets(sh)
+        pr = [[5.0, 0.15], [1.2, 0.55], [0.3, 0.45]]
+        ms = int_contract_methods()
+        T = zeros(3, 3)
+        for m to 3 {
+            setslab(T, m, apply(ms[m], cov_atoms_n(1), sh, pr))
+        }
+        cov_hits(cov, l, cov_devs(T, 3, 3, 0), INT_TOL_CN)
+    }
+    return 0
+}
+
+#| Stage 2: F_0..F_n at one x per bin, relative agreement 1e-13.
+def cov_boys(cov: Arr) {
+    xs = [0.05, 0.5, 3.0, 10.0, 22.0, 40.0, 75.0, 150.0]
+    ms = boys_methods()
+    for n to 17 {
+        for b to 8 {
+            T = zeros(4, n + 1)
+            for m to 4 {
+                setslab(T, m, apply(ms[m], n, xs[b]))
+            }
+            cov_hits(cov, sw_cls_boys(n, xs[b]), cov_devs(T, 4, n + 1, 1), 1.0e-13)
+        }
+    }
+    return 0
+}
+
+#| Stage 3: one registry (`which` 0 S, 1 T, 2 V) on a two-shell basis per
+#| (la, lb) class; the class is la * 5 + lb.
+def cov_one(cov: Arr, which) {
+    for la to 4 {
+        for lb to la + 1 {
+            sh = cov_shells([la, lb])
+            pr = cov_prims(2)
+            at = cov_atoms_n(3)
+            n = bas_nao_cart(sh)
+            ms = int_overlap_methods()
+            if which == 1 {
+                ms = int_kinetic_methods()
+            }
+            if which == 2 {
+                ms = int_nuclear_methods()
+            }
+            nm = len(ms)
+            T = zeros(nm, n * n)
+            ix = sw_flat_index(n * n)
+            for m to nm {
+                setslab(T, m, take(apply(ms[m], at, sh, pr), ix))
+            }
+            cov_hits(cov, la * 5 + lb, cov_devs(T, nm, n * n, 0), INT_TOL_ONE)
+        }
+    }
+    return 0
+}
+
+#| Stage 4: one quartet per canonical (la lb|lc ld) class with l <= 3, from
+#| each of the three ERI families. Rys counts where rys_applicable says it
+#| is validated (every class here).
+def cov_eri(cov: Arr) {
+    ms = [cov_eri_md, cov_eri_hgp, cov_eri_rys]
+    at = cov_atoms()
+    pr = cov_prims(4)
+    classes = 0
+    for la to 4 {
+        for lb to la + 1 {
+            for lc to 4 {
+                for ld to lc + 1 {
+                    if lc * 5 + ld <= la * 5 + lb {
+                        sh = cov_shells([la, lb, lc, ld])
+                        N = sh[0, SH_NCART] * sh[1, SH_NCART] * sh[2, SH_NCART] * sh[3, SH_NCART]
+                        ix = sw_flat_index(N)
+                        nm = 2
+                        if rys_applicable(la + lb + lc + ld) > 0.5 {
+                            nm = 3
+                        }
+                        T = zeros(nm, N)
+                        for m to nm {
+                            setslab(T, m, take(apply(ms[m], at, sh, pr), ix))
+                        }
+                        cov_hits(cov, sw_cls_eri(la, lb, lc, ld), cov_devs(T, nm, N, 0), INT_TOL_ERI)
+                        classes = classes + 1
+                    }
+                }
+            }
+        }
+    }
+    return classes
+}
+
+#| Stage 5: M_l for l = 0..3 (class l), and the one- and four-index
+#| transforms on bases with shells up to l = 1, 2, 3 (class = that l);
+#| `part` 0 is M_l, 1 the one-electron transform, 2 the ERI transform.
+def cov_c2s(cov: Arr, part) {
+    ms = int_c2s_methods()
+    for l to 4 {
+        if part == 0 {
+            N = bas_ncart(l) * bas_nsph(l)
+            T = zeros(2, N)
+            ix = sw_flat_index(N)
+            for m to 2 {
+                setslab(T, m, take(apply(ms[m], l, 0.0), ix))
+            }
+            cov_hits(cov, l, cov_devs(T, 2, N, 0), INT_TOL_C2S)
+        }
+        else {
+            if l > 0 {
+                ls = zeros(l + 1)
+                for k to l + 1 {
+                    ls[k] = k
+                }
+                sh = cov_shells(ls)
+                at = cov_atoms_n(l + 1)
+                pr = cov_prims(l + 1)
+                M = c2s_basis(sh)
+                ns = bas_nao_sph(sh)
+                if part == 1 {
+                    X = md1_s(at, sh, pr)
+                    ts = int_tr2_methods()
+                    N = ns * ns
+                }
+                else {
+                    X = mderi_screened(at, sh, pr)
+                    ts = int_tr4_methods()
+                    N = es_len8(ns)
+                }
+                ix = sw_flat_index(N)
+                T = zeros(2, N)
+                for m to 2 {
+                    setslab(T, m, take(apply(ts[m], X, M, sh), ix))
+                }
+                cov_hits(cov, l, cov_devs(T, 2, N, 0), INT_TOL_TR)
+            }
+        }
+    }
+    return 0
+}
+
+#| Stage 6: `X X^T` from each orthogonalizer on water 6-31G (class 0) and
+#| water 6-31G* 5D (class 1), both far from linear dependence.
+def cov_orth(cov: Arr) {
+    for c to 2 {
+        S = water631g_s_unit()
+        if c == 1 {
+            sh = water631gs_cart_shells()
+            S = tr2_blocks(water631gs_cart_s_unit(), c2s_basis(sh), sh)
+        }
+        n = len(S)
+        ix = sw_flat_index(n * n)
+        T = zeros(4, n * n)
+        for m to 4 {
+            setslab(T, m, take(cov_orth_inverse(S, m), ix))
+        }
+        cov_hits(cov, c, cov_devs(T, 4, n * n, 0), 1.0e-11)
+    }
+    return 0
+}
+
+#| Stage 7: the eigenvalues (row 0 of each member's result) of a random
+#| symmetric 12 x 12 matrix (class 0) and of water 6-31G's H_core in the
+#| Lowdin basis (class 1).
+def cov_eigen(cov: Arr) {
+    ms = eig_methods()
+    for c to 2 {
+        A = eig_random_sym(12, 4242)
+        if c == 1 {
+            S = water631g_s_unit()
+            X = orth_symm(S, S, opt_new())
+            A = transpose(X) @ (water631g_t_unit() + water631g_v_unit()) @ X
+        }
+        n = len(A)
+        T = zeros(3, n)
+        for m to 3 {
+            T[m, :] = eig_values(apply(ms[m], A, A, opt_new()))
+        }
+        cov_hits(cov, c, cov_devs(T, 3, n, 0), 1.0e-12)
+    }
+    return 0
+}
+
+#| Stage 8: J and K of seeded densities on water 6-31G*, one or two
+#| densities (class 0 or 1), Cartesian or spherical (+2).
+def cov_jk(cov: Arr) {
+    at = water631gs_cart_atoms()
+    sh = water631gs_cart_shells()
+    pr = water631gs_cart_prims()
+    Gc = water631gs_cart_eri8_cart()
+    M = c2s_basis(sh)
+    ms = int_jk_methods()
+    for sph to 2 {
+        G = Gc
+        b = int_basis_blob(at, sh, pr, M, sph)
+        n = bas_nao_cart(sh)
+        if sph == 1 {
+            G = tr4_blocks(Gc, M, sh)
+            n = bas_nao_sph(sh)
+        }
+        for nd to 2 {
+            D = mdjk_rand_dens(nd + 1, n, 11 + nd)
+            N = 2 * (nd + 1) * n * n
+            ix = sw_flat_index(N)
+            T = zeros(4, N)
+            for m to 4 {
+                setslab(T, m, take(apply(ms[m], G, b, b, D, opt_new()), ix))
+            }
+            cov_hits(cov, 2 * sph + nd, cov_devs(T, 4, N, 0), INT_TOL_JK)
+        }
+    }
+    return 0
+}
+
+#| Stage 10: SCF regimes on water 6-31G's stored integrals: 0 RHF, 1 UHF on
+#| the closed shell, 2 UHF on H2O+ (each with the three accelerators) and 3
+#| ROHF on H2O+ (with the four couplings). Energies agree within 1e-10.
+def cov_scf(cov: Arr) {
+    H = water631g_t_unit() + water631g_v_unit()
+    S = water631g_s_unit()
+    G = water631g_eri8_cart()
+    methods = [SCF_RHF, SCF_UHF, SCF_UHF, SCF_ROHF]
+    for reg to len(methods) {
+        o = ScfOptions { method: methods[reg], ..scf_defaults() }
+        p = scf_setup(H, S, G, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, WATER631G_E_NUC, o)
+        if reg > 1.5 {
+            p = scf_setup(H, S, G, WATER631G_CATION_ROHF_NALPHA, WATER631G_CATION_ROHF_NBETA, WATER631G_E_NUC, o)
+        }
+        nm = len(accel_methods())
+        if reg == 3 {
+            nm = len(rohf_couplings())
+        }
+        T = zeros(nm, 1)
+        for m to nm {
+            q = ScfSetup { options: ScfOptions { accelerator: m, max_iter: COV_SCF_MAXIT, ..o }, ..p }
+            if reg == 3 {
+                q = ScfSetup { options: ScfOptions { rohf_coupling: m, ..o }, ..p }
+            }
+            r = hf_scf(q)
+            T[m, 0] = r.energy
+            if r.converged < 0.5 {
+                T[m, 0] = 0.0
+            }
+        }
+        cov_hits(cov, reg, cov_devs(T, nm, 1, 0), 1.0e-10)
+    }
+    return 0
+}
+
+#| Test member: MD with packed entry 123 moved by 1e-10.
+def cov_bad_eri(at: Arr, sh: Arr, pr: Arr) -> Arr {
+    G = mderi_screened(at, sh, pr)
+    G[123] = G[123] + 1.0e-10
+    return G
+}
+
+# ---- the tests ------------------------------------------------------------------
+
+test "contraction, Boys and the one-electron stages: at least 2 agreeing members on every class" {
+    cov_c = sw_cov_new(5)
+    cov_contract(cov_c)
+    assert_near(cov_line(1, cov_c), 3.0, 0.0)
+    assert_near(sw_cov_covered(cov_c), 4, 0.0)
+    cov_b = sw_cov_new(SW_NCLS_BOYS)
+    cov_boys(cov_b)
+    assert_near(cov_line(2, cov_b), 4.0, 0.0)
+    assert_near(sw_cov_covered(cov_b), 136, 0.0)
+    for cov_w to 3 {
+        cov_o = sw_cov_new(25)
+        cov_one(cov_o, cov_w)
+        assert_gt(cov_line(3.1 + 0.1 * cov_w, cov_o), 1.5)
+        assert_near(sw_cov_covered(cov_o), 10, 0.0)
+        sw_cov_gate(cov_o)
+    }
+    sw_cov_gate(cov_c)
+    sw_cov_gate(cov_b)
+}
+
+test "ERIs: every (la lb|lc ld) class with l <= 3 checked by MD, HGP and Rys, at least 2 agreeing" {
+    cov_e = sw_cov_new(SW_NCLS_ERI)
+    assert_near(cov_eri(cov_e), 55, 0.0)
+    assert_near(sw_cov_covered(cov_e), 55, 0.0)
+    assert_gt(cov_line(4, cov_e), 1.5)
+    sw_cov_report(cov_e)
+    sw_cov_gate(cov_e)
+}
+
+test "c2s, the transforms, orthogonalizers, eigensolvers, J/K and SCF regimes: at least 2 agreeing members on every class" {
+    for cov_p to 3 {
+        cov_t = sw_cov_new(5)
+        cov_c2s(cov_t, cov_p)
+        assert_near(cov_line(5.1 + 0.1 * cov_p, cov_t), 2.0, 0.0)
+        sw_cov_gate(cov_t)
+    }
+    cov_x = sw_cov_new(2)
+    cov_orth(cov_x)
+    assert_near(cov_line(6, cov_x), 4.0, 0.0)
+    cov_v = sw_cov_new(2)
+    cov_eigen(cov_v)
+    assert_near(cov_line(7, cov_v), 3.0, 0.0)
+    cov_j = sw_cov_new(4)
+    cov_jk(cov_j)
+    assert_near(cov_line(8, cov_j), 4.0, 0.0)
+    assert_near(sw_cov_covered(cov_j), 4, 0.0)
+    cov_s = sw_cov_new(SW_NCLS_SCF)
+    cov_scf(cov_s)
+    assert_gt(cov_line(10, cov_s), 1.5)
+    assert_near(sw_cov_covered(cov_s), 4, 0.0)
+    sw_cov_gate(cov_x)
+    sw_cov_gate(cov_v)
+    sw_cov_gate(cov_j)
+    sw_cov_gate(cov_s)
+}
+
+test "a 1e-10 error planted in one ERI member is blamed on that member and that entry" {
+    cov_at = watersto3g_atoms()
+    cov_sh = watersto3g_shells()
+    cov_pr = watersto3g_prims()
+    cov_rep = sw_rep_new()
+    cov_out = zeros(406)
+    # the bad member second: the median of four puts the blame on it
+    cov_ms = [mderi_screened, cov_bad_eri, hgp_eri, rys_eri]
+    assert_near(sw_check3_arr(cov_ms, cov_at, cov_sh, cov_pr, 406, 406, 1.0e-11, cov_rep, cov_out), 0.0, 0.0)
+    assert_near(cov_rep[SW_REP_STRAT], 1, 0.0)
+    assert_near(cov_rep[SW_REP_INDEX], 123, 0.0)
+    assert_lt(abs(cov_rep[SW_REP_WORST] - 1.0e-10 / (1.0 + abs(cov_out[123]))), 1.0e-15)
+    # the bad member first: comparing against member 0 would blame the rest
+    cov_ms = [cov_bad_eri, mderi_screened, hgp_eri, rys_eri]
+    assert_near(sw_check3_arr(cov_ms, cov_at, cov_sh, cov_pr, 406, 406, 1.0e-11, cov_rep, cov_out), 0.0, 0.0)
+    assert_near(cov_rep[SW_REP_STRAT], 0, 0.0)
+    assert_near(cov_rep[SW_REP_INDEX], 123, 0.0)
+    # without it the four agree
+    cov_ms = [mderi_screened, mderi_full, hgp_eri, rys_eri]
+    assert_near(sw_check3_arr(cov_ms, cov_at, cov_sh, cov_pr, 406, 406, 1.0e-11, cov_rep, cov_out), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

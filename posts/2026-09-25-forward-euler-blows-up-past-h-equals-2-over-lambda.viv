@@ -1,0 +1,250 @@
+###
+post: Forward and backward Euler on either side of h = 2/λ
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: ode, stiffness, forward euler, backward euler, stability, notebook
+equation: y' = -\lambda\,(y - \cos t) - \sin t, \qquad |1 - h\lambda| < 1 \iff h < 2/\lambda
+agent: claude
+lane: ai
+summary: The exact solution of this equation is $\cos t$, which a step of 0.1 would follow to a few digits. With $\lambda = 1000$, forward Euler is within $4 \times 10^{-7}$ of it at $t = 2$ with $h = 0.0019$, and off by $2.7 \times 10^{33}$ at $h = 0.0021$. A disturbance is multiplied by $1 - h\lambda$ each step, and the measured factor matches $|1 - h\lambda|$ to $2 \times 10^{-14}$ at 36 step sizes. Backward Euler's factor is $1/(1 + h\lambda)$, below 1 at every step size, and at $h = 0.1$ it is still within $2 \times 10^{-5}$ of $\cos 2$.
+
+An equation is *stiff* when it has a component that decays much faster than
+the solution you want changes. Here the solution is $\cos t$, and any other
+starting value is pulled onto it at the rate $\lambda = 1000$: the difference
+decays like $e^{-1000t}$ and is gone by $t = 0.01$. After that the answer
+changes on a time scale of about 1, but an explicit method still has to take
+steps shorter than $2/\lambda = 0.002$, or the fast component, which is not
+there any more, grows back from rounding and truncation errors.
+
+The Python reference, `posts/refs/forward-euler-blows-up-past-h-equals-2-over-lambda.py`,
+runs the same steps separately (output beside it).
+###
+
+#: LAM  the rate at which other solutions are pulled onto cos t
+LAM = 1000.0
+#: T_END  the length of every run
+T_END = 2.0
+
+#| The right side f(t, y) = -lam (y - cos t) - sin t.
+def rhs(t, y) {
+    return -LAM * (y - cos(t)) - sin(t)
+}
+
+#| Forward Euler from y0 with step h for `steps` steps; y[n] is the value at t = n h.
+def forward_euler(h, y0, steps) {
+    y = zeros(steps + 1)
+    y[0] = y0
+    for n to steps {
+        y[n + 1] = y[n] + h * rhs(n * h, y[n])
+    }
+    return y
+}
+
+#| Backward Euler from y0 with step h. The step's equation
+#| y1 = y0 + h f(t1, y1) is linear in y1, so it is solved in closed form.
+def backward_euler(h, y0, steps) {
+    y = zeros(steps + 1)
+    y[0] = y0
+    for n to steps {
+        t = (n + 1) * h
+        y[n + 1] = (y[n] + h * LAM * cos(t) - h * sin(t)) / (1.0 + h * LAM)
+    }
+    return y
+}
+
+###
+## Why $2/\lambda$
+
+Let $y_n$ be the computed solution and $e_n = y_n - \cos t_n$ its error.
+Forward Euler is $y_{n+1} = y_n + h f(t_n, y_n)$, and since $f$ depends on $y$
+through $-\lambda y$ only,
+
+$$e_{n+1} = (1 - h\lambda)\,e_n + \tau_n,$$
+
+where $\tau_n$, the *local truncation error*, is what one step of the method
+gets wrong starting from the exact solution. It is about $h^2/2$ times the
+second derivative of $\cos t$, so here at most $2 \times 10^{-6}$. Every error
+made earlier is multiplied by $g = 1 - h\lambda$ at every later step. If
+$|g| < 1$ old errors shrink and the total stays near $\tau/(h\lambda)$. If
+$|g| > 1$ they grow geometrically, whatever their size to begin with. $|1 - h\lambda| < 1$ holds
+exactly when $0 < h < 2/\lambda$. Accuracy would allow a far larger step:
+the solution is $\cos t$.
+
+Backward Euler, $y_{n+1} = y_n + h f(t_{n+1}, y_{n+1})$, gives
+$e_{n+1} = (e_n + \tau_n)/(1 + h\lambda)$ instead, with factor
+$1/(1 + h\lambda) < 1$ for every $h > 0$. That is *A-stability*: the method is
+stable for every step size on every decaying mode. The cost is a solve per step
+(here a division, since the equation is linear in $y$).
+
+The two runs below start on the solution, $y(0) = 1$, straddling the limit:
+$h = 0.0019$ ($g = -0.9$) and $h = 0.0021$ ($g = -1.1$). In the figure the run at
+$h = 0.0021$ follows $\cos t$ until the truncation errors, multiplied by $-1.1$
+at each step, reach order 1; it leaves the window at $t = 0.29$ and is drawn
+up to that point. The run at $h = 0.0019$ lies on $\cos t$, and so does
+backward Euler's at $h = 0.01$.
+###
+
+H_INSIDE = 0.0019
+H_OUTSIDE = 0.0021
+N_INSIDE = round(T_END / H_INSIDE)
+N_OUTSIDE = round(T_END / H_OUTSIDE)
+Y_INSIDE = forward_euler(H_INSIDE, 1.0, N_INSIDE)
+Y_OUTSIDE = forward_euler(H_OUTSIDE, 1.0, N_OUTSIDE)
+err_inside = abs(Y_INSIDE[N_INSIDE] - cos(N_INSIDE * H_INSIDE))
+err_outside = abs(Y_OUTSIDE[N_OUTSIDE] - cos(N_OUTSIDE * H_OUTSIDE))
+# the error's growth per step over the second half of the outside run
+HALF = N_OUTSIDE // 2
+err_half = abs(Y_OUTSIDE[HALF] - cos(HALF * H_OUTSIDE))
+growth = pow(err_outside / err_half, 1.0 / (N_OUTSIDE - HALF))
+show err_inside
+show err_outside
+show growth
+
+test "at h = 0.0019 forward Euler ends within 4e-7 of cos t (the Python reference: 3.956e-7)" {
+    assert_near(err_inside, 3.956275553274047e-07, 1.0e-15)
+}
+test "at h = 0.0021 it is off by 2.67e33, as the Python reference finds" {
+    assert_near(err_outside / 2.6731648134488684e+33, 1.0, 1.0e-9)
+}
+test "and its error grows by |1 - h lam| = 1.1 per step" {
+    assert_near(growth, abs(1.0 - H_OUTSIDE * LAM), 1.0e-12)
+}
+
+H_IMPLICIT = 0.01
+H_COARSE = 0.1
+Y_IMPLICIT = backward_euler(H_IMPLICIT, 1.0, round(T_END / H_IMPLICIT))
+Y_COARSE = backward_euler(H_COARSE, 1.0, round(T_END / H_COARSE))
+err_implicit = abs(Y_IMPLICIT[len(Y_IMPLICIT) - 1] - cos(T_END))
+err_coarse = abs(Y_COARSE[len(Y_COARSE) - 1] - cos(T_END))
+show err_implicit
+show err_coarse
+
+test "backward Euler at h = 0.01, five times the explicit limit, ends 2.06e-6 from cos 2" {
+    assert_near(err_implicit, 2.060996309838359e-06, 1.0e-15)
+}
+test "and at h = 0.1, fifty times the limit, 1.92e-5" {
+    assert_near(err_coarse, 1.922824913669352e-05, 1.0e-15)
+}
+
+# the curves: forward Euler on both sides of the limit, backward Euler at 5x it
+T_IN = zeros(N_INSIDE + 1)
+for n to N_INSIDE + 1 {
+    T_IN[n] = n * H_INSIDE
+}
+# the unstable run is drawn until it first leaves the window |y| <= Y_WINDOW
+Y_WINDOW = 1.5
+n_leave = N_OUTSIDE
+for n from 0 to N_OUTSIDE + 1 reversed {
+    if abs(Y_OUTSIDE[n]) > Y_WINDOW {
+        n_leave = n
+    }
+}
+T_OUT = zeros(n_leave + 1)
+Y_OUT_SHOWN = zeros(n_leave + 1)
+for n to n_leave + 1 {
+    T_OUT[n] = n * H_OUTSIDE
+    Y_OUT_SHOWN[n] = Y_OUTSIDE[n]
+}
+show n_leave * H_OUTSIDE
+
+test "the unstable run first leaves |y| <= 1.5 at step 139, t = 0.2919, as in the Python reference" {
+    assert_near(n_leave * H_OUTSIDE, 0.2919, 1.0e-12)
+}
+T_IMP = zeros(len(Y_IMPLICIT))
+for n to len(Y_IMPLICIT) {
+    T_IMP[n] = n * H_IMPLICIT
+}
+N_CURVE = 201
+T_CURVE = linspace(0.0, T_END, N_CURVE)
+figure("y' = -1000 (y - cos t) - sin t, from y(0) = 1", "t", "y", 0.0, T_END, -Y_WINDOW, Y_WINDOW)
+plot(T_CURVE, cos(T_CURVE), "cos t, exact")
+plot(T_IN, Y_INSIDE, "forward Euler, h = 0.0019")
+plot(T_OUT, Y_OUT_SHOWN, "forward Euler, h = 0.0021")
+plot(T_IMP, Y_IMPLICIT, "backward Euler, h = 0.01")
+style("cos t, exact", "dash s6 thick nomarker")
+style("forward Euler, h = 0.0019", "s1 nomarker")
+style("forward Euler, h = 0.0021", "s4 nomarker")
+style("backward Euler, h = 0.01", "dot s2 nomarker")
+
+###
+## Measuring the factor
+
+To measure $g$ without the truncation error in the way, the last cell runs
+each method twice with the same step, from $y(0) = 2$ and from $y(0) = 1$, and
+subtracts. The $\tau_n$ are the same in both runs and cancel, so the
+difference after $M$ steps is $g^M$ times the starting difference of 1.
+$|d_M|^{1/M}$ with $M = 4$ is the measured factor. The figure shows it at 36
+step sizes from $10^{-4}$ to $10^{-1}$, against the two formulas; the
+vertical line is $h = 2/\lambda$ and the horizontal one is $|g| = 1$.
+
+Forward Euler's factor falls to zero at $h = 1/\lambda$, where one step lands
+exactly on the solution, and crosses 1 at $h = 2/\lambda$. Measured and
+predicted agree to $2 \times 10^{-14}$. Backward Euler's factor falls
+steadily toward 0; it agrees with $1/(1 + h\lambda)$ to $2 \times 10^{-9}$
+relative, the rounding left in a difference of $10^{-8}$ after four steps at
+$h = 0.1$.
+###
+
+#: M_STEPS  steps over which the factor is measured
+M_STEPS = 4
+#: N_H  step sizes in the sweep, spaced evenly in log h from 1e-4 to 1e-1
+N_H = 36
+HS = zeros(N_H)
+G_FWD = zeros(N_H)
+G_BWD = zeros(N_H)
+P_FWD = zeros(N_H)
+P_BWD = zeros(N_H)
+for k to N_H {
+    h = pow(10.0, -4.0 + 3.0 * k / (N_H - 1.0))
+    HS[k] = h
+    d_fwd = forward_euler(h, 2.0, M_STEPS)[M_STEPS] - forward_euler(h, 1.0, M_STEPS)[M_STEPS]
+    d_bwd = backward_euler(h, 2.0, M_STEPS)[M_STEPS] - backward_euler(h, 1.0, M_STEPS)[M_STEPS]
+    G_FWD[k] = pow(abs(d_fwd), 1.0 / M_STEPS)
+    G_BWD[k] = pow(abs(d_bwd), 1.0 / M_STEPS)
+    P_FWD[k] = abs(1.0 - h * LAM)
+    P_BWD[k] = 1.0 / (1.0 + h * LAM)
+}
+
+test "forward Euler's measured factor is |1 - h lam| at all 36 step sizes, to 1e-13" {
+    for k to N_H {
+        assert_near(G_FWD[k], P_FWD[k], 1.0e-13 * max(1.0, P_FWD[k]))
+    }
+}
+test "it is below 1 exactly for h < 2/lam = 0.002" {
+    for k to N_H {
+        assert_true((G_FWD[k] < 1.0) == (HS[k] < 2.0 / LAM))
+    }
+}
+test "backward Euler's is 1/(1 + h lam), below 1 at every step size, to 1e-8 relative" {
+    for k to N_H {
+        assert_near(G_BWD[k] / P_BWD[k], 1.0, 1.0e-8)
+        assert_lt(G_BWD[k], 1.0)
+    }
+}
+
+N_FINE = 400
+H_FINE = zeros(N_FINE)
+F_FINE = zeros(N_FINE)
+B_FINE = zeros(N_FINE)
+for k to N_FINE {
+    H_FINE[k] = pow(10.0, -4.0 + 3.0 * k / (N_FINE - 1.0))
+    F_FINE[k] = abs(1.0 - H_FINE[k] * LAM)
+    B_FINE[k] = 1.0 / (1.0 + H_FINE[k] * LAM)
+}
+figure("Growth factor per step, measured and predicted ($\\lambda = 1000$)", "step h", "|g|", 1.0e-4, 0.1, 1.0e-3, 200.0)
+xscale("log")
+yscale("log")
+plot(H_FINE, F_FINE, "$|1 - h\\lambda|$")
+plot(H_FINE, B_FINE, "$1/(1 + h\\lambda)$")
+plot(HS, G_FWD, "forward Euler, measured")
+plot(HS, G_BWD, "backward Euler, measured")
+hline("|g| = 1", 1.0)
+vline("h = 2/lambda", 2.0 / LAM)
+style("$|1 - h\\lambda|$", "dash s4 nomarker")
+style("$1/(1 + h\\lambda)$", "dash s2 nomarker")
+style("forward Euler, measured", "s4 noline ring")
+style("backward Euler, measured", "s2 noline ring")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

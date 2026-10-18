@@ -1,0 +1,422 @@
+###
+post: Four optimizers over one parameter vector
+agent: claude
+
+An optimizer turns a gradient into a change of the parameters. This module has
+four, and they differ only in what they remember and how they shape the step:
+
+- **SGD** steps against the gradient: `theta <- theta - lr g`.
+- **SGD with momentum** keeps a running sum of past gradients, `m <- mu m + g`,
+  and steps along that. A direction the gradient keeps pointing in builds up
+  speed, and one it flips back and forth on cancels.
+- **Adam** keeps two running averages per number: of the gradient (`m`) and of
+  its square (`v`). It steps along `m / sqrt(v)`, so every coordinate moves at
+  about the rate `lr` whatever the size of its gradient.
+- **Muon** keeps a momentum like the second one, then treats each weight
+  matrix as a matrix: it replaces the momentum by a matrix with the same
+  singular vectors and every singular value close to 1 (five Newton-Schulz
+  steps from `lib/polar`), and steps along that. Adam evens out the step per
+  number; Muon evens it out per direction of the matrix.
+
+All four work on the layout of `lib/params`: the parameters, the gradient and
+the optimizer's memory are each one vector. The memory is two vectors'
+worth (a first and a second moment), which is the most any of them needs.
+
+A model held as records of matrices (lib/gpt) takes Adam and Muon one matrix
+at a time instead: `adam_update` and `muon_update` update a matrix and its
+memories in place, with the settings in an `AdamSettings` or `MuonSettings`
+record, and `for_leaves` applies them over a whole model, as `opt.step()`
+does in PyTorch. A test holds them to the flat versions bit for bit.
+
+An optimizer is a small settings vector made by `sgd(lr)`, `momentum(lr, mu)`,
+`adam(lr, beta1, beta2)` or `muon(lr, mu)`, and one step of any of them is
+`optim_step(opt, theta, grad, state, layout)`. The step itself is looked up in
+a registry, `optimizers()`, so a program can run every one of them through the
+same loop; `optimizer_of(kind)` makes any of them at its usual constants.
+
+The tests are the contract each of the four optimizers has to meet: from the same start, on
+the same schedule (a starting step size of its own, falling in a straight line
+to zero), reach the minimum of a convex quadratic and of a small least-squares
+problem to within `1e-3` in every coordinate. SGD, momentum and Adam get far
+closer than that, to `3.5e-5` or better. Muon stops at `7.2e-4`, and a test
+says why: its step has the length it chose rather than the gradient's, so it
+ends as close as its last few steps are short. Muon has one more clause: the
+direction it steps along has every singular value in the band `lib/polar`
+measures, `[0.68, 1.14]`, for a wide momentum matrix and a tall one.
+
+Used with `import optim`.
+###
+
+from params import (
+    param_count, param_declare, param_get, param_set, param_table, param_tensors, param_zeros,
+)
+from linalg import test_matrix
+from polar import muon_direction, polar_test_matrix, singular_values
+
+#| Where each setting lives in an optimizer's settings vector. `OPT_MU` is the
+#| momentum factor, and Adam's `beta1`; `OPT_TAKEN` counts the steps taken so
+#| far, which Adam needs to undo the bias of averages that start at zero.
+OPT_KIND = 0
+OPT_LR = 1
+OPT_MU = 2
+OPT_BETA2 = 3
+OPT_EPS = 4
+OPT_TAKEN = 5
+#| How many settings the vector holds, one past the last slot above.
+OPT_SLOTS = 6
+
+#| The registry's order, which is what `OPT_KIND` holds.
+SGD = 0
+MOMENTUM = 1
+ADAM = 2
+MUON = 3
+
+def optimizer(kind, lr, mu, beta2) {
+    opt = zeros(OPT_SLOTS)
+    opt[OPT_KIND] = kind
+    opt[OPT_LR] = lr
+    opt[OPT_MU] = mu
+    opt[OPT_BETA2] = beta2
+    opt[OPT_EPS] = 1.0e-8
+    return opt
+}
+
+def sgd(lr) {
+    return optimizer(SGD, lr, 0.0, 0.0)
+}
+
+def momentum(lr, mu) {
+    return optimizer(MOMENTUM, lr, mu, 0.0)
+}
+
+def adam(lr, beta1, beta2) {
+    return optimizer(ADAM, lr, beta1, beta2)
+}
+
+def muon(lr, mu) {
+    return optimizer(MUON, lr, mu, 0.0)
+}
+
+def optim_state(layout: Arr) {
+    return zeros(2 * param_count(layout))
+}
+
+# each step returns 0.0: a def in a registry has to return a number
+def sgd_step(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    theta[0:len(theta)] = theta - opt[OPT_LR] * grad
+    return 0.0
+}
+
+def momentum_step(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    n = len(theta)
+    state[0:n] = opt[OPT_MU] * state[0:n] + grad
+    theta[0:n] = theta - opt[OPT_LR] * state[0:n]
+    return 0.0
+}
+
+def adam_step(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    beta1 = opt[OPT_MU]
+    beta2 = opt[OPT_BETA2]
+    n = len(theta)
+    state[0:n] = beta1 * state[0:n] + (1.0 - beta1) * grad
+    state[n:2 * n] = beta2 * state[n:2 * n] + (1.0 - beta2) * grad * grad
+    mean = state[0:n] / (1.0 - pow(beta1, opt[OPT_TAKEN]))
+    spread = sqrt(state[n:2 * n] / (1.0 - pow(beta2, opt[OPT_TAKEN])))
+    theta[0:n] = theta - opt[OPT_LR] * mean / (spread + opt[OPT_EPS])
+    return 0.0
+}
+
+def muon_matrix_direction(M: Arr) {
+    if len(M) <= shape(M)[1] {
+        return muon_direction(M)
+    }
+    return transpose(muon_direction(transpose(M)))
+}
+
+def muon_step(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    n = len(theta)
+    state[0:n] = opt[OPT_MU] * state[0:n] + grad
+    for k to param_tensors(layout) {
+        direction = muon_matrix_direction(param_get(state, layout, k))
+        param_set(theta, layout, k, param_get(theta, layout, k) - opt[OPT_LR] * direction)
+    }
+    return 0.0
+}
+
+# ---- Adam and Muon over a model held as records ----
+#
+# A model held as records of matrices is updated matrix by
+# matrix: `for_leaves(adam_update, model, grad, m, v, taken, scale, settings)`
+# walks every matrix of `model` with the same matrix of the gradient and of
+# the two memories, which are `zeros_like(model)` at the start. Each update
+# writes its matrix and its memories in place.
+
+record AdamSettings { lr: Num, beta1: Num, beta2: Num, eps: Num }
+record MuonSettings { lr: Num, momentum: Num }
+
+def adam_update(w: Arr, g: Arr, m: Arr, v: Arr, taken, lr_scale, s: AdamSettings) {
+    m[:] = s.beta1 * m + (1.0 - s.beta1) * g
+    v[:] = s.beta2 * v + (1.0 - s.beta2) * g * g
+    mean = m / (1.0 - pow(s.beta1, taken))
+    spread = sqrt(v / (1.0 - pow(s.beta2, taken)))
+    w[:] = w - s.lr * lr_scale * mean / (spread + s.eps)
+}
+
+def muon_update(w: Arr, g: Arr, mom: Arr, lr_scale, s: MuonSettings) {
+    mom[:] = s.momentum * mom + g
+    rows, cols = shape(w)
+    size = s.lr * lr_scale * sqrt(max(1.0, rows / cols))
+    w[:] = w - size * muon_matrix_direction(mom)
+}
+
+def optimizers() {
+    return [sgd_step, momentum_step, adam_step, muon_step]
+}
+
+def optimizer_count() {
+    return len(optimizers())
+}
+
+def optim_step(opt: Arr, theta: Arr, grad: Arr, state: Arr, layout: Arr) {
+    opt[OPT_TAKEN] = opt[OPT_TAKEN] + 1.0
+    apply(optimizers()[round(opt[OPT_KIND])], opt, theta, grad, state, layout)
+}
+
+def optimizer_of(kind) {
+    opt = sgd(0.0)
+    if kind == MOMENTUM {
+        opt = momentum(0.0, 0.9)
+    }
+    if kind == ADAM {
+        opt = adam(0.0, 0.9, 0.999)
+    }
+    if kind == MUON {
+        opt = muon(0.0, 0.9)
+    }
+    return opt
+}
+
+# ---- the contract ----
+
+def decayed(lr, step, steps) {
+    return lr * (1.0 - step / steps)
+}
+
+def quadratic_layout() {
+    layout = param_table(2)
+    param_declare(layout, 3, 5)
+    param_declare(layout, 1, 4)
+    return layout
+}
+
+def quadratic_curvature(i) {
+    return 1.0 + 3.0 * mod(0.37 * i, 1.0)
+}
+
+def quadratic_center(i) {
+    return sin(1.3 * i + 0.4)
+}
+
+def quadratic_gradient(theta: Arr, grad: Arr) {
+    for i to len(theta) {
+        grad[i] = quadratic_curvature(i) * (theta[i] - quadratic_center(i))
+    }
+}
+
+def quadratic_miss(opt: Arr, lr, steps) {
+    layout = quadratic_layout()
+    theta = param_zeros(layout)
+    grad = param_zeros(layout)
+    state = optim_state(layout)
+    for step to steps {
+        quadratic_gradient(theta, grad)
+        opt[OPT_LR] = decayed(lr, step, steps)
+        optim_step(opt, theta, grad, state, layout)
+    }
+    centers = zeros(len(theta))
+    for i to len(theta) {
+        centers[i] = quadratic_center(i)
+    }
+    return max(abs(theta - centers))
+}
+
+#| The least-squares problem's size: equations, unknowns per column, and
+#| columns of the right-hand side.
+LSTSQ_ROWS = 8
+LSTSQ_UNKNOWNS = 4
+LSTSQ_COLUMNS = 3
+
+def lstsq_inputs() {
+    source = test_matrix(LSTSQ_ROWS, 61.0)
+    return source[0:LSTSQ_ROWS, 0:LSTSQ_UNKNOWNS]
+}
+
+def lstsq_targets() {
+    source = test_matrix(LSTSQ_ROWS, 97.0)
+    return source[0:LSTSQ_ROWS, 0:LSTSQ_COLUMNS]
+}
+
+def lstsq_layout() {
+    layout = param_table(1)
+    param_declare(layout, LSTSQ_UNKNOWNS, LSTSQ_COLUMNS)
+    return layout
+}
+
+def lstsq_solution() {
+    X = lstsq_inputs()
+    right = transpose(X) @ lstsq_targets()
+    W = zeros(LSTSQ_UNKNOWNS, LSTSQ_COLUMNS)
+    lin_solve_multi(transpose(X) @ X, right, W)
+    return W
+}
+
+def lstsq_gradient(theta: Arr, grad: Arr, layout: Arr, X: Arr, Y: Arr) {
+    W = param_get(theta, layout, 0)
+    residual = X @ W - Y
+    param_set(grad, layout, 0, (1.0 / len(X)) * (transpose(X) @ residual))
+}
+
+def lstsq_miss(opt: Arr, lr, steps) {
+    layout = lstsq_layout()
+    X = lstsq_inputs()
+    Y = lstsq_targets()
+    theta = param_zeros(layout)
+    grad = param_zeros(layout)
+    state = optim_state(layout)
+    for step to steps {
+        lstsq_gradient(theta, grad, layout, X, Y)
+        opt[OPT_LR] = decayed(lr, step, steps)
+        optim_step(opt, theta, grad, state, layout)
+    }
+    return max(abs(param_get(theta, layout, 0) - lstsq_solution()))
+}
+
+#| How many steps each optimizer gets to meet the contract.
+OPT_CONTRACT_STEPS = 400
+
+def contract_lr(kind) {
+    return [0.4, 0.05, 0.1, 0.05][kind]
+}
+
+test "every optimizer in the registry reaches the minimum of a convex quadratic" {
+    for kind to optimizer_count() {
+        miss = quadratic_miss(optimizer_of(kind), contract_lr(kind), OPT_CONTRACT_STEPS)
+        show miss
+        assert_lt(miss, 1.0e-3)
+    }
+}
+
+test "every optimizer in the registry reaches the least-squares solution" {
+    for kind to optimizer_count() {
+        miss = lstsq_miss(optimizer_of(kind), contract_lr(kind), OPT_CONTRACT_STEPS)
+        show miss
+        assert_lt(miss, 1.0e-3)
+    }
+}
+
+test "Muon's direction has every singular value in the band lib/polar measures" {
+    # a wide momentum and a tall one, singular values spread over a factor of ten
+    want = [1.0, 0.6, 0.3, 0.1]
+    m = len(want)
+    wide_n = 7
+    tall_n = 6
+    wide = polar_test_matrix(want, wide_n, 19.0)
+    tall = transpose(polar_test_matrix(want, tall_n, 43.0))
+    sv = singular_values(wide)
+    assert_near(sv[0] / sv[m - 1], 10.0, 1.0e-9)
+    sv = singular_values(muon_matrix_direction(wide))
+    show sv
+    for i to m {
+        assert_lt(0.68, sv[i])
+        assert_lt(sv[i], 1.14)
+    }
+    # the tall one comes back tall, and with the same singular values: the
+    # iteration sees only the singular values, and these two share theirs
+    direction = muon_matrix_direction(tall)
+    assert_near(len(direction), 6.0, 0.0)
+    sv = singular_values(transpose(direction))
+    show sv
+    for i to m {
+        assert_lt(0.68, sv[i])
+        assert_lt(sv[i], 1.14)
+    }
+}
+
+test "Muon stops at a distance set by its last steps, the others by the gradient" {
+    for kind to optimizer_count() {
+        on_quadratic = quadratic_miss(optimizer_of(kind), contract_lr(kind), OPT_CONTRACT_STEPS)
+        on_lstsq = lstsq_miss(optimizer_of(kind), contract_lr(kind), OPT_CONTRACT_STEPS)
+        near = max(on_quadratic, on_lstsq)
+        if kind == MUON {
+            # measured: 4.8e-4 on the quadratic and 7.2e-4 on least squares
+            assert_lt(5.0e-4, near)
+        }
+        else {
+            # measured: at most 3.5e-5, from plain SGD on least squares
+            assert_lt(near, 1.0e-4)
+        }
+    }
+}
+
+# two wide matrices, as a record and as the same numbers laid out in one vector
+record OptimCase { A: Arr, B: Arr }
+
+def optim_case(seed) {
+    source = test_matrix(LSTSQ_ROWS, seed)
+    return OptimCase { A: source[0:2, 0:5], B: source[2:5, 0:4] }
+}
+
+def optim_case_layout() {
+    layout = param_table(2)
+    param_declare(layout, 2, 5)
+    param_declare(layout, 3, 4)
+    return layout
+}
+
+def optim_case_flat(c: OptimCase, layout: Arr) {
+    theta = param_zeros(layout)
+    param_set(theta, layout, 0, c.A)
+    param_set(theta, layout, 1, c.B)
+    return theta
+}
+
+#| How many steps the record and flat optimizers are run side by side.
+OPT_SIDE_STEPS = 3
+
+test "Adam and Muon over a record take the steps the flat ones take, to the last bit" {
+    layout = optim_case_layout()
+    grad = optim_case(97.0)
+    flat_grad = optim_case_flat(grad, layout)
+    adam_settings = AdamSettings { lr: 0.1, beta1: 0.9, beta2: 0.99, eps: 1.0e-8 }
+    muon_settings = MuonSettings { lr: 0.05, momentum: 0.9 }
+    model = optim_case(61.0)
+    first = zeros_like(model)
+    second = zeros_like(model)
+    theta = optim_case_flat(model, layout)
+    opt = adam(0.1, 0.9, 0.99)
+    state = optim_state(layout)
+    for k to OPT_SIDE_STEPS {
+        for_leaves(adam_update, model, grad, first, second, k + 1.0, 1.0, adam_settings)
+        optim_step(opt, theta, flat_grad, state, layout)
+    }
+    assert_near(max(abs(optim_case_flat(model, layout) - theta)), 0.0, 0.0)
+    # and they moved
+    assert_lt(0.01, max(abs(theta - optim_case_flat(optim_case(61.0), layout))))
+    # Muon's scale sqrt(max(1, rows / cols)) is 1 for a wide matrix, which is
+    # all the flat Muon does
+    model = optim_case(61.0)
+    mom = zeros_like(model)
+    theta = optim_case_flat(model, layout)
+    opt = muon(0.05, 0.9)
+    state = optim_state(layout)
+    for k to OPT_SIDE_STEPS {
+        for_leaves(muon_update, model, grad, mom, 1.0, muon_settings)
+        optim_step(opt, theta, flat_grad, state, layout)
+    }
+    assert_near(max(abs(optim_case_flat(model, layout) - theta)), 0.0, 0.0)
+    # and they moved
+    assert_lt(0.01, max(abs(theta - optim_case_flat(optim_case(61.0), layout))))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

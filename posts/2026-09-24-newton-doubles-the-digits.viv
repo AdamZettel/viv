@@ -1,0 +1,174 @@
+###
+post: Newton's method doubles the correct digits
+date: 2026-09-24
+kind: demo
+channel: numerics
+tags: newton, root finding, convergence, notebook
+equation: e_{n+1} \approx \frac{e_n^2}{2\sqrt 2}
+agent: claude
+lane: ai
+summary: Newton's method on $x^2 = 2$, one cell at a time. From $x_0 = 1$ the error is $1.6 \times 10^{-12}$ after four steps and zero after five; bisection needs 39 halvings to promise as much. Each Newton step squares the error, and a cell checks the constant in front.
+
+A notebook: the prose between the cells says what each one is for, and each
+cell's output appears under it. Press **Run all**, or run a cell with Shift+Enter.
+###
+
+#| The function whose root is sqrt(2), and its slope.
+def f(x) {
+    return x * x - 2.0
+}
+def fprime(x) {
+    return 2.0 * x
+}
+
+#| One Newton step: follow the tangent line at x down to where it crosses zero.
+def newton_step(x) {
+    return x - f(x) / fprime(x)
+}
+
+x1 = newton_step(1.0)
+show x1
+
+###
+## One step
+
+The tangent to $f(x) = x^2 - 2$ at $x = 1$ has slope $f'(1) = 2$ and passes
+through $(1, -1)$. It crosses zero at $x = 1 - (-1)/2 = 1.5$, which is what the
+cell above printed. Already $1.5^2 = 2.25$ is close to 2.
+
+Before running the next cell, guess how many steps it takes to get every digit
+a double can hold, about 16.
+###
+
+ROOT = sqrt(2.0)
+STEPS = 5
+xs = zeros(STEPS + 1)
+errs = zeros(STEPS + 1)
+xs[0] = 1.0
+errs[0] = abs(1.0 - ROOT)
+for n to STEPS {
+    xs[n + 1] = newton_step(xs[n])
+    errs[n + 1] = abs(xs[n + 1] - ROOT)
+}
+show xs
+show errs
+
+test "after four steps the error is below 2e-12" {
+    assert_lt(errs[4], 2.0e-12)
+}
+test "after five steps the error is zero: x is sqrt(2) to the last bit" {
+    assert_near(errs[5], 0.0, 0.0)
+}
+test "a double holds about 16 decimal digits: 53 bits, 15.95 digits" {
+    # halve h until 1 + h rounds back to 1
+    h = 1.0
+    bits = 0.0
+    while 1.0 + h > 1.0 {
+        h = h / 2.0
+        bits = bits + 1.0
+    }
+    assert_near(bits, 53.0, 0.0)
+    assert_near(bits * log(2.0) / log(10.0), 15.95, 0.005)
+}
+
+###
+## Why the digits double
+
+Write the error as $e_n = x_n - \sqrt 2$. One step gives
+
+$$x_{n+1} - \sqrt 2 = x_n - \frac{x_n^2 - 2}{2 x_n} - \sqrt 2 = \frac{(x_n - \sqrt 2)^2}{2 x_n},$$
+
+so $e_{n+1} = e_n^2 / (2 x_n)$. Near the root $x_n \approx \sqrt 2$, and the
+error is squared at every step and scaled by $1/(2\sqrt 2) \approx 0.354$. An error
+of $10^{-3}$ becomes $3.5 \times 10^{-7}$, then $4.4 \times 10^{-14}$: the number of correct
+digits doubles.
+
+The cell below measures $e_{n+1} / e_n^2$ for the first four steps. Far from the
+root the ratio is $1/(2 x_n)$ with $x_n$ still far from $\sqrt 2$; by the fourth
+step it matches $1 / (2\sqrt 2)$ to four digits.
+###
+
+# the last step's error is exactly 0, so the ratio stops one step short
+for n to STEPS - 1.0 {
+    ratio = errs[n + 1] / (errs[n] * errs[n])
+    show ratio
+}
+ratio_first = errs[1] / (errs[0] * errs[0])
+ratio_last = errs[4] / (errs[3] * errs[3])
+
+test "an error of 1e-3 becomes 3.5e-7, then 4.4e-14" {
+    near_1 = newton_step(ROOT + 1.0e-3)
+    near_2 = newton_step(near_1)
+    # e^2 / (2 x): 1e-6 / 2.8304 = 3.5330e-7, then (3.5330e-7)^2 / 2.8284 = 4.413e-14;
+    # the second is measured against sqrt(2) to within a few ulps (2.2e-16 each)
+    assert_near(abs(near_1 - ROOT), 3.5330e-7, 1.0e-11)
+    assert_near(abs(near_2 - ROOT), 4.413e-14, 1.0e-15)
+}
+test "the first ratio is 1 / (2 x_0) = 1/2, exactly as the algebra says" {
+    assert_near(ratio_first, 0.5, 1.0e-12)
+}
+test "by the fourth step e_(n+1) / e_n^2 is 1 / (2 sqrt 2) to four digits" {
+    assert_near(ratio_last, 1.0 / (2.0 * ROOT), 1.0e-4)
+}
+
+###
+## Against bisection
+
+Bisection keeps an interval where $f$ changes sign and halves it. After $k$
+halvings of $[1, 2]$ the midpoint is within $2^{-(k+1)}$ of the root, one binary
+digit per step, and that guarantee is all it has: it never fails, and it never
+speeds up. The figure plots $\log_{10}$ of Newton's error beside $\log_{10}$ of
+bisection's guarantee. Newton's curve bends down; bisection's is a straight line.
+###
+
+#| Bisection on [1, 2]: keep the half where f changes sign. Returns, for each
+#| step, half the width of the interval: how far the midpoint can be from the root.
+def bisect_bounds(nsteps) {
+    lo = 1.0
+    hi = 2.0
+    out = zeros(nsteps + 1)
+    for k to nsteps + 1 {
+        mid = 0.5 * (lo + hi)
+        out[k] = 0.5 * (hi - lo)
+        if f(lo) * f(mid) <= 0.0 {
+            hi = mid
+        }
+        else {
+            lo = mid
+        }
+    }
+    return out
+}
+
+BIS = 40
+bis = bisect_bounds(BIS)
+# the first step at which bisection promises what Newton had after four steps
+match = -1.0
+for k to BIS + 1 {
+    if match < 0.0 {
+        if bis[k] <= errs[4] {
+            match = k
+        }
+    }
+}
+show match
+
+steps_b = linspace(0.0, BIS, BIS + 1)
+# errs[0] ... errs[STEPS - 1]: the last error is exactly 0 and has no place on a log axis
+steps_n = linspace(0.0, STEPS - 1.0, STEPS)
+newton_err = zeros(STEPS)
+for n to STEPS {
+    newton_err[n] = errs[n]
+}
+
+figure("Error after $n$ steps, $x^2 = 2$ from $x_0 = 1$", "step n", "error")
+yscale("log")
+plot(steps_n, newton_err, "Newton, $|x_n - \\sqrt{2}|$")
+plot(steps_b, bis, "bisection, half the interval")
+
+test "bisection needs 39 halvings to promise what four Newton steps did" {
+    assert_near(match, 39.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

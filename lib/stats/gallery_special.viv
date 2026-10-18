@@ -1,0 +1,99 @@
+###
+post: The special functions against mpmath, drawn
+agent: claude
+
+The accuracy figure of vipyr's gallery example
+plot_special_function_accuracy.py, drawn in Viv on a smaller set of points:
+the normal distribution function `ndtr(x)` for x from -37 to 8, and the
+regularized upper incomplete gamma function `gammaincc(50, x)` for x from 2 to
+198, each against mpmath at 50 digits, in units in the last place. The
+reference values were computed with mpmath and are written out below. vipyr's
+full accuracy table (lib/stats/accuracy.json) covers 1192 points per function
+and SciPy and R beside it.
+###
+
+from stats.special import ndtr, gammaincc
+
+#: ndtr at x = -37, -36, ..., 8
+X_FIRST: Num = -37.0
+#: gammaincc(50, x) at x = 2, 6, ..., 198
+GAMMA_A: Num = 50.0
+G_FIRST: Num = 2.0
+G_STEP: Num = 4.0
+#: the 52 fraction bits of a double
+MANTISSA_BITS: Num = 52.0
+#: an error below half an ulp is drawn at half an ulp, so the log axis keeps it
+FLOOR_ULPS: Num = 0.5
+
+#: mpmath 1.3 at 50 digits
+NDTR_REF = [
+    5.7255712225245771e-300, 4.182624065797283e-284, 1.1249107064724062e-268, 1.1138987855743794e-253,
+    4.0611856209158549e-239, 5.4520806035123956e-225, 2.6952500812005002e-211, 4.9067139271481872e-198,
+    3.2897852667043802e-185, 8.1238694696594273e-173, 7.3894810068850185e-161, 2.4760633155033892e-149,
+    3.056696706382561e-138, 1.390392118549703e-127, 2.3306370062206488e-117, 1.439892435145079e-107,
+    3.2792780189790361e-98, 2.7536241186062337e-89, 8.5272239526309772e-81, 9.7409489189371508e-73,
+    4.1059962020989065e-65, 6.3887544005380868e-58, 3.6709661993127508e-51, 7.7935368191928e-45,
+    6.1171643995498803e-39, 1.776482112077679e-33, 1.9106595744986757e-28, 7.6198530241605255e-24,
+    1.1285884059538405e-19, 6.2209605742717839e-16, 1.279812543885835e-12, 9.8658764503769809e-10,
+    2.8665157187919391e-07, 3.1671241833119924e-05, 0.0013498980316300946, 0.022750131948179209,
+    0.15865525393145705, 0.5, 0.84134474606854293, 0.97724986805182079,
+    0.9986501019683699, 0.99996832875816688, 0.99999971334842808, 0.9999999990134123,
+    0.99999999999872013, 0.99999999999999933,
+]
+#: mpmath 1.3 at 50 digits
+GAMMAINCC_REF = [
+    1, 1, 1, 0.99999999999992395,
+    0.99999999955337127, 0.99999978899055419, 0.99998114193181264, 0.99948110853745198,
+    0.99402988373533308, 0.96466050177837293, 0.87497595646063264, 0.70334011478380931,
+    0.48119168452795674, 0.27487846595841797, 0.13078911799345455, 0.052198762557077498,
+    0.017672963010813177, 0.0051405024585058938, 0.0013007315489960967, 0.00028971073386788583,
+    5.7412990414952422e-05, 1.0222192761323587e-05, 1.6494985017178249e-06, 2.4312057998027738e-07,
+    3.2959820415723037e-08, 4.1357707654804985e-09, 4.8302877569944258e-10, 5.2774685848268011e-11,
+    5.4186357236607356e-12, 5.24990731134568e-13, 4.8175817872982797e-14, 4.2013890297384922e-15,
+    3.4928719863110788e-16, 2.7760149089469877e-17, 2.1146094546381355e-18, 1.5475166359434589e-19,
+    1.0903906992356408e-20, 7.4121008573228765e-22, 4.8698645725456705e-23, 3.0977951844508907e-24,
+    1.9109014283190268e-25, 1.1447586051548684e-26, 6.6692220024328739e-28, 3.7833539091181249e-29,
+    2.092363506004163e-30, 1.1293788445128826e-31, 5.9557639847527617e-33, 3.0715330056443397e-34,
+    1.5505694556415278e-35, 7.6686696893997725e-37,
+]
+
+
+#| The error of v against the reference in units in the last place of the
+#| reference (a normal double: its spacing is 2^(exponent - 52)).
+def ulps(v: Num, ref: Num) -> Num {
+    spacing = 2.0 ^ (floor(log(abs(ref)) / log(2.0)) - MANTISSA_BITS)
+    return max(abs(v - ref) / spacing, FLOOR_ULPS)
+}
+
+#: ndtr over its grid
+x = [X_FIRST + i for i to len(NDTR_REF)]
+e_ndtr = [ulps(ndtr(x[i]), NDTR_REF[i]) for i to len(NDTR_REF)]
+
+#: gammaincc(50, x) over its grid
+g = [G_FIRST + G_STEP * i for i to len(GAMMAINCC_REF)]
+e_gamma = [ulps(gammaincc(GAMMA_A, g[i]), GAMMAINCC_REF[i]) for i to len(GAMMAINCC_REF)]
+
+show max(e_ndtr)
+show max(e_gamma)
+
+figure("ndtr(x) against mpmath, 50 digits", "x", "error (ulps)")
+plot(x, e_ndtr, "ndtr")
+style("ndtr", "noline circle")
+yscale("log")
+
+figure("gammaincc(50, x) against mpmath, 50 digits", "x", "error (ulps)")
+plot(g, e_gamma, "gammaincc(50, x)")
+style("gammaincc(50, x)", "noline circle s2")
+yscale("log")
+
+#: the worst errors lib/stats/accuracy.json records over its full sets of points
+NDTR_WORST_ULPS: Num = 4.7
+GAMMAINCC_WORST_ULPS: Num = 1137.6
+
+test "no worse than the full accuracy table" {
+    assert_lt(max(e_ndtr), NDTR_WORST_ULPS)
+    assert_lt(max(e_gamma), GAMMAINCC_WORST_ULPS)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

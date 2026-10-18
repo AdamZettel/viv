@@ -1,0 +1,41 @@
+#! timing
+# PolyBench/C 4.2.1 doitgen: the multiresolution analysis kernel of MADNESS,
+# A[r, q, :] := A[r, q, :] C4 for every r and q.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/kernels/doitgen/doitgen.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+NQ = 8
+NR = 10
+NP = 12
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    A = zeros(NR, NQ, NP)
+    for i to NR {
+        for j to NQ {
+            for k to NP {
+                A[i, j, k] = ((i * j + k) % NP) / NP
+            }
+        }
+    }
+    C4 = [[(i * j % NP) / NP for j to NP] for i to NP]
+    return A, C4
+}
+
+# Every (r, q) row times C4 is one matrix product over the rows stacked.
+def kernel(A, C4) {
+    return reshape(reshape(A, NR * NQ, NP) @ C4, NR, NQ, NP)
+}
+
+A, C4 = init()
+t0 = clock()
+A = kernel(A, C4)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("A", A)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,183 @@
+###
+post: The Viv port of lmder against the Fortran, on the MINPACK test problems
+agent: claude
+
+Runs the Viv lmder1 on every case of the netlib test data for the eleven
+problems lib/minpack/mgh.viv ports (24 cases: each problem from its standard
+start, and for most also from 10 and 100 times it), and compares each case
+with the gfortran build of netlib's lmder1 (lib/minpack/mgh_ref.viv):
+
+- the result: info, the number of function and Jacobian evaluations, and x;
+- every trial step: the trust radius lmpar was given, the parameter it
+  returned, the step length, the trial norm, the actual and predicted
+  reductions, their ratio, the new radius and parameter, whether the step
+  was taken, the norm, the scaled gradient and x.
+
+`mc_results` holds one row per case: nprob, factor, info, nfev, njev, and the
+largest relative difference from the oracle in the final x and in the
+history. `lib/minpack/check.sh` prints it.
+###
+
+from minpack.lmder import H_ACTRED, H_PRERED, H_RATIO, H_X, lmder1, lmder1_maxfev
+from minpack.enorm import EPSMCH
+from minpack.mgh import mgh_data, mgh_fcn, mgh_start
+from minpack.mgh_ref import MGH_REF_CASES, MGH_REF_HIST, MGH_REF_NCASES, MGH_REF_X
+
+MC_TOL = sqrt(EPSMCH)
+# the columns of mc_results: nprob, factor, info, nfev, njev, worst in x,
+# worst in the history, trial steps, counts match, entries that differ,
+# worst column
+MC_NCOLS = 11
+
+#| The relative difference of a from the reference b; an exact zero in the
+#| reference must be matched exactly.
+def mc_rel(a, b) {
+    if b == 0.0 {
+        if a == 0.0 {
+            return 0.0
+        }
+        return 1.0e300
+    }
+    return abs(a - b) / abs(b)
+}
+
+#| The column whose largest magnitude scales the differences in column c:
+#| its own, except for the ratio, whose error is measured as the error of the
+#| actual reduction it implies.
+def mc_scale_col(c) {
+    if c == H_RATIO {
+        return H_ACTRED
+    }
+    return c
+}
+
+#| Run case k and compare it with the oracle. Writes the case's row of R:
+#| nprob, factor, info, nfev, njev, worst in x, worst in the history,
+#| rows of history, and 1 when the counts and the row count match the oracle's.
+def mc_run(k, R: Arr) {
+    nprob = MGH_REF_CASES[k, 0]
+    n = MGH_REF_CASES[k, 1]
+    m = MGH_REF_CASES[k, 2]
+    factor = MGH_REF_CASES[k, 3]
+    first = MGH_REF_CASES[k, 9]
+    nrows = MGH_REF_CASES[k, 10]
+    x = mgh_start(nprob, n, factor)
+    fvec = zeros(m)
+    fjac = zeros(m, n)
+    ipvt = zeros(n)
+    counts = zeros(2)
+    # room for every trial step lmder1 can take, so that one more than the
+    # oracle's shows up in counts, not as a write past the end
+    hist = zeros(lmder1_maxfev(n), H_X + n)
+    info = lmder1(mgh_fcn, mgh_data(nprob, m, n), x, fvec, fjac, MC_TOL, ipvt, counts, hist)
+    worst_x = 0.0
+    for j to n {
+        worst_x = max(worst_x, mc_rel(x[j], MGH_REF_X[k, j]))
+    }
+    # the history: how many entries differ at all, and the largest
+    # difference relative to the largest magnitude in its column
+    ndiff = 0.0
+    worst_h = 0.0
+    worst_col = -1.0
+    for c to H_X + n {
+        scale = 0.0
+        for r to nrows {
+            scale = max(scale, abs(MGH_REF_HIST[first + r, mc_scale_col(c)]))
+        }
+        for r to nrows {
+            ref = MGH_REF_HIST[first + r, c]
+            if hist[r, c] != ref {
+                ndiff = ndiff + 1.0
+            }
+            d = abs(hist[r, c] - ref)
+            if c == H_RATIO {
+                # the ratio's error as the error in the actual reduction it implies
+                d = d * MGH_REF_HIST[first + r, H_PRERED]
+            }
+            if scale > 0.0 {
+                d = d / scale
+            }
+            if d > worst_h {
+                worst_h = d
+                worst_col = c
+            }
+        }
+    }
+    same = 0.0
+    if info == MGH_REF_CASES[k, 4] and counts[0] == MGH_REF_CASES[k, 5] and counts[1] == MGH_REF_CASES[k, 6] and counts[0] - 1.0 == nrows {
+        same = 1.0
+    }
+    R[k, 0] = nprob
+    R[k, 1] = factor
+    R[k, 2] = info
+    R[k, 3] = counts[0]
+    R[k, 4] = counts[1]
+    R[k, 5] = worst_x
+    R[k, 6] = worst_h
+    R[k, 7] = nrows
+    R[k, 8] = same
+    R[k, 9] = ndiff
+    R[k, 10] = worst_col
+    return 0
+}
+
+mc_results = zeros(MGH_REF_NCASES, MC_NCOLS)
+for mc_k to MGH_REF_NCASES {
+    mc_run(mc_k, mc_results)
+}
+show mc_results
+
+#| Whether problem nprob is computed with arithmetic and square roots only,
+#| so that the port and the Fortran do the same operations on the same
+#| numbers all the way through.
+def mc_plain(nprob) {
+    return nprob == 4 or nprob == 6 or nprob == 7 or nprob == 8 or nprob == 9
+}
+
+test "the 23 cases other than Meyer from 10 times the start stop with the oracle's info, nfev and njev, after as many trial steps" {
+    for k to MGH_REF_NCASES {
+        meyer_far = mc_results[k, 0] == 10.0 and mc_results[k, 1] == 10.0
+        if not meyer_far {
+            assert_near(mc_results[k, 8], 1.0, 0.0)
+        }
+    }
+}
+
+test "the 15 cases computed with arithmetic and square roots match the oracle bit for bit at every trial step" {
+    count = 0.0
+    for k to MGH_REF_NCASES {
+        if mc_plain(mc_results[k, 0]) {
+            count = count + 1.0
+            assert_near(mc_results[k, 9], 0.0, 0.0)
+            assert_near(mc_results[k, 5], 0.0, 0.0)
+        }
+    }
+    assert_near(count, 15.0, 0.0)
+}
+
+test "the cases with exp and atan match the oracle to 1e-6 of each column's scale, and x to 1e-12" {
+    for k to MGH_REF_NCASES {
+        meyer_far = mc_results[k, 0] == 10.0 and mc_results[k, 1] == 10.0
+        if not mc_plain(mc_results[k, 0]) and not meyer_far {
+            assert_lt(mc_results[k, 6], 1.0e-6)
+            assert_lt(mc_results[k, 5], 1.0e-12)
+        }
+    }
+}
+
+# Meyer from 10 times the start follows a badly scaled valley for 400
+# evaluations, and its path turns on the last bits of exp: with musl's exp
+# it ended 0.3% from the Fortran's x, with the correctly rounded one 25%
+# (see the minpack readme). The check asks what it asks of scipy there: that
+# both stop the same way, at maxfev.
+test "Meyer from 10 times the start: both stop at maxfev = 400" {
+    for k to MGH_REF_NCASES {
+        if mc_results[k, 0] == 10.0 and mc_results[k, 1] == 10.0 {
+            assert_near(mc_results[k, 2], 5.0, 0.0)
+            assert_near(mc_results[k, 3], 400.0, 0.0)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

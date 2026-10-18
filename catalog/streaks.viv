@@ -1,0 +1,101 @@
+# Streaks: consecutive active days per user.
+#
+# Input: one row per event, sorted by (user, ts); ts in int64 nanoseconds.
+# A row's day is floor(ts / 1 day), in UTC. A day is active for a user when
+# the user has at least one event on it. For a row on day D:
+#
+#   streak_days   the number of consecutive active days ending on D (D counts:
+#                 the row itself makes D active)
+#   longest_90d   the longest run of consecutive active days inside the 90
+#                 days D-89 .. D, a run that began before D-89 cut at D-89
+#
+# Both read only the user's events on days <= D, and every row of a day gets
+# the same values.
+
+from rows import group_end
+
+NS_PER_S: Int = 1000000000
+DAY: Int = 86400 * NS_PER_S
+WINDOW_DAYS: Int = 90
+
+record Streaks {
+    streak_days: [Int]
+    longest_90d: [Int]
+}
+
+#| The current streak of active days and the longest streak inside the trailing
+#| window of days, for events sorted by (user, ts).
+#|| The user's distinct active days are kept in order with the length of the run
+#|| that ends on each; the window's longest run is a scan back over them.
+#||| The current streak has no lookback limit: serving it needs the user's whole
+#||| run of days, while the windowed one needs only the window.
+#: user  the entity key, sorted ascending
+#: ts  event time, int64 nanoseconds, ascending within a user
+#@ 3b3c8dc8
+def streaks(user: [Int], ts: [Int]) -> Streaks {
+    n = len(ts)
+    cur = int_zeros(n)
+    best = int_zeros(n)
+    g: Int = 0
+    while g < n {
+        stop_at = group_end(user, ts, g, "streaks")
+        days: [Int] = []
+        runs: [Int] = []
+        for i from g to stop_at {
+            d = day_of(ts[i])
+            step extend "the row's day joins the list of active days" {
+                m = len(days)
+                if m == 0 or days[m - 1] < d {
+                    run: Int = 1
+                    if m > 0 and days[m - 1] == d - 1 {
+                        run = runs[m - 1] + 1
+                    }
+                    days = append(days, d)
+                    runs = append(runs, run)
+                }
+            }
+            step window "the longest run inside days d - 89 .. d" {
+                lo = d - WINDOW_DAYS + 1
+                longest: Int = 0
+                k: Int = len(days) - 1
+                while k >= 0 and days[k] >= lo {
+                    longest = max(longest, min(runs[k], days[k] - lo + 1))
+                    k -= 1
+                }
+            }
+            cur[i] = runs[len(runs) - 1]
+            best[i] = longest
+        }
+        g = stop_at
+    }
+    return Streaks { streak_days: cur, longest_90d: best }
+}
+
+#| The UTC day number of a time in nanoseconds, rounded down (floor division,
+#| so times before the epoch fall on negative days).
+#: t  a time, int64 nanoseconds since the epoch
+#@ 195681a7
+def day_of(t: Int) -> Int {
+    return t // DAY
+}
+
+test "a streak counts back over consecutive days and the window cuts it" {
+    user: [Int] = [1, 1, 1, 1, 1]
+    ts: [Int] = [0, DAY, DAY + 5, 2 * DAY, 100 * DAY]
+    s = streaks(user, ts)
+    assert_true(s.streak_days[0] == 1 and s.streak_days[2] == 2 and s.streak_days[3] == 3)
+    assert_true(s.streak_days[4] == 1 and s.longest_90d[3] == 3 and s.longest_90d[4] == 1)
+    assert_true(day_of(-1) == -1 and day_of(DAY) == 1)
+}
+
+test "a run that began before the window is cut at the window's first day" {
+    user: [Int] = [4, 4, 4]
+    ts: [Int] = [0, DAY, 90 * DAY]
+    s = streaks(user, ts)
+    assert_true(s.longest_90d[2] == 1)
+    t = streaks(user, [0, DAY, 2 * DAY])
+    assert_true(t.longest_90d[2] == 3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

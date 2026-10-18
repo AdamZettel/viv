@@ -1,0 +1,391 @@
+###
+The postconditions of lib/algo/algo.spec as Viv: the checks the generated programs
+(lib/algo/tests, lib/algo/legacy/tests) run in all three engines. tools/algo/check.py
+checks the same properties again in Python, against the printed results, and compares
+the two verdicts. Several of these are tier-1 algorithms of their own (`is_sorted`,
+`is_permutation`, `is_heap` in the STL); they keep the `algo_` prefix until lib/algo's
+names are settled.
+
+The order is NumPy's, the one `argsort` and `take V sorted` use: ascending, -0.0 equal
+to 0.0, NaN after every number and NaNs equal to each other.
+###
+
+#| `x` comes strictly before `y`: ascending, NaN after every number.
+def algo_before(x, y) -> Bool {
+    if x != x {
+        return false
+    }
+    if y != y {
+        return true
+    }
+    return x < y
+}
+
+#| `x` and `y` are the same double: equal, with the same sign if zero, or both NaN.
+def algo_same(x, y) -> Bool {
+    if x != x {
+        return y != y
+    }
+    if x == 0.0 and y == 0.0 {
+        return (1.0 / x > 0.0) == (1.0 / y > 0.0)
+    }
+    return x == y
+}
+
+#| No entry comes before the one in front of it (std::is_sorted).
+def algo_is_sorted(a: Arr) -> Bool {
+    for i from 1 to len(a) {
+        if algo_before(a[i], a[i - 1]) {
+            return false
+        }
+    }
+    return true
+}
+
+#| No entry comes after the one in front of it.
+def algo_is_sorted_desc(a: Arr) -> Bool {
+    for i from 1 to len(a) {
+        if algo_before(a[i - 1], a[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+#| How many entries are -0.0.
+def algo_neg_zeros(a: Arr) {
+    k = 0
+    for i to len(a) {
+        if a[i] == 0.0 and 1.0 / a[i] < 0.0 {
+            k += 1
+        }
+    }
+    return k
+}
+
+#| `a` holds the same doubles as `b`, as many times each (std::is_permutation,
+#| with -0.0 and 0.0 told apart and every NaN the same).
+def algo_is_permutation(a: Arr, b: Arr) -> Bool {
+    if len(a) != len(b) {
+        return false
+    }
+    sa = take(a, argsort(a), axis=0)
+    sb = take(b, argsort(b), axis=0)
+    for i to len(a) {
+        if not (sa[i] == sb[i] or (sa[i] != sa[i] and sb[i] != sb[i])) {
+            return false
+        }
+    }
+    return algo_neg_zeros(a) == algo_neg_zeros(b)
+}
+
+#| The signs of the zeros of `a`, in order: 1 for 0.0, -1 for -0.0.
+def algo_zero_signs(a: Arr) -> Arr {
+    s = []
+    for i to len(a) {
+        if a[i] == 0.0 and 1.0 / a[i] > 0.0 {
+            s = append(s, 1.0)
+        }
+        else if a[i] == 0.0 {
+            s = append(s, -1.0)
+        }
+    }
+    return s
+}
+
+#| A sorted `r` kept the zeros of `x` in their input order. Zeros are the only entries
+#| that compare equal and print differently, so they are where a sort of plain values
+#| shows whether it is stable.
+def algo_is_stable_values(r: Arr, x: Arr) -> Bool {
+    sr = algo_zero_signs(r)
+    sx = algo_zero_signs(x)
+    if len(sr) != len(sx) {
+        return false
+    }
+    for i to len(sr) {
+        if sr[i] != sx[i] {
+            return false
+        }
+    }
+    return true
+}
+
+#| `p` holds each of 0, 1, ..., n - 1 once.
+def algo_is_index_perm(p: Arr, n) -> Bool {
+    if len(p) != n {
+        return false
+    }
+    seen = zeros(n)
+    for i to n {
+        if p[i] != floor(p[i]) or p[i] < 0 or p[i] >= n {
+            return false
+        }
+        if seen[p[i]] != 0.0 {
+            return false
+        }
+        seen[p[i]] = 1.0
+    }
+    return true
+}
+
+#| The positions `p` put `keys` in order.
+def algo_is_sorted_by(p: Arr, keys: Arr) -> Bool {
+    for i from 1 to len(p) {
+        if algo_before(keys[p[i]], keys[p[i - 1]]) {
+            return false
+        }
+    }
+    return true
+}
+
+#| Positions of equal keys appear in `p` in increasing order (a stable argsort).
+def algo_is_stable_by(p: Arr, keys: Arr) -> Bool {
+    for i from 1 to len(p) {
+        tie = not algo_before(keys[p[i - 1]], keys[p[i]]) and not algo_before(keys[p[i]], keys[p[i - 1]])
+        if tie and p[i - 1] > p[i] {
+            return false
+        }
+    }
+    return true
+}
+
+#| `r` is where `x` goes in the sorted `v` before any equal entry (std::lower_bound,
+#| np.searchsorted side="left"): every entry before `r` comes before `x`, none after.
+def algo_is_lower_bound(r, v: Arr, x) -> Bool {
+    if r != floor(r) or r < 0 or r > len(v) {
+        return false
+    }
+    for i to len(v) {
+        if algo_before(v[i], x) != (i < r) {
+            return false
+        }
+    }
+    return true
+}
+
+#| `r` is where `x` goes in the sorted `v` after every equal entry (std::upper_bound,
+#| np.searchsorted side="right"): `x` comes before every entry from `r` on, none before.
+def algo_is_upper_bound(r, v: Arr, x) -> Bool {
+    if r != floor(r) or r < 0 or r > len(v) {
+        return false
+    }
+    for i to len(v) {
+        if algo_before(x, v[i]) != (i >= r) {
+            return false
+        }
+    }
+    return true
+}
+
+#| `r` is the first position of an entry equal to `x` in the sorted `v`, or -1 when
+#| there is none (TheAlgorithms' binary_search).
+def algo_is_first_or_none(r, v: Arr, x) -> Bool {
+    first = -1
+    for i to len(v) {
+        if first < 0 and v[i] == x {
+            first = i
+        }
+    }
+    return r == first
+}
+
+#| No entry of `h` exceeds its parent (std::is_heap with operator<).
+def algo_is_max_heap(h: Arr) -> Bool {
+    for i from 1 to len(h) {
+        if h[floor((i - 1) / 2)] < h[i] {
+            return false
+        }
+    }
+    return true
+}
+
+#| Each `r[k]` is the lower bound of `q[k]` in `v`.
+def algo_all_lower_bounds(r: Arr, v: Arr, q: Arr) -> Bool {
+    for k to len(q) {
+        if not algo_is_lower_bound(r[k], v, q[k]) {
+            return false
+        }
+    }
+    return len(r) == len(q)
+}
+
+#| Each `r[k]` is the upper bound of `q[k]` in `v`.
+def algo_all_upper_bounds(r: Arr, v: Arr, q: Arr) -> Bool {
+    for k to len(q) {
+        if not algo_is_upper_bound(r[k], v, q[k]) {
+            return false
+        }
+    }
+    return len(r) == len(q)
+}
+
+#| Each `r[k]` is the first position of `q[k]` in `v`, or -1.
+def algo_all_first_or_none(r: Arr, v: Arr, q: Arr) -> Bool {
+    for k to len(q) {
+        if not algo_is_first_or_none(r[k], v, q[k]) {
+            return false
+        }
+    }
+    return len(r) == len(q)
+}
+
+#| Sorted in the total order of `sort`: ascending, -0.0 before 0.0, NaN last.
+def algo_is_sorted_total(a: Arr) -> Bool {
+    for i from 1 to len(a) {
+        x = a[i - 1]
+        y = a[i]
+        if algo_before(y, x) {
+            return false
+        }
+        if x == 0.0 and y == 0.0 and 1.0 / x > 0.0 and 1.0 / y < 0.0 {
+            return false
+        }
+    }
+    return true
+}
+
+#| `r` is the first position of the smallest entry of `a` (NaN largest).
+def algo_is_min_pos(r, a: Arr) -> Bool {
+    best = 0
+    for i from 1 to len(a) {
+        if algo_before(a[i], a[best]) {
+            best = i
+        }
+    }
+    return len(a) > 0 and r == best
+}
+
+#| `r` is the first position of the largest entry of `a` (NaN largest).
+def algo_is_max_pos(r, a: Arr) -> Bool {
+    best = 0
+    for i from 1 to len(a) {
+        if algo_before(a[best], a[i]) {
+            best = i
+        }
+    }
+    return len(a) > 0 and r == best
+}
+
+#| `f` answers whether `a` is sorted.
+def algo_is_sorted_answer(f: Bool, a: Arr) -> Bool {
+    return f == algo_is_sorted(a)
+}
+
+#| Each `d[i]` is the entry of `x` at position `p[i]`: the values moved with their positions.
+def algo_follows(d: Arr, p: Arr, x: Arr) -> Bool {
+    for i to len(d) {
+        if not algo_same(d[i], x[p[i]]) {
+            return false
+        }
+    }
+    return len(d) == len(x)
+}
+
+#| Each `r[i]` is the greatest common divisor of `a[i]` and `b[i]`: never negative,
+#| divides both, and no larger number does; 0 only for gcd(0, 0).
+def algo_all_gcd(r: Arr, a: Arr, b: Arr) -> Bool {
+    for i to len(r) {
+        g = r[i]
+        if g < 0 or g != floor(g) {
+            return false
+        }
+        if g == 0 {
+            if a[i] != 0 or b[i] != 0 {
+                return false
+            }
+        }
+        else {
+            if a[i] % g != 0 or b[i] % g != 0 {
+                return false
+            }
+            for d from g + 1 to max(abs(a[i]), abs(b[i])) + 1 {
+                if a[i] % d == 0 and b[i] % d == 0 {
+                    return false
+                }
+            }
+        }
+    }
+    return true
+}
+
+#| `f` is the number of arrangements of `x`'s entries by position, n!.
+def algo_is_factorial_count(f, x: Arr) -> Bool {
+    want = 1
+    for k from 1 to len(x) + 1 {
+        want = want * k
+    }
+    return f == want
+}
+
+#| `r` lists the keys `k` once each, and every edge `src[e] -> dst[e]` goes forward in it.
+def algo_is_topological(r: Arr, k: Arr, src: Arr, dst: Arr) -> Bool {
+    if not algo_is_permutation(r, k) {
+        return false
+    }
+    for e to len(src) {
+        at_src = -1
+        at_dst = -1
+        for i to len(r) {
+            if r[i] == src[e] {
+                at_src = i
+            }
+            if r[i] == dst[e] {
+                at_dst = i
+            }
+        }
+        if at_src >= at_dst {
+            return false
+        }
+    }
+    return true
+}
+
+test "the order puts NaN last and ties -0.0 with 0.0" {
+    nan = 0.0 / 0.0
+    assert_true(algo_before(1.0, nan) and not algo_before(nan, 1.0) and not algo_before(nan, nan))
+    assert_true(not algo_before(-0.0, 0.0) and not algo_before(0.0, -0.0))
+    assert_true(algo_is_sorted([-1.0, 0.0, -0.0, 2.0, nan, nan]))
+    assert_true(not algo_is_sorted([nan, 1.0]))
+}
+
+test "a permutation keeps every double, signed zeros and NaN included" {
+    nan = 0.0 / 0.0
+    assert_true(algo_is_permutation([nan, -0.0, 1.0], [1.0, -0.0, nan]))
+    assert_true(not algo_is_permutation([0.0, 1.0], [-0.0, 1.0]))
+    assert_true(not algo_is_permutation([1.0, 1.0], [1.0]))
+}
+
+test "stability shows in the zeros" {
+    assert_true(algo_is_stable_values([-1.0, -0.0, 0.0, 1.0], [-0.0, 1.0, -1.0, 0.0]))
+    assert_true(not algo_is_stable_values([-1.0, 0.0, -0.0, 1.0], [-0.0, 1.0, -1.0, 0.0]))
+    assert_true(algo_is_stable_by([1.0, 0.0, 2.0], [5.0, 3.0, 5.0]))
+    assert_true(not algo_is_stable_by([1.0, 2.0, 0.0], [5.0, 3.0, 5.0]))
+}
+
+test "the bounds of a value in a sorted array" {
+    v = [1.0, 2.0, 2.0, 2.0, 5.0]
+    assert_true(algo_is_lower_bound(1, v, 2.0) and not algo_is_lower_bound(2, v, 2.0))
+    assert_true(algo_is_upper_bound(4, v, 2.0) and not algo_is_upper_bound(3, v, 2.0))
+    assert_true(algo_is_lower_bound(len(v), v, 9.0) and algo_is_upper_bound(0, v, 0.0))
+    assert_true(algo_is_first_or_none(1, v, 2.0) and algo_is_first_or_none(-1, v, 3.0))
+}
+
+test "index permutations and heaps" {
+    assert_true(algo_is_index_perm([2.0, 0.0, 1.0], 3) and not algo_is_index_perm([0.0, 0.0, 1.0], 3))
+    assert_true(algo_is_sorted_by([1.0, 2.0, 0.0], [9.0, 1.0, 4.0]))
+    assert_true(algo_is_max_heap([9.0, 4.0, 7.0, 1.0, 2.0]) and not algo_is_max_heap([1.0, 4.0]))
+}
+
+test "the total order, extremes, gcds, counts and topological orders" {
+    assert_true(algo_is_sorted_total([-1.0, -0.0, 0.0]) and not algo_is_sorted_total([0.0, -0.0]))
+    assert_true(algo_is_min_pos(1, [3.0, 1.0, 1.0]) and algo_is_max_pos(1, [3.0, 0.0 / 0.0, 2.0]))
+    assert_true(algo_all_gcd([2.0, 0.0, 5.0], [4.0, 0.0, -5.0], [-6.0, 0.0, 0.0]))
+    assert_true(not algo_all_gcd([-2.0], [4.0], [-6.0]) and not algo_all_gcd([1.0], [4.0], [6.0]))
+    assert_true(algo_is_factorial_count(6, [1.0, 2.0, 3.0]))
+    assert_true(algo_is_topological([3.0, 2.0, 1.0], [1.0, 2.0, 3.0], [3.0, 2.0], [2.0, 1.0]))
+    assert_true(not algo_is_topological([2.0, 3.0, 1.0], [1.0, 2.0, 3.0], [3.0], [2.0]))
+    assert_true(algo_follows([1.0, 3.0], [1.0, 0.0], [3.0, 1.0]))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

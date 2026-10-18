@@ -1,0 +1,214 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// Claims: every number the posts state, tied to what establishes it, and every
+// fact-checked sentence. Built from src/data/claims.json
+// (scripts/claims-build.mjs) with posts/claim_verdicts.json and
+// posts/claim_quantities.json; the filters run in the page.
+import Base from '../layouts/Base.astro';
+import katex from 'katex';
+import { claimsDb, STATUS_ORDER, STATUS_NOTES } from '../lib/claimsView.js';
+import { failing } from '../../scripts/claims/db.mjs';
+import { renderProse } from '../lib/richText.js';
+import 'katex/dist/katex.min.css';
+import '../styles/claims.css';
+import { SHOW_NUMBER_CHECKS } from '../lib/repo.js';
+
+const db = claimsDb();
+// a post's page has its claims panel (id="claims") only while the number checks are shown
+const postAnchor = SHOW_NUMBER_CHECKS ? '#claims' : '';
+const prose = (s: string) => renderProse(s, katex);
+// The fact-checked sentences, several hundred of them, are typeset at build as
+// MathML, which the browser draws itself: KaTeX's HTML markup for all of them
+// would be most of the page's weight, and plain TeX source is unreadable in
+// find-in-page, print, copy and reader views.
+const mathml = { renderToString: (t: string, o: any) => katex.renderToString(t, { ...o, output: 'mathml' }) };
+const nums = db.numbers.filter((n: any) => n.status !== 'skip');
+const hist = Object.fromEntries(STATUS_ORDER.map((s) => [s, nums.filter((n: any) => n.status === s).length]));
+const channelOf = new Map(db.posts.map((p: any) => [p.slug, p.channel || '']));
+const titleOf = new Map(db.posts.map((p: any) => [p.slug, p.title]));
+const textOf = new Map(db.sentences.map((s: any) => [`${s.post}|${s.id}`, s.text]));
+const channels = [...new Set(db.posts.map((p: any) => p.channel).filter(Boolean))].sort();
+const checkable = db.sentences.filter((s: any) => s.kind === 'factual' || s.kind === 'definition');
+const verdictCounts: Record<string, number> = {};
+for (const s of db.sentences) verdictCounts[s.verdict] = (verdictCounts[s.verdict] || 0) + 1;
+const checkedSentences = db.sentences.filter((s: any) => s.verdict !== 'unchecked');
+const posts = [...db.posts].sort((a: any, b: any) => a.slug.localeCompare(b.slug)).map((p: any) => {
+  const mine = nums.filter((n: any) => n.post === p.slug);
+  const sents = db.sentences.filter((s: any) => s.post === p.slug && (s.kind === 'factual' || s.kind === 'definition'));
+  return { ...p, n: mine.length, c: Object.fromEntries(STATUS_ORDER.map((s) => [s, mine.filter((n: any) => n.status === s).length])), sents: sents.length, sentsChecked: sents.filter((s: any) => s.verdict !== 'unchecked').length };
+});
+const cons = db.consistency;
+const failingCount = nums.filter(failing).length;
+const numHtml = (raw: string, percent?: boolean) => (/[\\^{]/.test(raw) ? prose(`$${raw}${percent ? '\\%' : ''}$`) : `${raw}${percent ? '%' : ''}`);
+---
+
+<Base title="Fact checks · Viv posts" description="Quantities that several posts state, with the value they must agree on, and the sentences in the posts that have been fact-checked." heading="Fact checks" eyebrow="Posts">
+  <div class="cl-page">
+    {!SHOW_NUMBER_CHECKS && (
+      <p class="cl-lead">
+        Some quantities are stated in more than one post; each has one accepted value, and every post that states it
+        must round to it. Below that are the sentences in the posts that have been fact-checked, each with its verdict.
+        The claims themselves, each checked by a program, are in the <a href="/c/claims">Claims</a> channel.
+      </p>
+    )}
+    {SHOW_NUMBER_CHECKS && <>
+    <p class="cl-lead">
+      Every number a post's prose states is linked to what establishes it: a test's expected value, a value the run
+      prints, a number the post's reference script printed, a constant the program is given, or a cited source. A number
+      matches when the value rounds to it at the precision the prose states. Every sentence has an id that is a hash of
+      its text; a fact-check verdict is filed against that id, so editing the sentence sends it back to unchecked.
+      The build fails on a mismatch, a disputed verdict, or a quantity two posts state differently.
+    </p>
+
+    <section class="cl-stats" aria-label="Totals">
+      <div class="cl-stat"><b>{db.posts.length}</b><span>posts</span></div>
+      <div class="cl-stat"><b>{nums.length}</b><span>numbers in the prose</span></div>
+      <div class="cl-stat"><b>{db.sentences.length}</b><span>sentences</span></div>
+      <div class="cl-stat"><b>{checkedSentences.length}</b><span>with a verdict</span></div>
+      <div class={`cl-stat${failingCount ? ' cl-failing' : ''}`}><b>{failingCount}</b><span>failing</span></div>
+    </section>
+
+    <ul class="cl-legend cl-legend-page">
+      {STATUS_ORDER.map((s) => (
+        <li><span class={`cl-chip cl-s-${s}`}>{s}</span> <b>{hist[s]}</b> <small>{STATUS_NOTES[s]}</small></li>
+      ))}
+    </ul>
+
+    <form class="cl-filters" id="cl-filters" aria-label="Filter the numbers">
+      <label>Status
+        <select name="status">
+          <option value="">all</option>
+          {STATUS_ORDER.map((s) => <option value={s}>{s}</option>)}
+          <option value="attention">not checked by a test</option>
+        </select>
+      </label>
+      <label>Channel
+        <select name="channel">
+          <option value="">all</option>
+          {channels.map((c) => <option value={c}>{c}</option>)}
+        </select>
+      </label>
+      <label class="cl-grow">Post or words
+        <input name="q" type="search" placeholder="ising, growth rate, 0.577" autocomplete="off" />
+      </label>
+      <output id="cl-count" aria-live="polite"></output>
+    </form>
+
+    <h2>Numbers</h2>
+    <ol class="cl-list cl-rows" id="cl-rows">
+      {nums.map((n: any) => (
+        <li class={`cl-item${failing(n) ? ' cl-failing' : ''}`} data-status={n.status} data-channel={channelOf.get(n.post)} data-post={n.post}>
+          <span class="cl-num" set:html={/[\\^{]/.test(n.raw) ? prose(`$${n.raw}${n.percent ? '\\%' : ''}$`) : `${n.raw}${n.percent ? '%' : ''}`} />
+          <span class={`cl-chip cl-s-${n.status}`}>{n.status}{n.verdict === 'accepted' ? ', accepted' : ''}</span>
+          <a class="cl-post" href={`/p/${n.post}${postAnchor}`}>{titleOf.get(n.post)}</a>
+          <span class="cl-line">line {n.line}</span>
+          <p class="cl-sent" set:html={prose(textOf.get(`${n.post}|${n.sentence}`) || n.context)} />
+          {(n.note || n.link?.what || n.suspect) && <p class="cl-what">{n.note || n.link?.what || n.suspect}</p>}
+        </li>
+      ))}
+    </ol>
+    <p class="cl-empty" id="cl-empty" hidden>No numbers match these filters.</p>
+
+    <h2>By post</h2>
+    <div class="cl-scroll">
+      <table class="cl-table">
+        <thead>
+          <tr><th scope="col" class="cl-l">Post</th><th scope="col" class="cl-l">Channel</th><th scope="col">Numbers</th>{STATUS_ORDER.map((s) => <th scope="col"><span class={`cl-dot cl-s-${s}`} />{s}</th>)}<th scope="col">Sentences checked</th></tr>
+        </thead>
+        <tbody>
+          {posts.map((p: any) => (
+            <tr data-channel={p.channel || ''} data-post={p.slug}>
+              <th scope="row"><a href={`/p/${p.slug}${postAnchor}`}>{p.title}</a></th>
+              <td>{p.channel || ''}</td>
+              <td>{p.n}</td>
+              {STATUS_ORDER.map((s) => <td class={p.c[s] && (s === 'mismatch' || s === 'orphan') ? `cl-t-${s}` : ''}>{p.c[s] || ''}</td>)}
+              <td>{p.sentsChecked} / {p.sents}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    </>}
+
+    <h2>Quantities stated across posts</h2>
+    {SHOW_NUMBER_CHECKS && (
+      <p class="cl-note">Each quantity has an accepted value; every post that states it must round to it.</p>
+    )}
+    <div class="cl-scroll">
+      <table class="cl-table">
+        <thead><tr><th scope="col" class="cl-l">Quantity</th><th scope="col" class="cl-l">Accepted value</th><th scope="col" class="cl-l">Stated as</th><th scope="col">Posts</th><th scope="col">Agree</th></tr></thead>
+        <tbody>
+          {cons.quantities.filter((q: any) => q.statements.length).map((q: any) => (
+            <tr>
+              <th scope="row">{q.name}</th>
+              <td class="cl-mono" set:html={numHtml(String(q.value))} />
+              <td class="cl-mono" set:html={[...new Map(q.statements.map((s: any) => [`${s.raw}${s.percent ? '%' : ''}`, numHtml(s.raw, s.percent)])).values()].join(', ')} />
+              <td>{q.posts.length}</td>
+              <td class={q.statements.every((s: any) => s.ok) ? 'cl-t-ok' : 'cl-t-mismatch'}>{q.statements.filter((s: any) => s.ok).length} / {q.statements.length}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Fact-checked sentences</h2>
+    <p class="cl-note">
+      {checkedSentences.length} of {db.sentences.length} sentences have a verdict
+      ({Object.entries(verdictCounts).filter(([k]) => k !== 'unchecked').map(([k, v]) => `${v} ${k}`).join(', ')});
+      {checkable.filter((s: any) => s.verdict === 'unchecked').length} factual sentences and definitions are waiting.
+    </p>
+    <ol class="cl-list">
+      {checkedSentences.map((s: any) => (
+        <li class={`cl-item${s.verdict === 'disputed' ? ' cl-failing' : ''}`} data-channel={channelOf.get(s.post)} data-post={s.post}>
+          <span class={`cl-chip cl-v-${s.verdict}`}>{s.verdict}</span>
+          <a class="cl-post" href={`/p/${s.post}${postAnchor}`}>{titleOf.get(s.post)}</a>
+          <p class="cl-sent" set:html={renderProse(s.text, mathml)} />
+          {s.verdictNote && <p class="cl-what">{s.verdictNote}</p>}
+          {s.verdictRefs?.length > 0 && <p class="cl-refs">{s.verdictRefs.join('; ')}</p>}
+        </li>
+      ))}
+    </ol>
+  </div>
+
+  <script>
+    // Filter the numbers in place (only when they are shown): status, channel, and words in the post's name
+    // or the sentence. The choices ride in the address, so a link can carry them.
+    const form = document.getElementById('cl-filters') as HTMLFormElement;
+    if (form) {
+    const rows = [...document.querySelectorAll<HTMLLIElement>('#cl-rows > li')];
+    const count = document.getElementById('cl-count') as HTMLOutputElement;
+    const empty = document.getElementById('cl-empty') as HTMLElement;
+    const params = new URLSearchParams(location.search);
+    for (const k of ['status', 'channel', 'q']) {
+      const el = form.elements.namedItem(k) as HTMLInputElement | HTMLSelectElement | null;
+      const v = params.get(k === 'q' && params.has('post') && !params.has('q') ? 'post' : k);
+      if (el && v) el.value = v;
+    }
+    function apply() {
+      const f = new FormData(form);
+      const status = String(f.get('status') || '');
+      const channel = String(f.get('channel') || '');
+      const q = String(f.get('q') || '').trim().toLowerCase();
+      let shown = 0;
+      for (const r of rows) {
+        const ok = (!status || (status === 'attention' ? r.dataset.status !== 'checked' : r.dataset.status === status))
+          && (!channel || r.dataset.channel === channel)
+          && (!q || (r.dataset.post || '').includes(q) || (r.textContent || '').toLowerCase().includes(q));
+        r.hidden = !ok;
+        if (ok) shown++;
+      }
+      count.textContent = `${shown} of ${rows.length}`;
+      empty.hidden = shown > 0;
+      const out = new URLSearchParams();
+      if (status) out.set('status', status);
+      if (channel) out.set('channel', channel);
+      if (q) out.set('q', q);
+      history.replaceState(null, '', `${location.pathname}${out.toString() ? `?${out}` : ''}`);
+    }
+    form.addEventListener('input', apply);
+    form.addEventListener('submit', (e) => e.preventDefault());
+    apply();
+    }
+  </script>
+</Base>

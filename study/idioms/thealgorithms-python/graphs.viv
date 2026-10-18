@@ -1,0 +1,421 @@
+###
+Graphs, ported from TheAlgorithms/Python: graphs/breadth_first_search.py,
+graphs/depth_first_search.py, graphs/dijkstra.py, graphs/kahns_algorithm_topo.py,
+data_structures/disjoint_set/disjoint_set.py, graphs/minimum_spanning_tree_kruskal.py.
+
+Python keeps a graph as a dict from vertex to a list of neighbors. Here a vertex is a
+number 0 .. n-1 (a letter vertex is its character code minus 65), and a graph is an
+edge list turned into compressed rows: the neighbors of v are
+nbr[off[v]] ... nbr[off[v + 1] - 1], in the order the edges were added.
+###
+from seq import argsort
+
+A = 65.0
+
+#| off[v] is where v's neighbors start in the sorted edge list; off[n] is the edge count.
+def row_offsets(n, src: Arr) -> Arr {
+    off = zeros(n + 1.0)
+    for e to len(src) {
+        off[src[e] + 1.0] += 1.0
+    }
+    for v to n {
+        off[v + 1.0] += off[v]
+    }
+    return off
+}
+
+#| The edges grouped by source, each group in insertion order (argsort is stable).
+def by_source(src: Arr) -> Arr {
+    return argsort(src)
+}
+
+# ---------------------------------------------------------------- BFS
+#| graphs/breadth_first_search.py Graph.bfs: the set of vertices reachable from start,
+#| returned as a 0/1 mask over the vertices.
+def bfs(off: Arr, nbr: Arr, start) -> Arr {
+    n = len(off) - 1.0
+    visited = zeros(n)
+    queue = zeros(n)
+    head = 0.0
+    tail = 1.0
+    visited[start] = 1.0
+    queue[0] = start
+    while head < tail {
+        vertex = queue[head]
+        head += 1.0
+        for k to off[vertex + 1.0] - off[vertex] {
+            adjacent = nbr[off[vertex] + k]
+            if visited[adjacent] == 0.0 {
+                queue[tail] = adjacent
+                tail += 1.0
+                visited[adjacent] = 1.0
+            }
+        }
+    }
+    return visited
+}
+
+#| The vertices a 0/1 mask marks, ascending (Python `sorted(the_set)`).
+def members(mask: Arr) -> Arr {
+    out = zeros(sum(mask))
+    k = 0.0
+    for v to len(mask) {
+        if mask[v] == 1.0 {
+            out[k] = v
+            k += 1.0
+        }
+    }
+    return out
+}
+
+# ---------------------------------------------------------------- DFS
+#| graphs/depth_first_search.py: pop a vertex, mark it, push its unexplored neighbors
+#| in reverse so the first neighbor is explored first.
+def depth_first_search(off: Arr, nbr: Arr, start) -> Arr {
+    n = len(off) - 1.0
+    explored = zeros(n)
+    explored[start] = 1.0
+    stack = zeros(len(nbr) + 1.0)
+    stack[0] = start
+    top = 1.0
+    while top > 0.0 {
+        top -= 1.0
+        v = stack[top]
+        explored[v] = 1.0
+        for k from off[v] to off[v + 1.0] reversed {
+            if explored[nbr[k]] == 0.0 {
+                stack[top] = nbr[k]
+                top += 1.0
+            }
+        }
+    }
+    return explored
+}
+
+# ---------------------------------------------------------------- Dijkstra
+#| A binary min-heap of (cost, vertex) rows, ordered like Python tuples, in the first
+#| `size` rows of h. heapq.heappush: append, then sift the new row up.
+def less(h: Arr, i, j) -> Bool {
+    if h[i, 0] != h[j, 0] {
+        return h[i, 0] < h[j, 0]
+    }
+    return h[i, 1] < h[j, 1]
+}
+
+def swap_rows(h: Arr, i, j) {
+    for c to 2 {
+        t = h[i, c]
+        h[i, c] = h[j, c]
+        h[j, c] = t
+    }
+}
+
+def heappush(h: Arr, size, cost, vertex) {
+    h[size, 0] = cost
+    h[size, 1] = vertex
+    i = size
+    while i > 0.0 {
+        parent = floor((i - 1.0) / 2.0)
+        if not less(h, i, parent) {
+            break
+        }
+        swap_rows(h, i, parent)
+        i = parent
+    }
+    return size + 1.0
+}
+
+#| heapq.heappop, arranged the way C++'s pop_heap is: the smallest row is moved to
+#| row size - 1, the rest is re-heaped, and the new size (size - 1) is returned, so the
+#| caller reads the popped pair at h[size - 1, ...].
+def heappop(h: Arr, size) {
+    last = size - 1.0
+    swap_rows(h, 0.0, last)
+    i = 0.0
+    while true {
+        child = 2.0 * i + 1.0
+        if child >= last {
+            break
+        }
+        if child + 1.0 < last and less(h, child + 1.0, child) {
+            child += 1.0
+        }
+        if not less(h, child, i) {
+            break
+        }
+        swap_rows(h, i, child)
+        i = child
+    }
+    return last
+}
+
+INF = 1.0 / 0.0
+
+#| graphs/dijkstra.py: the cost of the cheapest path from start to end, or -1.
+def dijkstra(off: Arr, nbr: Arr, w: Arr, start, end) {
+    n = len(off) - 1.0
+    heap = zeros(len(nbr) + 1.0, 2.0)
+    size = heappush(heap, 0.0, 0.0, start)
+    visited = zeros(n)
+    costs = zeros(n) + INF
+    costs[start] = 0.0
+    while size > 0.0 {
+        size = heappop(heap, size)
+        cost = heap[size, 0]
+        u = heap[size, 1]
+        if visited[u] == 1.0 {
+            continue
+        }
+        visited[u] = 1.0
+        if u == end {
+            return cost
+        }
+        for k to off[u + 1.0] - off[u] {
+            v = nbr[off[u] + k]
+            if visited[v] == 1.0 {
+                continue
+            }
+            next_cost = cost + w[off[u] + k]
+            if next_cost < costs[v] {
+                costs[v] = next_cost
+                size = heappush(heap, size, next_cost, v)
+            }
+        }
+    }
+    return -1.0
+}
+
+#| dijkstra on a lettered graph: edge e goes from letter src[e] to letter dst[e] with
+#| weight w[e], and start and end are character codes.
+def dijkstra_letters(src_s: Arr, dst_s: Arr, w: Arr, n, start, end) {
+    src = src_s - A
+    order = by_source(src)
+    off = row_offsets(n, src)
+    return dijkstra(off, take(dst_s - A, order), take(w, order), start - A, end - A)
+}
+
+# ---------------------------------------------------------------- Kahn
+#| Where k sits in keys, or -1 (a dict lookup, by linear search).
+def index_of(keys: Arr, k) {
+    for i to len(keys) {
+        if keys[i] == k {
+            return i
+        }
+    }
+    return -1.0
+}
+
+#| graphs/kahns_algorithm_topo.py. The graph is a dict in Python: `keys` lists its keys
+#| in insertion order and edge e goes from key src[e] to key dst[e]. Returns the keys in
+#| topological order, or an empty array where Python returns None (a cycle).
+def topological_sort(keys: Arr, src_keys: Arr, dst_keys: Arr) -> Arr {
+    n = len(keys)
+    src = zeros(len(src_keys))
+    dst = zeros(len(dst_keys))
+    for e to len(src) {
+        src[e] = index_of(keys, src_keys[e])
+        dst[e] = index_of(keys, dst_keys[e])
+    }
+    order = by_source(src)
+    off = row_offsets(n, src)
+    nbr = take(dst, order)
+    indegree = zeros(n)
+    for e to len(dst) {
+        indegree[dst[e]] += 1.0
+    }
+    queue = zeros(n)
+    head = 0.0
+    tail = 0.0
+    for v to n {
+        if indegree[v] == 0.0 {
+            queue[tail] = v
+            tail += 1.0
+        }
+    }
+    topo = zeros(n)
+    processed = 0.0
+    while head < tail {
+        vertex = queue[head]
+        head += 1.0
+        topo[processed] = keys[vertex]
+        processed += 1.0
+        for k to off[vertex + 1.0] - off[vertex] {
+            neighbor = nbr[off[vertex] + k]
+            indegree[neighbor] -= 1.0
+            if indegree[neighbor] == 0.0 {
+                queue[tail] = neighbor
+                tail += 1.0
+            }
+        }
+    }
+    if processed != n {
+        return zeros(0.0)
+    }
+    return topo
+}
+
+# ---------------------------------------------------------------- disjoint set
+#| data_structures/disjoint_set/disjoint_set.py, with the Node objects replaced by two
+#| arrays indexed by node: parent and rank.
+def make_set(parent: Arr, rank: Arr, x) {
+    rank[x] = 0.0
+    parent[x] = x
+}
+
+def find_set(parent: Arr, x) {
+    if x != parent[x] {
+        parent[x] = find_set(parent, parent[x])
+    }
+    return parent[x]
+}
+
+def union_set(parent: Arr, rank: Arr, a, b) {
+    x = find_set(parent, a)
+    y = find_set(parent, b)
+    if x == y {
+        return 0.0
+    }
+    if rank[x] > rank[y] {
+        parent[y] = x
+    }
+    else {
+        parent[x] = y
+        if rank[x] == rank[y] {
+            rank[y] += 1.0
+        }
+    }
+}
+
+# ---------------------------------------------------------------- Kruskal
+#| graphs/minimum_spanning_tree_kruskal.py. edges has one row (a, b, cost) per edge;
+#| the result has one row per tree edge, in the order they were taken.
+def find_parent(parent: Arr, i) {
+    if i != parent[i] {
+        parent[i] = find_parent(parent, parent[i])
+    }
+    return parent[i]
+}
+
+def kruskal(num_nodes, edges: Arr) -> Arr {
+    order = argsort(slab(transpose(edges), 2.0))
+    parent = zeros(num_nodes)
+    for i to num_nodes {
+        parent[i] = i
+    }
+    tree = zeros(len(edges), 3.0)
+    taken = 0.0
+    for k to len(edges) {
+        e = order[k]
+        parent_a = find_parent(parent, edges[e, 0])
+        parent_b = find_parent(parent, edges[e, 1])
+        if parent_a != parent_b {
+            setslab(tree, taken, slab(edges, e))
+            taken += 1.0
+            parent[parent_a] = parent_b
+        }
+    }
+    out = zeros(taken, 3.0)
+    for k to taken {
+        setslab(out, k, slab(tree, k))
+    }
+    return out
+}
+
+# ---------------------------------------------------------------- runs
+# breadth_first_search.py __main__: add_edge(0,1) (0,2) (1,2) (2,0) (2,3) (3,3)
+bsrc = [0.0, 0.0, 1.0, 2.0, 2.0, 3.0]
+bdst = [1.0, 2.0, 2.0, 0.0, 3.0, 3.0]
+boff = row_offsets(4.0, bsrc)
+bnbr = take(bdst, by_source(bsrc))
+bfs_from_2 = members(bfs(boff, bnbr, 2.0))
+bfs_from_1 = members(bfs(boff, bnbr, 1.0))
+show bfs_from_2
+show bfs_from_1
+
+# depth_first_search.py G = {'A': ['B','C','D'], 'B': ['A','D','E'], 'C': ['A','F'],
+#   'D': ['B','D'], 'E': ['B','F'], 'F': ['C','E','G'], 'G': ['F']}
+dsrc = chars("AAABBBCCDDEEFFFG") - A
+ddst = chars("BCDADEAFBDBFCEGF") - A
+doff = row_offsets(7.0, dsrc)
+dnbr = take(ddst, by_source(dsrc))
+dfs_from_A = members(depth_first_search(doff, dnbr, 0.0))
+dfs_from_G = members(depth_first_search(doff, dnbr, 6.0))
+show dfs_from_A
+show dfs_from_G
+text(dfs_from_A + A)
+
+# dijkstra.py G, G2, G3
+dijkstra_G_E_C = dijkstra_letters(chars("AABBBBCCDEEFF"), chars("BCADEFAFBBFCE"), [2.0, 5.0, 2.0, 3.0, 1.0, 1.0, 5.0, 3.0, 3.0, 4.0, 3.0, 3.0, 3.0], 6.0, 69.0, 67.0)
+dijkstra_G2_E_F = dijkstra_letters(chars("BCDEE"), chars("CDFBF"), [1.0, 1.0, 1.0, 1.0, 3.0], 6.0, 69.0, 70.0)
+dijkstra_G3_E_F = dijkstra_letters(chars("BCDEEG"), chars("CDFBGF"), [1.0, 1.0, 1.0, 1.0, 2.0, 1.0], 7.0, 69.0, 70.0)
+show dijkstra_G_E_C
+show dijkstra_G2_E_F
+show dijkstra_G3_E_F
+
+# kahns_algorithm_topo.py doctests
+topo_dag = topological_sort([0.0, 1.0, 2.0, 3.0, 4.0, 5.0], [0.0, 0.0, 1.0, 2.0, 3.0, 3.0], [1.0, 2.0, 3.0, 3.0, 4.0, 5.0])
+topo_cycle = topological_sort([0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [1.0, 2.0, 0.0])
+topo_sparse = topological_sort([10.0, 20.0], [10.0], [20.0])
+topo_sparse_cycle = topological_sort([10.0, 20.0], [10.0, 20.0], [20.0, 10.0])
+show topo_dag
+show topo_cycle
+show topo_sparse
+show topo_sparse_cycle
+
+# kruskal doctests
+mst1 = kruskal(4.0, [[0.0, 1.0, 3.0], [1.0, 2.0, 5.0], [2.0, 3.0, 1.0]])
+mst2 = kruskal(4.0, [[0.0, 1.0, 3.0], [1.0, 2.0, 5.0], [2.0, 3.0, 1.0], [0.0, 2.0, 1.0], [0.0, 3.0, 2.0]])
+mst3 = kruskal(4.0, [[0.0, 1.0, 3.0], [1.0, 2.0, 5.0], [2.0, 3.0, 1.0], [0.0, 2.0, 1.0], [0.0, 3.0, 2.0], [2.0, 1.0, 1.0]])
+show mst1
+show mst2
+show mst3
+
+test "bfs: sorted(g.bfs(2)) == [0, 1, 2, 3]" {
+    assert_true(all(bfs_from_2 == [0.0, 1.0, 2.0, 3.0]))
+}
+
+test "dfs reaches all of G from A and from G" {
+    assert_true(all(dfs_from_A == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
+    assert_true(all(dfs_from_G == dfs_from_A))
+}
+
+test "dijkstra doctests: 6, 3, 3" {
+    assert_near(dijkstra_G_E_C, 6.0, 0.0)
+    assert_near(dijkstra_G2_E_F, 3.0, 0.0)
+    assert_near(dijkstra_G3_E_F, 3.0, 0.0)
+}
+
+test "kahn doctests" {
+    assert_true(all(topo_dag == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]))
+    assert_near(len(topo_cycle), 0.0, 0.0)
+    assert_true(all(topo_sparse == [10.0, 20.0]))
+    assert_near(len(topo_sparse_cycle), 0.0, 0.0)
+}
+
+test "disjoint_set test_disjoint_set" {
+    parent = zeros(6)
+    rank = zeros(6)
+    for v to 6 {
+        make_set(parent, rank, v)
+    }
+    union_set(parent, rank, 0.0, 1.0)
+    union_set(parent, rank, 1.0, 2.0)
+    union_set(parent, rank, 3.0, 4.0)
+    union_set(parent, rank, 3.0, 5.0)
+    for a to 6 {
+        for b to 6 {
+            same_python_set = floor(a / 3.0) == floor(b / 3.0)
+            assert_true((find_set(parent, a) == find_set(parent, b)) == same_python_set)
+        }
+    }
+}
+
+test "kruskal doctests" {
+    assert_allclose(mst1, [[2.0, 3.0, 1.0], [0.0, 1.0, 3.0], [1.0, 2.0, 5.0]], 0.0)
+    assert_allclose(mst2, [[2.0, 3.0, 1.0], [0.0, 2.0, 1.0], [0.0, 1.0, 3.0]], 0.0)
+    assert_allclose(mst3, [[2.0, 3.0, 1.0], [0.0, 2.0, 1.0], [2.0, 1.0, 1.0]], 0.0)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2016-2022 TheAlgorithms and contributors (TheAlgorithms/Python)
+# SPDX-FileCopyrightText: 2026 The Viv authors

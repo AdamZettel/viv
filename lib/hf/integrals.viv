@@ -1,0 +1,497 @@
+###
+post: The integral stages on one page, what each promises and who checks it
+agent: claude
+
+A Hartree-Fock energy needs four kinds of numbers from the basis: the
+contracted coefficients, the one-electron matrices `S`, `T` and `V`, the
+electron repulsion integrals `(ij|kl)`, and, for a spherical basis, the same
+things moved from Cartesian to spherical functions. Each of these has two or
+more implementations in `lib/hf` that share no algebra. This page lists them
+as registries, one per stage, and gives each stage one contract def.
+
+A contract def runs every member of its registry on the same input and
+requires them to agree (`lib/hf/sweep`); the agreed value is returned. Under
+`release_mode()` it runs member 0, the production member, and nothing else.
+The tolerance is written next to the def. Agreement is measured as
+`abs(v - median) / (1 + abs(median))`, per entry.
+
+This page is the verification layer around the integrals, not the way a
+calculation reaches them: the production path calls each production member
+by name (lib/hf/ao for a molecule's integrals, lib/hf/jk for J and K), and
+the registries, the masked drivers and the contract defs here run the same
+members side by side. The cross-checked pipeline of lib/hf/hf, the lock
+ladder (scf/lock_*.viv) and the tests in lib/hf/tests use them.
+
+| Stage | Registry | Members (production first) | Tolerance |
+|---|---|---|---|
+| 1 contraction | `int_contract_methods` | closed form, numeric via `md1_s`, numeric via `os_overlap` | 1e-13 |
+| 3 overlap | `int_overlap_methods` | `md1_s`, `os_overlap`, `gh_overlap` | 1e-12 |
+| 3 kinetic | `int_kinetic_methods` | `md1_t`, `os_kinetic`, `gh_kinetic` | 1e-12 |
+| 3 nuclear | `int_nuclear_methods` | `md1_v`, `os_nuclear` | 1e-12 |
+| 4 ERI | `int_eri_methods` | `mdg_screened`, `mderi_screened`, `mderi_full`, `hgp_eri`, `rys_eri` | 1e-12 |
+| 5 c2s block | `int_c2s_methods` | `c2s_closed`, `c2s_general` | 1e-14 |
+| 5 one-electron transform | `int_tr2_methods` | `tr2_blocks`, `tr2_dense` | 1e-13 |
+| 5 density back-transform | `int_tr2_back_methods` | `tr2_back_blocks`, `tr2_back_dense` | 1e-13 |
+| 5 ERI transform | `int_tr4_methods` | `tr4_blocks`, `tr4_quarter` (n <= 30) | 1e-13 |
+| 4+5 spherical ERIs | `int_eri_sph_methods` | `mdg_sph`, `mderi_sph`, `tr4_two_pass` | 1e-14 |
+| 8 J/K | `int_jk_methods` | `jk_packed`, `jk_pairs`, `jk_dense`, `int_jk_direct`, `int_jk_direct_full` | 1e-12 |
+
+Stage 2 (Boys) is `boys_methods()` in `lib/hf/boys`, stage 6
+(orthogonalizer) is `orth_methods()` and stage 7 (eigen) is `eig_methods()`;
+their contracts live with them.
+
+**Choosing members.** The ERI registry holds one member that costs far more
+than the others (Rys, about 7x MD on water cc-pVDZ in the interpreter), so
+the ERI and ERI-transform contracts take a member mask: bit `k` set means
+member `k` runs. Mask 0 means every member. `ScfOptions.eri_members` carries
+the ERI mask through the pipeline in `lib/hf/hf`, where 0 means the default
+pair `INT_ERI_PAIR` = MD on the generated kernels (lib/hf/mdg_eri) and HGP,
+two families that share no recurrence. The generated kernels are held to the
+general MD code they were generated from (lib/hf/md_eri) by
+lib/hf/tests/mdg_eri and by every sweep with mask 0. The masked driver `int_sweep3` reports the blamed member by its
+index in the full registry, not in the mask.
+
+**The numeric contraction.** `bas_contract` normalizes a contracted shell
+with the closed form for the overlap of two primitives,
+`(2 sqrt(ab)/(a+b))^(l+3/2)`. `bas_contract_numeric` gets the same overlaps
+from an integral code instead: each primitive becomes a one-primitive shell
+at the origin, `md1_s` (or `os_overlap`) gives their overlap matrix, and the
+contraction is scaled so that `sum_pq c_p c_q S_pq = 1`. A one-primitive shell
+is normalized by the closed form evaluated at `a = b`, where it is exactly 1,
+so the two strategies share only the radial factor `Nr(a, l)`.
+
+**Direct J/K.** The direct members `int_jk_direct` (density-screened) and
+`int_jk_direct_full` (lib/hf/jk_direct) read a basis blob instead of packed
+integrals. A sweep over
+`int_jk_methods()` passes the packed vector in slot 1 and the blob in slots
+2 and 3, so the in-core members and the direct one see the same density.
+
+Used with `import hf.integrals`.
+###
+
+import hf.opts
+from hf.basis import (
+    AT_LEN, bas_contract, bas_nao_cart, bas_nao_sph, bas_ncart, bas_nr, bas_nsph, PR_COEF,
+    PR_EXP, PR_LEN, SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+    SH_SPH0,
+)
+from hf.eri_store import es_len8
+from hf.sweep import (
+    sw_flat_index, sw_rep_new, SW_REP_NSTRAT, sw_rep_release, SW_REP_STRAT, SW_REP_WORST,
+    sw_table_median, sw_verdict, sweep3_arr, sweepnx_arr,
+)
+import hf.boys
+from hf.md_onebody import md1_s, md1_t, md1_v
+from hf.os_onebody import os_kinetic, os_nuclear, os_overlap
+from hf.gh_onebody import gh_kinetic, gh_overlap
+from hf.md_eri import mderi_full, mderi_screened, mderi_sph
+from hf.mdg_eri import mdg_screened, mdg_sph
+import hf.md_direct
+from hf.hgp_eri import hgp_eri
+from hf.rys_eri import rys_eri
+from hf.cart2sph import c2s_closed, c2s_general
+from hf.transform import (
+    tr2_back_blocks, tr2_back_dense, tr2_blocks, tr2_dense, tr4_blocks, tr4_quarter,
+    tr4_two_pass,
+)
+from hf.jk import jk_dense, jk_packed, jk_pairs
+from hf.jk_direct import int_jk_direct, int_jk_direct_full
+
+# the default ERI mask (ScfOptions.eri_members = 0): members 0 (MD on the
+# generated kernels) and 3 (HGP)
+INT_ERI_PAIR = 9
+
+INT_TOL_CN = 1.0e-13
+INT_TOL_ONE = 1.0e-12
+INT_TOL_ERI = 1.0e-12
+INT_TOL_C2S = 1.0e-14
+INT_TOL_TR = 1.0e-13
+INT_TOL_JK = 1.0e-12
+
+# tr4_quarter unpacks to [n, n, n, n]; it joins the ERI transform while the
+# Cartesian count n is at most this (30^4 doubles is 6.5 MB)
+INT_TR4_QUARTER_NMAX = 30
+
+# ---- stage 1: contracted coefficients -----------------------------------------
+
+#| Member `0`: the closed-form normalization of `lib/hf/basis`.
+def int_contract_closed(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return bas_contract(shells, prims)
+}
+
+#| The overlap matrix of shell `s`'s primitives, each as its own normalized
+#| one-primitive shell at the origin, taken from overlap member `which`
+#| (`0` = md1_s, `1` = os_overlap). Entry `[p, q]` is the overlap of the `x^l`
+#| components, the first in PySCF's order.
+def int_prim_overlaps(shells: Arr, prims: Arr, s, which) {
+    l = shells[s, SH_L]
+    np = round(shells[s, SH_NPRIM])
+    p0 = round(shells[s, SH_P0])
+    nc = bas_ncart(l)
+    at = zeros(1, AT_LEN)
+    sh = zeros(np, SH_LEN)
+    pr = zeros(np, PR_LEN)
+    for p to np {
+        sh[p, SH_ATOM] = 0
+        sh[p, SH_L] = l
+        sh[p, SH_NPRIM] = 1
+        sh[p, SH_P0] = p
+        sh[p, SH_CART0] = p * nc
+        sh[p, SH_SPH0] = p * bas_nsph(l)
+        sh[p, SH_NCART] = nc
+        sh[p, SH_NSPH] = bas_nsph(l)
+        pr[p, PR_EXP] = prims[p0 + p, PR_EXP]
+        pr[p, PR_COEF] = 1.0
+    }
+    S = zeros(1, 1)
+    if which < 0.5 {
+        S = md1_s(at, sh, pr)
+    }
+    else {
+        S = os_overlap(at, sh, pr)
+    }
+    # the x^l component of each primitive: every nc-th row and column
+    return S[::nc, ::nc]
+}
+
+#| `cn` with each shell's self-overlap taken from integral member `which`.
+def int_contract_by(shells: Arr, prims: Arr, which) {
+    cn = zeros(len(prims))
+    for s to len(shells) {
+        l = shells[s, SH_L]
+        p0 = round(shells[s, SH_P0])
+        np = round(shells[s, SH_NPRIM])
+        c = prims[p0:p0 + np, PR_COEF]
+        # c^T P c, summed entry by entry as (c_i c_j) P_ij
+        ss = sum((hcat(c) @ vcat(c)) * int_prim_overlaps(shells, prims, s, which))
+        scale = 1.0 / sqrt(ss)
+        for i to np {
+            cn[p0 + i] = scale * prims[p0 + i, PR_COEF] * bas_nr(prims[p0 + i, PR_EXP], l)
+        }
+    }
+    return cn
+}
+
+#| Member `1`: self-overlaps from McMurchie-Davidson (`md1_s`).
+def bas_contract_numeric(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return int_contract_by(shells, prims, 0)
+}
+
+#| Member `2`: self-overlaps from Obara-Saika (`os_overlap`).
+def bas_contract_numeric_os(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return int_contract_by(shells, prims, 1)
+}
+
+def int_contract_methods() {
+    return [int_contract_closed, bas_contract_numeric, bas_contract_numeric_os]
+}
+
+# ---- stage 3: one-electron matrices -------------------------------------------
+
+def int_overlap_methods() {
+    return [md1_s, os_overlap, gh_overlap]
+}
+
+def int_kinetic_methods() {
+    return [md1_t, os_kinetic, gh_kinetic]
+}
+
+def int_nuclear_methods() {
+    return [md1_v, os_nuclear]
+}
+
+# ---- stage 4: electron repulsion integrals ------------------------------------
+
+def int_eri_methods() {
+    return [mdg_screened, mderi_screened, mderi_full, hgp_eri, rys_eri]
+}
+
+# ---- stage 5: Cartesian to spherical ------------------------------------------
+
+#| The c2s members take `(l, unused)` so they fit the `(nmax, x) -> Arr`
+#| driver; each returns M_l, `[ncart(l), nsph(l)]`.
+def int_c2s_closed(l: Num, x: Num) -> Arr {
+    return c2s_closed(l)
+}
+
+def int_c2s_general(l: Num, x: Num) -> Arr {
+    return c2s_general(l)
+}
+
+def int_c2s_methods() {
+    return [int_c2s_closed, int_c2s_general]
+}
+
+def int_tr2_methods() {
+    return [tr2_blocks, tr2_dense]
+}
+
+def int_tr2_back_methods() {
+    return [tr2_back_blocks, tr2_back_dense]
+}
+
+def int_tr4_methods() {
+    return [tr4_blocks, tr4_quarter]
+}
+
+#| The spherical ERIs of a basis, production first: the generated kernels
+#| with spherical rows in the store (`mdg_sph`), md_eri's block-by-block
+#| transform (`mderi_sph`), and the Cartesian build followed by the ERI
+#| transform.
+#@ 45c8937f
+def int_eri_sph_methods() {
+    return [mdg_sph, mderi_sph, tr4_two_pass]
+}
+
+# ---- stage 8: J and K ---------------------------------------------------------
+
+#| The J/K registry the pipeline passes to the SCF drivers: `lib/hf/jk`'s
+#| three in-core members, then the direct ones at `INT_JK_DIRECT` and
+#| `INT_JK_DIRECT_FULL`.
+def int_jk_methods() {
+    return [jk_packed, jk_pairs, jk_dense, int_jk_direct, int_jk_direct_full]
+}
+
+# ---- the masked drivers -------------------------------------------------------
+
+#| `1` when member `k` is selected by `mask` (`0` selects every member).
+def int_mask_has(mask, k) {
+    if mask < 0.5 {
+        return 1
+    }
+    return mod(floor(mask / pow(2.0, k)), 2.0)
+}
+
+#| How many of the first `n` members `mask` selects, and the first of them
+#| (`-1` when none is).
+def int_mask_count(mask, n) {
+    c = 0
+    first = -1
+    for m to n {
+        if int_mask_has(mask, m) > 0.5 {
+            if c < 0.5 {
+                first = m
+            }
+            c = c + 1
+        }
+    }
+    return c, first
+}
+
+#| Run the members of `ms` that `mask` selects and return their consensus
+#| (elementwise median, `lib/hf/sweep`). With one member selected, or in
+#| release, only the first selected member runs. `rep[SW_REP_STRAT]` is the
+#| blamed member's index in `ms`.
+def int_run3(ms, mask, x1: Arr, x2: Arr, x3: Arr, N, rep: Arr, release) -> Arr {
+    cnt, f = int_mask_count(mask, len(ms))
+    if release > 0.5 or cnt < 1.5 {
+        sw_rep_release(rep)
+        rep[SW_REP_STRAT] = f
+        return apply(ms[f], x1, x2, x3)
+    }
+    ix = sw_flat_index(N)
+    T = zeros(cnt, N)
+    who = zeros(cnt)
+    out = apply(ms[f], x1 + 0.0, x2 + 0.0, x3 + 0.0)
+    setslab(T, 0, take(out, ix))
+    who[0] = f
+    r = 1
+    for m to len(ms) {
+        if m != f and int_mask_has(mask, m) > 0.5 {
+            cur = apply(ms[m], x1 + 0.0, x2 + 0.0, x3 + 0.0)
+            setslab(T, r, take(cur, ix))
+            who[r] = m
+            r = r + 1
+        }
+    }
+    C = zeros(N)
+    sw_table_median(T, cnt, N, N, C, rep)
+    rep[SW_REP_STRAT] = who[round(rep[SW_REP_STRAT])]
+    put(out, ix, C)
+    return out
+}
+
+#| The asserting form: every selected member within `tol` of the consensus.
+#| When one member ran (release, or a one-member mask) nothing was compared
+#| and nothing is asserted.
+def int_sweep3(ms, mask, x1: Arr, x2: Arr, x3: Arr, N, tol, rep: Arr) -> Arr {
+    release = 0
+    if release_mode() {
+        release = 1
+    }
+    R = int_run3(ms, mask, x1, x2, x3, N, rep, release)
+    if rep[SW_REP_NSTRAT] > 1.5 {
+        assert_lt(rep[SW_REP_WORST], tol)
+    }
+    return R
+}
+
+#| The non-asserting form: the consensus goes into `out`, the verdict (`1`
+#| agree, `0` dissent) is returned.
+def int_check3(ms, mask, x1: Arr, x2: Arr, x3: Arr, N, tol, rep: Arr, out: Arr) {
+    R = int_run3(ms, mask, x1, x2, x3, N, rep, 0)
+    ix = sw_flat_index(N)
+    put(out, ix, take(R, ix))
+    return sw_verdict(rep, tol)
+}
+
+#| `int_run3` for the J/K signature.
+def int_run5(ms, mask, x1: Arr, x2: Arr, x3: Arr, x4: Arr, x5: Arr, N, rep: Arr, release) -> Arr {
+    cnt, f = int_mask_count(mask, len(ms))
+    if release > 0.5 or cnt < 1.5 {
+        sw_rep_release(rep)
+        rep[SW_REP_STRAT] = f
+        return apply(ms[f], x1, x2, x3, x4, x5)
+    }
+    ix = sw_flat_index(N)
+    T = zeros(cnt, N)
+    who = zeros(cnt)
+    out = apply(ms[f], x1 + 0.0, x2 + 0.0, x3 + 0.0, x4 + 0.0, x5 + 0.0)
+    setslab(T, 0, take(out, ix))
+    who[0] = f
+    r = 1
+    for m to len(ms) {
+        if m != f and int_mask_has(mask, m) > 0.5 {
+            cur = apply(ms[m], x1 + 0.0, x2 + 0.0, x3 + 0.0, x4 + 0.0, x5 + 0.0)
+            setslab(T, r, take(cur, ix))
+            who[r] = m
+            r = r + 1
+        }
+    }
+    C = zeros(N)
+    sw_table_median(T, cnt, N, N, C, rep)
+    rep[SW_REP_STRAT] = who[round(rep[SW_REP_STRAT])]
+    put(out, ix, C)
+    return out
+}
+
+def int_sweep5(ms, mask, x1: Arr, x2: Arr, x3: Arr, x4: Arr, x5: Arr, N, tol, rep: Arr) -> Arr {
+    release = 0
+    if release_mode() {
+        release = 1
+    }
+    R = int_run5(ms, mask, x1, x2, x3, x4, x5, N, rep, release)
+    if rep[SW_REP_NSTRAT] > 1.5 {
+        assert_lt(rep[SW_REP_WORST], tol)
+    }
+    return R
+}
+
+def int_check5(ms, mask, x1: Arr, x2: Arr, x3: Arr, x4: Arr, x5: Arr, N, tol, rep: Arr, out: Arr) {
+    R = int_run5(ms, mask, x1, x2, x3, x4, x5, N, rep, 0)
+    ix = sw_flat_index(N)
+    put(out, ix, take(R, ix))
+    return sw_verdict(rep, tol)
+}
+
+# ---- the contract defs --------------------------------------------------------
+# Each one: release runs member 0; otherwise every selected member runs and
+# must agree within the tolerance named beside it.
+
+#| The contracted coefficients `cn[nprimtot]`, every member within `INT_TOL_CN`.
+def int_contract(atoms: Arr, shells: Arr, prims: Arr, rep: Arr) -> Arr {
+    return int_sweep3(int_contract_methods(), 0, atoms, shells, prims, len(prims), INT_TOL_CN, rep)
+}
+
+#| The overlap matrix S, `[nao_cart, nao_cart]`, every member within `INT_TOL_ONE`.
+def int_overlap(atoms: Arr, shells: Arr, prims: Arr, rep: Arr) -> Arr {
+    n = bas_nao_cart(shells)
+    return int_sweep3(int_overlap_methods(), 0, atoms, shells, prims, n * n, INT_TOL_ONE, rep)
+}
+
+#| The kinetic-energy matrix T, every member within `INT_TOL_ONE`.
+def int_kinetic(atoms: Arr, shells: Arr, prims: Arr, rep: Arr) -> Arr {
+    n = bas_nao_cart(shells)
+    return int_sweep3(int_kinetic_methods(), 0, atoms, shells, prims, n * n, INT_TOL_ONE, rep)
+}
+
+#| The nuclear-attraction matrix V, every member within `INT_TOL_ONE`.
+def int_nuclear(atoms: Arr, shells: Arr, prims: Arr, rep: Arr) -> Arr {
+    n = bas_nao_cart(shells)
+    return int_sweep3(int_nuclear_methods(), 0, atoms, shells, prims, n * n, INT_TOL_ONE, rep)
+}
+
+#| The packed-8 unit-Cartesian ERIs from the members `mask` selects,
+#| within `INT_TOL_ERI`.
+def int_eri(atoms: Arr, shells: Arr, prims: Arr, mask, rep: Arr) -> Arr {
+    n = bas_nao_cart(shells)
+    return int_sweep3(int_eri_methods(), mask, atoms, shells, prims, es_len8(n), INT_TOL_ERI, rep)
+}
+
+#| `M_l` for one shell of angular momentum `l`, both members within `INT_TOL_C2S`.
+def int_c2s(l, rep: Arr) -> Arr {
+    N = bas_ncart(l) * bas_nsph(l)
+    return sweepnx_arr(int_c2s_methods(), l, 0.0, N, N, INT_TOL_C2S, rep)
+}
+
+#| A one-electron matrix moved to spherical functions, `M^T X M`, within `INT_TOL_TR`.
+def int_sph2(X: Arr, M: Arr, shells: Arr, rep: Arr) -> Arr {
+    ns = bas_nao_sph(shells)
+    return sweep3_arr(int_tr2_methods(), X, M, shells, ns * ns, ns * ns, INT_TOL_TR, rep)
+}
+
+#| One spherical density moved to Cartesian functions, `M D M^T`, within `INT_TOL_TR`.
+def int_cart2(D: Arr, M: Arr, shells: Arr, rep: Arr) -> Arr {
+    nc = bas_nao_cart(shells)
+    return sweep3_arr(int_tr2_back_methods(), D, M, shells, nc * nc, nc * nc, INT_TOL_TR, rep)
+}
+
+#| The ERI-transform mask: `tr4_quarter` unpacks to `[n,n,n,n]`, so it
+#| joins only while the Cartesian count is at most `INT_TR4_QUARTER_NMAX`.
+def int_tr4_mask(shells: Arr) {
+    if bas_nao_cart(shells) <= INT_TR4_QUARTER_NMAX {
+        return 0
+    }
+    return 1
+}
+
+#| Packed-8 spherical ERIs from packed-8 unit-Cartesian ones,
+#| within `INT_TOL_TR`.
+def int_sph4(Gp: Arr, M: Arr, shells: Arr, rep: Arr) -> Arr {
+    ns = bas_nao_sph(shells)
+    return int_sweep3(int_tr4_methods(), int_tr4_mask(shells), Gp, M, shells, es_len8(ns), INT_TOL_TR, rep)
+}
+
+#| J and K, `[2 ndens, n, n]`, from densities `D[ndens, n, n]`, the members
+#| `mask` selects (bits `INT_JK_DIRECT` and `INT_JK_DIRECT_FULL`, the direct
+#| members, need `blob`),
+#| within `INT_TOL_JK`.
+def int_jk(Gp: Arr, blob: Arr, D: Arr, opts: Arr, mask, rep: Arr) -> Arr {
+    sh = shape(D)
+    N = 2 * sh[0] * sh[1] * sh[2]
+    return int_sweep5(int_jk_methods(), mask, Gp, blob, blob, D, opts, N, INT_TOL_JK, rep)
+}
+
+#| Never run: a call site for every def that takes a registry, so a program
+#| that uses this module without calling them still compiles.
+def int_anchor(x: Arr) {
+    rep = sw_rep_new()
+    out = zeros(1)
+    a = int_sweep3(int_eri_methods(), 0, x, x, x, 1, 1.0, rep)
+    b = int_sweep5(int_jk_methods(), 0, x, x, x, x, x, 1, 1.0, rep)
+    v = int_check3(int_eri_methods(), 0, x, x, x, 1, 1.0, rep, out)
+    v = v + int_check5(int_jk_methods(), 0, x, x, x, x, x, 1, 1.0, rep, out)
+    return v + a[0] + b[0]
+}
+
+# ---- tests ----------------------------------------------------------------------
+
+test "each registry holds the members the page lists" {
+    assert_near(len(int_contract_methods()), 3, 0.0)
+    assert_near(len(int_overlap_methods()), 3, 0.0)
+    assert_near(len(int_kinetic_methods()), 3, 0.0)
+    assert_near(len(int_nuclear_methods()), 2, 0.0)
+    assert_near(len(int_eri_methods()), 5, 0.0)
+    assert_near(len(int_c2s_methods()), 2, 0.0)
+    assert_near(len(int_tr2_methods()), 2, 0.0)
+    assert_near(len(int_tr2_back_methods()), 2, 0.0)
+    assert_near(len(int_tr4_methods()), 2, 0.0)
+    assert_near(len(int_eri_sph_methods()), 3, 0.0)
+    assert_near(len(int_jk_methods()), 5, 0.0)
+    assert_near(int_mask_has(INT_ERI_PAIR, 0) + int_mask_has(INT_ERI_PAIR, 3), 2.0, 0.0)
+    assert_near(int_mask_has(INT_ERI_PAIR, 1) + int_mask_has(INT_ERI_PAIR, 2) + int_mask_has(INT_ERI_PAIR, 4), 0.0, 0.0)
+    assert_near(int_mask_has(0, 3), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

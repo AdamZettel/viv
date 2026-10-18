@@ -1,0 +1,143 @@
+# Delinquency: days past due, from bills and payments, as a state machine.
+#
+# Input: one row per account event, sorted by (account, ts); ts in int64
+# nanoseconds; billed = a new bill due at ts, in cents; paid = a payment at
+# ts, in cents. At an instant the bills are added first, then the payments
+# pay the oldest open bills first; a payment beyond every open bill is kept
+# as credit and pays the next bills as they arrive.
+#
+# dpd(t) = floor((t - d) / 1 day), d the due time of the oldest bill still
+# open at t, or 0 when nothing is open. For a row at time t, before the
+# instant's own bills and payments:
+#
+#   dpd             dpd(t)
+#   worst_dpd_12m   the largest dpd(s) over t - 365 days <= s <= t. dpd only
+#                   falls when a payment lands, so this is the larger of
+#                   dpd(t) and dpd just before each payment instant in the window
+#   ever_cured_60   1 if at some earlier instant a payment took the account
+#                   from dpd >= 60 to dpd = 0, else 0
+
+from rows import group_end, instant_end
+
+NS_PER_S: Int = 1000000000
+DAY: Int = 86400 * NS_PER_S
+YEAR: Int = 365 * DAY
+CURE_FROM: Int = 60
+
+record Delinquency {
+    dpd: [Int]
+    worst_dpd_12m: [Int]
+    ever_cured_60: [Int]
+}
+
+#| Days past due, the worst of the last year and whether the account was ever
+#| cured from sixty days late, for events sorted by (account, ts).
+#|| A queue of open bills per account, oldest first; each payment instant records
+#|| the days past due it ended, for the trailing-year maximum.
+#||| The worst value over a year needs only the peaks before payments, because
+#||| between payments days past due can only grow.
+#: account  the entity key, sorted ascending
+#: ts  event time, int64 nanoseconds, ascending within an account
+#: billed  the amount of a new bill due at the event, cents
+#: paid  the amount paid at the event, cents
+#@ 9a0f486c
+def delinquency(account: [Int], ts: [Int], billed: [Int], paid: [Int]) -> Delinquency {
+    n = len(ts)
+    dpd = int_zeros(n)
+    worst = int_zeros(n)
+    cured = int_zeros(n)
+    g: Int = 0
+    while g < n {
+        stop_at = group_end(account, ts, g, "delinquency")
+        due: [Int] = []
+        left: [Int] = []
+        head: Int = 0
+        credit: Int = 0
+        peak_t: [Int] = []
+        peak: [Int] = []
+        ever: Int = 0
+        i: Int = g
+        while i < stop_at {
+            t = ts[i]
+            same = instant_end(ts, i, stop_at)
+            step read "the instant's rows see the state before their own bills and payments" {
+                now: Int = 0
+                if head < len(due) {
+                    now = (t - due[head]) // DAY
+                }
+                w: Int = now
+                k: Int = len(peak) - 1
+                while k >= 0 and peak_t[k] >= t - YEAR {
+                    w = max(w, peak[k])
+                    k -= 1
+                }
+                for r from i to same {
+                    dpd[r] = now
+                    worst[r] = w
+                    cured[r] = ever
+                }
+            }
+            step bills "the instant's bills join the queue, credit paying them first" {
+                for r from i to same {
+                    if billed[r] > 0 {
+                        due = append(due, t)
+                        left = append(left, billed[r])
+                    }
+                }
+                pay: Int = credit
+                credit = 0
+                for r from i to same {
+                    pay += paid[r]
+                }
+            }
+            step pay "payments close the oldest bills first" {
+                if pay > 0 {
+                    while pay > 0 and head < len(due) {
+                        take = min(pay, left[head])
+                        left[head] -= take
+                        pay -= take
+                        if left[head] == 0 {
+                            head += 1
+                        }
+                    }
+                    credit = pay
+                    after: Int = 0
+                    if head < len(due) {
+                        after = (t - due[head]) // DAY
+                    }
+                    peak_t = append(peak_t, t)
+                    peak = append(peak, now)
+                    if now >= CURE_FROM and after == 0 {
+                        ever = 1
+                    }
+                }
+            }
+            i = same
+        }
+        g = stop_at
+    }
+    return Delinquency { dpd: dpd, worst_dpd_12m: worst, ever_cured_60: cured }
+}
+
+test "late, later, cured" {
+    acct: [Int] = [1, 1, 1, 1, 1]
+    ts: [Int] = [0, 30 * DAY, 70 * DAY, 71 * DAY, 436 * DAY]
+    billed: [Int] = [100, 100, 0, 0, 0]
+    paid: [Int] = [0, 0, 200, 0, 0]
+    d = delinquency(acct, ts, billed, paid)
+    assert_true(d.dpd[1] == 30 and d.dpd[2] == 70 and d.dpd[3] == 0)
+    assert_true(d.worst_dpd_12m[3] == 70 and d.ever_cured_60[2] == 0 and d.ever_cured_60[3] == 1)
+    assert_true(d.worst_dpd_12m[4] == 0)
+}
+
+test "a partial payment leaves the oldest bill open" {
+    acct: [Int] = [2, 2, 2]
+    ts: [Int] = [0, 10 * DAY, 20 * DAY]
+    billed: [Int] = [100, 0, 0]
+    paid: [Int] = [0, 60, 0]
+    d = delinquency(acct, ts, billed, paid)
+    assert_true(d.dpd[2] == 20 and d.worst_dpd_12m[2] == 20)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

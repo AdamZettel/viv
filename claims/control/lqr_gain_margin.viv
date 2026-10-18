@@ -1,0 +1,97 @@
+###
+title: LQR stabilizes the cart-pole at half the gain
+line: Stable for every gain scaling from $\tfrac{1}{2}$ to 1000; stability is lost only below 0.463.
+claim: For the cart-pole linearized about the upright (state weight the identity, input weight 1), the open loop has an unstable eigenvalue at about $+3.97$. The LQR gain (Riccati residual below $10^{-9}$) puts the slowest closed-loop eigenvalue's real part at about $-0.81$, the loop stays stable at all 12 gain scalings tried from $\tfrac{1}{2}$ to 1000 (largest real part $-0.17$ or lower), and it loses stability only when the gain is scaled below about 0.463, beyond the $[\tfrac{1}{2}, \infty)$ margin LQR guarantees.
+topic: control
+section: LQR
+reference: The return-difference inequality of single-input LQR, which guarantees closed-loop stability for every gain scaling in $[\tfrac{1}{2}, \infty)$ (Kalman, "When is a linear control system optimal?", J. Basic Eng. 86 (1964) 51-60; Anderson and Moore, Optimal Control (1990), section 5.4). The Riccati solution is lib/are (SLICOT's Schur method), compared with SciPy's solve_continuous_are in the cart-pole gallery entry.
+scope: The cart-pole linearized about the upright (lib/cartpole_api), state weight the identity, input weight 1. Stability is read from the eigenvalues of $A - gBK$ at 12 scalings and the lower limit found by bisection to $10^{-6}$; the guarantee is about scaling the whole gain, not about delays or unmodeled dynamics.
+lane: ai
+by: claude
+cost: fast
+agree: 1e-9
+###
+
+from lqr import lqr_closed_loop, lqr_gains, lqr_residual, lqr_riccati, lqr_slowest
+from cartpole_api import cartpole_model
+
+FD_STEP = 1.0e-6
+INPUT_WEIGHT = 1.0
+SCALES = [0.5, 0.6, 0.8, 1.0, 1.5, 2.0, 5.0, 10.0, 30.0, 100.0, 300.0, 1000.0]
+BISECT_TOL = 1.0e-6
+#: the figure's sweep: gain scalings spaced evenly in log from 0.3 to 1000
+SWEEP_LO = 0.3
+SWEEP_HI = 1000.0
+SWEEP_POINTS = 61
+LOST_AT = 0.463
+
+a_cp, b_cp = cartpole_model(FD_STEP)
+w_cp = eye(4)
+p_cp = lqr_riccati(a_cp, b_cp, w_cp, INPUT_WEIGHT)
+k_cp = lqr_gains(p_cp, b_cp, INPUT_WEIGHT)
+riccati_residual = lqr_residual(p_cp, a_cp, b_cp, w_cp, INPUT_WEIGHT)
+slowest_nominal = lqr_slowest(lqr_closed_loop(a_cp, b_cp, k_cp))
+n_scales: Int = len(SCALES)
+slowest = zeros(n_scales)
+for sc to n_scales {
+    slowest[sc] = lqr_slowest(lqr_closed_loop(a_cp, b_cp, SCALES[sc] * k_cp))
+}
+worst_slowest = max(slowest)
+#: the smallest scaling that still stabilizes: bisection between 0 (open loop, unstable) and 1/2
+bis_lo = 0.0
+bis_hi = 0.5
+while bis_hi - bis_lo > BISECT_TOL {
+    bis_mid = 0.5 * (bis_lo + bis_hi)
+    if lqr_slowest(lqr_closed_loop(a_cp, b_cp, bis_mid * k_cp)) < 0.0 {
+        bis_hi = bis_mid
+    }
+    else {
+        bis_lo = bis_mid
+    }
+}
+lowest_stable_scale = bis_hi
+open_loop = lqr_slowest(a_cp)
+
+#: the slowest closed-loop real part across the sweep; above zero the cart-pole falls
+sweep_g = exp(linspace(log(SWEEP_LO), log(SWEEP_HI), SWEEP_POINTS))
+sweep_re = zeros(SWEEP_POINTS)
+for sw to SWEEP_POINTS {
+    sweep_re[sw] = lqr_slowest(lqr_closed_loop(a_cp, b_cp, sweep_g[sw] * k_cp))
+}
+figure("Slowest closed-loop eigenvalue as the LQR gain is scaled", "gain scaling g", "largest real part of eig(A - gBK)")
+xscale("log")
+plot(sweep_g, sweep_re, "slowest real part")
+plot([SWEEP_LO, SWEEP_HI], [0.0, 0.0], "stability boundary")
+style("stability boundary", "dot s6 nomarker thin")
+plot([0.5, 0.5], [min(sweep_re), max(sweep_re)], "LQR guarantee starts at g = 1/2")
+style("LQR guarantee starts at g = 1/2", "dash s2 nomarker")
+scatter([lowest_stable_scale], [0.0], "stability lost at g = 0.463")
+style("stability lost at g = 0.463", "s4 circle")
+show riccati_residual
+show slowest_nominal
+show worst_slowest
+show lowest_stable_scale
+show open_loop
+show n_scales
+
+test "the open loop is unstable" {
+    assert_gt(open_loop, 0.0)
+}
+test "the Riccati residual is below 1e-9 and the nominal loop is stable" {
+    assert_lt(riccati_residual, 1.0e-9)
+    assert_lt(slowest_nominal, 0.0)
+}
+test "stable at every scaling from 1/2 to 1000" {
+    assert_lt(worst_slowest, 0.0)
+    assert_near(SCALES[0], 0.5, 0.0)
+    assert_near(SCALES[n_scales - 1], 1000.0, 0.0)
+}
+test "the lowest stabilizing scaling is below 1/2, as the guarantee allows" {
+    assert_lt(lowest_stable_scale, 0.5)
+}
+test "stability is lost below 0.463 (to the third digit)" {
+    assert_near(lowest_stable_scale, LOST_AT, 5.0e-4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

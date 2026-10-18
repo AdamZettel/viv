@@ -1,0 +1,315 @@
+###
+post: Hartree-Fock for water
+date: 2026-09-24
+kind: demo
+tags: quantum chemistry, hartree-fock, integrals
+equation: E = E_\text{nuc} + \tfrac{1}{2} \sum_{\mu\nu} D_{\nu\mu} \left( H_{\mu\nu} + F_{\mu\nu} \right)
+summary: Water in the STO-3G basis, from the basis to the restricted Hartree-Fock energy, using `lib/hf`, a library whose tests compare it against PySCF. The electron repulsion integrals are computed two independent ways, McMurchie-Davidson and Head-Gordon-Pople, which must agree; the energy matches PySCF 2.5.0 within $10^{-9}$ hartree.
+agent: claude
+lane: ai
+
+The input is the molecule as PySCF takes it: the atoms as text, each an
+element symbol and its position in angstrom, and the basis set by its name,
+"sto-3g", found in a table generated from the Basis Set Exchange
+(`lib/basis/sto3g`). `molecule` (`lib/hf/mole`) turns them into the three
+tables `lib/hf` computes with: the atoms (charge and position in bohr),
+the shells of the basis (which atom, which angular momentum, where its
+primitives start) and the primitives (exponent and contraction coefficient).
+For water in STO-3G that is 3 atoms, 5 shells and 15 primitives, giving 7
+basis functions, the same functions PySCF builds for the molecule.
+
+Everything after that is computed by `lib/hf`, the same code whose tests
+compare it against PySCF on a set of molecules and basis sets (the reference values
+are in `lib/hfref`):
+
+1. The overlap $S$, kinetic energy $T$ and nuclear attraction $V$ matrices.
+   `lib/hf` has more than one implementation of each (three for $S$ and $T$,
+   two for $V$). Here every implementation runs, and the program
+   stops if any two disagree by more than $10^{-12}$.
+2. The electron repulsion integrals $(\mu\nu|\lambda\sigma)$, 406 of them once
+   the eightfold permutation symmetry is used. Two independent methods compute
+   them: McMurchie-Davidson, which expands each product of Gaussians in Hermite
+   Gaussians, and Head-Gordon-Pople, which runs the Obara-Saika vertical
+   recurrence and then the horizontal one. They share no recurrence. The
+   program compares them entry by entry and stops if any integral differs by
+   more than $10^{-12}$ relative, naming the method and the integral.
+3. The self-consistent field, using only the default implementation of each
+   step: a starting guess from a spin-averaged calculation, DIIS acceleration
+   (which combines the Fock matrices of the last few iterations to make the
+   commutator $FDS - SDF$ as small as possible), canonical orthogonalization, and the
+   Coulomb and exchange matrices J and K from the packed integrals. It solves
+   $F(D) C = S C \varepsilon$ repeatedly until the change in energy and the
+   commutator both fall below their tolerances, and $E$ is the formula above.
+
+The energy matches PySCF's $-74.9630631297292$ within $10^{-9}$.
+
+The figure moves the two hydrogens along their O-H bonds, keeping the angle,
+and reruns the whole calculation at five more bond lengths, using only the
+default implementations. Each energy is checked against PySCF at the same
+geometry. A parabola through the three points around the stored geometry puts
+the bottom at 0.987 angstrom. PySCF's own minimization along the same line
+gives 0.98704. The stored geometry has O-H at 0.958 angstrom, close to the
+experimental bond length, so STO-3G makes the bond about 3 percent too long.
+###
+
+from hf.mole import molecule
+from hf.molecule import Molecule
+from hf.basis import bas_contract, AT_X, AT_Y, AT_Z, SH_ATOM, SH_L, SH_NPRIM, SH_P0, SH_CART0, PR_EXP
+from hf.scf import rhf
+from hf.opts import scf_checked, scf_defaults
+from hf.hf import hf_hcore, hf_overlap, hf_scf, hf_setup_of, hf_step
+from hf.integrals import int_eri, INT_ERI_PAIR
+from hf.sweep import sw_rep_new, SW_REP_NSTRAT, SW_REP_WORST, sw_verdict
+
+# PySCF's conversion from bohr to angstrom (pyscf.lib.param.BOHR).
+BOHR_ANGSTROM = 0.52917721092
+
+# water as tools/hf_reference.py gives it to PySCF
+water = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "sto-3g")
+
+# ---- the cross-checked build: every one-electron implementation, both integral methods
+checked = scf_checked()
+S_water = hf_overlap(water, checked)
+H_water = hf_hcore(water, checked)
+eri_report = sw_rep_new()
+G_water = int_eri(water.atoms, water.shells, water.prims, INT_ERI_PAIR, eri_report)
+
+# ---- the SCF, using only the default implementation of each step
+water_result = hf_scf(hf_setup_of(water, H_water, S_water, G_water, scf_defaults()))
+E_water = water_result.energy
+
+# The worst gap itself sits at rounding level and its last digits depend on
+# the platform's exp, so the post shows the verdict and asserts the bound.
+eri_families_swept = eri_report[SW_REP_NSTRAT]
+mcmurchie_davidson_and_head_gordon_pople_agree_to_1e_12 = sw_verdict(eri_report, 1.0e-12)
+show E_water
+say("integral methods cross-checked", eri_families_swept)
+say("McMurchie-Davidson and Head-Gordon-Pople agree within 1e-12 (1 = yes)", mcmurchie_davidson_and_head_gordon_pople_agree_to_1e_12)
+
+# ---- the symmetric stretch, using only the default implementation of each step
+#| The atoms with both hydrogens moved along their O-H bonds by the factor
+#| `s`; oxygen sits at the origin, so scaling a hydrogen's coordinates scales
+#| its bond and keeps the angle.
+def stretch_atoms(atoms: Arr, s) {
+    a = atoms + 0.0
+    for k to 2 {
+        a[k + 1, AT_X] = atoms[k + 1, AT_X] * s
+        a[k + 1, AT_Y] = atoms[k + 1, AT_Y] * s
+        a[k + 1, AT_Z] = atoms[k + 1, AT_Z] * s
+    }
+    return a
+}
+
+#| The RHF energy of the molecule stretched by `s`, using only the default
+#| implementation of each step.
+def stretch_energy(mol: Molecule, s) {
+    r = rhf(Molecule { atoms: stretch_atoms(mol.atoms, s), ..mol })
+    return r.energy
+}
+
+STRETCH = [0.85, 0.95, 1.0, 1.05, 1.15, 1.3]
+# PySCF 2.5.0 RHF/STO-3G at the same stretched geometries (conv_tol 1e-12)
+STRETCH_PYSCF = [-74.87015730235669, -74.94969700178768, -74.9630631297292, -74.96430257205597, -74.94124852220563, -74.8695743402323]
+
+r_water_bohr = sqrt(water.atoms[1, AT_Y] * water.atoms[1, AT_Y] + water.atoms[1, AT_Z] * water.atoms[1, AT_Z])
+stretch_E = zeros(len(STRETCH))
+stretch_r = zeros(len(STRETCH))
+for k to len(STRETCH) {
+    stretch_r[k] = r_water_bohr * STRETCH[k] * BOHR_ANGSTROM
+    if STRETCH[k] == 1.0 {
+        stretch_E[k] = E_water
+    }
+    else {
+        stretch_E[k] = stretch_energy(water, STRETCH[k])
+    }
+}
+
+# The bottom of the parabola through s = 0.95, 1.0, 1.05 (entries 1, 2, 3).
+bottom_s = 1.0 + 0.05 * (stretch_E[1] - stretch_E[3]) / (2.0 * (stretch_E[1] - 2.0 * stretch_E[2] + stretch_E[3]))
+r_bottom_angstrom = r_water_bohr * bottom_s * BOHR_ANGSTROM
+r_stored_angstrom = r_water_bohr * BOHR_ANGSTROM
+show r_stored_angstrom
+show r_bottom_angstrom
+
+figure("Water's RHF/STO-3G energy along the symmetric stretch", "O-H distance (angstrom)", "energy (hartree)")
+plot(stretch_r, stretch_E, "lib/hf")
+scatter([r_stored_angstrom], [E_water], "the stored geometry, with both integral methods cross-checked")
+
+test "the energy is PySCF's -74.9630631297292 within 1e-9, with both integral methods cross-checked" {
+    assert_near(E_water, -74.9630631297292, 1.0e-9)
+    assert_near(eri_families_swept, 2.0, 0.0)
+    assert_near(mcmurchie_davidson_and_head_gordon_pople_agree_to_1e_12, 1.0, 0.0)
+    assert_lt(eri_report[SW_REP_WORST], 1.0e-12)
+    assert_near(water_result.converged, 1.0, 0.0)
+}
+
+test "every point of the stretch curve is PySCF's energy at that geometry within 1e-9" {
+    for k to len(STRETCH) {
+        assert_near(stretch_E[k], STRETCH_PYSCF[k], 1.0e-9)
+    }
+}
+
+test "the parabola's bottom is within 5e-4 angstrom of PySCF's minimum along the stretch, 0.98704" {
+    # 0.9867672575076872: the same parabola through PySCF's three energies
+    assert_near(r_bottom_angstrom, 0.9867672575076872, 1.0e-6)
+    assert_near(r_bottom_angstrom, 0.9870436921838125, 5.0e-4)
+}
+
+test "water in STO-3G is 3 atoms, 5 shells and 15 primitives, 7 basis functions and 406 distinct integrals" {
+    assert_near(len(water.atoms), 3, 0)
+    assert_near(len(water.shells), 5, 0)
+    assert_near(len(water.prims), 15, 0)
+    assert_near(len(S_water), 7, 0)
+    assert_near(len(G_water), 406, 0)
+}
+
+test "the parabola's bottom is 3 percent longer than the stored O-H bond" {
+    # 0.987 against 0.958 angstrom; the tolerance is half a percent, half the last stated digit
+    assert_near(r_bottom_angstrom / r_stored_angstrom - 1.0, 0.03, 0.005)
+}
+
+###
+## The density, iteration by iteration
+
+The figure below starts again from the core Hamiltonian, the density of the
+electrons with no repulsion between them, and takes plain Roothaan steps:
+build $F$ from the density, solve $FC = SC\varepsilon$, fill the five lowest
+orbitals, repeat, with no DIIS. Each frame is the electron density
+$\rho(\mathbf r) = \sum_{\mu\nu} D_{\mu\nu}\,\phi_\mu(\mathbf r)\,\phi_\nu(\mathbf r)$
+in the plane of the molecule, drawn as $\log_{10}\rho$ in bohr$^{-3}$, and
+the second figure is the energy of each frame's density. The steps end on
+the same energy as the accelerated run above.
+###
+
+# the plane of the molecule is x = 0; the picture is a square around it, in bohr
+PLANE_N = 40
+PLANE_Y = 3.4
+PLANE_Z_LO = -2.9
+# densities below this are drawn as this, so the log stays finite
+RHO_FLOOR = 1.0e-4
+# plain steps from the core guess; the energy change after the last is below DENSITY_STEPS_TOL
+DENSITY_STEPS = 24
+DENSITY_STEPS_TOL = 1.0e-9
+# frames drawn: the first steps, where the density moves
+DENSITY_FRAMES = 6
+
+#| The value of every basis function of `mol` at the point (x, y, z), in
+#| bohr. s and p shells only, in PySCF's order (p as x, y, z).
+#@ 629b0fde
+def ao_values(mol: Molecule, cn: Arr, x, y, z) {
+    vals = zeros(len(S_water))
+    for sh to len(mol.shells) {
+        at = mol.shells[sh, SH_ATOM]
+        dx = x - mol.atoms[at, AT_X]
+        dy = y - mol.atoms[at, AT_Y]
+        dz = z - mol.atoms[at, AT_Z]
+        r2 = dx * dx + dy * dy + dz * dz
+        radial = 0.0
+        for p to mol.shells[sh, SH_NPRIM] {
+            q = mol.shells[sh, SH_P0] + p
+            radial = radial + cn[q] * exp(-mol.prims[q, PR_EXP] * r2)
+        }
+        c0 = mol.shells[sh, SH_CART0]
+        l = mol.shells[sh, SH_L]
+        if l == 0 {
+            vals[c0] = radial
+        }
+        else if l == 1 {
+            vals[c0] = dx * radial
+            vals[c0 + 1] = dy * radial
+            vals[c0 + 2] = dz * radial
+        }
+        else {
+            stop("ao_values: s and p shells only")
+        }
+    }
+    return vals
+}
+
+#| The overlap of two s shells, by the Gaussian product theorem: an
+#| integral lib/hf computes its own way, so comparing the two checks that
+#| ao_values reads the tables and the contracted coefficients `cn` as lib/hf does.
+#@ 7cf99eef
+def ss_overlap(mol: Molecule, cn: Arr, sa, sb) {
+    ta = mol.shells[sa, SH_ATOM]
+    tb = mol.shells[sb, SH_ATOM]
+    r2 = 0.0
+    for d to 3 {
+        g = mol.atoms[ta, AT_X + d] - mol.atoms[tb, AT_X + d]
+        r2 = r2 + g * g
+    }
+    acc = 0.0
+    for i to mol.shells[sa, SH_NPRIM] {
+        for j to mol.shells[sb, SH_NPRIM] {
+            qi = mol.shells[sa, SH_P0] + i
+            qj = mol.shells[sb, SH_P0] + j
+            ai = mol.prims[qi, PR_EXP]
+            aj = mol.prims[qj, PR_EXP]
+            acc = acc + cn[qi] * cn[qj] * pow(pi / (ai + aj), 1.5) * exp(-ai * aj * r2 / (ai + aj))
+        }
+    }
+    return acc
+}
+
+#| log10 of the electron density of D on the picture's grid, row 0 at the bottom.
+#@ b337ae7b
+def density_plane(mol: Molecule, cn: Arr, D: Arr) {
+    img = zeros(PLANE_N, PLANE_N)
+    side = 2.0 * PLANE_Y
+    for r to PLANE_N {
+        for c to PLANE_N {
+            y = -PLANE_Y + (c + 0.5) * side / PLANE_N
+            z = PLANE_Z_LO + (r + 0.5) * side / PLANE_N
+            phi = ao_values(mol, cn, 0.0, y, z)
+            rho = sum(phi * (D @ phi))
+            # two decimals of the log are plenty for a picture and keep the figure data small
+            img[r, c] = round(100.0 * log(max(rho, RHO_FLOOR)) / log(10.0)) / 100.0
+        }
+    }
+    return img
+}
+
+water_cn = bas_contract(water.shells, water.prims)
+water_setup = hf_setup_of(water, H_water, S_water, G_water, scf_defaults())
+nao = len(S_water)
+step_from_zero = hf_step(water_setup, zeros(nao, nao), zeros(nao, nao))
+D_step = step_from_zero.density
+step_energy = zeros(DENSITY_STEPS)
+step_frames = zeros(DENSITY_FRAMES, PLANE_N, PLANE_N)
+for k to DENSITY_STEPS {
+    if k < DENSITY_FRAMES {
+        step_frames[k, :, :] = density_plane(water, water_cn, D_step)
+    }
+    stepped = hf_step(water_setup, 0.5 * D_step, 0.5 * D_step)
+    step_energy[k] = stepped.energy
+    D_step = stepped.density
+}
+steps_final_energy = step_energy[DENSITY_STEPS - 1]
+steps_last_change = abs(step_energy[DENSITY_STEPS - 1] - step_energy[DENSITY_STEPS - 2])
+show steps_final_energy
+# shells 0 and 1 are oxygen's 1s and 2s, 3 and 4 the hydrogens' 1s; basis functions 0, 1, 5 and 6
+ss_gap = max([abs(ss_overlap(water, water_cn, 0, 3) - S_water[0, 5]), abs(ss_overlap(water, water_cn, 1, 3) - S_water[1, 5]), abs(ss_overlap(water, water_cn, 3, 4) - S_water[5, 6])])
+show ss_gap
+
+figure("Water's electron density, one plain Roothaan step per frame", "y (bohr)", "z (bohr)", -PLANE_Y, PLANE_Y, PLANE_Z_LO, PLANE_Z_LO + 2.0 * PLANE_Y)
+origin("lower")
+label("O", "O", water.atoms[0, AT_Y], water.atoms[0, AT_Z])
+label("H1", "H", water.atoms[1, AT_Y], water.atoms[1, AT_Z])
+label("H2", "H", water.atoms[2, AT_Y], water.atoms[2, AT_Z])
+for k to DENSITY_FRAMES {
+    plot2d(slab(step_frames, k), "log10 of the density (bohr^-3)")
+}
+figure("The energy of each step's density", "step", "energy (hartree)")
+plot(linspace(1.0, DENSITY_STEPS, DENSITY_STEPS), step_energy, "plain Roothaan steps from the core guess")
+hline("the accelerated run", E_water)
+
+test "the basis functions on the grid are the ones lib/hf integrates: three of their overlaps are S's within 1e-12" {
+    assert_lt(ss_gap, 1.0e-12)
+}
+test "the plain steps end on the accelerated run's energy within 1e-9" {
+    assert_lt(steps_last_change, DENSITY_STEPS_TOL)
+    assert_near(steps_final_energy, E_water, 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

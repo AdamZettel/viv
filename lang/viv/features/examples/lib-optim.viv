@@ -1,0 +1,26 @@
+# lib/optim: Adam over a model held as a record, one matrix at a time.
+from optim import adam_update, AdamSettings
+
+record Model { w: Arr }
+
+def loss(m: Model) {
+    d = m.w - [1.0, -2.0]
+    return sum(d * d)
+}
+
+STEPS = 300
+model = Model { w: [0.0, 0.0] }
+first = zeros_like(model)
+second = zeros_like(model)
+settings = AdamSettings { lr: 0.05, beta1: 0.9, beta2: 0.999, eps: 1.0e-8 }
+for t to STEPS {
+    l, g = value_and_grad(loss, model)
+    for_leaves(adam_update, model, g, first, second, t + 1, 1.0, settings)
+}
+show model.w
+test "Adam reaches the minimum" {
+    assert_allclose(model.w, [1.0, -2.0], 1.0e-3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

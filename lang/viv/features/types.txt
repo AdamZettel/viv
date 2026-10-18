@@ -1,0 +1,326 @@
+# Types: the values a program holds (lang/viv/src/lower.rs, lower/ints.rs, lower/enums.rs,
+# lower/records.rs, lower/strings.rs, interp/maps.rs).
+
+== num-and-bool
+title: Num and Bool
+what: `Num` is a 64-bit float, the default for every number; a double holds every integer up
+  to 2^53 exactly. `Bool` is `true` or `false`: what a comparison gives and what `if` and
+  `while` take. A Bool is not a number: `true + 1.0` and `if count {` are refused by every
+  engine.
+when: Always; reach for Int only where an exact 64-bit integer is needed.
+example: num-and-bool
+doc: www/src/pages/reference.astro
+see: int-type, type-annotations
+keywords: Num Bool float double true false boolean
+usage: word:Bool, word:true, word:false
+
+== int-type
+title: Int, a checked 64-bit integer
+what: `Int` is a signed 64-bit integer. An Int comes from an annotation (`n: Int`, a
+  parameter, a return, a field), from arithmetic on Ints or from an Int array's element.
+  `+ - * // % ^` of Ints give Ints, and a result outside 64 bits stops the run with the
+  same message in every engine; `/` gives a number. A number where an Int is bound is a
+  compile error naming `int(...)`. An integer literal is a number unless it stands where
+  an Int is expected; `2 ^ 62` of two literals is a number, so start from an Int variable.
+when: For exact counters, indices, hashes and bit patterns, instead of `round(...)` on
+  doubles and 16-bit limbs. `viv lint --round` lists `round` calls used as indices.
+example: int-type
+see: int-arrays, num-and-bool, enums-and-match, lint
+keywords: Int integer int64 overflow exact floor division index round wrap_add wrap_mul umulhi
+usage: form:int-type, call:wrap_add, call:wrap_mul, call:umulhi
+
+== ints-and-numbers
+title: Ints where numbers go
+what: An Int goes wherever a number does, converted exactly (a magnitude past 2^53 stops
+  the run): `sqrt(n)`, `chr(97 + i)`, `append(xs, n)` on a real array, a map key or value,
+  a def's parameter written without a type that is also passed numbers. `k = int(x)`
+  makes `k` an Int when every assignment to `k` is an Int (`int(...)`, a literal, Int
+  arithmetic); `k = k / 2` keeps it a number. `enumerate(xs, start=1)` counts in Ints.
+  A comprehension of Int values is a real array unless an `[Int]` is wanted. A number is
+  never made an Int without `int`, `round`, `floor` or `ceil`.
+when: Instead of `float(i)` at every call, `m[float(k)]` keys and `[float(f(n)) ...]`.
+example: ints-and-numbers
+see: int-type, int-arrays
+keywords: Int number conversion exact float mix promote chr append map key enumerate start
+usage: form:int-type
+
+== int-arrays
+title: Int arrays: [Int]
+what: `[Int]` is a packed rank-1 array of Ints: `int_zeros(n)`, a literal in an Int position
+  (`idx: [Int] = [2, 0, 1]`, `ps: [Int] = []`), indexing, `len`, printing, passing and
+  returning. It grows with `ps = append(ps, k)` (amortized, like a real array's), and a
+  comprehension in an `[Int]` position builds one (`sq: [Int] = [k * k for k to n]`). An
+  Int indexes an array directly.
+when: For index lists, permutations, lists of primes and integer counts that must stay exact.
+example: int-arrays
+see: int-type, gathers
+keywords: [Int] int_zeros integer array index permutation counts
+usage: form:int-list-type, call:int_zeros
+
+== float32
+title: Float32, IEEE single precision
+what: `Float32` is an IEEE binary32 number. `x: Float32 = 0.1` holds the float32 nearest
+  0.1; `float32(x)` rounds a number or an Int to one and `float(x)` widens it exactly.
+  A literal beside a Float32 is a Float32 (`x * 3.0 + 1`); a Float32 and a number
+  variable do not mix: the compiler names `float32(y)` and `float(x)`. `+ - * /`,
+  `sqrt`, `abs`, `min`, `max` are correctly rounded and evaluated in float32 in every
+  engine (no fused multiply-add, no excess precision); `exp`, `log`, `sin`, `cos`,
+  `tanh` are Viv's double functions rounded once, checked on all 2^32 inputs.
+  `bfloat16(x)` and `float16(x)` round a Float32 to those precisions, to nearest even.
+  `fmt(x)` writes the shortest digits that read back as the same float32, as NumPy's
+  `repr(np.float32(x))` does.
+when: For GPU kernels and quantized models that compute in float32, and to reproduce a
+  NumPy float32 computation bit for bit.
+example: float32
+see: packed-arrays, num-and-bool, int-type
+keywords: Float32 float32 single precision binary32 bfloat16 float16 half round nearest even fp32
+usage: word:Float32, call:float32, call:bfloat16, call:float16
+
+== packed-arrays
+title: Packed arrays: [Float32], [BFloat16], [Float16], [Int8], [Int16], [Int32], [UInt8]
+what: Rank-1 arrays stored at their width: `float32_zeros(n)`, `bfloat16_zeros(n)`,
+  `float16_zeros(n)`, `int8_zeros(n)`, `int16_zeros(n)`, `int32_zeros(n)`,
+  `uint8_zeros(n)`, or a conversion named after the type: `float32(a)` of an `Arr`,
+  `bfloat16(w)` of a `[Float32]`, `int8(q)` of an `[Int]`. A float element reads as a
+  Float32 and a store rounds to nearest even; an integer element reads as an Int and a
+  store out of range stops the run (`128 does not fit in an Int8 (-128 to 127)`).
+  `float(a)` widens a float array to an `Arr`, `int64(a)` an integer one to an `[Int]`.
+  `sum` of a `[Float32]` takes NumPy's float32 order and gives `numpy.sum`'s bits;
+  `dot(a, b)` adds `a[i]*b[i]` in float32 with i ascending.
+when: For model weights (bf16, int8) and other data that must keep its width, and as
+  the arrays GPU kernels read and write.
+example: packed-arrays
+see: float32, int-arrays, binary-data
+keywords: [Float32] [BFloat16] [Float16] [Int8] [Int16] [Int32] [UInt8] float32_zeros bfloat16_zeros int8_zeros uint8_zeros int64 packed quantized weights
+usage: call:float32_zeros, call:bfloat16_zeros, call:float16_zeros, call:int8_zeros, call:int16_zeros, call:int32_zeros, call:uint8_zeros, call:int64
+
+== binary-data
+title: Binary files: read_bytes and the little-endian readers
+what: `read_bytes(path)` gives a file's bytes as an `[Int]`, one element per byte;
+  `read_bytes(path, offset, count)` gives only that window, so a large file is read in the
+  pieces a program needs. `le_u8`, `le_i8`, `le_u16`, `le_i16`, `le_u32`, `le_i32`,
+  `le_u64`, `le_i64` read the Int at an offset, and `le_f16`, `le_bf16`, `le_f32`, `le_f64`
+  the number, little-endian and exact (Python's `struct.unpack_from("<e", b, i)` and the
+  rest). In the browser a program reads the files attached to its run.
+when: For a binary format: a model file (GGUF), an image, a table of doubles written by
+  another program. Each byte is 8 bytes in memory, so read a large file in windows.
+example: binary-data
+see: int-arrays, int-type, read_text, lib/gguf/header
+keywords: bytes binary file read_bytes little-endian struct unpack f16 half bfloat16 float32 u32 u64 gguf
+usage: call:read_bytes, call:le_u32, call:le_f16, call:le_f32
+
+== enums-and-match
+title: Enums and match
+what: `enum Name { A, B(T1, T2) }` declares a sum type; a value is `Name.A` or
+  `Name.B(x, y)`. `match e { B(x, _) => { ... }, A | C => ..., _ => ... }` takes it apart.
+  A match must cover every variant or end with `_`: a missing variant is a compile error
+  that names it, and so is an arm that can never run. Payloads are Num, Int, Bool, Str, an
+  enum (the enum itself included) or an optional. Enum values are immutable.
+when: Instead of integer kind codes with an `if` chain per kind, and instead of flag
+  returns.
+example: enums-and-match
+see: optionals, int-type, recursion
+keywords: enum match variant sum type tagged union pattern case => _ wildcard
+usage: form:enum-decl, form:match
+
+== optionals
+title: Optionals: T?
+what: `T?` is an optional T, `Some(x)` or `None`, taken apart by `match` with `Some(v)` and
+  `None` arms. `None` adapts to an optional position.
+when: Instead of returning -1, NaN or a found flag beside the value.
+example: optionals
+see: enums-and-match, stop
+keywords: optional Some None maybe nullable ?
+usage: form:optional-type, word:Some, word:None
+
+== records
+title: Records
+what: `record P { x: Num, v: Arr }` declares a struct with typed fields, in every engine.
+  Build one with every field named, `P { x: 1.0, v: zeros(3) }`; read a field with `p.x`.
+  A def that takes or returns one annotates it (`def f(p: P) -> P`). Records nest, and
+  hold Num, Int, Bool, Str, arrays, maps, other records and arrays of records.
+when: Instead of slot constants into a number array (`p[SLOT_X]`), a flat parameter vector
+  with an offset table, or context threaded through many parameters.
+example: records
+see: record-defaults, constructor-defs, field-assignment, arrays-of-records, record-update, record-arithmetic, multiple-returns
+keywords: record struct field type class object
+usage: form:record-decl, form:record-literal
+
+== record-defaults
+title: Record field defaults
+what: `record GptConfig { vocab: Int, context: Int = 8, width: Int = 16 }` gives a field a
+  default; a literal that leaves the field out gets it, `GptConfig { vocab: 9 }`. A field
+  with no default must be given. A default is a constant: a literal, a top-level constant
+  or arithmetic of them (a value that calls a def or draws belongs in a constructor def).
+  A record update `R { f: e, ..base }` takes what it leaves out from `base`. The front end
+  writes the defaults into each literal, so the engines see complete literals.
+when: Instead of naming every field at every literal, a `defaults()` def that repeats the
+  fields, or a set of constants kept beside the record.
+example: record-defaults
+doc: lang/viv/src/ctor.rs
+see: records, constructor-defs, record-update
+keywords: default field dataclass record optional
+usage: form:field-default
+
+== constructor-defs
+title: Constructor defs
+what: `def Head(c: GptConfig) -> Head { ... }` is a def named after its record; `Head(c)`
+  calls it and `Head { ... }` is the literal, so it reads as Python's `Head(cfg)`. It must
+  declare the record as its return type, and a record has at most one. A literal's values
+  run in the order written; values that draw or call defs must be written in the record's
+  declaration order (the order the engines compute them), or the literal is refused.
+  `[Block(c) for l to c.layers]` builds an array of records in order.
+when: Instead of `init_head`, `make_block`, `new_gpt` defs beside each record.
+example: constructor-defs
+doc: lang/viv/src/ctor.rs
+see: records, record-defaults, arrays-of-records
+keywords: constructor new init record build __init__ class
+usage: form:constructor-def
+
+== record-update
+title: Record update: T { f: e, ..base }
+what: `T { f1: e1, ..base }` is the record `base` with the fields written replaced, Rust's
+  struct-update syntax. Any field may be written, or none (`T { ..base }` is a copy).
+when: For a record of options with defaults, instead of a helper def per field or a column
+  array.
+example: record-update
+see: records, field-assignment
+keywords: update struct defaults options .. spread copy with
+usage: form:record-update
+
+== field-assignment
+title: Field assignment and places
+what: `p.x = e` assigns a field, and a place may go through records and arrays of records:
+  `m.blocks[l].attn.Wq = W`, `m.last.W[1] = 5.0`. Records are values: after `q = m`,
+  `m.first.scale = 2.0` leaves `q` as it was. A write is into a variable of the def it is
+  in; a def does not change a record it was given.
+when: To change one field in place instead of rebuilding the whole record.
+example: field-assignment
+see: records, record-update, aliasing-and-copies
+keywords: field assign set place nested record value semantics
+usage: form:field-assign
+
+== arrays-of-records
+title: Arrays of records: [T]
+what: `[T]` is an array of records of one type: `[a, b]`, `append(rs, r)`, `rs[i]`,
+  `len(rs)`, `rs[i] = r`, `for r in rs`, and places through it (`mol.atoms[1].z = 2.0`). It
+  is a value, as each record in it is: `mol = Molecule { atoms: atoms }` and a write through
+  `mol` leaves `atoms` as it was.
+when: Instead of stacked arrays, parallel lists or a number table read by column
+  (`shells[s, SH_L]`).
+example: arrays-of-records
+see: records, growable-arrays, list-comprehension
+keywords: list of records array of structs [T] objects table
+usage: form:record-list-type
+
+== record-arithmetic
+title: Arithmetic on records of arrays
+what: For a record whose every field is an array (or a record or array of them), `+ - * /`
+  with another of its type or a number, `-r`, `sqrt(r)` and the other elementwise
+  functions act on each array; `zeros_like(r)` is one of the same shape, and `sum(r)` adds
+  its arrays' sums. A number field is refused, with its name.
+when: For a model's parameters and gradients (an optimizer step `p - lr * g`), instead of
+  one line per field or a flat parameter vector.
+example: record-arithmetic
+doc: www/src/pages/reference.astro
+see: for-leaves, value-and-grad-over-records, records
+keywords: record arithmetic parameters gradient zeros_like optimizer pytree
+usage: call:zeros_like
+
+== strings
+title: Strings
+what: `Str` is an immutable UTF-8 value. Length, indices and slices count code points, as
+  Python's do, negative indices count from the end, and slice bounds are clamped. The
+  functions are Python's, character for character (CPython 3.11's Unicode tables and error
+  messages): `split`, `join`, `strip`, `find`, `replace`, `upper`, `startswith`, `float`,
+  `int` and the rest. Strings are never changed in place. Literals side by side join
+  (`"ab" "cd"`, across lines inside parentheses), and `"""..."""` holds newlines.
+when: For labels, file parsing and text output, instead of character codes in arrays.
+example: strings
+see: string-lists, f-strings, method-call-syntax, in-operator
+keywords: Str string text unicode utf-8 split join strip find replace upper parse triple-quoted adjacent literal
+usage: form:str-type, call:split, call:join, call:replace, call:strip
+
+== string-lists
+title: Lists of strings: [Str]
+what: `[Str]` comes from `split`, a literal `["a", "b"]`, a comprehension, or `[]` grown by
+  `append`. It has `len`, indices, slices, `+`, `in`, `sorted`, `unique`, `join` and `for`.
+  `unique` gives each string once, sorted, which is the form of a Python set a program can
+  print and test.
+when: For tokens, labels and vocabularies, instead of a map used as a set or a string
+  joined and split again.
+example: string-lists
+see: strings, maps, in-operator
+keywords: list of strings [Str] words tokens unique sorted join set
+usage: call:unique, call:sorted
+
+== maps
+title: Maps
+what: `map()` is an empty map with number or string keys and values (one kind of each per
+  map). `m[k] = v` stores, `m[k]` reads, and the keys stay in the order first stored, so
+  printing never depends on hashing. `has`, `get(m, k, d)`, `remove`, `keys`, `values`,
+  `len`, `copy` and `clear` complete it. A map is one handle: after `b = m`, a store
+  through `b` is in `m`.
+when: For counts, lookups by label and sparse tables, instead of a linear search over
+  parallel arrays.
+example: maps
+see: map-comprehension, in-operator, string-lists
+keywords: map dict dictionary hash table keys values get has remove counter
+usage: call:map, call:has, call:get, call:keys, form:map-comprehension
+
+== complex-numbers
+title: Complex numbers: Cplx and CArr
+what: The `i` suffix makes an imaginary literal (`3.0 + 4.0i`); complex scalars have full
+  arithmetic with real promotion, `re`, `im`, `conj`, `abs` and complex `exp`, `log`,
+  `sqrt`, `sin`, `cos`, `tan`. `czeros(n)` or a literal with a complex element makes a
+  complex array (`CArr`), packed as interleaved doubles. Every engine computes them with
+  Viv's own formulas (Smith's division, no fused multiply-add), so the bits agree.
+  Complex arrays do not broadcast and are not printed whole.
+when: For Fourier work, quantum amplitudes and AC circuits, instead of separate real and
+  imaginary arrays.
+example: complex-numbers
+doc: www/src/pages/reference.astro
+see: fft
+keywords: complex imaginary i Cplx CArr czeros re im conj phase fourier
+usage: form:complex-literal, call:czeros
+
+== function-values
+title: Function values
+what: A def name or a lambda is a value: pass it to a def, hold it in a variable, call it
+  through the parameter. The compiled engines specialize a higher-order def per function
+  passed (`run_it(sq, x)` becomes `run_it__sq`). A builtin name such as `sqrt` is not a
+  function value; wrap it in a def or a lambda.
+when: To write one integrator, root finder or sweep that takes the function, instead of a
+  copy per function.
+example: function-values
+doc: lang/viv/src/defun.rs
+see: lambdas, method-registries, contracts
+keywords: function value higher-order callback def pass monomorphization
+usage: form:lambda
+
+== type-annotations
+title: Type annotations
+what: A parameter (`v: Arr`), a return (`-> Num`) and a variable (`label: Str = "x"`) may
+  be annotated with `Num`, `Int`, `Bool`, `Str`, `Arr`, `CArr`, `[Int]`, `[Str]`, `Map`,
+  a record name, `[T]` or `T?`. Unannotated types are inferred from the first binding; a
+  record parameter or a record result needs its annotation. A variable's type cannot change.
+when: Where inference cannot see the type (records, Ints, optionals), and to state an
+  interface the compiler checks.
+example: type-annotations
+see: int-type, records, optionals
+keywords: annotation type Num Int Arr Str Bool Map signature -> declare
+usage: form:typed-param, form:return-type
+
+== aliasing-and-copies
+title: Aliasing and copies
+what: Assignment and parameter passing alias arrays: `b = a` shares storage, and a def that
+  writes into an array parameter writes into the caller's array. `copy(a)` and every slice
+  are new arrays. Records are values (`q = p` gives `q` its own fields), but an array field
+  is shared like any array, so an element write through `q.v` is seen through `p.v`. Maps
+  are handles. Strings and lists of strings are never changed in place.
+when: When a def must not change its input: copy it, or slice it, before writing.
+example: aliasing-and-copies
+doc: www/src/pages/reference.astro
+see: slices, records, maps, memory-lens
+keywords: alias copy reference value semantics mutation shared storage
+usage: call:copy

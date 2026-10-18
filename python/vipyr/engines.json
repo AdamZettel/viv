@@ -1,0 +1,655 @@
+{
+ "viv": 1,
+ "note": "Numbers are copied from the committed files named in each entry; timings carry the machine and load they were measured at.",
+ "engines": [
+  {
+   "id": "power-flow",
+   "topic": "power",
+   "solves": "AC power flow by Newton-Raphson and fast-decoupled iteration, and DC power flow, on MATPOWER cases",
+   "vipyr": "vp.power.runpf(case)",
+   "viv": "lib/power/pf.viv",
+   "reference": "MATPOWER's own solution of t_case9_pf (lib/t/soln9_pf.mat, commit 80b6e16); an independent SciPy power flow (lib/power/oracle/pf_scipy.py)",
+   "agreement": "Newton on t_case9_pf: max dVm 4.4e-16 p.u., dVa 3.0e-14 deg against MATPOWER; on case9241pegase against SciPy: dVm 2.6e-13 p.u., dVa 5.0e-11 deg",
+   "evidence": [
+    "lib/power/COMPARISON.md",
+    "lib/power/compare.json"
+   ],
+   "claims": [
+    "claims/power/sparse_newton_scales_linearly.viv",
+    "claims/power/dc_error_with_loading.viv"
+   ],
+   "map": "viv map lib/power/pf.viv --text",
+   "comparison": {
+    "against": "SciPy power flow, scipy.sparse + SuperLU (lib/power/oracle/pf_scipy.py)",
+    "speed": "Newton solve: Viv 0.31 ms, SciPy 4.99 ms on case118; 134.82 ms, 202.22 ms on case9241pegase",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "Apple M2 Pro, load about 10",
+    "source": "lib/power/COMPARISON.md"
+   }
+  },
+  {
+   "id": "power-sparse-lu",
+   "topic": "linalg",
+   "solves": "Sparse LU factorization with minimum-degree ordering of the power-flow Jacobian",
+   "vipyr": null,
+   "viv": "lib/power/splu.viv",
+   "reference": "scipy.sparse.linalg.splu (SuperLU, MMD_AT_PLUS_A order, same pivot threshold)",
+   "agreement": "case9241pegase: fill 221310 entries vs SuperLU's 218729; residual 6.8e-13",
+   "evidence": [
+    "lib/power/COMPARISON.md"
+   ],
+   "claims": [],
+   "map": "viv map lib/power/splu.viv --text",
+   "comparison": {
+    "against": "scipy.sparse.linalg.splu (SuperLU)",
+    "speed": "Viv 6.43 ms, SuperLU 3.78 ms on case2383wp; 77.76 ms, 2470.30 ms on case9241pegase, where SuperLU varied from 22 ms to 2.5 s between runs",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro, load about 10",
+    "source": "lib/power/COMPARISON.md"
+   }
+  },
+  {
+   "id": "power-contingency",
+   "topic": "power",
+   "solves": "N-1 contingency analysis: a power flow for every branch and generator outage",
+   "vipyr": "vp.power.contingency(case)",
+   "viv": "lib/power/contingency.viv",
+   "reference": "PYPOWER 5.1.21 runpf, one outage at a time; pandapower 3.5.6 run_contingency",
+   "agreement": "case118, 232 outages compared: branch |S| to 1.4e-08 MVA and Vm to 1.6e-11 p.u. against PYPOWER",
+   "evidence": [
+    "lib/power/COMPARISON.md",
+    "lib/power/compare_study.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/power/contingency.viv --text",
+   "comparison": {
+    "against": "PYPOWER 5.1.21 runpf in a loop (Python/NumPy/SciPy)",
+    "speed": "case118, 240 outages: vp.power 0.08 s, PYPOWER 1.53 s; case300, 480 outages: 0.75 s, 5.43 s",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "load average near 30; timings are upper bounds",
+    "source": "lib/power/COMPARISON.md"
+   }
+  },
+  {
+   "id": "power-short-circuit",
+   "topic": "power",
+   "solves": "Three-phase short-circuit currents by IEC 60909",
+   "vipyr": "vp.power.short_circuit(case)",
+   "viv": "lib/power/shortcircuit.viv",
+   "reference": "pandapower 3.5.6 shortcircuit.calc_sc (3ph, case max)",
+   "agreement": "ieee14: Ik'' max relative difference 1.3e-15; case118_v33: 1.3e-02 from a different K_T rule on unit-ratio transformers, 3.0e-15 with the same rule",
+   "evidence": [
+    "lib/power/COMPARISON.md",
+    "lib/power/compare_study.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/power/shortcircuit.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "skyrme-hf",
+   "topic": "nuclear",
+   "solves": "Spherical Skyrme Hartree-Fock of closed-shell nuclei (SLy4, SLy5, SIII, SkM*)",
+   "vipyr": null,
+   "viv": "lib/skyrme/spherical.viv",
+   "reference": "An independent NumPy solver (lib/skyrme/refs/skyrme_hf.py); skyrme_rpa's published oxygen-16 output (Colo et al., CPC 184, 142 (2013)); AME2020 and Angeli-Marinova radii",
+   "agreement": "56 runs against NumPy: E/A to 3.9e-14 MeV, radii to 9.0e-13 fm, levels to 1.9e-11 MeV; oxygen-16 SLy5 E/A -8.0250 MeV vs skyrme_rpa -8.0261 MeV",
+   "evidence": [
+    "lib/skyrme/COMPARISON.md"
+   ],
+   "claims": [
+    "claims/science/spin_orbit_magic_28.viv",
+    "claims/science/spin_orbit_nuclei_vs_atoms.viv"
+   ],
+   "map": "viv map lib/skyrme/spherical.viv --text",
+   "comparison": {
+    "against": "NumPy solver lib/skyrme/refs/skyrme_hf.py (one thread)",
+    "speed": "per run at 0.1 fm: exported Viv library 0.016 to 0.089 s, NumPy 0.4 to 4.4 s",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "Apple M-series",
+    "source": "lib/skyrme/COMPARISON.md"
+   }
+  },
+  {
+   "id": "shell-model",
+   "topic": "nuclear",
+   "solves": "Nuclear shell-model lowest eigenstates (energies, spins) in the p and sd shells",
+   "vipyr": null,
+   "viv": "lib/nuclear/shell/shellmodel.viv",
+   "reference": "BIGSTICK 8.0.0 (oracle build, Lanczos vectors in double precision) on the same .sps and .int files",
+   "agreement": "energies within 4.2e-6 MeV over seven cases (tolerance 1e-5); spins within 1.7e-5 (silicon-28)",
+   "evidence": [
+    "lib/nuclear/shell/test_shellmodel.py",
+    "lib/nuclear/shell/bigstick_reference.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/nuclear/shell/shellmodel.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "dftatom",
+   "topic": "chemistry",
+   "solves": "Self-consistent LDA and relativistic LDA atoms on a radial mesh (port of dftatom)",
+   "vipyr": "vp.dftatom.atom(Z=26)",
+   "viv": "ports/dftatom/atom.viv",
+   "reference": "upstream dftatom e49b3042 (gfortran 15.2.0); NIST SRD 141 LDA and RLDA tables",
+   "agreement": "all 50 cases the same doubles as upstream with Viv's libm; every E_tot within 5.1e-7 Ha of NIST, every eigenvalue within 1.2e-6",
+   "evidence": [
+    "ports/dftatom/COMPARISON.md"
+   ],
+   "claims": [
+    "claims/science/atom_virial.viv"
+   ],
+   "map": "viv map ports/dftatom/atom.viv --text",
+   "comparison": {
+    "against": "upstream dftatom Fortran, -O3 -march=native -ffast-math and -O2 strict",
+    "speed": "one SCF solve, iron: Viv exact 0.105 s; Fortran -O3 0.070 s; Fortran -O2 strict 0.091 s",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro, loaded",
+    "source": "ports/dftatom/COMPARISON.md"
+   }
+  },
+  {
+   "id": "liquids-md-mc",
+   "topic": "physics",
+   "solves": "Lennard-Jones liquid by molecular dynamics and Monte Carlo (port of Allen-Tildesley examples)",
+   "vipyr": "vp.liquids.md_nve()",
+   "viv": "ports/liquids/md_nve.viv",
+   "reference": "upstream Allen-Tildesley examples 4818bc82 (gfortran 15.2.0); Thol et al. 2015 equation of state; upstream GUIDE.md",
+   "agreement": "12 cases, 0 differing doubles against upstream's Fortran; mc_nvt E/N -3.3323 +- 0.0026 vs GUIDE.md -3.332(1)",
+   "evidence": [
+    "ports/liquids/COMPARISON.md",
+    "ports/liquids/timings.json"
+   ],
+   "claims": [],
+   "map": "viv map ports/liquids/md_nve.viv --text",
+   "comparison": {
+    "against": "upstream Fortran (gfortran -O2) and upstream's Python",
+    "speed": "md_nve N=256, 10 x 200 steps: Viv 0.941 s, Fortran 0.452 s, Python 28.096 s; link cells N=864: Viv 4.656 s, Fortran 3.409 s",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Darwin arm64, load 7.7 to 9.4",
+    "source": "ports/liquids/timings.json"
+   }
+  },
+  {
+   "id": "pwdft",
+   "topic": "physics",
+   "solves": "Plane-wave Kohn-Sham DFT (LDA, GTH pseudopotentials) with band structures for six crystals",
+   "vipyr": null,
+   "viv": "dft/pwdft_it.viv",
+   "reference": "independent NumPy implementations dft/ref/pwdft_ref.py and pwdft_iter.py; Marini, Onida and Del Sole, PRL 88, 016403 (2002)",
+   "agreement": "dense engine: same energy as the NumPy twin to 1e-8 Ha and the same iteration count; iterative engine to 1e-7 Ha and 1e-5 eV; copper X5 -1.40 eV vs published LDA -1.40",
+   "evidence": [
+    "dft/README.md",
+    "dft/results/README.md"
+   ],
+   "claims": [],
+   "map": "viv map dft/pwdft_it.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "hartree-fock",
+   "topic": "chemistry",
+   "solves": "Restricted and unrestricted Hartree-Fock in Gaussian basis sets (STO-3G to cc-pVTZ)",
+   "vipyr": null,
+   "viv": "lib/hf/scf.viv",
+   "reference": "PySCF 2.5.0, same core-Hamiltonian guess and CDIIS",
+   "agreement": "11 cases: energy within 1.3e-11 Eh of PySCF ((H2O)8, 6-31G*), the other ten within 7.4e-13 Eh",
+   "evidence": [
+    "study/ports/pyscf/results/RESULTS.md",
+    "study/ports/pyscf/results/verify.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/hf/scf.viv --text",
+   "comparison": {
+    "against": "PySCF 2.5.0 (Python over libcint and libcvhf C)",
+    "speed": "whole SCF: water STO-3G Viv native 2.4 ms, PySCF 2.3 ms; water cc-pVTZ 265.2 ms, 100.5 ms; (H2O)8 6-31G* 245.1 s, 26.5 s",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro; cells marked * taken at load 2 or more",
+    "source": "study/ports/pyscf/results/RESULTS.md"
+   }
+  },
+  {
+   "id": "boys-function",
+   "topic": "chemistry",
+   "solves": "The Boys function F_n(T) of Gaussian integrals",
+   "vipyr": "vp.special.boys(n_max, T)",
+   "viv": "lib/hf/boys.viv",
+   "reference": "mpmath at 50 digits",
+   "agreement": "1.7e-15 relative on [0, 200] against its mpmath table; tolerance 5e-15",
+   "evidence": [
+    "python/vipyr/spec.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/hf/boys.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "plasma-dispersion",
+   "topic": "plasma",
+   "solves": "The plasma dispersion function Z and the Faddeeva function w",
+   "vipyr": "vp.special.plasma_z(zeta)",
+   "viv": "lib/zfunc.viv",
+   "reference": "scipy.special.wofz",
+   "agreement": "w 1e-14 relative on -6 <= Re z <= 6, -1 <= Im z <= 4 (Weideman's expansion, N = 40); tolerance 2e-14 for Z, 1e-12 for Z'",
+   "evidence": [
+    "python/vipyr/spec.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/zfunc.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "ode-solve",
+   "topic": "ode",
+   "solves": "Stiff and non-stiff initial value problems by Dormand-Prince, Radau IIA and BDF",
+   "vipyr": "vp.ode.solve(rhs, t_span, y0, method=...)",
+   "viv": "lib/ode/solve.viv",
+   "reference": "stiff test set reference solutions (Mazzia and Magherini, Bari, 2008); SciPy 1.12 solve_ivp step counts",
+   "agreement": "Radau IIA largest relative error 5.2e-10 at rtol 1e-8; BDF 1.6e-6; Robertson to 1e11 by Radau: 1717 steps vs SciPy's 1718, end values to 9.3e-13",
+   "evidence": [
+    "python/vipyr/spec.json",
+    "lib/ode/bench_scipy.json"
+   ],
+   "claims": [
+    "claims/math/stiff_robertson.viv",
+    "claims/math/kepler_leapfrog_rk4.viv"
+   ],
+   "map": "viv map lib/ode/solve.viv --text",
+   "comparison": {
+    "against": "SciPy 1.12 solve_ivp",
+    "speed": "Robertson to 1e11, Radau: Viv 0.0060 s, SciPy 0.134 s; Kepler, Dormand-Prince: Viv 0.0015 s, SciPy 0.052 s",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "Darwin arm64, 1-minute load 16.0 at start, 12.8 at end",
+    "source": "lib/ode/bench_scipy.json"
+   }
+  },
+  {
+   "id": "ode-batch",
+   "topic": "ode",
+   "solves": "Thousands of parameter sets of one initial value problem in one call",
+   "vipyr": "vp.ode.batch(rhs, t_span, y0, params)",
+   "viv": "lib/ode/solve.viv",
+   "reference": "Bateman's closed form for one-compartment pharmacokinetics; SciPy solve_ivp per parameter set",
+   "agreement": "40 pharmacokinetic models: worst error 2.8e-10 mg/L at rtol 1e-9; 10000 SIR runs: max abs diff 1.7e-14 from SciPy (dopri5)",
+   "evidence": [
+    "python/vipyr/spec.json",
+    "lib/ode/bench_scipy.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/ode/solve.viv --text",
+   "comparison": {
+    "against": "SciPy 1.12 solve_ivp in a loop",
+    "speed": "10000 SIR epidemics: dopri5 Viv 0.839 s, SciPy 22.44 s; Radau Viv 6.92 s, SciPy 109.0 s",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "Darwin arm64, 1-minute load 16.0 at start, 12.8 at end",
+    "source": "lib/ode/bench_scipy.json"
+   }
+  },
+  {
+   "id": "minpack-least-squares",
+   "topic": "optimize",
+   "solves": "Nonlinear least squares by MINPACK's Levenberg-Marquardt (lmder)",
+   "vipyr": "vp.optimize.least_squares(fun, x0)",
+   "viv": "lib/minpack/lmder.viv",
+   "reference": "gfortran build of netlib's MINPACK lmder (-O0 -ffp-contract=off); SciPy 1.12 least_squares(method='lm')",
+   "agreement": "the 15 Moré-Garbow-Hillstrom cases using only arithmetic and square roots match the Fortran bit for bit; nfev and njev equal the Fortran's in every case but Meyer",
+   "evidence": [
+    "lib/minpack/README.md",
+    "lib/minpack/bench_optimize.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/minpack/lmder.viv --text",
+   "comparison": {
+    "against": "SciPy 1.12 least_squares(method='lm')",
+    "speed": "Rosenbrock, standard start: Viv 0.25 ms, SciPy 0.081 ms per call, same nfev 21 and njev 16",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro, load 12.06 to 13.62",
+    "source": "lib/minpack/bench_optimize.json"
+   }
+  },
+  {
+   "id": "minpack-curve-fit",
+   "topic": "optimize",
+   "solves": "Curve fitting with parameter covariances, on MINPACK's Levenberg-Marquardt",
+   "vipyr": "vp.optimize.curve_fit(f, x, y, p0)",
+   "viv": "lib/minpack/fit.viv",
+   "reference": "NIST StRD nonlinear regression certified values; SciPy 1.12 curve_fit",
+   "agreement": "Misra1a start 1: 9.8 certified digits of the parameters (SciPy 9.2); Lanczos3 start 1: 6.8 (SciPy 5.0)",
+   "evidence": [
+    "lib/minpack/bench_optimize.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/minpack/fit.viv --text",
+   "comparison": {
+    "against": "SciPy 1.12 curve_fit",
+    "speed": "Misra1a start 1: Viv 0.30 ms, SciPy 0.19 ms; Lanczos3 start 1: 0.89 ms, 3.01 ms",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro, load 12.06 to 13.62",
+    "source": "lib/minpack/bench_optimize.json"
+   }
+  },
+  {
+   "id": "lqr-riccati",
+   "topic": "control",
+   "solves": "Continuous algebraic Riccati equation and LQR gain, after SLICOT's algorithms",
+   "vipyr": "vp.control.lqr(A, B, Q, R)",
+   "viv": "lib/are.viv",
+   "reference": "scipy.linalg.solve_continuous_are; relative Riccati residual",
+   "agreement": "relative residual under 4e-15 on lib/are's test systems; gain within 1e-9 relative of SciPy's (tolerance)",
+   "evidence": [
+    "python/vipyr/spec.json"
+   ],
+   "claims": [
+    "claims/control/lqr_gain_margin.viv"
+   ],
+   "map": "viv map lib/are.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "real-schur",
+   "topic": "linalg",
+   "solves": "Real Schur form and eigenvalues of a dense matrix",
+   "vipyr": "vp.linalg.schur(A)",
+   "viv": "lib/schur.viv",
+   "reference": "scipy.linalg.schur(A, output='real') and scipy.linalg.eigvals",
+   "agreement": "held to residual |A - Z T Z^T| / |A| 2e-13, orthogonality 2e-13, eigenvalues 1e-10 relative (tolerances)",
+   "evidence": [
+    "python/vipyr/spec.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/schur.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "cartpole-closed-loop",
+   "topic": "control",
+   "solves": "Nonlinear cart-pole simulated under an LQR gain",
+   "vipyr": "vp.control.simulate(...)",
+   "viv": "lib/cartpole_api.viv",
+   "reference": "its own linearization test and the cart-pole post's closed loop",
+   "agreement": "near the upright the nonlinear rate equals A s to 1e-10; from 25 degrees the pole ends within 0.00096 rad of upright after 6 s",
+   "evidence": [
+    "python/vipyr/spec.json"
+   ],
+   "claims": [],
+   "map": "viv map lib/cartpole_api.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "stats-ols",
+   "topic": "stats",
+   "solves": "Ordinary least squares by pivoted Householder QR with one refinement step",
+   "vipyr": "vp.stats.ols(X, y)",
+   "viv": "lib/stats/linmod.viv",
+   "reference": "NIST StRD linear regression certified values; statsmodels 0.14; R 4.3.3 lm",
+   "agreement": "Filip: 7.61 certified digits of the coefficients, statsmodels and R lm 0.0; Longley: 13.16 (R lm 12.98)",
+   "evidence": [
+    "lib/stats/nist_lls.json"
+   ],
+   "claims": [
+    "claims/stats/lstsq_qr_vs_normal_equations.viv"
+   ],
+   "map": "viv map lib/stats/linmod.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "stats-glm",
+   "topic": "stats",
+   "solves": "Generalized linear models by IRLS, following R's glm.fit",
+   "vipyr": "vp.stats.glm(X, y, family)",
+   "viv": "lib/stats/glm.viv",
+   "reference": "R 4.3.3 glm on its own datasets",
+   "agreement": "mtcars logit coefficients to 2.7e-15 relative, same 8 iterations as R; all cases to 1e-10 at R's epsilon 1e-14",
+   "evidence": [
+    "lib/stats/glm_check.json",
+    "python/vipyr/spec.json"
+   ],
+   "claims": [
+    "claims/stats/logistic_separation.viv"
+   ],
+   "map": "viv map lib/stats/glm.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "ising-mc",
+   "topic": "physics",
+   "solves": "Two-dimensional Ising model by Metropolis and Wolff Monte Carlo",
+   "vipyr": "vp.statmech.ising()",
+   "viv": "stat/ising/ising_mc.viv",
+   "reference": "Onsager (1944), Yang (1952), Kaufman (1949) exact results",
+   "agreement": "statistical checks, most at 4 standard errors, against the exact values; Binder crossings at about 2.263 and 2.269 vs T_c 2.26919",
+   "evidence": [
+    "stat/ising/test_ising.py",
+    "claims/results.json"
+   ],
+   "claims": [
+    "claims/science/ising_binder_crossing.viv"
+   ],
+   "map": "viv map stat/ising/ising_mc.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "bs-implied-vol",
+   "topic": "finance",
+   "solves": "Black-Scholes prices and implied volatility by Newton iteration",
+   "vipyr": "vp.finance.implied_vol(...)",
+   "viv": "examples/options/bs.viv",
+   "reference": "SciPy closed form; round trip through bs_price",
+   "agreement": "bs_price worst relative error 1.0e-13 on 2000 random quotes; implied vol round trip 8.8e-13 on 898 quotes",
+   "evidence": [
+    "python/vipyr/spec.json",
+    "examples/options/RESULTS.md"
+   ],
+   "claims": [
+    "claims/finance/put_call_parity.viv"
+   ],
+   "map": "viv map examples/options/bs.viv --text",
+   "comparison": {
+    "against": "NumPy 1.24.4 and Numba 0.57.1",
+    "speed": "1e6 quotes: Viv exact 0.863 s, NumPy 4.52 s, Numba 0.585 s",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro, load 1.8 to 2.7",
+    "source": "examples/options/RESULTS.md"
+   }
+  },
+  {
+   "id": "crr-tree",
+   "topic": "finance",
+   "solves": "American and European options on a Cox-Ross-Rubinstein binomial tree",
+   "vipyr": "vp.finance.crr_price(...)",
+   "viv": "examples/options/crr.viv",
+   "reference": "Hull's printed American put values; Black-Scholes",
+   "agreement": "Hull's 4.49, 4.263, 4.272, 4.278, 4.283 (N = 5 to 500) within half a unit of the last digit; European at N = 4000 within 2e-3 of Black-Scholes",
+   "evidence": [
+    "python/vipyr/spec.json",
+    "examples/options/RESULTS.md"
+   ],
+   "claims": [],
+   "map": "viv map examples/options/crr.viv --text",
+   "comparison": {
+    "against": "NumPy 1.24.4 and Numba 0.57.1",
+    "speed": "1e3 American puts, N = 1000: Viv exact 0.897 s, NumPy 10.8 s, Numba 0.571 s",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro, load 1.8 to 2.7",
+    "source": "examples/options/RESULTS.md"
+   }
+  },
+  {
+   "id": "mc-asian",
+   "topic": "finance",
+   "solves": "Arithmetic Asian option by Monte Carlo with Philox random numbers",
+   "vipyr": null,
+   "viv": "examples/options/mc.viv",
+   "reference": "the same algorithm in NumPy and Numba",
+   "agreement": "plain estimate agrees with the other columns to 5e-14",
+   "evidence": [
+    "examples/options/RESULTS.md",
+    "examples/options/bench_results.json"
+   ],
+   "claims": [
+    "claims/finance/monte_carlo_rate.viv"
+   ],
+   "map": "viv map examples/options/mc.viv --text",
+   "comparison": {
+    "against": "NumPy 1.24.4 and Numba 0.57.1",
+    "speed": "1e6 paths x 12 dates: Viv exact 1.42 s, NumPy 0.660 s, Numba 0.258 s",
+    "lines": null,
+    "viv_slower": true,
+    "machine": "Apple M2 Pro, load 1.8 to 2.7",
+    "source": "examples/options/RESULTS.md"
+   }
+  },
+  {
+   "id": "tiny-gpt",
+   "topic": "ml",
+   "solves": "A small GPT trained with Muon and Adam, gradients by reverse-mode differentiation",
+   "vipyr": "vp.gpt.train(text, steps, seed)",
+   "viv": "lib/gpt/gpt.viv",
+   "reference": "NumPy program study/compare/ml/tiny_gpt.py (hand-written backward pass); PyTorch 2.2.2 reimplementation python/tests/gpt_reference.py",
+   "agreement": "30 losses within 1.2e-15 of NumPy's, trained matrices within 3.6e-15 relative; 50 losses within 1.7e-14 relative of PyTorch's",
+   "evidence": [
+    "python/vipyr/spec.json",
+    "study/compare/ml/tiny_gpt.md"
+   ],
+   "claims": [],
+   "map": "viv map lib/gpt/gpt.viv --text",
+   "comparison": {
+    "against": "NumPy program study/compare/ml/tiny_gpt.py",
+    "speed": null,
+    "lines": "Viv 218 code lines vs Python 242",
+    "viv_slower": null,
+    "machine": null,
+    "source": "study/compare/ml/tiny_gpt.md"
+   }
+  },
+  {
+   "id": "sisso",
+   "topic": "ml",
+   "solves": "Symbolic regression by SISSO: feature construction, sure independence screening, L0 fit",
+   "vipyr": "vp.sisso.fit(df, target, units, rung, dim, ops)",
+   "viv": "study/ports/sisso/sisso.viv",
+   "reference": "SISSO 3.5 Fortran (bc18cae), gfortran 15 and Open MPI 5",
+   "agreement": "five cases: same feature-space sizes, subspace and descriptors; coefficients, RMSE and MaxAE to the Fortran's ten printed digits",
+   "evidence": [
+    "study/ports/sisso/NOTES.md",
+    "study/ports/sisso/fortran_reference.json"
+   ],
+   "claims": [],
+   "map": "viv map study/ports/sisso/sisso.viv --text",
+   "comparison": {
+    "against": "SISSO 3.5 Fortran",
+    "speed": "timing case: Viv 3.4 s, Fortran 7.2 s; fcheavy 0.30 s, 0.46 s",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "shared with other jobs",
+    "source": "study/ports/sisso/NOTES.md"
+   }
+  },
+  {
+   "id": "features-sessions",
+   "topic": "data",
+   "solves": "Per-entity point-in-time features (sessions, velocity, delinquency) on a pandas DataFrame",
+   "vipyr": "vp.features.sessions(df)",
+   "viv": "catalog/sessions.viv",
+   "reference": "pandas groupby().apply() with a Python loop per row (catalog/catalog.py)",
+   "agreement": "equal bit for bit; no feature reads a row after its own time (vipyr.check_point_in_time)",
+   "evidence": [
+    "python/vipyr/spec.json",
+    "gallery/data/features_bench.json"
+   ],
+   "claims": [],
+   "map": "viv map catalog/sessions.viv --text",
+   "comparison": {
+    "against": "pandas 2.2.2 groupby().apply()",
+    "speed": "219,065 events: sessions 0.0125 s, 4.289 s; velocity 0.1544 s, 3.351 s",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "Apple M2 Pro, load 20.7",
+    "source": "gallery/data/features_bench.json"
+   }
+  },
+  {
+   "id": "gbm-deploy",
+   "topic": "ml",
+   "solves": "A scikit-learn gradient-boosted classifier exported as Viv and compiled to C",
+   "vipyr": null,
+   "viv": "examples/deploy/churn.viv",
+   "reference": "scikit-learn GradientBoostingClassifier predict_proba",
+   "agreement": "30000 rows: max abs diff 1.1e-16 (1 ulp) on 21 values, labels identical",
+   "evidence": [
+    "examples/deploy/results.json"
+   ],
+   "claims": [],
+   "map": "viv map examples/deploy/churn.viv --text",
+   "comparison": {
+    "against": "scikit-learn predict_proba",
+    "speed": "C library 1.96e6 rows/s, scikit-learn 1.01e6 rows/s; one row 19.4 us, 851 us",
+    "lines": null,
+    "viv_slower": false,
+    "machine": "load 7.6",
+    "source": "examples/deploy/results.json"
+   }
+  },
+  {
+   "id": "nas-parallel",
+   "topic": "numerics",
+   "solves": "NAS Parallel Benchmarks EP, IS, CG, MG and FT, serial",
+   "vipyr": null,
+   "viv": "study/benchmarks/viv/nas/cg.viv",
+   "reference": "NPB 3.4.3 verification (checksums, residual norms, zeta, ranks)",
+   "agreement": "passes NPB's own check at every class run (130 runs)",
+   "evidence": [
+    "study/benchmarks/viv/nas/cg.viv"
+   ],
+   "claims": [],
+   "map": "viv map study/benchmarks/viv/nas/cg.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "numpy-benchmarks",
+   "topic": "numerics",
+   "solves": "serge-sans-paille's numpy-benchmarks kernels translated to Viv by py2viv",
+   "vipyr": null,
+   "viv": "study/benchmarks/viv/npb/arc_distance.viv",
+   "reference": "the suite's NumPy outputs, checked before each timing",
+   "agreement": "20 of 32 kernels translate and pass the output check; 12 are refused",
+   "evidence": [
+    "study/benchmarks/viv/npb/arc_distance.viv"
+   ],
+   "claims": [],
+   "map": "viv map study/benchmarks/viv/npb/arc_distance.viv --text",
+   "comparison": null
+  },
+  {
+   "id": "adder-depth",
+   "topic": "hardware",
+   "solves": "Ripple-carry and Kogge-Stone adders built from NAND gates, depth and gate count",
+   "vipyr": null,
+   "viv": "claims/hardware/adder_depth.viv",
+   "reference": "integer addition, exhaustive and random",
+   "agreement": "both adders right on all 10,000 additions; 64-bit critical path 132 gate delays (ripple) vs 13 (Kogge-Stone)",
+   "evidence": [
+    "claims/results.json"
+   ],
+   "claims": [
+    "claims/hardware/adder_depth.viv"
+   ],
+   "map": "viv map claims/hardware/adder_depth.viv --text",
+   "comparison": null
+  }
+ ]
+}

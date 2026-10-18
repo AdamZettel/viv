@@ -1,0 +1,402 @@
+###
+post: Printing a CAS expression as Viv and as LaTeX
+agent: claude
+
+An expression in the store (lib/cas/store) is printed in two steps. First it
+becomes a syntax tree of the shape Viv's parser builds: `a + b`, `a - b`,
+`a * b`, `a / b`, `-a`, `pow(a, b)` (written `a ^ b`), calls, names and
+numbers. That step decides the
+presentation: the terms of a sum with the highest power first, a negative term
+as a subtraction, the factors with negative exponents under a fraction bar,
+$u^{1/2}$ as `sqrt(u)`.
+
+Then the tree is written two ways:
+
+- `cas_text(e)`: Viv source with only the parentheses Viv's precedence needs.
+  Reading it back with `cas` gives the same node.
+- `cas_tex(e)`: LaTeX by the rules of the compiler's printer, `lang/viv/src/tex.rs`:
+  `\frac` for a quotient, `\left( \right)` only where the operators need
+  them, `\,` between factors and `\cdot` before a digit, $e^{u}$, `\ln`,
+  `\sin`, `\sqrt`. A Rust test (`cas_tex_is_tex_rs_on_cas_text` in
+  `lang/viv/tests/cas.rs`) prints a corpus both ways and requires `cas_tex(e)`
+  to equal tex.rs's LaTeX of `cas_text(e)`. Two differences are deliberate:
+  the constant `pi` is $\pi$ (tex.rs prints a two-letter name upright unless
+  a glossary names it), and an integer of a million or more is written out in
+  full, since it is exact (tex.rs writes a double that large as
+  $m \times 10^{k}$).
+
+Used with `import cas.show`.
+###
+from cas.store import (
+    C_HALF, C_ONE, C_PI, cas_add, cas_addv, cas_base, cas_coeff, cas_div, cas_expo, cas_fn,
+    cas_int, cas_isnum, cas_kid, cas_kids, cas_kind, cas_mono, cas_mul, cas_name_of, cas_neg,
+    cas_nk, cas_np, cas_nq, cas_num, cas_pow, cas_sqrt, cas_sym, K_FAIL, K_FN, K_MUL, K_NUM,
+    K_POW, K_SYM,
+)
+
+# syntax node kinds: the shapes of Viv's Core expressions
+SX_NUM = 0
+SX_NAME = 1
+SX_ADD = 2
+SX_SUB = 3
+SX_MUL = 4
+SX_DIV = 5
+SX_NEG = 6
+SX_POW = 7
+SX_CALL = 8
+
+# the syntax tree being printed: kind, operands, text (a number's digits, a name)
+SX_KIND = map()
+SX_A = map()
+SX_B = map()
+SX_S = map()
+SX_COUNT = zeros(1)
+
+# Viv's precedence levels, loosest first
+V_SUM = 1
+V_PROD = 2
+V_UNARY = 3
+V_POW = 4
+V_ATOM = 5
+
+# tex.rs's binding levels (lang/viv/src/tex.rs, P_ADD to P_ATOM)
+P_ADD = 5
+P_MUL = 6
+P_NEG = 7
+P_POST = 8
+P_ATOM = 9
+
+# integers below this print as tex.rs prints a double; above it, every digit
+TEX_PLAIN_LIMIT = 1000000
+
+def sx(kind, a, b, s) {
+    i = SX_COUNT[0]
+    SX_KIND[i] = kind
+    SX_A[i] = a
+    SX_B[i] = b
+    SX_S[i] = s
+    SX_COUNT[0] = i + 1
+    return i
+}
+def sx_num(n) {
+    return sx(SX_NUM, 0, 0, fmt(n, ".17g"))
+}
+
+#| `-t`, with the minus moved onto the first factor of a product, so a
+#| negative term reads `-2 * x`, not `-(2 * x)`.
+def sx_neg(t) {
+    if SX_KIND[t] == SX_MUL {
+        return sx(SX_MUL, sx_neg(SX_A[t]), SX_B[t], "")
+    }
+    return sx(SX_NEG, t, 0, "")
+}
+
+#| The product of the syntax nodes in `fs`, left to right; 1 when empty.
+def sx_product(fs) {
+    if len(fs) == 0 {
+        return sx_num(1)
+    }
+    acc = fs[0]
+    for i from 1 to len(fs) {
+        acc = sx(SX_MUL, acc, fs[i], "")
+    }
+    return acc
+}
+
+#| The syntax tree of a positive rational `p/q`.
+def sx_rat(p, q) {
+    if q == 1 {
+        return sx_num(p)
+    }
+    return sx(SX_DIV, sx_num(p), sx_num(q), "")
+}
+
+#| The syntax tree of `e`.
+def sx_of(e) {
+    k = cas_kind(e)
+    if k == K_NUM {
+        p = cas_np(e)
+        if p < 0 {
+            return sx(SX_NEG, sx_rat(-p, cas_nq(e)), 0, "")
+        }
+        return sx_rat(p, cas_nq(e))
+    }
+    if k == K_SYM {
+        return sx(SX_NAME, 0, 0, cas_name_of(e))
+    }
+    if k == K_FAIL {
+        return sx(SX_CALL, sx(SX_NAME, 0, 0, cas_name_of(e)), 0, "refused")
+    }
+    if k == K_FN {
+        return sx(SX_CALL, sx_of(cas_kid(e, 0)), 0, cas_name_of(e))
+    }
+    if k == K_POW {
+        return sx_power(cas_kid(e, 0), cas_kid(e, 1))
+    }
+    if k == K_MUL {
+        return sx_mul(e)
+    }
+    return sx_sum(e)
+}
+
+#| `b^x` as syntax: sqrt for 1/2, a quotient for a negative exponent.
+def sx_power(b, x) {
+    if x == C_ONE {
+        return sx_of(b)
+    }
+    if x == C_HALF {
+        return sx(SX_CALL, sx_of(b), 0, "sqrt")
+    }
+    if cas_isnum(x) and cas_np(x) < 0 {
+        return sx(SX_DIV, sx_num(1), sx_power(b, cas_neg(x)), "")
+    }
+    return sx(SX_POW, sx_of(b), sx_of(x), "")
+}
+
+#| A product: the coefficient's numerator and the factors with positive
+#| exponents over its denominator and the factors with negative ones.
+def sx_mul(e) {
+    p, q = cas_coeff(e)
+    m = cas_mono(e)
+    fs = cas_kids(m)
+    if cas_kind(m) != K_MUL {
+        fs = [m]
+    }
+    num = []
+    den = []
+    if abs(p) != 1 {
+        num = append(num, sx_num(abs(p)))
+    }
+    if q != 1 {
+        den = append(den, sx_num(q))
+    }
+    for i to len(fs) {
+        f = fs[i]
+        x = cas_expo(f)
+        if cas_isnum(x) and cas_np(x) < 0 {
+            den = append(den, sx_power(cas_base(f), cas_neg(x)))
+        } else {
+            num = append(num, sx_of(f))
+        }
+    }
+    t = sx_product(num)
+    if len(den) > 0 {
+        t = sx(SX_DIV, t, sx_product(den), "")
+        if p < 0 {
+            return sx(SX_NEG, t, 0, "")
+        }
+        return t
+    }
+    if p < 0 {
+        return sx_neg(t)
+    }
+    return t
+}
+
+#| Whether the term `t` of a sum is written with a minus.
+def cas_negative_term(t) {
+    p, q = cas_coeff(t)
+    return p < 0
+}
+
+#| A sum: the terms with the highest power first (the stored order reversed),
+#| a negative term as a subtraction.
+def sx_sum(e) {
+    n = cas_nk(e)
+    acc = sx_of(cas_kid(e, n - 1))
+    i = n - 2
+    while i >= 0 {
+        t = cas_kid(e, i)
+        if cas_negative_term(t) {
+            acc = sx(SX_SUB, acc, sx_of(cas_neg(t)), "")
+        } else {
+            acc = sx(SX_ADD, acc, sx_of(t), "")
+        }
+        i = i - 1
+    }
+    return acc
+}
+
+# ---- Viv text -----------------------------------------------------------------------
+
+#| `s` in parentheses when its level is below `need`.
+def v_at(s, lvl, need) {
+    if lvl < need {
+        return "(" + s + ")"
+    }
+    return s
+}
+
+#| The Viv text of syntax node `t`, and its precedence level.
+def sx_text(t) {
+    k = SX_KIND[t]
+    if k == SX_NUM or k == SX_NAME {
+        return SX_S[t], V_ATOM
+    }
+    if k == SX_CALL {
+        a, la = sx_text(SX_A[t])
+        return SX_S[t] + "(" + a + ")", V_ATOM
+    }
+    if k == SX_NEG {
+        a, la = sx_text(SX_A[t])
+        return "-" + v_at(a, la, V_POW), V_UNARY
+    }
+    if k == SX_POW {
+        a, la = sx_text(SX_A[t])
+        b, lb = sx_text(SX_B[t])
+        return v_at(a, la, V_ATOM) + "^" + v_at(b, lb, V_UNARY), V_POW
+    }
+    a, la = sx_text(SX_A[t])
+    b, lb = sx_text(SX_B[t])
+    if k == SX_ADD {
+        return v_at(a, la, V_SUM) + " + " + v_at(b, lb, V_PROD), V_SUM
+    }
+    if k == SX_SUB {
+        return v_at(a, la, V_SUM) + " - " + v_at(b, lb, V_PROD), V_SUM
+    }
+    if k == SX_MUL {
+        return v_at(a, la, V_PROD) + " * " + v_at(b, lb, V_UNARY), V_PROD
+    }
+    return v_at(a, la, V_PROD) + " / " + v_at(b, lb, V_UNARY), V_PROD
+}
+
+#| `e` as Viv source; `cas` reads it back to the same node.
+def cas_text(e) {
+    SX_COUNT[0] = 0
+    s, l = sx_text(sx_of(e))
+    return s
+}
+
+# ---- LaTeX, by tex.rs's rules ------------------------------------------------------
+
+def t_paren(s) {
+    return "\\left(" + s + "\\right)"
+}
+#| `s` if it binds at least `need`, else in parentheses (tex.rs `at`).
+def t_at(s, lvl, need) {
+    if lvl >= need {
+        return s
+    }
+    return t_paren(s)
+}
+
+#| A name as tex.rs writes it: one letter as itself, pi as \pi, else upright.
+def t_name(name) {
+    if name == "pi" {
+        return "\\pi"
+    }
+    if len(name) == 1 and sx_letter(name) and name != "_" {
+        return name
+    }
+    return "\\mathrm{" + replace(name, "_", "\\_") + "}"
+}
+
+def sx_letter(c) {
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+}
+
+#| The LaTeX of syntax node `t` and its binding level (tex.rs `render`).
+def sx_tex(t) {
+    k = SX_KIND[t]
+    if k == SX_NUM {
+        return SX_S[t], P_ATOM
+    }
+    if k == SX_NAME {
+        return t_name(SX_S[t]), P_ATOM
+    }
+    if k == SX_NEG {
+        a, la = sx_tex(SX_A[t])
+        if la > P_NEG and not startswith(a, "-") {
+            return "-" + a, P_NEG
+        }
+        return "-" + t_paren(a), P_NEG
+    }
+    if k == SX_CALL {
+        a, la = sx_tex(SX_A[t])
+        h = SX_S[t]
+        if h == "sqrt" {
+            return "\\sqrt{" + a + "}", P_ATOM
+        }
+        if h == "abs" {
+            return "\\left|" + a + "\\right|", P_ATOM
+        }
+        if h == "exp" {
+            return "e^{" + a + "}", P_POST
+        }
+        if h == "log" or h == "ln" {
+            return "\\ln " + t_at(a, la, P_ATOM), P_MUL
+        }
+        if h == "sin" or h == "cos" or h == "tan" or h == "sinh" or h == "cosh" or h == "tanh" {
+            return "\\" + h + " " + t_at(a, la, P_ATOM), P_MUL
+        }
+        if h == "asin" or h == "acos" or h == "atan" {
+            return "\\arc" + h[1:] + " " + t_at(a, la, P_ATOM), P_MUL
+        }
+        return "\\operatorname{" + replace(h, "_", "\\_") + "}\\left(" + a + "\\right)", P_ATOM
+    }
+    a, la = sx_tex(SX_A[t])
+    b, lb = sx_tex(SX_B[t])
+    if k == SX_POW {
+        return t_at(a, la, P_ATOM) + "^{" + b + "}", P_POST
+    }
+    if k == SX_DIV {
+        return "\\frac{" + a + "}{" + b + "}", P_POST
+    }
+    if k == SX_ADD or k == SX_SUB {
+        ls = t_at(a, la, P_ADD)
+        rs = b
+        if lb < P_ADD or (k == SX_SUB and lb == P_ADD) or startswith(b, "-") {
+            rs = t_paren(b)
+        }
+        op = " + "
+        if k == SX_SUB {
+            op = " - "
+        }
+        return ls + op + rs, P_ADD
+    }
+    # a product
+    ls = t_at(a, la, P_MUL)
+    rs = b
+    if lb < P_MUL or lb == P_NEG or startswith(b, "-") {
+        rs = t_paren(b)
+    }
+    sep = "\\,"
+    if len(rs) > 0 and isdigit(rs[0]) {
+        sep = " \\cdot "
+    }
+    return ls + sep + rs, P_MUL
+}
+
+#| `e` as LaTeX, by the rules of lang/viv/src/tex.rs.
+def cas_tex(e) {
+    SX_COUNT[0] = 0
+    s, l = sx_tex(sx_of(e))
+    return s
+}
+
+test "text: highest power first, minus signs, fractions" {
+    x = cas_sym("x")
+    y = cas_sym("y")
+    p = cas_addv([C_ONE, cas_mul(cas_int(-2), x), cas_pow(x, cas_int(2))])
+    assert_true(cas_text(p) == "x^2 - 2 * x + 1")
+    assert_true(cas_text(cas_mul(cas_num(7, 3), C_ONE)) == "7 / 3")
+    assert_true(cas_text(cas_div(cas_mul(cas_int(2), x), y)) == "2 * x / y")
+    assert_true(cas_text(cas_neg(cas_div(x, y))) == "-(x / y)")
+    assert_true(cas_text(cas_num(-1, 2)) == "-(1 / 2)")
+    assert_true(cas_text(cas_sqrt(cas_add(x, C_ONE))) == "sqrt(x + 1)")
+    assert_true(cas_text(cas_pow(cas_neg(x), cas_int(3))) == "-x^3")
+    assert_true(cas_text(cas_pow(cas_add(x, C_ONE), cas_int(-2))) == "1 / (x + 1)^2")
+    assert_true(cas_text(cas_fn("exp", cas_neg(cas_pow(x, cas_int(2))))) == "exp(-x^2)")
+}
+
+test "LaTeX by tex.rs's rules" {
+    x = cas_sym("x")
+    assert_true(cas_tex(cas_num(7, 3)) == "\\frac{7}{3}")
+    assert_true(cas_tex(cas_addv([C_ONE, cas_mul(cas_int(-2), x), cas_pow(x, cas_int(2))])) == "x^{2} - 2\\,x + 1")
+    assert_true(cas_tex(cas_mul(cas_fn("sin", x), cas_int(3))) == "3\\,\\sin x")
+    assert_true(cas_tex(cas_mul(C_HALF, cas_fn("exp", cas_mul(cas_int(-2), x)))) == "\\frac{e^{-2\\,x}}{2}")
+    assert_true(cas_tex(cas_mul(cas_sqrt(C_PI), C_HALF)) == "\\frac{\\sqrt{\\pi}}{2}")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

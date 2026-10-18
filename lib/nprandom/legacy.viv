@@ -1,0 +1,153 @@
+###
+post: NumPy's legacy random functions, over its Mersenne Twister
+agent: claude
+
+The functions `np.random.rand`, `random_sample`, `uniform`, `randint`, `choice`,
+`shuffle` and `permutation` draw from one MT19937 state (lib/nprandom/mt19937).
+Each def here is the NumPy 1.24.4 code path it names (numpy/random/mtrand.pyx,
+_bounded_integers.pyx.in, src/distributions/distributions.c; tag v1.24.4,
+commit 9315a9072b2636f75c831b4eca9f42a5f67ca2fb), with the draws in the same
+order, so a seeded Python program and its translation see the same numbers.
+
+- `npr_lg_uniform(st, low, rng)`: random_uniform, `low + rng * double`.
+- `npr_lg_bounded(st, rng)`: an int in [0, rng] by masked rejection
+  (random_bounded_uint64 with use_masked): no draw when rng is 0, one 32-bit
+  word per try while rng < 2^32 - 1, the word itself at 2^32 - 1, a 64-bit
+  draw above. RandomState.randint(low, high) is `low + npr_lg_bounded(high - 1 - low)`.
+- `npr_lg_interval(st, mx)`: random_interval, the masked draw shuffle uses
+  (the same draws as `npr_lg_bounded` for mx < 2^32 - 1).
+- `npr_lg_shuffle(st, a)`, `npr_lg_shuffle_rows(st, A)`: Fisher-Yates from the
+  top index down, `j = random_interval(i)`, then swap entries (or rows) i and j.
+- `npr_lg_cdf(p)`, `npr_lg_search(cdf, u)`: for choice with `p=`, the running
+  sum of p divided by its last entry, and the count of entries at or below a draw
+  (`searchsorted(u, side='right')`).
+- `npr_kahan_sum(p)`: the sum NumPy checks `p` with.
+
+The normal draws (`randn`, `standard_normal`, `normal`) are not here: NumPy
+computes them with the platform's `log`, whose last bit Viv's libm does not
+reproduce on every input, so no Viv code can promise NumPy's values.
+
+Used with `import nprandom.legacy`.
+###
+
+from nprandom.mt19937 import npr_mt_double, npr_mt_masked64, npr_mt_next32
+from nprandom.bits import npr_mask, NPR_U32_MAX
+
+#| random_uniform: low + rng * a double in [0, 1).
+def npr_lg_uniform(st: Arr, low, rng) {
+    return low + rng * npr_mt_double(st)
+}
+
+#| A masked 32-bit draw at or below rng (rng < 2^32 - 1, mask = gen_mask(rng)).
+def npr_lg_masked32(st: Arr, rng, mask: Int) {
+    v = band(int(npr_mt_next32(st)), mask)
+    while v > rng {
+        v = band(int(npr_mt_next32(st)), mask)
+    }
+    return float(v)
+}
+
+#| A masked 64-bit draw at or below rng (2^32 <= rng < 2^53).
+def npr_lg_masked64(st: Arr, rng, mask: Int) {
+    v = npr_mt_masked64(st, mask)
+    while v > rng {
+        v = npr_mt_masked64(st, mask)
+    }
+    return float(v)
+}
+
+#| random_bounded_uint64 with use_masked: an int in [0, rng], 0 <= rng < 2^53.
+def npr_lg_bounded(st: Arr, rng) {
+    if rng == 0 {
+        return 0
+    }
+    if rng == NPR_U32_MAX {
+        return npr_mt_next32(st)
+    }
+    if rng < NPR_U32_MAX {
+        return npr_lg_masked32(st, rng, npr_mask(int(rng)))
+    }
+    return npr_lg_masked64(st, rng, npr_mask(int(rng)))
+}
+
+#| random_interval: shuffle's draw of an int in [0, mx].
+def npr_lg_interval(st: Arr, mx) {
+    if mx == 0 {
+        return 0
+    }
+    if mx <= NPR_U32_MAX {
+        return npr_lg_masked32(st, mx, npr_mask(int(mx)))
+    }
+    return npr_lg_masked64(st, mx, npr_mask(int(mx)))
+}
+
+#| RandomState.shuffle of a vector, in place.
+def npr_lg_shuffle(st: Arr, a: Arr) {
+    n = len(a)
+    for k to n - 1 {
+        i = n - 1 - k
+        j = npr_lg_interval(st, i)
+        t = a[i]
+        a[i] = a[j]
+        a[j] = t
+    }
+}
+
+#| RandomState.shuffle of a matrix: its rows, in place.
+def npr_lg_shuffle_rows(st: Arr, A: Arr) {
+    n = shape(A)[0]
+    m = shape(A)[1]
+    for k to n - 1 {
+        i = n - 1 - k
+        j = npr_lg_interval(st, i)
+        if i != j {
+            for c to m {
+                t = A[i, c]
+                A[i, c] = A[j, c]
+                A[j, c] = t
+            }
+        }
+    }
+}
+
+#| kahan_sum (numpy/random/_common.pyx): the sum choice checks p with.
+def npr_kahan_sum(p: Arr) {
+    n = len(p)
+    if n == 0 {
+        return 0.0
+    }
+    s = p[0]
+    c = 0.0
+    for i from 1 to n {
+        y = p[i] - c
+        t = s + y
+        c = (t - s) - y
+        s = t
+    }
+    return s
+}
+
+#| choice's cdf: p.cumsum() (in order), then each entry divided by the last.
+def npr_lg_cdf(p: Arr) {
+    cdf = cumsum(p)
+    return cdf / cdf[len(p) - 1]
+}
+
+#| searchsorted(u, side='right') in a non-decreasing cdf: how many entries are <= u.
+def npr_lg_search(cdf: Arr, u) {
+    lo = 0
+    hi = len(cdf)
+    while lo < hi {
+        mid = floor((lo + hi) / 2)
+        if cdf[mid] <= u {
+            lo = mid + 1
+        }
+        else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

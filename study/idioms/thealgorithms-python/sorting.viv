@@ -1,0 +1,235 @@
+###
+Sorting and searching, ported from TheAlgorithms/Python:
+sorts/merge_sort.py, sorts/quick_sort.py, sorts/heap_sort.py, sorts/insertion_sort.py,
+searches/binary_search.py (binary_search, bisect_left, binary_search_by_recursion).
+###
+import seq
+
+#| sorts/merge_sort.py: split at the middle, sort each half, merge.
+def merge(left: Arr, right: Arr) -> Arr {
+    result = zeros(len(left) + len(right))
+    i = 0.0
+    j = 0.0
+    for k to len(result) {
+        if j < len(right) and (i == len(left) or right[j] < left[i]) {
+            result[k] = right[j]
+            j += 1.0
+        }
+        else {
+            result[k] = left[i]
+            i += 1.0
+        }
+    }
+    return result
+}
+
+def merge_sort(collection: Arr) -> Arr {
+    n = len(collection)
+    if n <= 1.0 {
+        return collection
+    }
+    mid = floor(n / 2.0)
+    return merge(merge_sort(collection[:mid]), merge_sort(collection[mid:]))
+}
+
+#| The entries of `a` that compare to `pivot` as `side` says: -1 less, 0 equal, 1 greater.
+#| Python writes this as three list comprehensions over a closure on `pivot`.
+def partition(a: Arr, pivot, side) -> Arr {
+    out = []
+    for i to len(a) {
+        if sign(a[i] - pivot) == side {
+            out = append(out, a[i])
+        }
+    }
+    return out
+}
+
+def sign(x) {
+    if x < 0.0 {
+        return -1.0
+    }
+    if x > 0.0 {
+        return 1.0
+    }
+    return 0.0
+}
+
+#| sorts/quick_sort.py: a random pivot, then [*lesser, *equal, *greater].
+def quick_sort(collection: Arr) -> Arr {
+    if len(collection) < 2.0 {
+        return collection
+    }
+    pivot = collection[floor(rand() * len(collection))]
+    lesser = quick_sort(partition(collection, pivot, -1.0))
+    greater = quick_sort(partition(collection, pivot, 1.0))
+    return concat(lesser, partition(collection, pivot, 0.0), greater)
+}
+
+#| sorts/heap_sort.py: sift a[index] down a max-heap of the first heap_size entries.
+def heapify(a: Arr, index, heap_size) {
+    largest = index
+    left = 2.0 * index + 1.0
+    right = 2.0 * index + 2.0
+    if left < heap_size and a[largest] < a[left] {
+        largest = left
+    }
+    if right < heap_size and a[largest] < a[right] {
+        largest = right
+    }
+    if largest != index {
+        t = a[largest]
+        a[largest] = a[index]
+        a[index] = t
+        heapify(a, largest, heap_size)
+    }
+}
+
+def heap_sort(a: Arr) -> Arr {
+    n = len(a)
+    for i to floor(n / 2.0) reversed {
+        heapify(a, i, n)
+    }
+    for i from 1.0 to n reversed {
+        t = a[0]
+        a[0] = a[i]
+        a[i] = t
+        heapify(a, 0.0, i)
+    }
+    return a
+}
+
+#| sorts/insertion_sort.py: shift each item left past the larger ones before it.
+def insertion_sort(a: Arr) -> Arr {
+    for insert_index to len(a) {
+        insert_value = a[insert_index]
+        j = insert_index
+        while j > 0.0 and insert_value < a[j - 1.0] {
+            a[j] = a[j - 1.0]
+            j -= 1.0
+        }
+        a[j] = insert_value
+    }
+    return a
+}
+
+#| searches/binary_search.py binary_search: the leftmost index of item, or -1.
+def binary_search(sorted: Arr, item) {
+    left = 0.0
+    right = len(sorted) - 1.0
+    result = -1.0
+    while left <= right {
+        mid = left + floor((right - left) / 2.0)
+        if sorted[mid] == item {
+            result = mid
+            right = mid - 1.0
+        }
+        else if item < sorted[mid] {
+            right = mid - 1.0
+        }
+        else {
+            left = mid + 1.0
+        }
+    }
+    return result
+}
+
+#| searches/binary_search.py bisect_left: the first index whose entry is >= item.
+def bisect_left(sorted: Arr, item) {
+    lo = 0.0
+    hi = len(sorted)
+    while lo < hi {
+        mid = lo + floor((hi - lo) / 2.0)
+        if sorted[mid] < item {
+            lo = mid + 1.0
+        }
+        else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+#| searches/binary_search.py binary_search_by_recursion.
+def search_between(sorted: Arr, item, left, right) {
+    if right < left {
+        return -1.0
+    }
+    mid = left + floor((right - left) / 2.0)
+    if sorted[mid] == item {
+        leftmost = search_between(sorted, item, left, mid - 1.0)
+        if leftmost != -1.0 {
+            return leftmost
+        }
+        return mid
+    }
+    if item < sorted[mid] {
+        return search_between(sorted, item, left, mid - 1.0)
+    }
+    return search_between(sorted, item, mid + 1.0, right)
+}
+
+def binary_search_by_recursion(sorted: Arr, item) {
+    return search_between(sorted, item, 0.0, len(sorted) - 1.0)
+}
+
+srand(7.0)
+data = [0.0, 5.0, 3.0, 2.0, 2.0, -45.0, -2.0, -5.0, 103.0, 9.0, 1.0, 7.0, 11.0]
+by_merge = merge_sort(data)
+by_quick = quick_sort(data)
+by_heap = heap_sort(copy(data))
+by_insertion = insertion_sort(copy(data))
+show by_merge
+show by_quick
+show by_heap
+show by_insertion
+
+haystack = [0.0, 5.0, 7.0, 10.0, 10.0, 10.0, 15.0]
+found = zeros(8)
+queries = [0.0, 5.0, 7.0, 10.0, 15.0, 6.0, -1.0, 16.0]
+for q to len(queries) {
+    found[q] = binary_search(haystack, queries[q])
+}
+show found
+lefts = zeros(8)
+for q to len(queries) {
+    lefts[q] = bisect_left(haystack, queries[q])
+}
+show lefts
+recursive = zeros(8)
+for q to len(queries) {
+    recursive[q] = binary_search_by_recursion(haystack, queries[q])
+}
+show recursive
+
+test "the four sorts agree with sort()" {
+    expect = copy(data)
+    sort(expect)
+    assert_true(all(by_merge == expect))
+    assert_true(all(by_quick == expect))
+    assert_true(all(by_heap == expect))
+    assert_true(all(by_insertion == expect))
+}
+
+test "merge_sort doctests" {
+    assert_true(all(merge_sort([0.0, 5.0, 3.0, 2.0, 2.0]) == [0.0, 2.0, 2.0, 3.0, 5.0]))
+    assert_true(all(merge_sort([-2.0, -5.0, -45.0]) == [-45.0, -5.0, -2.0]))
+    assert_true(all(merge_sort(zeros(0.0)) == zeros(0.0)))
+}
+
+test "binary_search doctests" {
+    assert_near(binary_search([0.0, 5.0, 7.0, 10.0, 15.0], 0.0), 0.0, 0.0)
+    assert_near(binary_search([0.0, 5.0, 7.0, 10.0, 15.0], 15.0), 4.0, 0.0)
+    assert_near(binary_search([0.0, 5.0, 7.0, 10.0, 15.0], 6.0), -1.0, 0.0)
+    assert_near(binary_search(haystack, 10.0), 3.0, 0.0)
+}
+
+test "quick_sort is a sort for any seed" {
+    for seed to 20 {
+        srand(seed + 1.0)
+        assert_true(all(quick_sort(data) == by_merge))
+    }
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2016-2022 TheAlgorithms and contributors (TheAlgorithms/Python)
+# SPDX-FileCopyrightText: 2026 The Viv authors

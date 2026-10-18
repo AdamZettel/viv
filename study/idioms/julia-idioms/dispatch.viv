@@ -1,0 +1,187 @@
+###
+post: Dual numbers and shapes: two multiple-dispatch examples
+agent: claude
+
+Two idioms from the Julia manual. First, a Dual number type: a struct plus
+methods added to +, -, *, /, sin, cos and exp, so any generic function
+differentiates itself when handed a Dual. Viv cannot add methods to its
+operators, so this port shows three substitutes: the deriv builtin (forward
+autodiff inside the compiler), the complex-step derivative (Viv's complex
+scalars go through the same generic def), and dual numbers written out as
+pairs with one function per operation.
+
+Second, a vector of shapes of different types and area/perimeter methods
+chosen by dispatch. Viv has no arrays of records and no dispatch, so a shape
+is a row [kind, a, b, c] and area branches on the kind.
+###
+
+from ref_values import (
+    REF_DUAL_DG, REF_DUAL_DH, REF_NEWTON_DOTTIE, REF_NEWTON_DOTTIE_IT, REF_NEWTON_WALLIS,
+    REF_NEWTON_WALLIS_IT, REF_SHAPES_AREA, REF_SHAPES_BIGGEST, REF_SHAPES_PERIM,
+)
+
+def g(x) {
+    return x * x * x - 2.0 * x - 5.0
+}
+
+def h(x) {
+    return exp(-x) * sin(3.0 * x) / (1.0 + x * x)
+}
+
+# ---------------------------------------------- 1. the deriv builtin
+
+#| deriv differentiates a lambda whose body is written out in builtins; it
+#| cannot see through a call to g or h, so the formulas are repeated here.
+test "deriv gives the derivatives the Dual type gives" {
+    assert_near(deriv(fn(x) -> x * x * x - 2.0 * x - 5.0, 2.0), REF_DUAL_DG, 0.0)
+    assert_near(deriv(fn(x) -> exp(-x) * sin(3.0 * x) / (1.0 + x * x), 0.7), REF_DUAL_DH, 1.0e-15)
+}
+
+# ---------------------------------------------- 2. complex step
+
+#| f'(x) = Im f(x + i eps) / eps, exact to rounding for analytic f. This one
+#| does go through the generic defs g and h: they run on a complex argument.
+def complex_step(f, x) {
+    return im(f(complex(x, 1.0e-30))) / 1.0e-30
+}
+
+test "complex-step derivative through the same generic defs" {
+    assert_near(complex_step(g, 2.0), REF_DUAL_DG, 1.0e-14)
+    assert_near(complex_step(h, 0.7), REF_DUAL_DH, 1.0e-15)
+}
+
+#| Newton's method for any f, the derivative by complex step. Returns
+#| [root, iterations] (Julia returns the tuple (x, it)). f(x) itself is also
+#| evaluated at a complex point: the C backend gives each def one argument
+#| type, so f cannot take a real at one call and a complex at another.
+def newton(f, x, tol, maxiter) {
+    for it to maxiter {
+        dx = re(f(complex(x, 0.0))) / complex_step(f, x)
+        x = x - dx
+        if abs(dx) < tol {
+            return [x, it + 1.0]
+        }
+    }
+    return [x, maxiter]
+}
+
+def dottie(x) {
+    return cos(x) - x
+}
+
+test "Newton: Wallis's cubic and the Dottie number" {
+    r = newton(g, 2.0, 1.0e-14, 50.0)
+    assert_near(r[0], REF_NEWTON_WALLIS, 1.0e-15)
+    assert_near(r[1], REF_NEWTON_WALLIS_IT, 0.0)
+    r2 = newton(dottie, 1.0, 1.0e-14, 50.0)
+    assert_near(r2[0], REF_NEWTON_DOTTIE, 1.0e-15)
+    assert_near(r2[1], REF_NEWTON_DOTTIE_IT, 0.0)
+}
+
+# ---------------------------------------------- 3. duals as pairs
+
+#| A dual number is [value, derivative]. Each operator is a def.
+def dual(v, d) {
+    return [v, d]
+}
+
+def d_add(a, b) {
+    return a + b
+}
+
+def d_sub(a, b) {
+    return a - b
+}
+
+def d_mul(a, b) {
+    return [a[0] * b[0], a[1] * b[0] + a[0] * b[1]]
+}
+
+def d_div(a, b) {
+    return [a[0] / b[0], (a[1] * b[0] - a[0] * b[1]) / (b[0] * b[0])]
+}
+
+def d_sin(a) {
+    return [sin(a[0]), cos(a[0]) * a[1]]
+}
+
+def d_exp(a) {
+    return [exp(a[0]), exp(a[0]) * a[1]]
+}
+
+def d_const(c) {
+    return [c, 0.0]
+}
+
+def g_dual(x) {
+    return d_sub(d_sub(d_mul(d_mul(x, x), x), d_mul(d_const(2.0), x)), d_const(5.0))
+}
+
+def h_dual(x) {
+    return d_div(d_mul(d_exp(d_sub(d_const(0.0), x)), d_sin(d_mul(d_const(3.0), x))), d_add(d_const(1.0), d_mul(x, x)))
+}
+
+test "hand-written duals agree, at the cost of rewriting g and h" {
+    assert_near(g_dual(dual(2.0, 1.0))[1], REF_DUAL_DG, 0.0)
+    assert_near(h_dual(dual(0.7, 1.0))[1], REF_DUAL_DH, 1.0e-15)
+}
+
+# ---------------------------------------------- shapes
+
+CIRCLE = 0
+RECT = 1
+TRI = 2
+
+def area(s) {
+    if s[0] == CIRCLE {
+        return acos(-1.0) * s[1] * s[1]
+    }
+    if s[0] == RECT {
+        return s[1] * s[2]
+    }
+    p = (s[1] + s[2] + s[3]) / 2.0
+    return sqrt(p * (p - s[1]) * (p - s[2]) * (p - s[3]))
+}
+
+def perimeter(s) {
+    if s[0] == CIRCLE {
+        return 2.0 * acos(-1.0) * s[1]
+    }
+    if s[0] == RECT {
+        return 2.0 * (s[1] + s[2])
+    }
+    return s[1] + s[2] + s[3]
+}
+
+#| sum(f, shapes): f applied to every row.
+def total(f, shapes) {
+    s = 0.0
+    for i to len(shapes) {
+        s += f(slab(shapes, i))
+    }
+    return s
+}
+
+shapes = [[CIRCLE, 1.0, 0.0, 0.0],
+          [RECT, 2.0, 3.0, 0.0],
+          [TRI, 3.0, 4.0, 5.0],
+          [CIRCLE, 0.5, 0.0, 0.0]]
+show total(area, shapes)
+
+test "total area and perimeter of a mixed list of shapes" {
+    assert_near(total(area, shapes), REF_SHAPES_AREA, 1.0e-15)
+    assert_near(total(perimeter, shapes), REF_SHAPES_PERIM, 1.0e-15)
+}
+
+test "the largest area, argmax(area, shapes)" {
+    best = 0.0
+    for i to len(shapes) {
+        if area(slab(shapes, i)) > area(slab(shapes, best)) {
+            best = i
+        }
+    }
+    assert_near(area(slab(shapes, best)), REF_SHAPES_BIGGEST, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

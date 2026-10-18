@@ -1,0 +1,118 @@
+###
+title: Spin-orbit coupling makes 28 a magic number
+line: In calcium-40 the gap at 28 neutrons is 4.4 MeV; with $W_0 = 0$ it closes, while the gaps at 8 and 20 widen past 10 MeV.
+claim: In calcium-40 with the SLy5 Skyrme force, the neutron single-particle spectrum has shell gaps of about 8.9 MeV at 8 neutrons, 5.5 MeV at 20 and 4.4 MeV at 28. With the spin-orbit strength $W_0$ set to zero, the gaps at 8 and 20 survive and widen (about 14.4 and 11.4 MeV, both above 10 MeV) while the gap at 28 disappears, because 28 then falls inside the degenerate $1f$ level. The magic number 28 is made by spin-orbit splitting.
+topic: science
+section: nuclear structure
+reference: SLy5 (Chabanat et al., Nucl. Phys. A 635, 231 (1998)) in lib/skyrme/spherical, the solver checked against its NumPy twin and against skyrme_rpa (lib/skyrme/COMPARISON.md); Mayer and Jensen's explanation of the magic numbers 28, 50, 82, 126 by spin-orbit coupling (M. G. Mayer, Phys. Rev. 75, 1969 (1949)).
+scope: Hartree-Fock single-particle energies of the converged mean field of one nucleus (calcium-40, closed with or without spin-orbit) on a 0.1 fm mesh; a gap is the energy from the last level filled to the next when levels fill in order of energy, each holding $2j + 1$ neutrons. Without spin-orbit 1f and 2p sit 1.4 MeV apart, so 40 (the oscillator's magic number) would reappear as a closure. Experimental gaps and the shell structure of neutron-rich calcium are not part of the check.
+lane: ai
+by: claude
+cost: fast
+###
+
+from skyrme.spherical import Force, SLY5, solve
+
+#: calcium-40, closed for either force
+Z_CA = 20.0
+N_CA = 20.0
+MESH_H = 0.1
+MESH_N: Int = 150
+MIX = 0.5
+E_TOL = 1.0e-9
+MAX_ITER = 300
+MAGIC = [8, 20, 28]
+
+#| 2j from a label such as "n 1f7/2": the digits before the slash.
+def two_j(label: Str) -> Int {
+    head = split(label, "/")[0]
+    digits = ""
+    for c in head {
+        if c >= "0" and c <= "9" {
+            digits = digits + c
+        }
+        else {
+            digits = ""
+        }
+    }
+    return int(float(digits))
+}
+
+#| The neutron shell gaps at the given particle numbers: the energy from the
+#| last filled to the next level when the levels, sorted by energy and each
+#| holding 2j + 1, fill exactly to that number; 0 when the number falls
+#| inside a level.
+def neutron_gaps(spec: Arr, labels: Str, magic: Arr) -> Arr {
+    names = split(labels, ",")
+    e = []
+    deg = []
+    for k to len(names) {
+        if startswith(names[k], "n ") {
+            e = append(e, spec[k])
+            deg = append(deg, two_j(names[k]) + 1.0)
+        }
+    }
+    order = argsort(e)
+    gaps = zeros(len(magic))
+    for m to len(magic) {
+        filled = 0.0
+        for q to len(order) {
+            i: Int = int(order[q])
+            filled = filled + deg[i]
+            if filled == magic[m] and q + 1 < len(order) {
+                gaps[m] = e[int(order[q + 1])] - e[i]
+            }
+        }
+    }
+    return gaps
+}
+
+no_so = Force { t0: SLY5.t0, t1: SLY5.t1, t2: SLY5.t2, t3: SLY5.t3, x0: SLY5.x0, x1: SLY5.x1, x2: SLY5.x2, x3: SLY5.x3, w0: 0.0, alpha: SLY5.alpha, j2: SLY5.j2 }
+with_so = solve(MESH_H, MESH_N, SLY5, Z_CA, N_CA, MIX, E_TOL, MAX_ITER)
+without_so = solve(MESH_H, MESH_N, no_so, Z_CA, N_CA, MIX, E_TOL, MAX_ITER)
+gaps_with = neutron_gaps(with_so.spectrum, with_so.spectrum_labels, MAGIC * 1.0)
+gaps_without = neutron_gaps(without_so.spectrum, without_so.spectrum_labels, MAGIC * 1.0)
+show gaps_with
+show gaps_without
+gap_8_with = gaps_with[0]
+gap_20_with = gaps_with[1]
+gap_28_with = gaps_with[2]
+gap_8_without = gaps_without[0]
+gap_20_without = gaps_without[1]
+gap_28_without = gaps_without[2]
+show gap_8_with
+show gap_20_with
+show gap_28_with
+show gap_8_without
+show gap_20_without
+show gap_28_without
+
+#: the figure: the neutron shell gaps at 8, 20 and 28 with and without spin-orbit
+figure("Neutron shell gaps in calcium-40, SLy5", "neutron number", "gap (MeV)")
+bars(MAGIC * 1.0, gaps_without, "W0 = 0")
+style("W0 = 0", "s2")
+bars(MAGIC * 1.0, gaps_with, "with spin-orbit")
+style("with spin-orbit", "s1")
+xtick("8", 8.0)
+xtick("20", 20.0)
+xtick("28", 28.0)
+
+test "both runs converged" {
+    assert_true(with_so.converged)
+    assert_true(without_so.converged)
+}
+test "with spin-orbit there is a gap at 28, above 3 MeV" {
+    assert_gt(gap_28_with, 3.0)
+}
+test "without spin-orbit the gaps at 8 and 20 are above 10 MeV and wider than with it" {
+    assert_gt(gap_8_without, 10.0)
+    assert_gt(gap_20_without, 10.0)
+    assert_gt(gap_8_without, gap_8_with)
+    assert_gt(gap_20_without, gap_20_with)
+}
+test "without spin-orbit 28 falls inside a level: no gap" {
+    assert_near(gap_28_without, 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

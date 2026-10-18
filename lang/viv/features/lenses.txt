@@ -1,0 +1,216 @@
+# Program knowledge (lenses): files beside the code that explain it, check it
+# while it runs, or describe how it uses memory and how its modules depend on
+# each other, each kept true by a check.
+
+== intent-lens
+title: The intent lens: what each def is for, in a file beside the code
+what: `<module>.intent` holds one block per def, headed by the def's name and its body
+  hash: `what`, `how` and `why` lines, a glossary line per variable (`x  the current
+  estimate`), and the def's steps as an outline with the control words `repeat until
+  ...`, `if ...`, `for each ...`. The same entries can be written inline as `#|`,
+  `#||`, `#|||` and `#:` comments above the def; each anchor has one home, and `viv
+  lens move --to-file|--to-inline` moves them. `viv lens init` writes a skeleton with
+  every def, step and hash; `viv lens check` fails on a stale entry, a public def with
+  no `what`, a step with no text, an outline whose nesting differs from the code, or a
+  number in the text with no `[test "..."]` citation.
+when: For every library def another person or agent will read or change. The code
+  file stays free of prose, and the check keeps the prose from drifting from the code.
+example: intent-lens
+see: intent-levels, intent-stamps, lens-coverage, debt, view-lenses, docstrings-and-annotations
+keywords: intent what how why glossary outline lens init check move documentation
+verb: lens
+lens: intent
+usage: file:intent
+
+== intent-levels
+title: Intent at the def, step and statement level
+what: An intent entry explains a def (`what`, `how`, `why`, the glossary), each of its
+  steps (one line of text, and `why` and `how` lines under it), and single statements:
+  `= x  <text>` under a step explains the first statement of that step that assigns
+  `x`, `= f()` the first that calls `f`, `#k` the k-th, and `>` adds a paragraph. An
+  anchor that names no statement fails `viv lens check`.
+when: Explain a statement when the line alone does not say its purpose or its physical
+  meaning. Restating the code in words is not an explanation.
+example: intent-levels
+see: intent-lens, steps, one-line-steps, pseudocode-view
+keywords: line intent statement anchor step why how levels explain line
+
+== intent-stamps
+title: Stamps: an entry records the code it was written for
+what: Each `.intent` and `.debug` entry carries `@<body hash>`, the hash `viv hash`
+  prints for the def's body (it ignores formatting and the def's name). When the body
+  changes, the entry is stale: `viv lens check` reports it with the structural diff
+  and fails. `viv lens stamp <file> <def>` records that the entry was re-read and is
+  right for the new body. Inline entries are stamped by a `#@ <hash>` line.
+when: After editing a def, re-read its entry, fix it, then stamp it. Do not stamp
+  without reading: the stamp is the record that the text matches the code.
+example: intent-stamps
+see: intent-lens, debt, hash
+keywords: stamp stale hash body hash re-stamp lens stamp
+
+== lens-coverage
+title: Lens coverage and its ratchet
+what: `viv lens coverage [files or dirs]` counts, per module, the defs with a `what`,
+  the steps with text, the glossary lines against the variables, and the stale entries,
+  dead defs and `serves` of nothing. `--check` compares the repository with
+  lens_coverage.json and fails when a module's coverage drops; `--update` records the
+  current numbers. `viv lens needed` lists dead defs: defs reached from no program,
+  test or entry point.
+when: Run `viv lens coverage --check` before committing a change to a module with
+  intent; it is a gate. Use the per-module numbers to choose what to explain next.
+example: lens-coverage
+see: debt, intent-lens, intent-stamps
+keywords: coverage ratchet lens_coverage.json dead defs needed serves glossary
+
+== debt
+title: viv debt: what the lenses still owe, most central first
+what: `viv debt [files or dirs]` lists every def without a `what`, every step without
+  text, every undocumented variable, every stale or unstamped entry, dead defs, and
+  the entries no person has signed, with each def's number of callers, the most central first.
+  `--limit n` shortens the list; `--run <program>` runs it once and puts the defs it
+  calls first, the most called first.
+when: To pick the next explanation to write, or to see what an edit left stale.
+example: debt
+see: lens-coverage, intent-lens, intent-stamps
+keywords: debt missing stale unsigned callers todo
+verb: debt
+
+== debug-lens
+title: The debug lens: watch, hold and trace
+what: `<module>.debug` (or an inline `debug { }` block) says what to look at while a
+  def runs. `watch at <step> x` and `watch per iteration x, r = <expr>` record values;
+  an item `name = expr` computes a value the code does not hold, in a debug build only.
+  `hold` checks a claim (see holds). `trace f, g` records every call of those defs. All
+  of it goes into the story, never to stdout, so the program prints the same with and
+  without the lens, and a release build skips it. Entries are stamped with the def's
+  body hash.
+when: Instead of adding print statements to follow an iteration: the watches stay in
+  their own file, cost nothing in release, and are read by `viv story` and the explorer.
+example: debug-lens
+see: holds, story, intent-stamps, release-mode
+keywords: debug watch trace hold per iteration print debugging instrument at
+lens: debug
+usage: file:debug, form:debug-block
+
+== story
+title: viv story: the run told in the intent's words
+what: `viv story <file>` runs the program in debug mode and prints its calls, steps and
+  loop passes as a tree, each def and step with its intent text, each pass with the
+  values the debug lens watches, and each failed hold where it happened, then a count
+  of holds checked. A def appears when it has steps or is traced. `--depth k` limits
+  the call depth, `--expand` shows the steps inside each pass, `--engine c` takes the events from the
+  compiled program, `--json` feeds the explorer.
+when: To see what an iterative code did (how many passes, which values, where a hold
+  failed) without reading raw output or adding prints.
+example: story
+see: debug-lens, holds, explorer, intent-lens
+keywords: story trace run log iterations watch tree narrative
+verb: story
+lens: story
+
+== digits
+title: viv digits: which printed digits are real
+what: `viv digits <file>` runs the program in the interpreter once as written, then again
+  with its floating-point evaluation perturbed, and gives for every printed number the
+  leading significant digits that stay the same, with a `|` where they stop. The
+  perturbations, each switchable: the order of every built-in reduction (`sum`, `dot`,
+  the sums of `@`: pairwise, left to right, reversed, random), FMA contraction of
+  `a*b + c`, and Monte Carlo arithmetic as Verificarlo does it (noise of half an ulp on
+  each `+ - * /`, digits `-log10(sigma/|mu|)` over the samples). It then perturbs the
+  most-executed lines one at a time and says which printed numbers each one moves. A
+  whole result with no rounding error (an index, a size) is left exact. `--json` and
+  `-o` write the report the explorer shows; `vipyr.digits` runs it from Python.
+when: To learn how many digits of a result to quote, and which lines lose the rest,
+  without knowing the exact answer.
+example: digits
+see: ordered-sum, story, explorer
+keywords: digits precision rounding error cancellation condition number stochastic rounding monte carlo arithmetic verificarlo fma reduction order significant
+verb: digits
+
+== memory-lens
+title: The memory lens: what each def does with its arrays
+what: `viv view <file> --lens memory` prints, for each def, what the compiler infers:
+  which parameters it writes in place (the caller sees the change), which it only
+  reads, what it returns, and what a loop pass keeps or frees. Nothing in it is written
+  by hand. A `<module>.memory` file holds the one fact the compiler takes on trust: a
+  `disjoint` pin saying a `parallel for` writes different elements on every pass, which
+  checked builds verify while they run.
+when: Before calling a def that may write its arguments, and when deciding whether a
+  def should return a new array or fill one it is given.
+example: memory-lens
+see: disjoint-pins, parallel-for, view-lenses, aliasing-and-copies
+keywords: memory ownership in place writes reads alias frees arena disjoint pin
+lens: memory
+usage: file:memory
+
+== arch-lens
+title: The architecture lens: layers, budgets and multi-paths
+what: A `.arch` file names a system's modules in layers (`library`, `program`,
+  `verification`) with an `order`, private names and their owners, budgets (how many
+  modules and defs a program may load, how deep its calls go, a def's fan-in), and
+  multi-paths (a stage with several implementations, its registry and the test that
+  checks they agree). `viv arch check` reports upward and verification dependencies,
+  private reads, broken budgets and stages that do not match the code; `--check`
+  compares with arch_ratchet.json. `viv arch report <program>` measures one program.
+when: For a library of several modules: it states the dependency rules once and holds
+  every later change to them.
+example: arch-lens
+see: method-registries, lens-coverage
+keywords: architecture layers budget fanin depth multipath arch ratchet dependencies modules
+verb: arch
+lens: arch
+
+== cert
+title: The cert lens: a phrase's exact value, recorded
+what: `viv check --phrases --cert <file>` writes `<file>.cert`: one entry per phrase,
+  stamped with a hash of what its check read, with the phrase as written, the math in
+  TeX, the exact value, how the CAS found it, the numeric value and its method, and
+  the outcome. On the next `--cert` run an entry whose phrase changed or is gone is
+  reported as stale.
+when: To keep a record of which phrases of a program were checked against exact values,
+  beside the program, so a later edit to a phrase shows up as stale.
+example: cert
+see: check-phrases-certificates, phrases, lib-cas
+keywords: cert certificate exact value cas stamp proved phrase
+lens: cert
+usage: file:cert
+
+== pseudocode-view
+title: The pseudocode view
+what: `viv view <file> --lens pseudocode` prints each def as an algorithm: its `what`,
+  its steps numbered with their intent text, the control words of the outline, and
+  each statement as `x ← expr`, tagged `[phrase]` when it is written as a phrase and
+  `[code]` otherwise, with a count of each. `--def d` shows one def; `--words-only`
+  leaves out the code.
+when: To read a def as its algorithm, or to see which statements still need words.
+example: pseudocode-view
+doc: lang/viv/src/pseudo.rs
+see: intent-lens, phrases, view-lenses
+keywords: pseudocode algorithm view words phrases
+lens: pseudocode
+
+== explain
+title: viv explain: the call tree with each def's purpose
+what: `viv explain <file>` prints the program's calls from the top level down, each
+  def with its `what` and its steps with their text, as the intent lens gives them.
+  `--from <def>` starts at a def, `--depth k` limits the depth, `--json` is for tools.
+  It reads the code and the lenses and runs nothing.
+when: To get a first reading of a program or a library entry point before reading code.
+example: explain
+see: intent-lens, story, explorer
+keywords: explain call tree overview read summary
+verb: explain
+
+== view-lenses
+title: viv view: one program through each lens
+what: `viv view <file> --lens <l>` shows the program as `code` (without annotations),
+  `intent` (the default), `pseudocode`, `debug`, `story` (runs it), `memory`, or `all`:
+  the code with its intent entries written back in as `#|` comments and step text.
+  `--json` prints it for tools. It never changes a file.
+when: To read a module the way a task needs: the intent to learn what it does, the
+  code alone to edit it, memory before calling it.
+example: view-lenses
+see: intent-lens, pseudocode-view, memory-lens, debug-lens, story
+keywords: view lens code intent pseudocode debug story memory all
+verb: view
+lens: all

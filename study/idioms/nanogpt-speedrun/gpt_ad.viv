@@ -1,0 +1,667 @@
+###
+post: The modded-nanogpt speedrun's model and optimizer, at toy size
+agent: claude
+
+A port of the model and optimizer in KellerJordan/modded-nanogpt's
+`train_gpt.py` (commit bc3a0c2): the pieces of its GPT that do not depend on
+the GPU, and NorMuon plus Adam, the optimizer it trains with. Everything is float64 and runs in the interpreter and in C.
+
+The model, per sequence of `T` tokens:
+
+- the token embedding, tied to the output head until two thirds of training;
+- the *smear gate*: each token's row gets a learned fraction of the row before it;
+- `x0 = norm(x)`, and a small gate network on `x0` that decides, per token and
+  per layer, how much of `x0` to add back into the residual stream;
+- per layer, attention: queries and keys RMS-normalized per head, rotated by
+  half-truncated RoPE, keys on the long-window layer taking their non-rotated
+  lanes from the previous token, a sliding window, and on layer 1 a value
+  embedding added to the values through a sigmoid gate;
+- per layer, a ReLU-squared MLP;
+- learned scalars on every residual branch;
+- a final norm, the head, the softcap `23 sigmoid((z + 5) / 7.5)`, and
+  cross-entropy summed over tokens.
+
+The gradient comes from `value_and_grad`. `gpt.viv` is the same model with
+its backward pass written out by hand (196 lines, and 18 arrays that keep
+each layer's activations for it).
+
+Used with `import gpt_ad`.
+###
+
+import nn_adjoints
+from nn import cross_entropy, MASKED, relu2, softmax_rows
+from params import (
+    param_add, param_cols, param_declare, param_get, param_offset, param_rows, param_set,
+    param_table, param_tensors, param_zeros,
+)
+from polar import frob, ns_step
+from hand.backward import hand_sequence
+
+# ---- sizes ----
+L = 2          # layers
+H = 2          # heads
+HD = 16        # head_dim
+QK = 8         # qk_dim, narrower than head_dim as in the file (96 < 128)
+D = H * HD     # model_dim
+M = 4 * D      # MLP hidden width
+G = 16         # the x0-gate network's hidden width (the file: 64)
+T = 16         # tokens per sequence
+B = 4          # sequences per step
+V = 32         # vocabulary, padded up to a multiple of 32
+ROT = QK / 2   # lanes RoPE rotates; the rest pass through ("half-truncated")
+EPS = 1.1920928955078125e-7
+ATTN_SCALE = 0.1 * sqrt(HD / QK)
+# per layer: sliding window in tokens, key offset on or off, value embedding on or off
+WINDOW = [8.0, 16.0]
+KEY_OFFSET = [0.0, 1.0]
+HAS_VE = [0.0, 1.0]
+
+# ---- the parameters, one flat vector (lib/params) ----
+model = param_table(12 + 5 * L)
+LM = param_declare(model, D, V)
+EMB = param_declare(model, V, D)
+VE = param_declare(model, V, D)
+VEG = param_declare(model, H, 12)
+SMEAR = param_declare(model, 1, 12)
+SCAL = param_declare(model, 1, 2 * L + 1)
+RESID = param_declare(model, L, 2)
+POST = param_declare(model, L, 2)
+GW1 = param_declare(model, G, D)
+GW2 = param_declare(model, L, G)
+GB2 = param_declare(model, 1, L)
+GSCALE = param_declare(model, 1, 1)
+WQK = zeros(L)
+WV = zeros(L)
+WO = zeros(L)
+WFC = zeros(L)
+WPROJ = zeros(L)
+for l to L {
+    WQK[l] = param_declare(model, 2 * H * QK, D)
+    WV[l] = param_declare(model, D, D)
+    WO[l] = param_declare(model, D, D)
+    WFC[l] = param_declare(model, M, D)
+    WPROJ[l] = param_declare(model, M, D)
+}
+SMEAR_LAMBDA = 2 * L    # where smear_lambda sits in the scalars
+
+# ---- RoPE tables (Yarn.reset, not paired) ----
+F1 = zeros(T, QK)
+F2 = zeros(T, QK)
+for t to T {
+    for d to QK {
+        freq = 0.0
+        if d < ROT {
+            # (1/1024)^linspace(0, 1, ROT/2), each repeated for a pair of lanes
+            freq = pow(1.0 / 1024.0, floor(d / 2) / (ROT / 2 - 1))
+        }
+        F1[t, d] = cos(t * freq)
+        F2[t, d] = sin(t * freq)
+        if mod(d, 2) == 1 {
+            F2[t, d] = -F2[t, d]
+        }
+    }
+}
+
+# ---- small pieces ----
+
+#| RMS-normalize each row of `X`; `r[i]` keeps row i's divisor for the backward.
+def norm_rows(X: Arr, r: Arr) {
+    n = len(X)
+    w = len(transpose(X))
+    Y = zeros(n, w)
+    for i to n {
+        total = 0.0
+        for j to w {
+            total = total + X[i, j] * X[i, j]
+        }
+        r[i] = sqrt(total / w + EPS)
+        for j to w {
+            Y[i, j] = X[i, j] / r[i]
+        }
+    }
+    return Y
+}
+
+def sigmoid(x) {
+    return 1.0 / (1.0 + exp(-x))
+}
+
+#| The same, entry by entry. The C backend types a def by its first call, so
+#| one def cannot take a number at one call and an array at another.
+def sigmoids(X: Arr) {
+    return 1.0 / (1.0 + exp(-X))
+}
+
+def gelu(x) {
+    return 0.5 * x * (1.0 + erf(x / sqrt(2.0)))
+}
+
+#| Rows `idx` of `E`: an embedding lookup.
+def gather_rows(E: Arr, idx: Arr) {
+    w = len(transpose(E))
+    X = zeros(len(idx), w)
+    for t to len(idx) {
+        for j to w {
+            X[t, j] = E[idx[t], j]
+        }
+    }
+    return X
+}
+
+#| Scalar `k` of the scalars tensor.
+def scalar(theta: Arr, k) {
+    return theta[param_offset(model, SCAL) + k]
+}
+
+# ---- QK norm + RoPE (the _qk_norm_rope_pad kernel, not paired) ----
+
+#| Normalize each head's `QK` lanes of `R` (T by 2H*QK: the H query heads,
+#| then the H key heads), then rotate the first ROT lanes by RoPE. With
+#| `offset` on, a key head's lanes from ROT on come from the previous token's
+#| normalized key instead. `N` gets the normalized lanes, `r` each head's divisor.
+def qk_norm_rope(R: Arr, offset, N: Arr, r: Arr) {
+    Y = zeros(T, 2 * H * QK)
+    for t to T {
+        for h to 2 * H {
+            c = h * QK
+            total = 0.0
+            for d to QK {
+                total = total + R[t, c + d] * R[t, c + d]
+            }
+            r[t, h] = sqrt(total / QK + EPS)
+            for d to QK {
+                N[t, c + d] = R[t, c + d] / r[t, h]
+            }
+            for d to QK {
+                # the lane RoPE pairs d with: 0<->1, 2<->3, ...
+                e = d + 1 - 2 * mod(d, 2)
+                Y[t, c + d] = F1[t, d] * N[t, c + d] + F2[t, d] * N[t, c + e]
+            }
+        }
+    }
+    if offset > 0.0 {
+        for t to T - 1 {
+            for h to H {
+                c = (H + h) * QK
+                for d to QK - ROT {
+                    Y[t + 1, c + ROT + d] = N[t, c + ROT + d]
+                }
+            }
+        }
+    }
+    return Y
+}
+
+# ---- the whole model ----
+
+#| The summed cross-entropy of one sequence `idx` against `tgt`. Its gradient
+#| comes from `value_and_grad`.
+def sequence(theta: Arr, idx: Arr, tgt: Arr) {
+    # -- embedding and smear gate --
+    X = gather_rows(param_get(theta, model, EMB), idx)
+    smear_w = param_get(theta, model, SMEAR)
+    lam = scalar(theta, SMEAR_LAMBDA)
+    smear_sig = zeros(T)
+    XS = 1.0 * X
+    for t to T - 1 {
+        a = 0.0
+        for c to 12 {
+            a = a + X[t + 1, c] * smear_w[0, c]
+        }
+        smear_sig[t + 1] = sigmoid(a)
+        for d to D {
+            XS[t + 1, d] = X[t + 1, d] + lam * smear_sig[t + 1] * X[t, d]
+        }
+    }
+    r0 = zeros(T)
+    X0 = norm_rows(XS, r0)
+
+    # -- the x0 gates: (gelu(x0 W1^T) W2^T + b2) * scale, one column per layer --
+    W1 = param_get(theta, model, GW1)
+    W2 = param_get(theta, model, GW2)
+    b2 = param_get(theta, model, GB2)
+    gscale = theta[param_offset(model, GSCALE)]
+    HPRE = X0 @ transpose(W1)
+    HG = gelu(HPRE)
+    GRAW = HG @ transpose(W2)
+    for t to T {
+        for l to L {
+            GRAW[t, l] += b2[0, l]
+        }
+    }
+    GATE = gscale * GRAW
+    VEROWS = gather_rows(param_get(theta, model, VE), idx)
+    VEGW = param_get(theta, model, VEG)
+
+    GIN = zeros(T, 12)
+    VEGS = zeros(T, H)
+
+    x = 1.0 * X0
+    for l to L {
+        sa0 = scalar(theta, 2 * l)
+        sa1 = scalar(theta, 2 * l + 1)
+        r = zeros(T)
+        xn = norm_rows(x, r)
+        raw = xn @ transpose(sa0 * param_get(theta, model, WQK[l]))
+        nq = zeros(T, 2 * H * QK)
+        rq = zeros(T, 2 * H)
+        y = qk_norm_rope(raw, KEY_OFFSET[l], nq, rq)
+        v = xn @ transpose(sa0 * param_get(theta, model, WV[l]))
+        if HAS_VE[l] > 0.0 {
+            # gate pattern 2 sigmoid(W [x[:6], ve[:6]]), one number per head
+            for t to T {
+                for c to 6 {
+                    GIN[t, c] = xn[t, c]
+                    GIN[t, 6 + c] = VEROWS[t, c]
+                }
+            }
+            VEGS = 2.0 * sigmoids(GIN @ transpose(VEGW))
+            for t to T {
+                for h to H {
+                    for d to HD {
+                        v[t, h * HD + d] += VEGS[t, h] * VEROWS[t, h * HD + d]
+                    }
+                }
+            }
+        }
+        # causal attention in a sliding window, one head at a time
+        ya = zeros(T, D)
+        for h to H {
+            S = zeros(T, T)
+            for i to T {
+                for j to T {
+                    S[i, j] = MASKED
+                    if j <= i and j >= i - WINDOW[l] {
+                        total = 0.0
+                        for d to QK {
+                            total = total + y[i, h * QK + d] * y[j, (H + h) * QK + d]
+                        }
+                        S[i, j] = ATTN_SCALE * total
+                    }
+                }
+            }
+            Pr = softmax_rows(S)
+            for i to T {
+                for j to T {
+                    for d to HD {
+                        ya[i, h * HD + d] += Pr[i, j] * v[j, h * HD + d]
+                    }
+                }
+            }
+        }
+        out = ya @ (sa1 * param_get(theta, model, WO[l]))
+        ra = theta[param_offset(model, RESID) + 2 * l]
+        pa = theta[param_offset(model, POST) + 2 * l]
+        xm = ra * x + pa * out
+        for t to T {
+            for d to D {
+                xm[t, d] += X0[t, d] * GATE[t, l]
+            }
+        }
+        r2 = zeros(T)
+        xn2 = norm_rows(xm, r2)
+        pre = xn2 @ transpose(param_get(theta, model, WFC[l]))
+        mo = relu2(pre) @ param_get(theta, model, WPROJ[l])
+        rm = theta[param_offset(model, RESID) + 2 * l + 1]
+        pm = theta[param_offset(model, POST) + 2 * l + 1]
+        x = rm * xm + pm * mo
+    }
+
+    # -- head, softcap, cross-entropy --
+    rf = zeros(T)
+    XF = norm_rows(x, rf)
+    LMW = param_get(theta, model, LM)
+    U = (XF @ LMW + 5.0) / 7.5
+    SIG = sigmoids(U)
+    LOGITS = 23.0 * SIG
+    return T * cross_entropy(LOGITS, tgt)
+}
+
+# ---- data ----
+
+#| The tokens of sequence `b` of step `step` (and, with `shift` 1, its targets).
+def batch_tokens(tokens: Arr, step, b, shift) {
+    start = mod((step * B + b) * 37, len(tokens) - T - 1)
+    out = zeros(T)
+    for t to T {
+        out[t] = tokens[start + t + shift]
+    }
+    return out
+}
+
+#| The summed loss over the step's B sequences.
+def batch_loss(theta: Arr, tokens: Arr, step) {
+    total = 0.0
+    for b to B {
+        total = total + sequence(theta, batch_tokens(tokens, step, b, 0), batch_tokens(tokens, step, b, 1))
+    }
+    return total
+}
+
+# ---- the optimizer: NorMuon for the matrices, Adam for the rest ----
+
+ADAM = 0
+NORMUON = 1
+ADAM_LR = 0.008
+ADAM_EPS = 1.0e-10
+ADAM_WD = 0.005
+MUON_LR = 0.023
+MUON_BETA2 = 0.9
+MUON_WD = 1.2
+
+#| Per tensor, in declaration order: optimizer, beta1, beta2, lr_mul, wd_mul
+#| (TrainingManager.param_table).
+def optim_table() {
+    cfg = zeros(param_tensors(model), 5)
+    adam_rows = [[0.5, 0.95, 1.0, 150.0],
+        [0.5, 0.95, 1.0, 150.0],
+        [0.75, 0.95, 75.0, 5.0],
+        [0.9, 0.99, 1.0, 1.0],
+        [0.9, 0.99, 0.01, 0.0],
+        [0.9, 0.99, 5.0, 0.0],
+        [0.9, 0.95, 5.0, 0.0],
+        [0.9, 0.95, 1.0, 0.0],
+        [0.9, 0.99, 0.1, 1.0],
+        [0.9, 0.99, 0.1, 1.0],
+        [0.9, 0.99, 0.1, 0.0],
+        [0.9, 0.99, 0.1, 0.0]]
+    for k to param_tensors(model) {
+        if k < len(adam_rows) {
+            cfg[k, 0] = ADAM
+            for c to 4 {
+                cfg[k, c + 1] = adam_rows[k, c]
+            }
+        }
+        else {
+            cfg[k, 0] = NORMUON
+            cfg[k, 3] = 1.0
+            cfg[k, 4] = 1.0
+        }
+    }
+    return cfg
+}
+OPT = optim_table()
+
+POLAR_EXPRESS = [[8.156554524902461, -22.48329292557795, 15.878769915207462],
+    [4.042929935166739, -2.808917465908714, 0.5000178451051316],
+    [3.8916678022926607, -2.772484153217685, 0.5060648178503393],
+    [3.285753657755655, -2.3681294933425376, 0.46449024233003106],
+    [2.3465413258596377, -1.7097828382687081, 0.42323551169305323]]
+
+#| Polar Express: five quintic steps, each with its own coefficients, from a
+#| start scaled so the spectral norm is below 1. A tall matrix goes through
+#| transposed, which is the file's X^T X branch.
+def polar_express(Gm: Arr) {
+    rows = len(Gm)
+    cols = len(transpose(Gm))
+    X = Gm / (frob(Gm) * 1.02 + 1.0e-6)
+    if rows > cols {
+        X = transpose(X)
+    }
+    for k to 5 {
+        X = ns_step(X, POLAR_EXPRESS[k, 0], POLAR_EXPRESS[k, 1], POLAR_EXPRESS[k, 2])
+    }
+    if rows > cols {
+        return transpose(X)
+    }
+    return X
+}
+
+#| NorMuon's variance reduction: an Adafactor-like second moment of the
+#| orthogonalized update, per row (tall) or per column (wide), kept in `second`
+#| from `at` on; the update is rescaled by it and back to its old norm.
+def normuon_scale(X: Arr, second: Arr, at) {
+    rows = len(X)
+    cols = len(transpose(X))
+    per_row = rows >= cols
+    n = cols
+    red = rows
+    if per_row {
+        n = rows
+        red = cols
+    }
+    vmean = zeros(n)
+    for i to rows {
+        for j to cols {
+            if per_row {
+                vmean[i] += X[i, j] * X[i, j] / red
+            }
+            else {
+                vmean[j] += X[i, j] * X[i, j] / red
+            }
+        }
+    }
+    vnorm = sqrt(sum(vmean) * red)
+    stepsz = zeros(n)
+    for k to n {
+        second[at + k] += (1.0 - MUON_BETA2) * (vmean[k] - second[at + k])
+        stepsz[k] = 1.0 / sqrt(max(second[at + k], 1.0e-10))
+    }
+    vnorm_new = sqrt(sum(vmean * red * stepsz * stepsz))
+    Y = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            k = j
+            if per_row {
+                k = i
+            }
+            Y[i, j] = X[i, j] * stepsz[k] * vnorm / max(vnorm_new, 1.0e-10)
+        }
+    }
+    return Y
+}
+
+#| The rows `r0` to `r0 + rows` of tensor `k`: one matrix Polar Express sees.
+#| Nesterov momentum, Polar Express, variance reduction, then the step with
+#| cautious weight decay (decay only where the update and the weight agree in sign).
+def normuon_group(theta: Arr, grad: Arr, first: Arr, second: Arr, k, r0, rows, lr, wd, mu) {
+    cols = param_cols(model, k)
+    at = param_offset(model, k) + r0 * cols
+    Gm = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            n = at + i * cols + j
+            first[n] += (1.0 - mu) * (grad[n] - first[n])
+            Gm[i, j] = grad[n] + mu * (first[n] - grad[n])
+        }
+    }
+    U = normuon_scale(polar_express(Gm), second, at)
+    for i to rows {
+        for j to cols {
+            n = at + i * cols + j
+            keep = 0.0
+            if U[i, j] * theta[n] >= 0.0 {
+                keep = 1.0
+            }
+            theta[n] = theta[n] - theta[n] * keep * wd * lr - U[i, j] * lr
+        }
+    }
+}
+
+#| NorMuon on tensor `k`. A QK tensor is two groups (the query heads, the key
+#| heads), since the file orthogonalizes each head pair separately; c_proj
+#| steps at twice the rate; a tall matrix at sqrt(rows / cols) times it.
+def normuon_step(theta: Arr, grad: Arr, first: Arr, second: Arr, k, lr_sched, mu) {
+    rows = param_rows(model, k)
+    cols = param_cols(model, k)
+    wd = MUON_WD * MUON_LR * lr_sched
+    lr = MUON_LR * lr_sched * sqrt(max(1.0, rows / cols))
+    groups = 1
+    for l to L {
+        if k == WQK[l] {
+            groups = 2
+            lr = MUON_LR * lr_sched
+        }
+        if k == WPROJ[l] {
+            lr = 2.0 * lr
+        }
+    }
+    for g to groups {
+        normuon_group(theta, grad, first, second, k, g * rows / groups, rows / groups, lr, wd, mu)
+    }
+}
+
+#| Adam with bias correction and cautious weight decay on tensor `k`.
+def adam_step(theta: Arr, grad: Arr, first: Arr, second: Arr, steps: Arr, k, lr_sched) {
+    b1 = OPT[k, 1]
+    b2 = OPT[k, 2]
+    lr = ADAM_LR * lr_sched * OPT[k, 3]
+    steps[k] += 1.0
+    step_size = lr * sqrt(1.0 - pow(b2, steps[k])) / (1.0 - pow(b1, steps[k]))
+    eff_wd = lr * lr * ADAM_WD * OPT[k, 4]
+    at = param_offset(model, k)
+    for i to param_rows(model, k) * param_cols(model, k) {
+        n = at + i
+        first[n] = b1 * first[n] + (1.0 - b1) * grad[n]
+        second[n] = b2 * second[n] + (1.0 - b2) * grad[n] * grad[n]
+        u = first[n] / (sqrt(second[n]) + ADAM_EPS) * step_size
+        if u * theta[n] > 0.0 {
+            u = u + eff_wd * theta[n]
+        }
+        theta[n] -= u
+    }
+}
+
+# ---- schedules (TrainingSchedule.get_lr, get_muon_momentum), scaled to STEPS ----
+STEPS = 30
+STAGE_END = [10.0, 20.0, 30.0]
+STAGE_LR = [1.0, 1.52, 1.73]
+COOLDOWN_FRAC = 0.6
+SPLIT_STEP = 21          # the start of the third stage, made odd so Adam runs
+MOM_WARMUP = 7
+MOM_COOLDOWN = 2
+
+def lr_schedule(step) {
+    stage = 2
+    for s to 3 {
+        k = 2 - s
+        if step < STAGE_END[k] {
+            stage = k
+        }
+    }
+    lr = STAGE_LR[stage]
+    cd_start = floor(STEPS * (1.0 - COOLDOWN_FRAC))
+    if step >= cd_start {
+        f = min(1.0, (step - cd_start) / (STEPS - cd_start))
+        lr = lr * (1.0 - f) + 0.15 * f
+    }
+    return lr
+}
+
+def muon_momentum(step) {
+    lo = 0.85
+    hi = 0.95
+    if step < MOM_WARMUP {
+        return lo + step / MOM_WARMUP * (hi - lo)
+    }
+    if step > STEPS - MOM_COOLDOWN {
+        return hi - (step - (STEPS - MOM_COOLDOWN)) / MOM_COOLDOWN * (hi - lo)
+    }
+    return hi
+}
+
+#| One optimizer step (NorMuonAndAdam.step + TrainingManager.step_optimizers).
+#| Adam steps only on odd steps, so its gradients add up over two; `grad` is
+#| cleared for the tensors that stepped. The optimizer's memory is `first` and
+#| `second` (Adam's two moments; NorMuon's momentum and second moment), laid
+#| out like the model, `steps` (Adam's count per tensor) and `split[0]`, 1 once
+#| embed and lm_head are untied.
+def optimizer_step(theta: Arr, grad: Arr, first: Arr, second: Arr, steps: Arr, split: Arr, step) {
+    lr_sched = lr_schedule(step)
+    mu = muon_momentum(step)
+    do_adam = mod(step, 2) == 1
+    tied = split[0] == 0.0
+    if do_adam and tied {
+        param_add(grad, model, LM, transpose(param_get(grad, model, EMB)))
+    }
+    for k to param_tensors(model) {
+        if OPT[k, 0] == NORMUON {
+            normuon_step(theta, grad, first, second, k, lr_sched, mu)
+        }
+        else {
+            if do_adam and not (k == EMB and tied) {
+                adam_step(theta, grad, first, second, steps, k, lr_sched)
+            }
+        }
+    }
+    if do_adam and tied {
+        param_set(theta, model, EMB, transpose(param_get(theta, model, LM)))
+    }
+    for k to param_tensors(model) {
+        if do_adam or OPT[k, 0] == NORMUON {
+            param_set(grad, model, k, zeros(param_rows(model, k), param_cols(model, k)))
+        }
+    }
+    if step == SPLIT_STEP {
+        steps[EMB] = steps[LM]
+        param_set(first, model, EMB, transpose(param_get(first, model, LM)))
+        param_set(second, model, EMB, transpose(param_get(second, model, LM)))
+        split[0] = 1.0
+    }
+}
+
+#| Train for STEPS steps from `theta`, in place; `losses[s]` is the loss per
+#| token before step s, and `losses[STEPS]` the loss after the last.
+def train(theta: Arr, tokens: Arr, losses: Arr) {
+    # Adam's tensors step every other step, so their gradients add up over
+    # two; optimizer_step zeroes each tensor it steps
+    grad = param_zeros(model)
+    first = param_zeros(model)
+    second = param_zeros(model)
+    steps = zeros(param_tensors(model))
+    split = zeros(1)
+    for step to STEPS {
+        loss, g = value_and_grad(batch_loss, theta, tokens, step)
+        grad = grad + g
+        losses[step] = loss / (B * T)
+        optimizer_step(theta, grad, first, second, steps, split, step)
+    }
+    losses[STEPS] = batch_loss(theta, tokens, STEPS) / (B * T)
+}
+
+# ---- the generated gradient, checked against central differences and the hand-written one ----
+
+test "every tensor's gradient matches central differences of the loss" {
+    srand(7.0)
+    theta = param_zeros(model)
+    for n to len(theta) {
+        theta[n] = 0.4 * (rand() - 0.5)
+    }
+    idx = zeros(T)
+    tgt = zeros(T)
+    for t to T {
+        idx[t] = floor(V * rand())
+        tgt[t] = floor(V * rand())
+    }
+    grad0 = grad(sequence, theta, idx, tgt)
+    h = 1.0e-5
+    worst = 0.0
+    for k to param_tensors(model) {
+        # two entries of every tensor, chosen at random
+        for pick to 2 {
+            n = param_offset(model, k) + floor(param_rows(model, k) * param_cols(model, k) * rand())
+            was = theta[n]
+            theta[n] = was + h
+            up = sequence(theta, idx, tgt)
+            theta[n] = was - h
+            down = sequence(theta, idx, tgt)
+            theta[n] = was
+            numeric = (up - down) / (2.0 * h)
+            worst = max(worst, abs(grad0[n] - numeric) / max(abs(numeric), 1.0e-3))
+        }
+    }
+    show worst
+    # the truncation error of a step of 1e-5, as for the hand-written pass
+    assert_lt(worst, 1.0e-5)
+    # the hand-written backward pass (hand/backward.viv) at the same point
+    hand_grad = param_zeros(model)
+    hand_loss = hand_sequence(theta, hand_grad, idx, tgt, true)
+    ad_loss, ad_grad = value_and_grad(sequence, theta, idx, tgt)
+    assert_near(ad_loss, hand_loss, 0.0)
+    hand_miss = max(abs(ad_grad - hand_grad)) / max(abs(hand_grad))
+    show hand_miss
+    assert_lt(hand_miss, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

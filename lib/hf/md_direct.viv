@@ -1,0 +1,383 @@
+###
+post: Direct J and K, recomputing the integrals instead of storing them
+agent: claude
+
+The Fock matrix needs the Coulomb and exchange matrices of a density `D`:
+
+    J[i, j] = sum_kl (ij|kl) D[k, l]
+    K[i, j] = sum_kl (ik|jl) D[k, l]
+
+With the integrals stored in packed-8 form this is a loop over the vector.
+The vector grows as `n^4 / 8`: 18.4 MB at 65 AOs and 172 MB at 114. Direct
+J/K stores nothing. Every SCF iteration recomputes each shell quartet with
+`mderi_block` and adds it into J and K straight away, then throws it away.
+
+**One unique integral, eight contributions.** `mderi_block` gives each
+integral once, for `i >= j`, `k >= l`, `ij >= kl`. Its 8 index orders all
+carry the same value, and each order adds to J and K in its own place:
+
+    order (p q | r s)   adds  g D[r, s] to J[p, q]   and  g D[q, s] to K[p, r]
+
+When indices coincide (`i = j`, `k = l`, or `ij = kl`), some of the 8 orders
+are the same order counted twice, so `g` is halved once for each
+coincidence before the 8 contributions are added. The result is exact for any
+`D`, symmetric or not.
+
+**Parallel, with the same answer on any thread count.** The quartets come from
+the same flat list as `mderi_build`, and they are dealt round-robin into
+`MDJK_NCHUNK` = 32 chunks. A `parallel for` runs over the chunks. Each chunk
+adds into its own copy of J and K, and after the loop the copies are summed
+in chunk order. A chunk handles the same quartets in the same order whichever
+thread runs it, so the default build, the OpenMP build and any
+`OMP_NUM_THREADS` give the same bits.
+
+The signature is the frozen J/K one, `(X1, X2, X3, D, opts) -> [2 ndens, n, n]`
+with `atoms`, `shells` and `prims` in `X1 .. X3`, so this member can sit in
+the same registry as the in-core ones. `opts[OPT_SCREEN_TOL]` is the Schwarz
+threshold. Everything is over unit-normalized Cartesian AOs.
+
+**Density screening** (`mdjk_direct_screened`, the production member). A
+quartet adds `g D` terms to J and K, with `|g| <= Q_AB Q_CD`, so a quartet
+whose bound times the largest density element it meets is small adds
+nothing that matters. With `Dm[A, B]` the largest `|D|` over the functions
+of shells A and B (and every density), the quartet `(AB|CD)` is skipped when
+
+    Q_AB Q_CD max(4 Dm[A,B], 4 Dm[C,D], Dm[A,C], Dm[A,D], Dm[B,C], Dm[B,D])
+
+is at or below `opts[OPT_DIRECT_TOL]`, 1e-13: the rule and the threshold of
+PySCF's direct SCF (`CVHFnrs8_prescreen` with `direct_scf_tol = 1e-13`; the
+4 is J's weight). On a full density this drops few quartets. On the change
+of density between two SCF iterations, which the incremental Fock build of
+lib/hf/scf_loop hands it, it drops most of them once the SCF is close to
+converged. The Schwarz factors `Q` are a property of the basis: a caller
+that builds J and K many times computes them once (`mderi_schwarz`) and
+passes them (`mdjk_screened_q`). The quartets are dealt into the chunks by
+bra pair, so no quartet list is built per call; `mdjk_direct`, which deals
+the Schwarz list round-robin and screens by nothing else, checks it.
+
+Used with `import hf.md_direct`.
+###
+
+from hf.opts import OPT_DIRECT_TOL, OPT_SCREEN_TOL
+from hf.md_eri import (
+    mderi_block, MDERI_D_GA, MDERI_D_GB, MDERI_D_NA, MDERI_D_NB, MDERI_D_SA, MDERI_D_SB,
+    MDERI_DIR_LEN, mderi_grid, mderi_groups, mderi_qlist, mderi_schwarz, mderi_store,
+    mderi_store_seg, MDERI_TOP,
+)
+from hf.basis import bas_nao_cart, SH_CART0, SH_NCART
+from hf.eri_store import es_get, es_rng
+
+MDJK_NCHUNK = 32
+
+#| Add block `B` of store pairs `(k1, k2)` into the J and K copies of one
+#| chunk, `W[w0 + 2d]` (J) and `W[w0 + 2d + 1]` (K) for each density `d`.
+#| Rows and columns of `B` are numbered as lib/hf/md_eri's packs number
+#| them, a shell pair of the two groups at a time.
+#@ 69e0ba72
+def mdjk_put(W: Arr, w0, B: Arr, D: Arr, nd, ST: Arr, shells: Arr, k1, k2) {
+    d1 = MDERI_TOP + MDERI_DIR_LEN * k1
+    d2 = MDERI_TOP + MDERI_DIR_LEN * k2
+    sa = ST[d1 + MDERI_D_SA]
+    sb = ST[d1 + MDERI_D_SB]
+    sc = ST[d2 + MDERI_D_SA]
+    sd = ST[d2 + MDERI_D_SB]
+    gna = ST[d1 + MDERI_D_NA]
+    gnb = ST[d1 + MDERI_D_NB]
+    gnc = ST[d2 + MDERI_D_NA]
+    gnd = ST[d2 + MDERI_D_NB]
+    na = shells[sa, SH_NCART]
+    nb = shells[sb, SH_NCART]
+    nc = shells[sc, SH_NCART]
+    ndd = shells[sd, SH_NCART]
+    for ga to gna {
+        for ia to na {
+            i = shells[sa + ga, SH_CART0] + ia
+            for gb to gnb {
+                for ib to nb {
+                    j = shells[sb + gb, SH_CART0] + ib
+                    if sa == sb and j > i {
+                        continue
+                    }
+                    ij = i * (i + 1) / 2 + j
+                    row = ((ga * gnb + gb) * na + ia) * nb + ib
+                    for gc to gnc {
+                        for ic to nc {
+                            k = shells[sc + gc, SH_CART0] + ic
+                            for gd to gnd {
+                                for id to ndd {
+                                    l = shells[sd + gd, SH_CART0] + id
+                                    if sc == sd and l > k {
+                                        continue
+                                    }
+                                    kl = k * (k + 1) / 2 + l
+                                    if k1 == k2 and kl > ij {
+                                        continue
+                                    }
+                                    #: halve once per equal index pair, so the eight orders count each integral once
+                                    f = B[row, ((gc * gnd + gd) * nc + ic) * ndd + id]
+                                    if i == j {
+                                        f = 0.5 * f
+                                    }
+                                    if k == l {
+                                        f = 0.5 * f
+                                    }
+                                    if ij == kl {
+                                        f = 0.5 * f
+                                    }
+                                    for d to nd {
+                                        wj = w0 + 2 * d
+                                        wk = wj + 1
+                                        dkl = f * (D[d, k, l] + D[d, l, k])
+                                        dij = f * (D[d, i, j] + D[d, j, i])
+                                        W[wj, i, j] = W[wj, i, j] + dkl
+                                        W[wj, j, i] = W[wj, j, i] + dkl
+                                        W[wj, k, l] = W[wj, k, l] + dij
+                                        W[wj, l, k] = W[wj, l, k] + dij
+                                        W[wk, i, k] = W[wk, i, k] + f * D[d, j, l]
+                                        W[wk, j, k] = W[wk, j, k] + f * D[d, i, l]
+                                        W[wk, i, l] = W[wk, i, l] + f * D[d, j, k]
+                                        W[wk, j, l] = W[wk, j, l] + f * D[d, i, k]
+                                        W[wk, k, i] = W[wk, k, i] + f * D[d, l, j]
+                                        W[wk, l, i] = W[wk, l, i] + f * D[d, k, j]
+                                        W[wk, k, j] = W[wk, k, j] + f * D[d, l, i]
+                                        W[wk, l, j] = W[wk, l, j] + f * D[d, k, i]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+#| One quartet of the list into chunk `c`'s copies; a def of its own so the
+#| block is freed as soon as it has been added.
+#@ 005d2ee4
+def mdjk_one(W: Arr, D: Arr, nd, ST: Arr, G: Arr, shells: Arr, QL: Arr, q, c) {
+    k1 = QL[q, 0]
+    k2 = QL[q, 1]
+    mdjk_put(W, 2 * nd * c, mderi_block(ST, k1, k2, G), D, nd, ST, shells, k1, k2)
+    return 0
+}
+
+#| Chunk `c` of `nch`: quartets `c, c + nch, c + 2 nch, ...` of the list,
+#| added into `W`, the chunk's own copies of J and K.
+#@ 39acc072
+def mdjk_chunk(W: Arr, D: Arr, nd, ST: Arr, G: Arr, shells: Arr, QL: Arr, nq, c, nch) {
+    q = c
+    while q < nq {
+        mdjk_one(W, D, nd, ST, G, shells, QL, q, 0)
+        q = q + nch
+    }
+    return 0
+}
+
+#| J and K with the quartets dealt into `nch` chunks. The result does not
+#| depend on the thread count; it depends on `nch` only through the order of
+#| the final sums.
+#@ 53fe5f5d
+def mdjk_direct_nch(atoms: Arr, shells: Arr, prims: Arr, D: Arr, opts: Arr, nch) {
+    n = bas_nao_cart(shells)
+    nd = len(D)
+    ST = mderi_store_seg(atoms, shells, prims)
+    G = mderi_grid(ST)
+    npl = ST[0]
+    tol = opts[OPT_SCREEN_TOL]
+    Q = mderi_schwarz(ST, G)
+    QL = mderi_qlist(Q, npl, tol)
+    nq = len(QL)
+    # pass c fills a copy of its own and files it as slab c of W, so the
+    # passes write disjoint slabs
+    W = zeros(nch, 2 * nd, n, n)
+    parallel for c to nch {
+        Wc = zeros(2 * nd, n, n)
+        mdjk_chunk(Wc, D, nd, ST, G, shells, QL, nq, c, nch)
+        setslab(W, c, Wc)
+    }
+    #: summed in chunk order, so the result does not depend on threads
+    out = zeros(2 * nd, n, n)
+    for c to nch {
+        Wc = slab(W, c)
+        for r to 2 * nd {
+            setslab(out, r, slab(out, r) + slab(Wc, r))
+        }
+    }
+    return out
+}
+
+#| The J/K registry member: `X1 .. X3` = atoms, shells, prims; `D` is
+#| `[ndens, n, n]`; the result is `[2 ndens, n, n]`, J then K per density.
+#@ d52d5288
+def mdjk_direct(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    return mdjk_direct_nch(X1, X2, X3, D, opts, MDJK_NCHUNK)
+}
+
+#| The largest `|D|` over the functions of each pair of shell groups
+#| (`GT`, lib/hf/md_eri's `mderi_groups`) and every density, `[ng, ng]`,
+#| symmetric. A group's functions are consecutive.
+#@ 6ff6be83
+def mdjk_dmax(D: Arr, shells: Arr, GT: Arr) {
+    ng = len(GT)
+    A = abs(slab(D, 0))
+    for d from 1 to len(D) {
+        A = max(A, abs(slab(D, d)))
+    }
+    lo = zeros(ng)
+    hi = zeros(ng)
+    for g to ng {
+        lo[g] = shells[GT[g, 0], SH_CART0]
+        hi[g] = lo[g] + GT[g, 1] * shells[GT[g, 0], SH_NCART]
+    }
+    Dm = zeros(ng, ng)
+    for a to ng {
+        for b to a + 1 {
+            v = max(max(A[lo[a]:hi[a], lo[b]:hi[b]]), max(A[lo[b]:hi[b], lo[a]:hi[a]]))
+            Dm[a, b] = v
+            Dm[b, a] = v
+        }
+    }
+    return Dm
+}
+
+#| One quartet computed and added into `W`; a def of its own so the block is
+#| freed as soon as it has been added.
+#@ 27d38d0b
+def mdjk_pair(W: Arr, D: Arr, nd, ST: Arr, G: Arr, shells: Arr, k1, k2) {
+    mdjk_put(W, 0, mderi_block(ST, k1, k2, G), D, nd, ST, shells, k1, k2)
+    return 0
+}
+
+#| Chunk `c` of `nch` of the screened build: bra pairs `c, c + nch, ...`,
+#| each against every ket pair up to it, a quartet kept when it passes the
+#| Schwarz test (`Q_AB Q_CD >= tol_s`) and the density test (header), with
+#| `Dm` over the store's shell groups.
+#@ e3033706
+def mdjk_chunk_screened(W: Arr, D: Arr, nd, ST: Arr, G: Arr, shells: Arr, Q: Arr, Dm: Arr, tol_s, tol_d, c, nch) {
+    #: bounds for the early bra test
+    npl = ST[0]
+    qmax = max(Q)
+    dmax = max(Dm)
+    #: skip a bra pair no ket can lift over the density test
+    k1 = c
+    while k1 < npl {
+        ga = ST[MDERI_TOP + MDERI_DIR_LEN * k1 + MDERI_D_GA]
+        gb = ST[MDERI_TOP + MDERI_DIR_LEN * k1 + MDERI_D_GB]
+        q1 = Q[k1]
+        # no ket pair can lift this bra pair over the density test
+        if q1 * qmax * 4.0 * dmax > tol_d {
+            dab = 4.0 * Dm[ga, gb]
+            for k2 to k1 + 1 {
+                q = q1 * Q[k2]
+                if q >= tol_s {
+                    gc = ST[MDERI_TOP + MDERI_DIR_LEN * k2 + MDERI_D_GA]
+                    gd = ST[MDERI_TOP + MDERI_DIR_LEN * k2 + MDERI_D_GB]
+                    dm = max(max(dab, 4.0 * Dm[gc, gd]), max(max(Dm[ga, gc], Dm[ga, gd]), max(Dm[gb, gc], Dm[gb, gd])))
+                    if q * dm > tol_d {
+                        mdjk_pair(W, D, nd, ST, G, shells, k1, k2)
+                    }
+                }
+            }
+        }
+        k1 = k1 + nch
+    }
+    return 0
+}
+
+#| J and K of `D` with Schwarz and density screening, from the Schwarz
+#| factors `Q` of the store's pairs (`mderi_schwarz`); `[2 ndens, n, n]`.
+#@ 58c7efa4
+def mdjk_screened_q(atoms: Arr, shells: Arr, prims: Arr, D: Arr, opts: Arr, Q: Arr) -> Arr {
+    n = bas_nao_cart(shells)
+    nd = len(D)
+    nch = MDJK_NCHUNK
+    ST = mderi_store(atoms, shells, prims)
+    G = mderi_grid(ST)
+    Dm = mdjk_dmax(D, shells, mderi_groups(shells, prims))
+    tol_s = opts[OPT_SCREEN_TOL]
+    tol_d = opts[OPT_DIRECT_TOL]
+    #: one J/K copy per chunk: parallel without shared writes
+    W = zeros(nch, 2 * nd, n, n)
+    parallel for c to nch {
+        Wc = zeros(2 * nd, n, n)
+        mdjk_chunk_screened(Wc, D, nd, ST, G, shells, Q, Dm, tol_s, tol_d, c, nch)
+        setslab(W, c, Wc)
+    }
+    #: summed in chunk order, so the result does not depend on threads
+    out = zeros(2 * nd, n, n)
+    for c to nch {
+        out = out + slab(W, c)
+    }
+    return out
+}
+
+#| The density-screened J/K registry member: `X1 .. X3` = atoms, shells,
+#| prims. It computes the Schwarz factors itself; the SCF's direct member
+#| (lib/hf/jk_direct) takes them from the basis blob instead.
+#@ 50faef85
+def mdjk_direct_screened(X1: Arr, X2: Arr, X3: Arr, D: Arr, opts: Arr) -> Arr {
+    ST = mderi_store(X1, X2, X3)
+    return mdjk_screened_q(X1, X2, X3, D, opts, mderi_schwarz(ST, mderi_grid(ST)))
+}
+
+#| Test helper: `nd` seeded symmetric densities `[nd, n, n]` with entries in
+#| (-1, 1), from the Park-Miller generator of `lib/hf/eri_store`.
+def mdjk_rand_dens(nd, n, seed) {
+    st = zeros(1)
+    st[0] = seed
+    D = zeros(nd, n, n)
+    for d to nd {
+        for i to n {
+            for j to i + 1 {
+                v = 2.0 * es_rng(st) - 1.0
+                D[d, i, j] = v
+                D[d, j, i] = v
+            }
+        }
+    }
+    return D
+}
+
+#| Test helper: J and K of `D` by dense contraction of the packed vector,
+#| as two `[n^2, n^2]` matrix-vector products: `J = Gj @ vec(D)` with
+#| `Gj[(i,j),(k,l)] = (ij|kl)`, and `K = Gk @ vec(D)` with
+#| `Gk[(i,j),(k,l)] = (ik|jl)`. The largest gap to `JK` over every entry is
+#| returned.
+def mdjk_dense_gap(Gp: Arr, JK: Arr, D: Arr, n) {
+    #: (ij|kl) for J, (ik|jl) for K, as dense matrices
+    Gj = zeros(n * n, n * n)
+    Gk = zeros(n * n, n * n)
+    for i to n {
+        for j to n {
+            for k to n {
+                for l to n {
+                    Gj[i * n + j, k * n + l] = es_get(Gp, i, j, k, l)
+                    Gk[i * n + j, k * n + l] = es_get(Gp, i, k, j, l)
+                }
+            }
+        }
+    }
+    w = 0.0
+    for d to len(D) {
+        v = zeros(n * n)
+        for k to n {
+            for l to n {
+                v[k * n + l] = D[d, k, l]
+            }
+        }
+        J = Gj @ v
+        K = Gk @ v
+        for i to n {
+            for j to n {
+                w = max(w, abs(JK[2 * d, i, j] - J[i * n + j]))
+                w = max(w, abs(JK[2 * d + 1, i, j] - K[i * n + j]))
+            }
+        }
+    }
+    return w
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,120 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/getting-started: a first call, your own .viv file, and the tools for
+// feature code and models.
+import DocPage from '../../layouts/DocPage.astro';
+import Code from '../../components/Code.astro';
+import { vipyrTree } from '../../lib/site';
+
+const START = `import vipyr as vp
+
+# water, unless atoms= and coords= say otherwise
+r = vp.scf.run(basis="cc-pvdz")
+r.e_tot, r.converged, r.mo_energy   # hartree
+r.check()    # the program's own tests on this run`;
+
+const VIV = `#| The sum of squares of an array.
+def sumsq(x: Arr) -> Num {
+    s = 0.0
+    for v in x {
+        s = s + v * v
+    }
+    return s
+}`;
+
+const OWN = `import numpy as np
+import vipyr as vp
+
+k = vp.load("kernels.viv")               # compiled to C once, cached under __pycache__/vipyr/
+k.sumsq(np.arange(4.0))                  # 14.0: each annotated top-level def is a Python function
+
+import vipyr.auto                        # or vp.install(): the import hook
+import kernels                           # finds kernels.viv beside your .py files`;
+
+const PIT = `import vipyr as vp
+
+# does any feature of fn read a row later than the row it is computed for?
+vp.check_point_in_time(fn, df, by="user_id", ts="ts")
+
+# replay serving request by request: equal to the training batch, bit for bit?
+vp.check_parity(fn, df, by="user_id", ts="ts")`;
+---
+
+<DocPage
+  title="Getting started · vipyr"
+  icon="/brand/vipyr/vipyr-icon.svg"
+  description="A first vipyr call, your own .viv file as a Python module, and the tools for feature code: point-in-time and parity checks, and a fitted pipeline as one C99 file."
+  tree={vipyrTree(Astro.url.pathname)}
+  toc={[['first', 'A first call'], ['own', 'Your own Viv'], ['tools', 'Feature code and models'], ['next', 'Where next']]}>
+  <h1>Getting started</h1>
+  <p class="lede">
+    vipyr does two things: it calls Viv's checked programs as Python functions, and it loads your own
+    <code>.viv</code> files as Python modules. Below are both, then the tools for feature pipelines.
+  </p>
+
+  <h2 id="first">A first call</h2>
+  <p>
+    Every page writes <code>vp.scf.run(...)</code> for <code>vipyr.scf.run</code>. From a
+    <a href="/vipyr/install">checkout</a>, <code>vp.scf</code> imports directly; on PyPI it is
+    planned as <code>pip install "vipyr[chem]"</code>.
+  </p>
+  <Code lang="python" code={START} />
+  <p>
+    The first call in a process compiles the program to a C library, or loads the one built last time; later calls
+    reuse it. A wrong argument is refused before anything compiles, with the parameter's name in the message.
+  </p>
+
+  <h2 id="own">Your own Viv</h2>
+  <p>A <code>.viv</code> file of your own, <code>kernels.viv</code>:</p>
+  <Code lang="viv" code={VIV} />
+  <p>
+    <code>vp.load</code> compiles it and returns a module. Each top-level def whose parameters are annotated becomes a
+    Python function that takes NumPy arrays, or a pandas or polars DataFrame whose columns go to the parameters by
+    name. A compile error is a <code>SyntaxError</code> that points into the <code>.viv</code> file.
+  </p>
+  <Code lang="python" code={OWN} />
+  <ul>
+    <li>
+      <code>%load_ext vipyr</code> in Jupyter adds the <code>%%viv NAME</code> cell magic: a cell of Viv defs becomes
+      the module <code>NAME</code>, and each call is recorded in <code>.viv_runs.jsonl</code>.
+    </li>
+    <li>
+      A package of your own builds its wheel with <code>build-backend = "vipyr.build"</code> and lists its
+      <code>.viv</code> modules under <code>[tool.vipyr]</code> in <code>pyproject.toml</code>.
+    </li>
+  </ul>
+  <p>The language itself is introduced in the <a href="/tour">Viv tour</a>.</p>
+
+  <h2 id="tools">Feature code and models</h2>
+  <p>
+    Three tools for the code between your data and a model, all on your own functions:
+  </p>
+  <Code lang="python" code={PIT} />
+  <ul>
+    <li>
+      <code>vp.check_point_in_time</code> checks a feature function for future leakage: no output row may depend on
+      an input row with a later timestamp.
+    </li>
+    <li>
+      <code>vp.check_parity</code> checks that serving computes what training computed: it replays the rows one
+      request at a time and compares with the batch result bit for bit.
+    </li>
+    <li>
+      <code>vp.compile.compile_model</code> (or <code>vipyr compile model.pkl -o model.c</code>) writes a fitted
+      scikit-learn pipeline and your custom features as one C99 file, with a self-test that runs on the target
+      machine.
+    </li>
+  </ul>
+  <p>
+    Per-entity features with state, such as sessions, rolling counts and time since the last event, are in
+    <a href="/vipyr/features"><code>vp.features</code></a>.
+  </p>
+
+  <h2 id="next">Where next</h2>
+  <ul>
+    <li><a href="/vipyr/gallery">The gallery</a>: worked examples with their output and figures.</li>
+    <li><a href="/vipyr/api">The API reference</a>: the functions documented here, by family.</li>
+    <li><a href="/explore">Explore a run</a>: step through what a program did, line by line.</li>
+  </ul>
+</DocPage>

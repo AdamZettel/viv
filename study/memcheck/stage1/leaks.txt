@@ -1,0 +1,20 @@
+# The leaks of the memory model's stage 1, before (main at 9bfcc15) and after
+# stage 1 (branch own1), at 1,000 and 10,000 passes. Programs: lang/viv/tests/memory_leaks.rs
+# (keys, while, maps), study/memcheck/parallel/alloc_in_body_def.viv (parallel).
+# C: peak resident set of the program built with cc -O2 (bytes, macOS getrusage).
+# wasm: the direct wasm module's memory at exit (tools/run-wasm.mjs --memory).
+program                       passes   C before     C after   wasm before  wasm after
+keys(mp), values(mp) in loops   1000   67305472     1540096       1900544     1900544
+                               10000  659800064     1507328       1900544     1900544
+while sum(g(a)) ... < t         1000   34308096     1359872      33947648     1835008
+                               10000  330579968     1359872     322830336     1835008
+maps made in defs and dropped   1000   25411584     1900544      23789568     1835008
+                               10000  238469120     1998848     221642752     1835008
+# parallel for whose body calls a def returning 64 numbers, in a def called N times,
+# OpenMP with 8 threads (peak resident set) and without OpenMP
+alloc_in_body_def, OpenMP x8      50   24199168     2408448
+                                 200   83984384     2441216
+alloc_in_body_def, no OpenMP      50    1916928     1376256
+                                 200    1916928     1376256
+# study/compare/strings/parse_numbers.viv under `leaks --atExit`
+parse_numbers: before 33 leaks for 1680 total leaked bytes; after 0 leaks for 0 total leaked bytes

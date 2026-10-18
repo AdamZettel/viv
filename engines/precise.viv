@@ -1,0 +1,37 @@
+# precise: a number in three parts that each print exactly.
+#
+# `show` prints six significant figures, and an energy checked to 1e-9 needs
+# twelve. An engine shows its energy as v = hi + mid * 1e-6 + lo * 1e-12
+# (for |v| < 1e4): hi is v rounded to two decimals, mid and lo are integers
+# below 5000 and 500000, and all three print in six figures without loss. The
+# page adds them back up (www/src/lib/engines/report.js).
+#
+# Used with `import engines.precise`.
+
+#| v rounded to two decimals: the first part.
+def precise_hi(v) {
+    return round(v * 100.0) / 100.0
+}
+
+#| The next six decimals, as an integer.
+def precise_mid(v) {
+    return round((v - precise_hi(v)) * 1.0e6)
+}
+
+#| The six after those, as an integer.
+def precise_lo(v) {
+    r = (v - precise_hi(v)) * 1.0e6
+    return round((r - round(r)) * 1.0e6)
+}
+
+test "three parts add back up to the number, to 1e-12" {
+    v = -75.98394849810573
+    assert_near(precise_hi(v) + precise_mid(v) * 1.0e-6 + precise_lo(v) * 1.0e-12, v, 1.0e-12)
+    w = 0.480080446924
+    assert_near(precise_hi(w) + precise_mid(w) * 1.0e-6 + precise_lo(w) * 1.0e-12, w, 1.0e-12)
+    assert_lt(abs(precise_mid(v)), 5000.5)
+    assert_lt(abs(precise_lo(v)), 500000.5)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

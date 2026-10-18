@@ -1,0 +1,84 @@
+###
+title: Nuclear spin-orbit splitting rivals the shell gap
+line: In oxygen-16 the $1p$ splitting is 6.2 MeV, 40% of the shell gap; in hydrogen fine structure is $4.4 \times 10^{-6}$ of the gap.
+claim: In oxygen-16 with the SLy5 Skyrme force (Viv's Hartree-Fock on a 0.1 fm radial mesh), the spin-orbit splitting of the $1p$ shell is about 6.2 MeV for neutrons and 6.1 MeV for protons, between 30% and 50% (about 40%) of the gap from the $1s_{1/2}$ to the $1p_{3/2}$ level, while in hydrogen the $n = 2$ fine-structure splitting from the Dirac formula is $4.5 \times 10^{-5}$ eV, about $4.4 \times 10^{-6}$ of the $1s$ to $n = 2$ gap (below $10^{-5}$). Spin-orbit coupling is a leading term in nuclear shell structure and a correction of order $\alpha^2$ in a light atom.
+topic: science
+section: nuclear and atomic structure
+reference: SLy5 parameters of Chabanat et al., Nucl. Phys. A 643, 441 (1998), as skyrme_rpa (Colò et al., Comput. Phys. Commun. 184, 142 (2013)) lists them; lib/skyrme agrees with the post's NumPy twin to $10^{-7}$ (tools/export/test_skyrmehf.py). Hydrogen: the Dirac energy levels of a point nucleus, $E = mc^2\bigl[1 + \bigl(\alpha/(n - \delta_j)\bigr)^2\bigr]^{-1/2}$, with CODATA 2018 $\alpha$ and $m_e c^2$; its leading term $\alpha^2/12$ for the ratio is checked too.
+scope: One nucleus and one force; the size of the nuclear splitting depends on the force's spin-orbit strength $W_0$ (126 MeV fm$^5$ in SLy5), and the measured 1p splitting in oxygen-16 (about 6 MeV) is not part of the check. The atomic side is the Dirac point-nucleus model, which leaves out the Lamb shift, hyperfine structure and the reduced-mass correction. Heavier atoms have larger fine structure (it grows as $Z^4$).
+lane: ai
+by: claude
+cost: fast
+related: lib/skyrme/skyrme.viv, /explore
+###
+
+from skyrme.skyrme import skyrme_o16
+
+#: the mesh of lib/skyrme/story_o16.viv: spacing in fm, number of points
+MESH_H = 0.1
+MESH_N: Int = 150
+#: the fine-structure constant and the electron's rest energy in eV, CODATA 2018
+ALPHA_FS = 7.2973525693e-3
+MC2_EV = 510998.95
+
+#| The Dirac energy of hydrogen's level (n, j), binding only (rest energy taken off), eV.
+def dirac_level(n, j) -> Num {
+    k = j + 0.5
+    delta = k - sqrt(k * k - ALPHA_FS * ALPHA_FS)
+    x = ALPHA_FS / (n - delta)
+    return MC2_EV * (1.0 / sqrt(1.0 + x * x) - 1.0)
+}
+
+o16 = skyrme_o16(MESH_H, MESH_N)
+#: o16.levels: neutrons 1s1/2, 1p3/2, 1p1/2, then the protons' same three, MeV
+so_split_n = o16.levels[2] - o16.levels[1]
+so_split_p = o16.levels[5] - o16.levels[4]
+sp_gap_n = o16.levels[1] - o16.levels[0]
+sp_gap_p = o16.levels[4] - o16.levels[3]
+so_ratio_n = so_split_n / sp_gap_n
+so_ratio_p = so_split_p / sp_gap_p
+show so_split_n
+show so_split_p
+show so_ratio_n
+show so_ratio_p
+
+fs_split_ev = dirac_level(2.0, 1.5) - dirac_level(2.0, 0.5)
+gap_12_ev = dirac_level(2.0, 0.5) - dirac_level(1.0, 0.5)
+fs_ratio = fs_split_ev / gap_12_ev
+show fs_split_ev
+show gap_12_ev
+show fs_ratio
+
+#: the figure: the spin-orbit splitting as a fraction of the shell gap, nucleus against atom
+figure("Spin-orbit splitting over the shell gap", "", "splitting / gap")
+yscale("log")
+bars([0.0, 1.0, 2.0], [so_ratio_n, so_ratio_p, fs_ratio], "ratio")
+xtick("O-16 neutrons", 0.0)
+xtick("O-16 protons", 1.0)
+xtick("hydrogen n = 2", 2.0)
+
+test "the Hartree-Fock iteration converged" {
+    assert_true(o16.converged)
+}
+test "the 1p spin-orbit splitting in oxygen-16 is 5.5 to 7 MeV for neutrons and protons" {
+    assert_gt(so_split_n, 5.5)
+    assert_lt(so_split_n, 7.0)
+    assert_gt(so_split_p, 5.5)
+    assert_lt(so_split_p, 7.0)
+}
+test "it is 30% to 50% of the 1s1/2 to 1p3/2 gap" {
+    assert_gt(so_ratio_n, 0.3)
+    assert_lt(so_ratio_n, 0.5)
+    assert_gt(so_ratio_p, 0.3)
+    assert_lt(so_ratio_p, 0.5)
+}
+test "hydrogen's n = 2 fine-structure splitting is 4.5e-5 eV and below 1e-5 of the 1s to n = 2 gap" {
+    assert_near(fs_split_ev, 4.53e-5, 0.01e-5)
+    assert_lt(fs_ratio, 1.0e-5)
+}
+test "the ratio is alpha^2 / 12 to leading order" {
+    assert_near(fs_ratio / (ALPHA_FS * ALPHA_FS / 12.0), 1.0, 1.0e-4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

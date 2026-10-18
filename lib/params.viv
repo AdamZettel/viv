@@ -1,0 +1,189 @@
+###
+post: A model's parameters as one vector and a table
+agent: claude
+
+A model is several matrices of different shapes: an embedding, a few
+projections, an output layer. Training keeps more arrays of exactly those
+shapes: the gradient, and whatever the optimizer remembers between steps (a
+momentum, a running average of squared gradients). Written out one variable per
+matrix, every one of those arrays becomes six variables, and every loop over
+them is written six times.
+
+This module keeps all of a model's numbers in one flat vector and keeps a small
+table beside it that says where each matrix lives: the offset of its first
+entry, its number of rows and its number of columns. A matrix is stored row by
+row from its offset. The table is the model's *layout*, and anything with the
+same layout (a gradient, a momentum) is one more vector of the same length. An
+optimizer is then one loop over one vector, or one loop over the table when it
+needs each matrix whole.
+
+A tensor is named by its row in the table. Declaring a shape returns that row,
+so a program names its tensors as it declares them:
+
+    model = param_table(2)
+    EMBED = param_declare(model, 6, 8)
+    OUT = param_declare(model, 8, 6)
+    theta = param_zeros(model)
+
+Used with `import params`.
+###
+
+from linalg import test_matrix
+
+#| The columns of a layout table: where a tensor starts in the flat vector, and
+#| its shape.
+PARAM_OFFSET = 0
+PARAM_ROWS = 1
+PARAM_COLS = 2
+#| How many numbers describe one tensor: the three above.
+PARAM_FIELDS = 3
+
+def param_table(count) {
+    return zeros(count, PARAM_FIELDS)
+}
+
+def param_declare(layout: Arr, rows, cols) {
+    k = 0
+    while layout[k, PARAM_ROWS] > 0.0 {
+        k = k + 1
+    }
+    start = 0.0
+    if k > 0 {
+        start = layout[k - 1, PARAM_OFFSET] + layout[k - 1, PARAM_ROWS] * layout[k - 1, PARAM_COLS]
+    }
+    layout[k, PARAM_OFFSET] = start
+    layout[k, PARAM_ROWS] = rows
+    layout[k, PARAM_COLS] = cols
+    return k
+}
+
+def param_tensors(layout: Arr) {
+    return len(layout)
+}
+
+def param_offset(layout: Arr, k) {
+    return round(layout[k, PARAM_OFFSET])
+}
+
+def param_rows(layout: Arr, k) {
+    return round(layout[k, PARAM_ROWS])
+}
+
+def param_cols(layout: Arr, k) {
+    return round(layout[k, PARAM_COLS])
+}
+
+def param_count(layout: Arr) {
+    last = param_tensors(layout) - 1
+    return param_offset(layout, last) + param_rows(layout, last) * param_cols(layout, last)
+}
+
+def param_zeros(layout: Arr) {
+    return zeros(param_count(layout))
+}
+
+def param_get(theta: Arr, layout: Arr, k) {
+    start = param_offset(layout, k)
+    rows = param_rows(layout, k)
+    cols = param_cols(layout, k)
+    M = zeros(rows, cols)
+    for i to rows {
+        M[i, 0:cols] = theta[start + i * cols:start + (i + 1) * cols]
+    }
+    return M
+}
+
+def param_set(theta: Arr, layout: Arr, k, M: Arr) {
+    start = param_offset(layout, k)
+    cols = param_cols(layout, k)
+    for i to param_rows(layout, k) {
+        at = start + i * cols
+        theta[at:at + cols] = M[i, 0:cols]
+    }
+}
+
+def param_add(theta: Arr, layout: Arr, k, M: Arr) {
+    start = param_offset(layout, k)
+    cols = param_cols(layout, k)
+    for i to param_rows(layout, k) {
+        at = start + i * cols
+        theta[at:at + cols] = theta[at:at + cols] + M[i, 0:cols]
+    }
+}
+
+def param_add_row(theta: Arr, layout: Arr, k, row, M: Arr, from_row) {
+    cols = param_cols(layout, k)
+    start = param_offset(layout, k) + row * cols
+    theta[start:start + cols] = theta[start:start + cols] + M[from_row, 0:cols]
+}
+
+test "a layout packs its tensors end to end, row by row" {
+    model = param_table(3)
+    first = param_declare(model, 2, 3)
+    row = param_declare(model, 1, 4)
+    last = param_declare(model, 3, 2)
+    # each declaration is named by the row it took
+    assert_near(first, 0.0, 0.0)
+    assert_near(last, 2.0, 0.0)
+    assert_near(param_tensors(model), 3.0, 0.0)
+    assert_near(param_offset(model, row), 6.0, 0.0)
+    assert_near(param_offset(model, last), 10.0, 0.0)
+    assert_near(param_count(model), 16.0, 0.0)
+    theta = param_zeros(model)
+    assert_near(len(theta), 16.0, 0.0)
+    # entry (1, 0) of the last tensor is two past its start: one row of two columns
+    M = zeros(param_rows(model, last), param_cols(model, last))
+    M[1, 0] = 7.0
+    param_set(theta, model, last, M)
+    assert_near(theta[12], 7.0, 0.0)
+}
+
+test "a tensor comes back out as the matrix that went in, and its neighbors are untouched" {
+    model = param_table(3)
+    param_declare(model, 2, 3)
+    middle = param_declare(model, 4, 5)
+    param_declare(model, 1, 2)
+    theta = param_zeros(model)
+    for i to len(theta) {
+        theta[i] = -1.0
+    }
+    M = test_matrix(5, 17.0)
+    param_set(theta, model, middle, M)
+    back = param_get(theta, model, middle)
+    for i to param_rows(model, middle) {
+        for j to param_cols(model, middle) {
+            assert_near(back[i, j], M[i, j], 0.0)
+        }
+    }
+    # the six entries before it and the two after it
+    for i to param_offset(model, middle) {
+        assert_near(theta[i], -1.0, 0.0)
+    }
+    assert_near(theta[26], -1.0, 0.0)
+    assert_near(theta[27], -1.0, 0.0)
+}
+
+test "adding a gradient twice is doubling it, and a row lands only in its row" {
+    model = param_table(2)
+    weight = param_declare(model, 3, 2)
+    table = param_declare(model, 2, 2)
+    grad = param_zeros(model)
+    G = test_matrix(3, 5.0)
+    param_add(grad, model, weight, G)
+    param_add(grad, model, weight, G)
+    twice = param_get(grad, model, weight)
+    for i to param_rows(model, weight) {
+        for j to param_cols(model, weight) {
+            assert_near(twice[i, j], 2.0 * G[i, j], 0.0)
+        }
+    }
+    param_add_row(grad, model, table, 1, G, 2)
+    rows = param_get(grad, model, table)
+    assert_near(rows[0, 0], 0.0, 0.0)
+    assert_near(rows[0, 1], 0.0, 0.0)
+    assert_near(rows[1, 0], G[2, 0], 0.0)
+    assert_near(rows[1, 1], G[2, 1], 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,98 @@
+# Kernel collection K1: SLICOT-style control numerics.
+#
+# Adapters over lib/schur.viv (Hessenberg and Francis's double-shift QR),
+# lib/are.viv (Laub's Schur method for the Riccati equation, as SLICOT's
+# SB02MD) and lib/lyap.viv (Bartels and Stewart, as SB03MD). Each adapter
+# takes and returns what the SciPy function of the same name does, so the
+# library's output arguments become results.
+
+import schur as sl
+from are import are_solve, are_gains
+from lyap import lyap_solve
+
+#| Stop unless M is a square matrix; `who` names the caller in the message.
+def k1_square(M: Arr, who: Str, what: Str) -> Num {
+    s = shape(M)
+    if len(s) != 2 {
+        stop(f"{who}: {what} must be a matrix")
+    }
+    if s[0] != s[1] {
+        stop(f"{who}: {what} must be square, got {s[0]} by {s[1]}")
+    }
+    return s[0]
+}
+
+#| The real Schur decomposition A = Z T Z^T: T quasi-triangular, Z orthogonal.
+#| As scipy.linalg.schur(A, output="real"). T is not unique, so compare
+#| through the residual and the eigenvalues, not entry by entry.
+def schur(A: Arr) {
+    n = k1_square(A, "schur", "A")
+    T = zeros(n, n)
+    Z = zeros(n, n)
+    junk = sl.schur(A, T, Z)
+    return T, Z
+}
+
+#| The stabilizing solution X of A^T X + X A - X B R^-1 B^T X + Q = 0, as
+#| scipy.linalg.solve_continuous_are(A, B, Q, R).
+def solve_care(A: Arr, B: Arr, Q: Arr, R: Arr) -> Arr {
+    n = k1_square(A, "solve_care", "A")
+    m = k1_square(R, "solve_care", "R")
+    qn = k1_square(Q, "solve_care", "Q")
+    sb = shape(B)
+    if len(sb) != 2 or sb[0] != n or sb[1] != m or qn != n {
+        stop("solve_care: B must be n by m and Q n by n, for A n by n and R m by m")
+    }
+    X = zeros(n, n)
+    cut = are_solve(A, B, R, Q, X)
+    if cut != n {
+        stop(f"solve_care: the Hamiltonian has {cut} stable eigenvalues, not {n}; no stabilizing solution")
+    }
+    return X
+}
+
+#| The X with A X + X A^T = Q, as scipy.linalg.solve_continuous_lyapunov(A, Q).
+#| lib/lyap solves A'^T X + X A' + C = 0, so A' = A^T and C = -Q.
+def solve_lyapunov(A: Arr, Q: Arr) -> Arr {
+    n = k1_square(A, "solve_lyapunov", "A")
+    qn = k1_square(Q, "solve_lyapunov", "Q")
+    if qn != n {
+        stop(f"solve_lyapunov: Q is {qn} by {qn}, A is {n} by {n}")
+    }
+    X = zeros(n, n)
+    junk = lyap_solve(transpose(A), -Q, X)
+    return X
+}
+
+#| The linear-quadratic regulator for xdot = A x + B u with cost
+#| int x^T Q x + u^T R u: the gain K = R^-1 B^T P, m by n, with u = -K x, and
+#| the Riccati solution P. As python-control's lqr without its third result.
+def lqr(A: Arr, B: Arr, Q: Arr, R: Arr) {
+    P = solve_care(A, B, Q, R)
+    return are_gains(B, R, P), P
+}
+
+test "schur puts the matrix back and Z is orthogonal" {
+    A = [[4.0, -2.0, 1.0], [3.0, 6.0, -4.0], [2.0, 1.0, 8.0]]
+    T, Z = schur(A)
+    assert_lt(max(abs(Z @ T @ transpose(Z) - A)), 1.0e-13)
+    assert_lt(max(abs(transpose(Z) @ Z - eye(3))), 1.0e-14)
+}
+
+test "a double integrator with unit weights: gains 1 and sqrt 3" {
+    A = [[0.0, 1.0], [0.0, 0.0]]
+    B = [[0.0], [1.0]]
+    K, P = lqr(A, B, eye(2), [[1.0]])
+    assert_near(K[0, 0], 1.0, 1.0e-13)
+    assert_near(K[0, 1], sqrt(3.0), 1.0e-13)
+}
+
+test "the Lyapunov solution satisfies A X + X A^T = Q" {
+    A = [[-1.0, 2.0], [0.0, -3.0]]
+    Q = [[1.0, 0.5], [0.5, 2.0]]
+    X = solve_lyapunov(A, Q)
+    assert_lt(max(abs(A @ X + X @ transpose(A) - Q)), 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

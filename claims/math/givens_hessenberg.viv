@@ -1,0 +1,106 @@
+#! timing
+###
+title: Givens QR of a Hessenberg matrix costs O(n²)
+line: About $3n^2$ operations against Householder's $\tfrac{4}{3}n^3$; at $n = 400$ Householder does more than 100 times the work.
+claim: QR of an $n \times n$ upper Hessenberg matrix by Givens rotations takes $n - 1$ rotations and about $3n^2$ floating-point operations, while Householder QR that ignores the zeros takes about $\tfrac{4}{3} n^3$. From $n = 50$ to 400 the counted operations grow with log-log slopes between 1.9 and 2.1 and between 2.8 and 3.1, at $n = 400$ Householder does more than 100 times the work, and the two give the same $R$ up to the signs of its rows (relative difference below $10^{-12}$).
+topic: math
+section: linalg
+reference: Golub and Van Loan, Matrix Computations (4th ed., 2013), sections 5.1.9 and 5.2.5 ($3n^2$ flops for Hessenberg QR by Givens, $\tfrac{4}{3} n^3$ for Householder QR of a square matrix), the step every QR-algorithm iteration on a Hessenberg matrix repeats.
+scope: Operation counts are counted in the programs' inner loops (multiplications and additions of the updates; square roots and the reflector setup are left out); the wall-clock times are shown but not asserted. One random Hessenberg matrix per size.
+lane: ai
+by: claude
+cost: fast
+###
+
+from qrlib import hessenberg_givens_r, householder_r, loglog_slope
+
+SIZES = [50, 100, 200, 400]
+SEED: Int = 11
+
+#| A random n x n upper Hessenberg matrix.
+def random_hessenberg(n: Int) -> Arr {
+    h = zeros(n, n)
+    for i to n {
+        for j to n {
+            if i <= j + 1 {
+                h[i, j] = randn()
+            }
+        }
+    }
+    return h
+}
+
+srand(SEED)
+n_sizes: Int = len(SIZES)
+sizes = zeros(n_sizes)
+flops_givens = zeros(n_sizes)
+flops_householder = zeros(n_sizes)
+time_givens = zeros(n_sizes)
+time_householder = zeros(n_sizes)
+r_diff = 0.0
+for k to n_sizes {
+    n: Int = int(SIZES[k])
+    sizes[k] = SIZES[k]
+    h = random_hessenberg(n)
+    t0 = clock()
+    rg, fg = hessenberg_givens_r(h)
+    time_givens[k] = clock() - t0
+    t0 = clock()
+    rh, fh = householder_r(h)
+    time_householder[k] = clock() - t0
+    flops_givens[k] = float(fg)
+    flops_householder[k] = float(fh)
+    #: R is unique up to the sign of each row
+    for i to n {
+        for j from i to n {
+            r_diff = max(r_diff, abs(abs(rg[i, j]) - abs(rh[i, j])) / abs(rh[i, i]))
+        }
+    }
+}
+slope_givens = loglog_slope(sizes, flops_givens)
+slope_householder = loglog_slope(sizes, flops_householder)
+time_slope_givens = loglog_slope(sizes, time_givens)
+time_slope_householder = loglog_slope(sizes, time_householder)
+n_last: Int = n_sizes - 1
+work_ratio_at_400 = flops_householder[n_last] / flops_givens[n_last]
+givens_in_n2 = flops_givens[n_last] / (sizes[n_last] * sizes[n_last])
+householder_in_n3 = flops_householder[n_last] / (sizes[n_last] * sizes[n_last] * sizes[n_last])
+show flops_givens
+show flops_householder
+show slope_givens
+show slope_householder
+show work_ratio_at_400
+show givens_in_n2
+show householder_in_n3
+show r_diff
+show time_slope_givens
+show time_slope_householder
+
+#: the figure: counted operations against n for both methods
+figure("Operations for QR of an upper Hessenberg matrix", "n", "floating-point operations")
+xscale("log")
+yscale("log")
+plot(sizes, flops_householder, "Householder, about 4/3 n^3")
+style("Householder, about 4/3 n^3", "s2 square")
+plot(sizes, flops_givens, "Givens, about 3 n^2")
+style("Givens, about 3 n^2", "s1 circle")
+
+test "Givens on a Hessenberg matrix: about 3 n^2 operations, slope between 1.9 and 2.1" {
+    assert_near(givens_in_n2, 3.0, 0.05)
+    assert_gt(slope_givens, 1.9)
+    assert_lt(slope_givens, 2.1)
+}
+test "Householder ignoring the zeros: about 4/3 n^3, slope between 2.8 and 3.1" {
+    assert_near(householder_in_n3, 4.0 / 3.0, 0.05)
+    assert_gt(slope_householder, 2.8)
+    assert_lt(slope_householder, 3.1)
+}
+test "at n = 400 Householder does more than 100 times the work" {
+    assert_gt(work_ratio_at_400, 100.0)
+}
+test "the two give the same R up to row signs, to 1e-12" {
+    assert_lt(r_diff, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

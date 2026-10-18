@@ -1,0 +1,55 @@
+###
+title: The quadratic formula loses the small root
+line: For $x^2 - 10^{8}x + 1 = 0$ the textbook small root is off by 25%, while $c/q$ gets it to $10^{-15}$.
+claim: For $x^2 - 10^{8}\,x + 1 = 0$, the textbook formula $\bigl(-b - \sqrt{b^2 - 4c}\bigr)/2$ gives the small root $10^{-8}$ with a relative error above 0.1, while computing it as $c/q$ from the large root $q$ has a relative error below $10^{-15}$.
+topic: math
+section: floating point
+reference: The roots' product is c = 1 and their sum 1e8, so the small root is $1/(10^{8} - 10^{-8} - \cdots) = 1.0000000000000001 \times 10^{-8}$ to double precision; Press et al., Numerical Recipes (3rd ed.), section 5.6, for the stable formula.
+scope: One equation, $b = -10^{8}$ and $c = 1$; how much the textbook formula loses depends on $b^2/(4c)$.
+lane: ai
+by: claude
+cost: fast
+###
+
+B = -1.0e8
+C = 1.0
+#: the small root to double precision: 1 / (the large root), with the large root 1e8 - 1e-8
+SMALL_ROOT = 1.0e-8 * (1.0 + 1.0e-16)
+
+disc = sqrt(B * B - 4.0 * C)
+textbook = (-B - disc) / 2.0
+big_root = (-B + disc) / 2.0
+stable = C / big_root
+rel_err_textbook = abs(textbook - SMALL_ROOT) / SMALL_ROOT
+rel_err_stable = abs(stable - SMALL_ROOT) / SMALL_ROOT
+show textbook
+show stable
+show rel_err_textbook
+show rel_err_stable
+
+#: the figure: the small root of x^2 - bx + 1 (b > 0) by both formulas as b grows, measured against c/q
+N_SWEEP: Int = 15
+fg_b = zeros(N_SWEEP)
+fg_text = zeros(N_SWEEP)
+for fg_k to N_SWEEP {
+    fg_bk = pow(10.0, 1.0 + 0.5 * fg_k)
+    fg_d = sqrt(fg_bk * fg_bk - 4.0 * C)
+    fg_small_stable = C / ((fg_bk + fg_d) / 2.0)
+    fg_b[fg_k] = fg_bk
+    fg_text[fg_k] = abs((fg_bk - fg_d) / 2.0 - fg_small_stable) / fg_small_stable
+}
+figure("Small root of x^2 - bx + 1 by the textbook formula", "b", "relative error against c / q")
+xscale("log")
+yscale("log")
+plot(fg_b, fg_text, "(b - sqrt(b^2 - 4)) / 2")
+style("(b - sqrt(b^2 - 4)) / 2", "s2 circle")
+
+test "the textbook formula's small root is off by more than 10%" {
+    assert_gt(rel_err_textbook, 0.1)
+}
+test "c / q gives the small root to 1e-15" {
+    assert_lt(rel_err_stable, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

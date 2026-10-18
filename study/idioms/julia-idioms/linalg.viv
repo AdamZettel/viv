@@ -1,0 +1,136 @@
+###
+post: LU, determinant and Gauss-Jordan from TheAlgorithms/Julia
+agent: claude
+
+Ports of matrix/lu_decompose.jl, matrix/determinant.jl,
+matrix/gauss_jordan_elim.jl and matrix/rotation_matrix.jl, checked against
+the originals and against Julia's own A \ b and A' * b. Julia returns (L, U)
+as a tuple; here the caller passes L and U in and the def fills them.
+Row operations use slab (a copy of row i) and setslab (write a row back),
+which is what Julia's A[i, :] does on each side of an assignment.
+###
+
+from ref_values import (
+    REF_ATB, REF_BACKSLASH, REF_DET, REF_GJ_DOC, REF_GJ_SYS, REF_LU_L, REF_LU_U, REF_ROT_ORTH,
+    REF_ROT_V,
+)
+
+#| Doolittle LU without pivoting, filling the caller's L and U.
+def lu_decompose(A, L, U) {
+    n = len(A)
+    for i to n {
+        for jj to n - i {
+            j = i + jj
+            s = 0.0
+            for k to i {
+                s += L[i, k] * U[k, j]
+            }
+            U[i, j] = A[i, j] - s
+        }
+        L[i, i] = 1.0
+        for kk to n - i - 1.0 {
+            k = i + 1.0 + kk
+            s = 0.0
+            for j to i {
+                s += L[k, j] * U[j, i]
+            }
+            L[k, i] = (A[k, i] - s) / U[i, i]
+        }
+    }
+}
+
+def determinant(A) {
+    n = len(A)
+    L = zeros(n, n)
+    U = zeros(n, n)
+    lu_decompose(A, L, U)
+    d = 1.0
+    for i to n {
+        d *= L[i, i] * U[i, i]
+    }
+    return d
+}
+
+#| The leading square block of a matrix: A[:, 1:m] in Julia.
+def square_part(A) {
+    m = len(A)
+    S = zeros(m, m)
+    for i to m {
+        for j to m {
+            S[i, j] = A[i, j]
+        }
+    }
+    return S
+}
+
+#| Row-reduce A in place to reduced row echelon form.
+def gauss_jordan(A) {
+    m = len(A)
+    assert_true(determinant(square_part(A)) != 0.0)
+    for i to m {
+        if A[i, i] == 0.0 {
+            for rr to m - i - 1.0 {
+                r = i + 1.0 + rr
+                if A[r, i] != 0.0 {
+                    row = slab(A, i)
+                    setslab(A, i, slab(A, r))
+                    setslab(A, r, row)
+                    break
+                }
+            }
+        }
+        setslab(A, i, slab(A, i) / A[i, i])
+        for j to m {
+            if j != i {
+                setslab(A, j, slab(A, j) - slab(A, i) * A[j, i])
+            }
+        }
+    }
+    return A
+}
+
+def rotation_matrix(theta) {
+    return [[cos(theta), -sin(theta)], [sin(theta), cos(theta)]]
+}
+
+A = [[4.0, 3.0, 2.0], [2.0, 1.0, 3.0], [3.0, 2.0, 1.0]]
+b = [25.0, 13.0, 16.0]
+L = zeros(3, 3)
+U = zeros(3, 3)
+lu_decompose(A, L, U)
+show U
+
+test "LU factors match the Julia original" {
+    assert_allclose(L, REF_LU_L, 0.0)
+    assert_allclose(U, REF_LU_U, 0.0)
+    assert_allclose(L @ U, A, 1.0e-15)
+    assert_near(determinant(A), REF_DET, 1.0e-15)
+}
+
+test "Gauss-Jordan on the docstring matrix and on [A b]" {
+    assert_allclose(gauss_jordan([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), REF_GJ_DOC, 1.0e-15)
+    Ab = zeros(3, 4)
+    for i to 3 {
+        for j to 3 {
+            Ab[i, j] = A[i, j]
+        }
+        Ab[i, 3] = b[i]
+    }
+    assert_allclose(gauss_jordan(Ab), REF_GJ_SYS, 1.0e-14)
+}
+
+test "lin_solve and transpose stand in for A \\ b and A' * b" {
+    x = zeros(3)
+    lin_solve(A, b, x)
+    assert_allclose(x, REF_BACKSLASH, 1.0e-14)
+    assert_allclose(transpose(A) @ b, REF_ATB, 0.0)
+}
+
+test "rotation by pi/6" {
+    R = rotation_matrix(acos(-1.0) / 6.0)
+    assert_allclose(R @ [1.0, 0.0], REF_ROT_V, 0.0)
+    assert_near(max(abs(transpose(R) @ R - [[1.0, 0.0], [0.0, 1.0]])), REF_ROT_ORTH, 1.0e-16)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,118 @@
+# The Computer Language Benchmarks Game: n-body.
+# Reference: upstream/benchmarksgame/programs/nbody.python3 (Kevin Carson et al.),
+# ported line by line. Differences are listed in viv/NOTES.md.
+# N is read from N.txt (the reference reads sys.argv[1]).
+
+PI = 3.14159265358979323
+SOLAR_MASS = 4 * PI * PI
+DAYS_PER_YEAR = 365.24
+
+# SYSTEM: the bodies in the reference's dict order (sun, jupiter, saturn,
+# uranus, neptune): row b of R is body b's position, of V its velocity.
+R = [[0.0, 0.0, 0.0],
+     [4.84143144246472090e+00, -1.16032004402742839e+00, -1.03622044471123109e-01],
+     [8.34336671824457987e+00, 4.12479856412430479e+00, -4.03523417114321381e-01],
+     [1.28943695621391310e+01, -1.51111514016986312e+01, -2.23307578892655734e-01],
+     [1.53796971148509165e+01, -2.59193146099879641e+01, 1.79258772950371181e-01]]
+V = [[0.0, 0.0, 0.0],
+     [1.66007664274403694e-03 * DAYS_PER_YEAR, 7.69901118419740425e-03 * DAYS_PER_YEAR, -6.90460016972063023e-05 * DAYS_PER_YEAR],
+     [-2.76742510726862411e-03 * DAYS_PER_YEAR, 4.99852801234917238e-03 * DAYS_PER_YEAR, 2.30417297573763929e-05 * DAYS_PER_YEAR],
+     [2.96460137564761618e-03 * DAYS_PER_YEAR, 2.37847173959480950e-03 * DAYS_PER_YEAR, -2.96589568540237556e-05 * DAYS_PER_YEAR],
+     [2.68067772490389322e-03 * DAYS_PER_YEAR, 1.62824170038242295e-03 * DAYS_PER_YEAR, -9.51592254519715870e-05 * DAYS_PER_YEAR]]
+M = [SOLAR_MASS,
+     9.54791938424326609e-04 * SOLAR_MASS,
+     2.85885980666130812e-04 * SOLAR_MASS,
+     4.36624404335156298e-05 * SOLAR_MASS,
+     5.15138902046611451e-05 * SOLAR_MASS]
+NBODIES = len(M)
+
+# PAIRS = combinations(SYSTEM): the pairs (x, y), x before y, as index arrays
+NPAIRS = NBODIES * (NBODIES - 1) / 2
+PAIR1 = zeros(NPAIRS)
+PAIR2 = zeros(NPAIRS)
+npair = 0
+for x to NBODIES - 1 {
+    for y from x + 1 to NBODIES {
+        PAIR1[npair] = x
+        PAIR2[npair] = y
+        npair = npair + 1
+    }
+}
+
+def advance(dt, n) {
+    for i to n {
+        for p to NPAIRS {
+            b1 = PAIR1[p]
+            b2 = PAIR2[p]
+            dx = R[b1, 0] - R[b2, 0]
+            dy = R[b1, 1] - R[b2, 1]
+            dz = R[b1, 2] - R[b2, 2]
+            mag = dt * ((dx * dx + dy * dy + dz * dz) ^ (-1.5))
+            b1m = M[b1] * mag
+            b2m = M[b2] * mag
+            V[b1, 0] -= dx * b2m
+            V[b1, 1] -= dy * b2m
+            V[b1, 2] -= dz * b2m
+            V[b2, 0] += dx * b1m
+            V[b2, 1] += dy * b1m
+            V[b2, 2] += dz * b1m
+        }
+        for b to NBODIES {
+            vx = V[b, 0]
+            vy = V[b, 1]
+            vz = V[b, 2]
+            R[b, 0] += dt * vx
+            R[b, 1] += dt * vy
+            R[b, 2] += dt * vz
+        }
+    }
+    return 0
+}
+
+def report_energy() {
+    e = 0.0
+    for p to NPAIRS {
+        b1 = PAIR1[p]
+        b2 = PAIR2[p]
+        dx = R[b1, 0] - R[b2, 0]
+        dy = R[b1, 1] - R[b2, 1]
+        dz = R[b1, 2] - R[b2, 2]
+        e -= (M[b1] * M[b2]) / ((dx * dx + dy * dy + dz * dz) ^ 0.5)
+    }
+    for b to NBODIES {
+        vx = V[b, 0]
+        vy = V[b, 1]
+        vz = V[b, 2]
+        e += M[b] * (vx * vx + vy * vy + vz * vz) / 2.0
+    }
+    print(fmt(e, ".9f"))
+    return 0
+}
+
+def offset_momentum(ref) {
+    px = 0.0
+    py = 0.0
+    pz = 0.0
+    for b to NBODIES {
+        px -= V[b, 0] * M[b]
+        py -= V[b, 1] * M[b]
+        pz -= V[b, 2] * M[b]
+    }
+    V[ref, 0] = px / M[ref]
+    V[ref, 1] = py / M[ref]
+    V[ref, 2] = pz / M[ref]
+    return 0
+}
+
+def main_(n) {
+    offset_momentum(0)
+    report_energy()
+    advance(0.01, n)
+    report_energy()
+    return 0
+}
+
+main_(int(strip(read_text("N.txt"))))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

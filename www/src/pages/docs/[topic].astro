@@ -1,0 +1,66 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import DocPage from '../../layouts/DocPage.astro';
+import { vivTree } from '../../lib/site';
+import VivCell from '../../components/VivCell.jsx';
+import corpus from '../../data/vivDocExamples.json';
+import { codeSpans } from '../../lib/richText.js';
+
+export function getStaticPaths() {
+  return corpus.topics.map((t) => ({ params: { topic: t.slug } }));
+}
+
+const { topic } = Astro.params;
+const meta = corpus.topics.find((t) => t.slug === topic)!;
+const examples = corpus.examples.filter((e) => e.topic === topic);
+const idx = corpus.topics.findIndex((t) => t.slug === topic);
+const prev = corpus.topics[idx - 1];
+const next = corpus.topics[idx + 1];
+---
+
+<DocPage
+  title={`${meta.title} · Viv docs`}
+  description={`${meta.intro} Every example runs in the page, and a test checks its output.`}
+  tree={vivTree(corpus.topics)}
+  crumbs={[['/docs', 'Docs']]}
+  toc={examples.map((e, i) => [`ex-${i + 1}`, e.title] as [string, string])}>
+      <h1>{meta.title}</h1>
+      <p class="lede">
+        {meta.intro} Run a cell to see its output beside the expected one.
+      </p>
+
+      {
+        examples.map((e, i) => (
+          <section class="doc-ex">
+            <h2 id={`ex-${i + 1}`}>{e.title}</h2>
+            {e.note && <p set:html={codeSpans(e.note)} />}
+            <div class="cellhost">
+              <VivCell client:load idx={i} src={e.code} standalone={true} expected={e.expectError ? null : (e.expect ?? null)} />
+            </div>
+            {e.expectError && (
+              <p class="expect expect-err">
+                expected error: <code>{e.expectError}…</code>
+              </p>
+            )}
+          </section>
+        ))
+      }
+
+      <div class="nextprev">
+        <span>{prev && <a href={`/docs/${prev.slug}`}>← {prev.title}</a>}</span>
+        <span>{next && <a href={`/docs/${next.slug}`}>{next.title} →</a>}</span>
+      </div>
+
+  <style>
+    .doc-ex { max-width: 100%; }
+    .doc-ex h2 { margin: 2.4rem 0 0.4rem; font-size: 1.12rem; scroll-margin-top: 72px; }
+    .expect { font-size: 0.86rem; color: var(--text-muted); margin: -0.3rem 0 0; }
+    .expect pre {
+      font: 12px/1.55 var(--font-mono); background: var(--bg-soft);
+      border: 1px solid var(--border); border-left: 2px solid var(--accent-soft);
+      border-radius: 0 8px 8px 0; padding: 9px 12px; margin: 5px 0 0; overflow-x: auto;
+    }
+    .expect-err code { color: var(--danger); }
+  </style>
+</DocPage>

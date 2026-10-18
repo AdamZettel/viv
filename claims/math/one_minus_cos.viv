@@ -1,0 +1,78 @@
+###
+title: 1 − cos x loses its digits as x shrinks
+line: At $x = 10^{-4}$ the direct form has lost 7 of 16 digits, while $2\sin^2(x/2)$ keeps at least 15 down to $x = 10^{-7}$.
+claim: Computing $1 - \cos x$ directly for small $x$ loses digits as $x$ shrinks, never keeping more than 2 digits above $16 - \log_{10}(2/x^2)$ (at $x = 10^{-4}$ at least 7 of 16 digits are lost, at $x = 10^{-7}$ fewer than 4 remain), while the equivalent $2\sin^2(x/2)$ keeps at least 15 digits at every $x$ from $10^{-1}$ to $10^{-7}$.
+topic: math
+section: floating point
+reference: The identity $1 - \cos x = 2\sin^2(x/2)$, evaluated with the series $x^2/2 - x^4/24 + x^6/720 - x^8/40320 + x^{10}/3628800$ for the true value (its truncation error is below $10^{-17}$ relative for $x \le 0.1$); Higham, Accuracy and Stability of Numerical Algorithms, section 1.7.
+scope: The digit counts are -log10 of the relative error at seven points, one per decade, on this machine's cos (correctly rounded or nearly). The loss comes from rounding $\cos x$ to double before the subtraction, not from the subtraction itself.
+lane: ai
+by: claude
+cost: fast
+###
+
+N_POINTS: Int = 7
+
+#| 1 - cos x by its Taylor series to the x^10 term, for |x| at most 0.1.
+def one_minus_cos_series(x: Num) -> Num {
+    x2 = x * x
+    return x2 / 2.0 - x2 * x2 / 24.0 + x2 * x2 * x2 / 720.0 - x2 * x2 * x2 * x2 / 40320.0 + x2 * x2 * x2 * x2 * x2 / 3628800.0
+}
+
+#| -log10 of the relative error of v against the true value t, capped at 17.
+def digits(v: Num, t: Num) -> Num {
+    e = abs(v - t) / abs(t)
+    if e == 0.0 {
+        return 17.0
+    }
+    return min(17.0, -log(e) / log(10.0))
+}
+
+digits_direct = zeros(N_POINTS)
+digits_half_angle = zeros(N_POINTS)
+digits_expected_loss = zeros(N_POINTS)
+for k to N_POINTS {
+    x = pow(10.0, -(k + 1.0))
+    t = one_minus_cos_series(x)
+    s = sin(x / 2.0)
+    digits_direct[k] = digits(1.0 - cos(x), t)
+    digits_half_angle[k] = digits(2.0 * s * s, t)
+    digits_expected_loss[k] = log(2.0 / (x * x)) / log(10.0)
+}
+show digits_direct
+show digits_half_angle
+#: x = 1e-4 is index 3, x = 1e-7 index 6
+lost_at_1e4 = 16.0 - digits_direct[3]
+show lost_at_1e4
+
+#: the figure: correct digits of both forms against x
+fg_x = zeros(N_POINTS)
+for fg_k to N_POINTS {
+    fg_x[fg_k] = pow(10.0, -(fg_k + 1.0))
+}
+figure("Correct digits of 1 - cos x", "x", "correct digits")
+xscale("log")
+plot(fg_x, digits_half_angle, "2 sin^2(x/2)")
+style("2 sin^2(x/2)", "s1 circle")
+plot(fg_x, digits_direct, "1 - cos x")
+style("1 - cos x", "s2 square")
+
+test "at x = 1e-4 the direct form has lost at least 7 digits" {
+    assert_gt(lost_at_1e4, 7.0)
+}
+test "at x = 1e-7 fewer than 4 digits remain" {
+    assert_lt(digits_direct[6], 4.0)
+}
+test "the direct form never keeps more than 2 digits above 16 - log10(2 / x^2)" {
+    for k to N_POINTS {
+        assert_lt(digits_direct[k], 16.0 + 2.0 - digits_expected_loss[k])
+    }
+}
+test "2 sin^2(x / 2) keeps at least 15 digits from x = 1e-1 to 1e-7" {
+    for k to N_POINTS {
+        assert_gt(digits_half_angle[k], 15.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

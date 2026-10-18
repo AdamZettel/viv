@@ -1,0 +1,379 @@
+###
+post: A denoising diffusion model learns a swiss roll
+agent: claude
+
+DDPM (Ho, Jain and Abbeel 2020) on a 2D toy distribution, following the labml
+annotated implementation (labml_nn/diffusion/ddpm/__init__.py): the linear
+noise schedule, q_sample, the simple loss (mean squared error between the noise
+added and the noise predicted), and ancestral sampling with p_sample. The UNet
+is replaced by a small MLP, and labml's TimeEmbedding (sinusoidal features, then
+Linear, Swish, Linear) is kept as written.
+
+This copy takes the loss's gradient from `value_and_grad`; `ddpm.viv` has the
+backward pass written by hand.
+
+The initial weights come from PyTorch through ddpm_ref.viv, which ref.py writes.
+Every random number after that comes from Viv's rand(), and ref.py replays the
+same stream, so the two programs train on the same batches and sample from the
+same noise.
+###
+
+from params import param_declare, param_get, param_table, param_zeros
+from optim import adam, optim_state, optim_step
+from random import arange, pi, randint, randn_matrix
+from stats import mean, std
+from ddpm_ref import (
+    REF_ALPHA_BAR, REF_BETA, REF_EPS_THETA0, REF_GRAD0, REF_LOSS0, REF_LOSSES, REF_SAMPLES,
+    REF_THETA1, REF_THETA_FINAL, THETA0,
+)
+from hand.backward import loss_and_grad
+
+T = 1000           # diffusion steps, labml's n_steps
+TIME_CH = 32       # width of the time embedding (labml's n_channels)
+HIDDEN = 32        # width of the MLP; equal to TIME_CH so the embedding adds in
+BATCH = 128
+TRAIN_STEPS = 3000
+LR = 1.0e-3
+NSAMPLE = 512
+REPORT = 500       # steps per reported loss average
+
+###
+## The model's parameters
+
+Ten tensors in one flat vector (lib/params). Every weight is stored `in` by
+`out`, so a layer is `X @ W` plus a bias row; PyTorch stores the transpose.
+###
+
+model = param_table(10)
+TE1_W = param_declare(model, TIME_CH / 4, TIME_CH)
+TE1_B = param_declare(model, 1, TIME_CH)
+TE2_W = param_declare(model, TIME_CH, TIME_CH)
+TE2_B = param_declare(model, 1, TIME_CH)
+IN_W = param_declare(model, 2, HIDDEN)
+IN_B = param_declare(model, 1, HIDDEN)
+HID_W = param_declare(model, HIDDEN, HIDDEN)
+HID_B = param_declare(model, 1, HIDDEN)
+OUT_W = param_declare(model, HIDDEN, 2)
+OUT_B = param_declare(model, 1, 2)
+
+###
+## The noise schedule
+
+`beta` rises linearly from 1e-4 to 0.02; `alpha = 1 - beta`, and `alpha_bar`
+is the running product of `alpha`, which says how much of `x0` is left at step `t`.
+The three are one `Diffusion` record, which `q_sample` and `p_sample` take.
+###
+
+record Diffusion { beta: Arr, alpha: Arr, alpha_bar: Arr }
+
+def schedule(n) -> Diffusion {
+    beta = linspace(0.0001, 0.02, n)
+    alpha = 1.0 - beta
+    alpha_bar = zeros(n)
+    running = 1.0
+    for s to n {
+        running = running * alpha[s]
+        alpha_bar[s] = running
+    }
+    return Diffusion { beta: beta, alpha: alpha, alpha_bar: alpha_bar }
+}
+
+sched = schedule(T)
+
+###
+## Random numbers
+
+rand() is uniform; lib/random's randn is Box-Muller on two of them (u1 first,
+`sqrt(-2 log u1) cos(2 pi u2)`), and randn_matrix fills a matrix row by row.
+###
+
+#| A point on the swiss roll for a uniform `u`: angle `s = 1.5 pi (1 + 2u)`,
+#| point `(s cos s, s sin s) / 7`, which gives each coordinate a spread near 1.
+def roll_point(u, P: Arr, i) {
+    s = 1.5 * pi * (1.0 + 2.0 * u)
+    P[i, 0] = s * cos(s) / 7.0
+    P[i, 1] = s * sin(s) / 7.0
+}
+
+def roll_batch(n) {
+    P = zeros(n, 2)
+    for i to n {
+        roll_point(rand(), P, i)
+    }
+    return P
+}
+
+###
+## Layers
+
+A bias row is added to every row of a matrix. Swish is `x sigmoid(x)`,
+labml's activation.
+###
+
+def ones_column(n) {
+    c = zeros(n, 1)
+    fill(c, 1.0)
+    return c
+}
+
+def plus_bias(X: Arr, b: Arr) {
+    return X + ones_column(len(X)) @ b
+}
+
+def sigmoid(Z: Arr) {
+    return 1.0 / (1.0 + exp(-Z))
+}
+
+def swish(Z: Arr) {
+    return Z * sigmoid(Z)
+}
+
+#| labml's sinusoidal features of the step index: `TIME_CH / 8` frequencies
+#| `exp(-k log(10000) / (half - 1))`, sines then cosines.
+def time_features(t: Arr) {
+    half = TIME_CH / 8
+    rate = log(10000.0) / (half - 1)
+    angle = hcat(t) @ vcat(exp(arange(half) * -rate))
+    return hcat(sin(angle), cos(angle))
+}
+
+def layer(theta: Arr, X: Arr, W, b) {
+    return plus_bias(X @ param_get(theta, model, W), param_get(theta, model, b))
+}
+
+#| eps_theta(x_t, t): the time embedding (Linear, Swish, Linear) is added to the
+#| first hidden layer, then Swish, Linear, Swish, Linear to two outputs.
+def eps_model(theta: Arr, X: Arr, t: Arr) {
+    temb = layer(theta, swish(layer(theta, time_features(t), TE1_W, TE1_B)), TE2_W, TE2_B)
+    h1 = swish(layer(theta, X, IN_W, IN_B) + temb)
+    h2 = swish(layer(theta, h1, HID_W, HID_B))
+    return layer(theta, h2, OUT_W, OUT_B)
+}
+
+###
+## The loss
+
+labml's `loss`: noise `x0` to step `t` with `q_sample`, predict the noise, and
+take the mean squared error. Its gradient comes from `value_and_grad`.
+###
+
+def q_sample(sched: Diffusion, x0: Arr, t: Arr, eps: Arr) {
+    xt = zeros(len(x0), 2)
+    for i to len(x0) {
+        keep = pow(sched.alpha_bar[t[i]], 0.5)
+        spread = pow(1.0 - sched.alpha_bar[t[i]], 0.5)
+        for j to 2 {
+            xt[i, j] = keep * x0[i, j] + spread * eps[i, j]
+        }
+    }
+    return xt
+}
+
+def mse(A: Arr, B: Arr) {
+    D = A - B
+    return sum(D * D) / (len(A) * 2)
+}
+
+def simple_loss(theta: Arr, sched: Diffusion, x0: Arr, t: Arr, eps: Arr) {
+    return mse(eps_model(theta, q_sample(sched, x0, t, eps), t), eps)
+}
+
+#| One draw of a training batch, in the order ref.py replays: the points, then
+#| the steps, then the noise.
+def draw_steps(n) {
+    t = zeros(n)
+    for i to n {
+        t[i] = randint(0, T)
+    }
+    return t
+}
+
+###
+## Ancestral sampling
+
+labml's `p_sample`: from `x_t`, the mean
+`(x_t - (1 - alpha_t) / sqrt(1 - alpha_bar_t) eps_theta) / sqrt(alpha_t)`
+plus `sqrt(beta_t)` times fresh noise (labml adds it at every step, t = 0 too).
+###
+
+def p_sample(theta: Arr, sched: Diffusion, X: Arr, step) {
+    t = zeros(len(X))
+    fill(t, step)
+    eps_theta = eps_model(theta, X, t)
+    eps_coef = (1.0 - sched.alpha[step]) / pow(1.0 - sched.alpha_bar[step], 0.5)
+    mean = 1.0 / pow(sched.alpha[step], 0.5) * (X - eps_coef * eps_theta)
+    return mean + pow(sched.beta[step], 0.5) * randn_matrix(len(X), 2)
+}
+
+def sample(theta: Arr, sched: Diffusion, n) {
+    X = randn_matrix(n, 2)
+    for k to T {
+        X = p_sample(theta, sched, X, T - k - 1)
+    }
+    return X
+}
+
+###
+## Summaries of a point cloud
+
+The mean and spread of each coordinate, and the distance from each point to
+the nearest of 2000 points along the roll's curve.
+###
+
+CURVE = zeros(2000, 2)
+for i to 2000 {
+    roll_point(i / 1999.0, CURVE, i)
+}
+
+def distance_to_roll(P: Arr) {
+    d = zeros(len(P))
+    for i to len(P) {
+        best = 1.0e300
+        for k to len(CURVE) {
+            dx = P[i, 0] - CURVE[k, 0]
+            dy = P[i, 1] - CURVE[k, 1]
+            best = min(best, dx * dx + dy * dy)
+        }
+        d[i] = sqrt(best)
+    }
+    return d
+}
+
+def fraction_below(d: Arr, cut) {
+    hits = 0.0
+    for i to len(d) {
+        if d[i] < cut {
+            hits = hits + 1.0
+        }
+    }
+    return hits / len(d)
+}
+
+###
+## Checks against PyTorch, then training and sampling
+###
+
+test "the schedule matches torch.linspace and torch.cumprod" {
+    assert_allclose(sched.beta, REF_BETA, 1.0e-17)
+    assert_allclose(sched.alpha_bar, REF_ALPHA_BAR, 1.0e-15)
+}
+show sched.alpha_bar[0]
+show sched.alpha_bar[T - 1]
+beta_miss = max(abs(sched.beta - REF_BETA))
+alpha_bar_miss = max(abs(sched.alpha_bar - REF_ALPHA_BAR))
+show beta_miss
+show alpha_bar_miss
+
+theta = THETA0 + 0.0
+srand(2020.0)
+
+x0 = roll_batch(BATCH)
+t = draw_steps(BATCH)
+eps = randn_matrix(BATCH, 2)
+loss0, grad = value_and_grad(simple_loss, theta, sched, x0, t, eps)
+show loss0
+forward_miss = max(abs(eps_model(theta, q_sample(sched, x0, t, eps), t) - REF_EPS_THETA0))
+loss0_miss = abs(loss0 - REF_LOSS0)
+grad_miss = max(abs(grad - REF_GRAD0))
+show forward_miss
+show loss0_miss
+show grad_miss
+
+test "the first batch, forward, matches PyTorch" {
+    assert_allclose(eps_model(theta, q_sample(sched, x0, t, eps), t), REF_EPS_THETA0, 1.0e-13)
+    assert_near(loss0, REF_LOSS0, 1.0e-14)
+}
+
+test "the generated gradient matches torch autograd" {
+    assert_allclose(grad, REF_GRAD0, 1.0e-14)
+}
+
+test "the generated gradient matches the hand-written backward pass to 1e-12" {
+    hand_grad = param_zeros(model)
+    hand_loss = loss_and_grad(THETA0 + 0.0, hand_grad, sched, x0, t, eps)
+    assert_near(loss0, hand_loss, 0.0)
+    hand_miss = max(abs(grad - hand_grad)) / max(abs(hand_grad))
+    show hand_miss
+    assert_lt(hand_miss, 1.0e-12)
+}
+
+opt = adam(LR, 0.9, 0.999)
+state = optim_state(model)
+optim_step(opt, theta, grad, state, model)
+step1_miss = max(abs(theta - REF_THETA1))
+show step1_miss
+
+test "one Adam step lands where torch.optim.Adam does" {
+    assert_allclose(theta, REF_THETA1, 1.0e-15)
+}
+
+#| The mean loss over each run of REPORT steps; step 0 is already done.
+losses = zeros(TRAIN_STEPS / REPORT)
+losses[0] = loss0 / REPORT
+for k to TRAIN_STEPS - 1 {
+    x0 = roll_batch(BATCH)
+    t = draw_steps(BATCH)
+    eps = randn_matrix(BATCH, 2)
+    loss, grad = value_and_grad(simple_loss, theta, sched, x0, t, eps)
+    optim_step(opt, theta, grad, state, model)
+    slot = floor((k + 1) / REPORT)
+    losses[slot] = losses[slot] + loss / REPORT
+}
+show losses
+loss_miss = max(abs(losses - REF_LOSSES))
+theta_miss = max(abs(theta - REF_THETA_FINAL))
+show loss_miss
+show theta_miss
+
+test "3000 steps of training follow PyTorch's" {
+    assert_allclose(losses, REF_LOSSES, 1.0e-13)
+    assert_allclose(theta, REF_THETA_FINAL, 1.0e-13)
+}
+
+samples = sample(theta, sched, NSAMPLE)
+target = roll_batch(NSAMPLE)
+noise = randn_matrix(NSAMPLE, 2)
+sample_miss = max(abs(samples - REF_SAMPLES))
+show sample_miss
+
+test "1000 steps of ancestral sampling follow PyTorch's" {
+    assert_allclose(samples, REF_SAMPLES, 1.0e-12)
+}
+
+def summarize(P: Arr) {
+    d = distance_to_roll(P)
+    x = P[:, 0]
+    y = P[:, 1]
+    mean_x = mean(x)
+    mean_y = mean(y)
+    spread_x = std(x)
+    spread_y = std(y)
+    distance = sum(d) / len(d)
+    within_tenth = fraction_below(d, 0.1)
+    show mean_x
+    show mean_y
+    show spread_x
+    show spread_y
+    show distance
+    show within_tenth
+    return distance
+}
+
+narrate "samples"
+far_samples = summarize(samples)
+narrate "target"
+far_target = summarize(target)
+narrate "noise"
+far_noise = summarize(noise)
+
+test "the samples sit closer to the roll than the noise they started from" {
+    assert_lt(far_samples, far_noise)
+}
+
+figure("DDPM samples and the swiss roll", "x", "y", -2.5, 2.5, -2.5, 2.5)
+scatter(target[:, 0], target[:, 1], "target")
+scatter(samples[:, 0], samples[:, 1], "samples")
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2020 Varuna Jayasiri (labmlai/annotated_deep_learning_paper_implementations)
+# SPDX-FileCopyrightText: 2026 The Viv authors

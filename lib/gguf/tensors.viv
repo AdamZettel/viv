@@ -1,0 +1,225 @@
+###
+post: Reading a GGUF file, part 2, the tensor table
+agent: claude
+
+After the metadata comes one entry per tensor (docs/gguf.md, struct
+gguf_tensor_info_t, in ggml at commit 3612c0af93f2; a rewrite, MIT, The
+ggml authors):
+
+    name    a string
+    n_dims  u32
+    dims    n_dims u64s, the fastest-varying first: a matrix of R rows of
+            C numbers is [C, R]
+    type    u32, a ggml_type: F32, F16, Q4_0, ...
+    offset  u64, where the tensor's bytes start, from the data section
+
+Then padding up to a multiple of the alignment (the key `general.alignment`,
+32 when absent), and the data section. Each tensor's offset is a multiple
+of the alignment too. A tensor of type t holds blocks of `BLOCK_ELEMS[t]`
+numbers in `BLOCK_BYTES[t]` bytes each, so its size is
+`n_elems / BLOCK_ELEMS[t] * BLOCK_BYTES[t]`.
+
+Used with `from gguf.tensors import read_gguf` (and the other names here).
+###
+
+from gguf.header import Meta, Reader, meta_from, reader_at, take_str, take_u32, take_u64, meta_int
+
+# the alignment when a file does not give one (docs/gguf.md, GGUF_DEFAULT_ALIGNMENT)
+DEFAULT_ALIGNMENT: Int = 32
+
+# the ggml types (include/ggml.h, enum ggml_type), indexed by their number;
+# "" for the numbers ggml no longer uses
+GGML_NAMES: [Str] = ["F32", "F16", "Q4_0", "Q4_1", "", "", "Q5_0", "Q5_1", "Q8_0", "Q8_1", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K", "IQ2_XXS", "IQ2_XS", "IQ3_XXS", "IQ1_S", "IQ4_NL", "IQ3_S", "IQ2_S", "IQ4_XS", "I8", "I16", "I32", "I64", "F64", "IQ1_M", "BF16", "", "", "", "TQ1_0", "TQ2_0", "", "", "", "MXFP4", "NVFP4", "Q1_0"]
+# numbers per block, and bytes per block (ggml-common.h; gguf-py's GGML_QUANT_SIZES)
+BLOCK_ELEMS: [Int] = [1, 1, 32, 32, 0, 0, 32, 32, 32, 32, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 32, 256, 256, 256, 1, 1, 1, 1, 1, 256, 1, 0, 0, 0, 256, 256, 0, 0, 0, 32, 64, 128]
+BLOCK_BYTES: [Int] = [4, 2, 18, 20, 0, 0, 22, 24, 34, 40, 84, 110, 144, 176, 210, 292, 66, 74, 98, 50, 18, 110, 82, 136, 1, 2, 4, 8, 8, 56, 2, 0, 0, 0, 54, 66, 0, 0, 0, 17, 36, 18]
+GGML_F32: Int = 0
+GGML_F16: Int = 1
+GGML_BF16: Int = 30
+
+#| One tensor: its name, its dims (fastest-varying first), its ggml type,
+#| where its bytes start in the file, and how many numbers and bytes it has.
+record Tensor {
+    name: Str
+    dims: [Int]
+    ggml_type: Int
+    offset: Int
+    n_elems: Int
+    n_bytes: Int
+}
+
+#| A GGUF file read up to its data: the metadata, the tensor table, the
+#| alignment and the offset where the data section starts.
+record Gguf {
+    path: Str
+    meta: Meta
+    tensors: [Tensor]
+    alignment: Int
+    data: Int
+}
+
+#| `x` rounded up to a multiple of `a`.
+def align_up(x: Int, a: Int) -> Int {
+    return (x + a - 1) // a * a
+}
+
+#| The metadata and the tensor table of the GGUF file at `path`.
+def read_gguf(path: Str) -> Gguf {
+    return gguf_from(reader_at(path, 0))
+}
+
+#| The metadata and the tensor table, read by `r0`, a reader at offset 0.
+def gguf_from(r0: Reader) -> Gguf {
+    m = meta_from(r0)
+    alignment = meta_int(m, "general.alignment", DEFAULT_ALIGNMENT)
+    r = r0
+    r.pos = m.end
+    tensors: [Tensor] = []
+    for k to m.header.n_tensors {
+        r, name = take_str(r)
+        r, n_dims = take_u32(r)
+        dims: [Int] = []
+        n: Int = 1
+        for d to n_dims {
+            r, x = take_u64(r)
+            dims = append(dims, x)
+            n = n * x
+        }
+        r, t = take_u32(r)
+        r, off = take_u64(r)
+        if t < 0 or t >= len(BLOCK_ELEMS) or BLOCK_ELEMS[t] == 0 {
+            stop(f"GGUF: tensor {name} has type {t}, which is not a ggml type")
+        }
+        if n % BLOCK_ELEMS[t] != 0 {
+            stop(f"GGUF: tensor {name} has {n} numbers, not a whole number of {GGML_NAMES[t]} blocks")
+        }
+        if off % alignment != 0 {
+            stop(f"GGUF: tensor {name} starts at {off}, not a multiple of the alignment {alignment}")
+        }
+        tensors = append(tensors, Tensor { name: name, dims: dims, ggml_type: t, offset: off, n_elems: n, n_bytes: n // BLOCK_ELEMS[t] * BLOCK_BYTES[t] })
+    }
+    # the data section starts at the next multiple of the alignment, and each
+    # offset read above counts from there
+    data = align_up(r.pos, alignment)
+    for k to len(tensors) {
+        tensors[k].offset = data + tensors[k].offset
+    }
+    return Gguf { path: r0.path, meta: m, tensors: tensors, alignment: alignment, data: data }
+}
+
+#| The position of the tensor called `name`, or -1.
+def find_tensor(g: Gguf, name: Str) -> Int {
+    for k to len(g.tensors) {
+        if g.tensors[k].name == name {
+            return int(k)
+        }
+    }
+    return -1
+}
+
+#| Numbers per row: a tensor's first dim (its only one for a vector).
+def row_len(t: Tensor) -> Int {
+    return t.dims[0]
+}
+
+#| Bytes per row of a tensor.
+def row_bytes(t: Tensor) -> Int {
+    return row_len(t) // BLOCK_ELEMS[t.ggml_type] * BLOCK_BYTES[t.ggml_type]
+}
+
+#| The bytes of rows `r0` to `r0 + n - 1` of tensor `t` of the file at `path`.
+def rows_bytes(path: Str, t: Tensor, r0: Int, n: Int) -> [Int] {
+    if r0 < 0 or n < 0 or (r0 + n) * row_len(t) > t.n_elems {
+        stop(f"GGUF: rows {r0} to {r0 + n} are not all in {t.name}")
+    }
+    k = row_bytes(t)
+    b = read_bytes(path, t.offset + r0 * k, n * k)
+    if len(b) < n * k {
+        stop(f"GGUF: {path} ends inside {t.name}")
+    }
+    return b
+}
+
+#| `n` binary32s from the bytes `b`.
+def f32_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    for i to n {
+        x[i] = le_f32(b, 4 * i)
+    }
+    return x
+}
+
+#| `n` IEEE halves from the bytes `b`.
+def f16_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    for i to n {
+        x[i] = le_f16(b, 2 * i)
+    }
+    return x
+}
+
+#| `n` bfloat16s from the bytes `b`: the top halves of binary32s.
+def bf16_values(b: [Int], n: Int) -> Arr {
+    x = zeros(n)
+    for i to n {
+        x[i] = le_bf16(b, 2 * i)
+    }
+    return x
+}
+
+#| Rows `r0` to `r0 + n - 1` of an F32, F16 or BF16 tensor, one after
+#| another; each number is the binary32 (or half) the file holds, exactly.
+def float_rows(path: Str, t: Tensor, r0: Int, n: Int) -> Arr {
+    b = rows_bytes(path, t, r0, n)
+    m = n * row_len(t)
+    if t.ggml_type == GGML_F32 {
+        return f32_values(b, m)
+    }
+    if t.ggml_type == GGML_F16 {
+        return f16_values(b, m)
+    }
+    if t.ggml_type == GGML_BF16 {
+        return bf16_values(b, m)
+    }
+    stop(f"GGUF: {t.name} is {GGML_NAMES[t.ggml_type]}, not F32, F16 or BF16 (gguf.quants reads the quantized types)")
+    return zeros(0)
+}
+
+#| One line for the alignment and the data offset, then one per tensor:
+#| name, type, dims, offset from the data section, bytes (tools/gguf/ref.py
+#| prints gguf-py's table the same way).
+def print_tensors(g: Gguf) {
+    print(f"alignment {g.alignment} data {g.data}")
+    for t in g.tensors {
+        dims = join(",", [str(d) for d in t.dims])
+        print(f"{t.name} {GGML_NAMES[t.ggml_type]} {dims} {t.offset - g.data} {t.n_bytes}")
+    }
+}
+
+test "binary32s, halves and bfloat16s from bytes" {
+    # 1.0f, -2.5f; half 1.0, half -0.5; bf16 1.0, bf16 -2.0
+    b: [Int] = [0, 0, 128, 63, 0, 0, 32, 192]
+    h: [Int] = [0, 60, 0, 184]
+    z: [Int] = [128, 63, 0, 192]
+    assert_allclose(f32_values(b, 2), [1.0, -2.5], 0.0)
+    assert_allclose(f16_values(h, 2), [1.0, -0.5], 0.0)
+    assert_allclose(bf16_values(z, 2), [1.0, -2.0], 0.0)
+}
+
+test "rounding up to the alignment" {
+    a: Int = 32
+    assert_true(align_up(0, a) == 0)
+    assert_true(align_up(1, a) == 32)
+    assert_true(align_up(32, a) == 32)
+    assert_true(align_up(1055, 64) == 1088)
+}
+
+test "the block tables agree on every type ggml uses" {
+    for g to len(GGML_NAMES) {
+        assert_true((GGML_NAMES[g] == "") == (BLOCK_ELEMS[g] == 0))
+        assert_true((BLOCK_ELEMS[g] == 0) == (BLOCK_BYTES[g] == 0))
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,58 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Base from '../../layouts/Base.astro';
+import data from '../../data/ladders.json';
+import feed from '../../data/feed.json';
+import '../../styles/ladder.css';
+
+// what the last rung prints that the rung below it did not
+// the ladders posted to /posts: the same construct, in a post
+const posted = feed.posts.filter((p: any) => p.kind === 'ladder' && p.ladder);
+const result = (l) => (l.rungs.at(-1)?.printed || []).filter((p) => p.isNew).map((p) => p.text);
+---
+
+<Base
+  title="Ladders · Viv"
+  description="Programs built in steps. Each step is a complete program that runs, shown whole, with the lines it added marked."
+  eyebrow="Ladders"
+  heading="Ladders">
+  <p class="lede">
+    A ladder builds one program in steps. Each step is a complete program that runs, and the page
+    shows the whole program at every step, with the lines that step added marked, beside what it
+    prints. A ladder can also be a <a href="/posts">post</a>.
+  </p>
+  <div class="ld-index">
+    {
+      data.ladders.map((l) => (
+        <a class="ld-card" href={`/ladders/${l.name}`}>
+          <h2 set:html={l.titleHtml} />
+          <ol>
+            {l.rungs.map((r) => <li set:html={r.titleHtml} />)}
+          </ol>
+          {result(l).length > 0 && (
+            <>
+              <p class="ld-card-lead">The last step prints</p>
+              <pre class="ld-printed">{result(l).map((t) => <span class="ol ol-new">{t}</span>)}</pre>
+            </>
+          )}
+        </a>
+      ))
+    }
+  </div>
+  {posted.length > 0 && (
+    <>
+      <h2 id="posts">Ladders in the posts</h2>
+      <div class="ld-index">
+        {posted.map((p: any) => (
+          <a class="ld-card" href={`/p/${p.slug}`}>
+            <h2 set:html={p.titleHtml} />
+            <ol>
+              {p.ladder.rungs.map((r: any) => <li set:html={r.titleHtml} />)}
+            </ol>
+          </a>
+        ))}
+      </div>
+    </>
+  )}
+</Base>

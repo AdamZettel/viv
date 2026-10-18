@@ -1,0 +1,614 @@
+###
+Data structures, ported from TheAlgorithms/Python: data_structures/stacks/stack.py,
+data_structures/queues/queue_by_list.py, data_structures/heap/heap.py,
+data_structures/linked_list/singly_linked_list.py, data_structures/hashing/hash_map.py.
+
+Each Python object becomes one array: a few header slots (named by constants) and then
+the items. An array is passed by reference, so a def that changes the array changes
+the object, as a method on `self` does. Where Python raises an exception (push on a
+full stack, pop from an empty one), the def returns a flag or a sentinel instead.
+###
+import seq
+
+# ---------------------------------------------------------------- stack
+S_TOP = 0.0
+S_LIMIT = 1.0
+S_ITEMS = 2.0
+
+def stack_new(limit) -> Arr {
+    s = zeros(S_ITEMS + limit)
+    s[S_LIMIT] = limit
+    return s
+}
+
+def stack_size(s: Arr) {
+    return s[S_TOP]
+}
+
+def stack_is_empty(s: Arr) -> Bool {
+    return s[S_TOP] == 0.0
+}
+
+def stack_is_full(s: Arr) -> Bool {
+    return s[S_TOP] == s[S_LIMIT]
+}
+
+#| Stack.push; false where Python raises StackOverflowError.
+def stack_push(s: Arr, data) -> Bool {
+    if stack_is_full(s) {
+        return false
+    }
+    s[S_ITEMS + s[S_TOP]] = data
+    s[S_TOP] += 1.0
+    return true
+}
+
+#| Stack.pop. The caller checks stack_is_empty first: Python raises StackUnderflowError.
+def stack_pop(s: Arr) {
+    s[S_TOP] -= 1.0
+    return s[S_ITEMS + s[S_TOP]]
+}
+
+def stack_peek(s: Arr) {
+    return s[S_ITEMS + s[S_TOP] - 1.0]
+}
+
+def stack_contains(s: Arr, item) -> Bool {
+    for i to s[S_TOP] {
+        if s[S_ITEMS + i] == item {
+            return true
+        }
+    }
+    return false
+}
+
+# ---------------------------------------------------------------- queue
+#| QueueByList keeps a Python list and pops from the front; here a ring buffer.
+Q_HEAD = 0.0
+Q_COUNT = 1.0
+Q_ITEMS = 2.0
+
+def queue_new(capacity) -> Arr {
+    return zeros(Q_ITEMS + capacity)
+}
+
+def queue_capacity(q: Arr) {
+    return len(q) - Q_ITEMS
+}
+
+def queue_put(q: Arr, item) {
+    q[Q_ITEMS + mod(q[Q_HEAD] + q[Q_COUNT], queue_capacity(q))] = item
+    q[Q_COUNT] += 1.0
+}
+
+def queue_get(q: Arr) {
+    item = q[Q_ITEMS + q[Q_HEAD]]
+    q[Q_HEAD] = mod(q[Q_HEAD] + 1.0, queue_capacity(q))
+    q[Q_COUNT] -= 1.0
+    return item
+}
+
+def queue_rotate(q: Arr, rotation) {
+    for r to rotation {
+        queue_put(q, queue_get(q))
+    }
+}
+
+def queue_get_front(q: Arr) {
+    return q[Q_ITEMS + q[Q_HEAD]]
+}
+
+#| The entries front to back (Python `tuple(self.entries)`).
+def queue_items(q: Arr) -> Arr {
+    out = zeros(q[Q_COUNT])
+    for i to q[Q_COUNT] {
+        out[i] = q[Q_ITEMS + mod(q[Q_HEAD] + i, queue_capacity(q))]
+    }
+    return out
+}
+
+# ---------------------------------------------------------------- max-heap
+#| heap.py Heap: slot 0 is heap_size, item i is h[H_ITEMS + i].
+H_SIZE = 0.0
+H_ITEMS = 1.0
+
+def heap_new(capacity) -> Arr {
+    return zeros(H_ITEMS + capacity)
+}
+
+def heap_swap(h: Arr, i, j) {
+    t = h[H_ITEMS + i]
+    h[H_ITEMS + i] = h[H_ITEMS + j]
+    h[H_ITEMS + j] = t
+}
+
+#| Heap.max_heapify. Python's left_child_idx returns None past the end; here `and`
+#| checks the bound before the comparison reads the child.
+def max_heapify(h: Arr, index) {
+    if index < h[H_SIZE] {
+        violation = index
+        left = 2.0 * index + 1.0
+        right = 2.0 * index + 2.0
+        if left < h[H_SIZE] and h[H_ITEMS + left] > h[H_ITEMS + violation] {
+            violation = left
+        }
+        if right < h[H_SIZE] and h[H_ITEMS + right] > h[H_ITEMS + violation] {
+            violation = right
+        }
+        if violation != index {
+            heap_swap(h, violation, index)
+            max_heapify(h, violation)
+        }
+    }
+}
+
+def build_max_heap(h: Arr, collection: Arr) {
+    for i to len(collection) {
+        h[H_ITEMS + i] = collection[i]
+    }
+    h[H_SIZE] = len(collection)
+    if h[H_SIZE] > 1.0 {
+        for i to h[H_SIZE] // 2.0 reversed {
+            max_heapify(h, i)
+        }
+    }
+}
+
+#| Heap.extract_max. The caller checks the size first: Python raises on an empty heap.
+def extract_max(h: Arr) {
+    me = h[H_ITEMS]
+    last = h[H_ITEMS + h[H_SIZE] - 1.0]
+    h[H_SIZE] -= 1.0
+    if h[H_SIZE] >= 1.0 {
+        h[H_ITEMS] = last
+        max_heapify(h, 0.0)
+    }
+    return me
+}
+
+def heap_insert(h: Arr, value) {
+    h[H_ITEMS + h[H_SIZE]] = value
+    idx = (h[H_SIZE] - 1.0) // 2.0
+    h[H_SIZE] += 1.0
+    while idx >= 0.0 {
+        max_heapify(h, idx)
+        idx = (idx - 1.0) // 2.0
+    }
+}
+
+def heap_sort_in_place(h: Arr) {
+    size = h[H_SIZE]
+    for j from 1.0 to size reversed {
+        heap_swap(h, 0.0, j)
+        h[H_SIZE] -= 1.0
+        max_heapify(h, 0.0)
+    }
+    h[H_SIZE] = size
+}
+
+#| The items as a list (Python `repr(heap)`).
+def heap_items(h: Arr) -> Arr {
+    return h[H_ITEMS:H_ITEMS + h[H_SIZE]]
+}
+
+# ---------------------------------------------------------------- linked list
+#| singly_linked_list.py LinkedList as a pool of nodes, one row (data, next) each.
+#| Row 0 is a header (length, rows used); row 1 is a sentinel whose next is the head.
+#| NIL is Python's None.
+DATA = 0.0
+NEXT = 1.0
+NIL = -1.0
+SENTINEL = 1.0
+
+def list_new(capacity) -> Arr {
+    ll = zeros(capacity + 2.0, 2.0)
+    ll[0, 1] = 2.0
+    ll[SENTINEL, NEXT] = NIL
+    return ll
+}
+
+def list_len(ll: Arr) {
+    return ll[0, 0]
+}
+
+def list_is_empty(ll: Arr) -> Bool {
+    return ll[0, 0] == 0.0
+}
+
+#| The row of the node before position index (the sentinel for index 0).
+def list_before(ll: Arr, index) {
+    node = SENTINEL
+    for k to index {
+        node = ll[node, NEXT]
+    }
+    return node
+}
+
+#| LinkedList.insert_nth; false where Python raises IndexError.
+def list_insert_nth(ll: Arr, index, data) -> Bool {
+    if index < 0.0 or index > list_len(ll) {
+        return false
+    }
+    row = ll[0, 1]
+    ll[0, 1] = row + 1.0
+    prev = list_before(ll, index)
+    ll[row, DATA] = data
+    ll[row, NEXT] = ll[prev, NEXT]
+    ll[prev, NEXT] = row
+    ll[0, 0] += 1.0
+    return true
+}
+
+def list_insert_head(ll: Arr, data) -> Bool {
+    return list_insert_nth(ll, 0.0, data)
+}
+
+def list_insert_tail(ll: Arr, data) -> Bool {
+    return list_insert_nth(ll, list_len(ll), data)
+}
+
+#| LinkedList.delete_nth. The caller checks the index: Python raises IndexError.
+def list_delete_nth(ll: Arr, index) {
+    prev = list_before(ll, index)
+    gone = ll[prev, NEXT]
+    ll[prev, NEXT] = ll[gone, NEXT]
+    ll[0, 0] -= 1.0
+    return ll[gone, DATA]
+}
+
+def list_delete_head(ll: Arr) {
+    return list_delete_nth(ll, 0.0)
+}
+
+def list_delete_tail(ll: Arr) {
+    return list_delete_nth(ll, list_len(ll) - 1.0)
+}
+
+def list_get(ll: Arr, index) {
+    return ll[ll[list_before(ll, index), NEXT], DATA]
+}
+
+def list_set(ll: Arr, index, data) {
+    ll[ll[list_before(ll, index), NEXT], DATA] = data
+}
+
+#| LinkedList.reverse: point every node back at the one before it.
+def list_reverse(ll: Arr) {
+    prev = NIL
+    current = ll[SENTINEL, NEXT]
+    while current != NIL {
+        next_node = ll[current, NEXT]
+        ll[current, NEXT] = prev
+        prev = current
+        current = next_node
+    }
+    ll[SENTINEL, NEXT] = prev
+}
+
+#| The data head to tail (Python `list(linked_list)`).
+def list_items(ll: Arr) -> Arr {
+    out = zeros(list_len(ll))
+    node = ll[SENTINEL, NEXT]
+    for k to list_len(ll) {
+        out[k] = ll[node, DATA]
+        node = ll[node, NEXT]
+    }
+    return out
+}
+
+# ---------------------------------------------------------------- hash map
+#| hash_map.py HashMap: open addressing with linear probing, grown and shrunk by
+#| rebuilding. Row 0 is a header (len, initial_block_size, capacity_factor); bucket b is
+#| row 1 + b: (state, key, val), state EMPTY, ITEM or DELETED. A resize makes a new
+#| array, so every def that can resize returns the map and the caller rebinds it:
+#| `hm = hm_set(hm, key, val)`.
+EMPTY = 0.0
+ITEM = 1.0
+DELETED = 2.0
+H_LEN = 0.0
+H_INITIAL = 1.0
+H_FACTOR = 2.0
+
+def hm_new(initial_block_size, capacity_factor) -> Arr {
+    hm = zeros(initial_block_size + 1.0, 3.0)
+    hm[0, H_INITIAL] = initial_block_size
+    hm[0, H_FACTOR] = capacity_factor
+    return hm
+}
+
+def hm_buckets(hm: Arr) {
+    return len(hm) - 1.0
+}
+
+def hm_len(hm: Arr) {
+    return hm[0, H_LEN]
+}
+
+#| Python's hash() of an integer key: the integer itself, except that hash(-1) is -2.
+def py_hash(key) {
+    if key == -1.0 {
+        return -2.0
+    }
+    return key
+}
+
+def hm_bucket_index(hm: Arr, key) {
+    return py_hash(key) % hm_buckets(hm)
+}
+
+def hm_next_ind(hm: Arr, ind) {
+    return (ind + 1.0) % hm_buckets(hm)
+}
+
+#| HashMap._try_set: fill an empty (or deleted) bucket, or overwrite the same key.
+def hm_try_set(hm: Arr, ind, key, val) -> Bool {
+    row = ind + 1.0
+    if hm[row, 0] != ITEM {
+        hm[row, 0] = ITEM
+        hm[row, 1] = key
+        hm[row, 2] = val
+        hm[0, H_LEN] += 1.0
+        return true
+    }
+    if hm[row, 1] == key {
+        hm[row, 2] = val
+        return true
+    }
+    return false
+}
+
+def hm_add_item(hm: Arr, key, val) {
+    ind = hm_bucket_index(hm, key)
+    for probe to hm_buckets(hm) {
+        if hm_try_set(hm, ind, key, val) {
+            break
+        }
+        ind = hm_next_ind(hm, ind)
+    }
+}
+
+def hm_is_full(hm: Arr) -> Bool {
+    return hm_len(hm) >= floor(hm_buckets(hm) * hm[0, H_FACTOR])
+}
+
+def hm_is_sparse(hm: Arr) -> Bool {
+    if hm_buckets(hm) <= hm[0, H_INITIAL] {
+        return false
+    }
+    return hm_len(hm) < hm_buckets(hm) * hm[0, H_FACTOR] / 2.0
+}
+
+#| HashMap._resize: a new bucket array, and every live item added again in bucket order.
+def hm_resize(hm: Arr, new_size) -> Arr {
+    out = zeros(new_size + 1.0, 3.0)
+    out[0, H_INITIAL] = hm[0, H_INITIAL]
+    out[0, H_FACTOR] = hm[0, H_FACTOR]
+    for b to hm_buckets(hm) {
+        if hm[b + 1.0, 0] == ITEM {
+            hm_add_item(out, hm[b + 1.0, 1], hm[b + 1.0, 2])
+        }
+    }
+    return out
+}
+
+#| HashMap.__setitem__.
+def hm_set(hm0: Arr, key, val) -> Arr {
+    hm = hm0
+    if hm_is_full(hm) {
+        hm = hm_resize(hm, hm_buckets(hm) * 2.0)
+    }
+    hm_add_item(hm, key, val)
+    return hm
+}
+
+#| The bucket holding key, or -1 (the probe loop of __getitem__ and __delitem__).
+def hm_find(hm: Arr, key) {
+    ind = hm_bucket_index(hm, key)
+    for probe to hm_buckets(hm) {
+        row = ind + 1.0
+        if hm[row, 0] == EMPTY {
+            return -1.0
+        }
+        if hm[row, 0] == ITEM {
+            if hm[row, 1] == key {
+                return ind
+            }
+        }
+        ind = hm_next_ind(hm, ind)
+    }
+    return -1.0
+}
+
+#| HashMap.__getitem__. The caller checks hm_contains first: Python raises KeyError.
+def hm_get(hm: Arr, key) {
+    return hm[hm_find(hm, key) + 1.0, 2]
+}
+
+def hm_contains(hm: Arr, key) -> Bool {
+    return hm_find(hm, key) != -1.0
+}
+
+#| HashMap.__delitem__, then shrink if sparse. Python raises KeyError on a missing key;
+#| here nothing is removed.
+def hm_del(hm0: Arr, key) -> Arr {
+    hm = hm0
+    ind = hm_find(hm, key)
+    if ind != -1.0 {
+        hm[ind + 1.0, 0] = DELETED
+        hm[0, H_LEN] -= 1.0
+    }
+    if hm_is_sparse(hm) {
+        hm = hm_resize(hm, hm_buckets(hm) // 2.0)
+    }
+    return hm
+}
+
+#| The keys in bucket order (Python `list(hm)`, which is also the order repr uses).
+def hm_keys(hm: Arr) -> Arr {
+    out = zeros(hm_len(hm))
+    k = 0.0
+    for b to hm_buckets(hm) {
+        if hm[b + 1.0, 0] == ITEM {
+            out[k] = hm[b + 1.0, 1]
+            k += 1.0
+        }
+    }
+    return out
+}
+
+def hm_values(hm: Arr) -> Arr {
+    out = zeros(hm_len(hm))
+    k = 0.0
+    for b to hm_buckets(hm) {
+        if hm[b + 1.0, 0] == ITEM {
+            out[k] = hm[b + 1.0, 2]
+            k += 1.0
+        }
+    }
+    return out
+}
+
+# ---------------------------------------------------------------- runs
+# heap.py __main__: thirteen lists, stored end to end with their lengths
+heap_inputs = [0.0, 2.0, 3.0, 5.0, 5.0, 3.0, 5.0, 5.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 5.0, 0.0, 2.0, 2.0, 3.0, 5.0, 2.0, 5.0, 3.0, 0.0, 2.0, 3.0, 0.0, 3.0, 6.0, 1.0, 2.0, 7.0, 9.0, 3.0, 4.0, 5.0, 10.0, 8.0, 103.0, 9.0, 1.0, 7.0, 11.0, 15.0, 25.0, 201.0, 209.0, 107.0, 5.0, -45.0, -2.0, -5.0]
+heap_lengths = [1.0, 1.0, 2.0, 2.0, 2.0, 4.0, 4.0, 4.0, 5.0, 8.0, 10.0, 11.0, 3.0]
+start = 0.0
+for c to len(heap_lengths) {
+    h = heap_new(12)
+    build_max_heap(h, heap_inputs[start:start + heap_lengths[c]])
+    after_build = heap_items(h)
+    max_value = extract_max(h)
+    after_extract = heap_items(h)
+    heap_insert(h, 100.0)
+    after_insert = heap_items(h)
+    heap_sort_in_place(h)
+    heap_sorted = heap_items(h)
+    show after_build
+    show max_value
+    show after_extract
+    show after_insert
+    show heap_sorted
+    start += heap_lengths[c]
+}
+
+# queue_by_list.py rotate doctest
+q = queue_new(8)
+queue_put(q, 10.0)
+queue_put(q, 20.0)
+queue_put(q, 30.0)
+queue_put(q, 40.0)
+queue_rotate(q, 1.0)
+rotated_1 = queue_items(q)
+queue_rotate(q, 2.0)
+rotated_3 = queue_items(q)
+show rotated_1
+show rotated_3
+
+# linked list: test_singly_linked_list, with the list printed at each step
+ll = list_new(16)
+for i to 10 {
+    list_insert_nth(ll, i, i + 1.0)
+}
+list_insert_head(ll, 0.0)
+list_insert_tail(ll, 11.0)
+linked_0_to_11 = list_items(ll)
+deleted = [list_delete_head(ll), list_delete_nth(ll, 9.0), list_delete_tail(ll)]
+linked_1_to_9 = list_items(ll)
+for i to 9 {
+    list_set(ll, i, -i)
+}
+list_reverse(ll)
+linked_reversed = list_items(ll)
+show linked_0_to_11
+show deleted
+show linked_1_to_9
+show linked_reversed
+
+# hash map: insert 0..11 (keys i, values 10 i), delete the even ones, then look up
+hm = hm_new(8.0, 0.75)
+for i to 12 {
+    hm = hm_set(hm, i, 10.0 * i)
+}
+hm_buckets_after_insert = hm_buckets(hm)
+hm_keys_after_insert = hm_keys(hm)
+for i to 6 {
+    hm = hm_del(hm, 2.0 * i)
+}
+hm_buckets_after_delete = hm_buckets(hm)
+hm_keys_after_delete = hm_keys(hm)
+hm_values_after_delete = hm_values(hm)
+show hm_buckets_after_insert
+show hm_keys_after_insert
+show hm_buckets_after_delete
+show hm_keys_after_delete
+show hm_values_after_delete
+hm_neg = hm_new(5.0, 0.75)
+hm_neg = hm_set(hm_neg, -5.0, 10.0)
+hm_neg = hm_set(hm_neg, 6.0, 30.0)
+hm_neg = hm_set(hm_neg, -7.0, 20.0)
+hm_neg = hm_set(hm_neg, -1.0, 40.0)
+hm_neg_keys = hm_keys(hm_neg)
+show hm_neg_keys
+
+test "stack.py test_stack" {
+    s = stack_new(10.0)
+    assert_true(stack_is_empty(s))
+    assert_true(not stack_is_full(s))
+    for i to 10 {
+        assert_near(stack_size(s), i, 0.0)
+        assert_true(stack_push(s, i))
+    }
+    assert_true(stack_is_full(s))
+    assert_true(not stack_push(s, 200.0))
+    assert_near(stack_pop(s), 9.0, 0.0)
+    assert_near(stack_peek(s), 8.0, 0.0)
+    assert_true(stack_push(s, 100.0))
+    assert_true(stack_contains(s, 100.0))
+    assert_true(not stack_contains(s, -5.0))
+    assert_near(stack_size(s), 10.0, 0.0)
+}
+
+test "queue_by_list rotate and get_front doctests" {
+    assert_true(all(rotated_1 == [20.0, 30.0, 40.0, 10.0]))
+    assert_true(all(rotated_3 == [40.0, 10.0, 20.0, 30.0]))
+    assert_near(queue_get_front(q), 40.0, 0.0)
+    assert_near(queue_get(q), 40.0, 0.0)
+    assert_true(all(queue_items(q) == [10.0, 20.0, 30.0]))
+}
+
+test "singly_linked_list test_singly_linked_list" {
+    empty = list_new(2.0)
+    assert_true(list_is_empty(empty))
+    assert_true(not list_insert_nth(empty, 1.0, 5.0))
+    assert_true(all(linked_0_to_11 == linspace(0.0, 11.0, 12.0)))
+    assert_true(all(deleted == [0.0, 10.0, 11.0]))
+    assert_true(all(linked_1_to_9 == linspace(1.0, 9.0, 9.0)))
+    assert_near(list_len(ll), 9.0, 0.0)
+    assert_true(all(linked_reversed == linspace(-8.0, 0.0, 9.0)))
+    assert_near(list_get(ll, 0.0), -8.0, 0.0)
+}
+
+test "hash_map doctests" {
+    small = hm_new(2.0, 0.75)
+    hm_add_item(small, 1.0, 10.0)
+    hm_add_item(small, 2.0, 20.0)
+    assert_true(hm_is_full(small))
+    assert_true(not hm_is_full(hm_new(2.0, 0.75)))
+    five = hm_new(5.0, 0.75)
+    hm_add_item(five, 1.0, 10.0)
+    five = hm_set(five, 0.0, 20.0)
+    assert_true(all(hm_keys(five) == [0.0, 1.0]))
+    one = hm_new(1.0, 0.75)
+    hm_add_item(one, 10.0, 13.2)
+    hm_add_item(one, 6.0, 5.26)
+    assert_true(all(hm_keys(one) == [10.0]))
+    assert_true(all(hm_neg_keys == [-7.0, -5.0, 6.0, -1.0]))
+    for i to 12 {
+        assert_true(hm_contains(hm, i) == (mod(i, 2.0) == 1.0))
+    }
+    assert_near(hm_get(hm, 7.0), 70.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2016-2022 TheAlgorithms and contributors (TheAlgorithms/Python)
+# SPDX-FileCopyrightText: 2026 The Viv authors

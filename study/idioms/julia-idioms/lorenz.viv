@@ -1,0 +1,97 @@
+###
+post: The Lorenz system, SciML style
+agent: claude
+
+The shape the SciML tutorials teach: an in-place right-hand side
+lorenz!(du, u, p, t), parameters in a struct with defaults, and a solver
+that takes the step as a keyword argument and a do-block that runs after
+every step. The Julia reference (ref.jl, part B) is a fixed-step RK4 written
+that way. Here the right-hand side is also in place, since an array
+parameter is the caller's array. The parameters are an array with named
+slots, dt is positional, and the per-step block is a def that writes into
+global arrays.
+###
+
+from ref_values import REF_LORENZ_RHO14_U, REF_LORENZ_U, REF_LORENZ_X_EVERY_HALF, REF_LORENZ_ZMAX
+
+#| Slots of the parameter array, and the defaults LorenzParams() has.
+SIGMA = 0
+RHO = 1
+BETA = 2
+
+def lorenz_params(sigma, rho, beta) {
+    return [sigma, rho, beta]
+}
+
+def lorenz(du, u, p, t) {
+    du[0] = p[SIGMA] * (u[1] - u[0])
+    du[1] = u[0] * (p[RHO] - u[2]) - u[1]
+    du[2] = u[0] * u[1] - p[BETA] * u[2]
+}
+
+#| Overwrite a with b, element by element: Julia's a .= b.
+def assign(a, b) {
+    for i to len(a) {
+        a[i] = b[i]
+    }
+}
+
+#| Classical RK4 from t0 to t1 in steps of dt, updating u in place and
+#| calling after_step(t, u) after each step.
+def rk4(after_step, f, u, t0, t1, p, dt) {
+    k1 = zeros(len(u))
+    k2 = zeros(len(u))
+    k3 = zeros(len(u))
+    k4 = zeros(len(u))
+    t = t0
+    for n to round((t1 - t0) / dt) {
+        f(k1, u, p, t)
+        f(k2, u + dt / 2.0 * k1, p, t + dt / 2.0)
+        f(k3, u + dt / 2.0 * k2, p, t + dt / 2.0)
+        f(k4, u + dt * k3, p, t + dt)
+        assign(u, u + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4))
+        t = t0 + (n + 1.0) * dt
+        after_step(t, u)
+    }
+}
+
+#| What the do-block in ref.jl keeps: the largest z, and x at t = 0.5, 1, 1.5, 2.
+zmax = [-1.0e300]
+samples = zeros(4)
+taken = zeros(1)
+
+def record_step(t, u) {
+    zmax[0] = max(zmax[0], u[2])
+    if abs(mod(t, 0.5)) < 1.0e-9 {
+        samples[taken[0]] = u[0]
+        taken[0] = taken[0] + 1.0
+    }
+}
+
+def ignore_step(t, u) {
+    return 0.0
+}
+
+u = [1.0, 0.0, 0.0]
+rk4(record_step, lorenz, u, 0.0, 2.0, lorenz_params(10.0, 28.0, 8.0 / 3.0), 1.0e-3)
+show u
+show zmax[0]
+
+test "state at t = 2 matches the Julia rk4!" {
+    assert_allclose(u, REF_LORENZ_U, 1.0e-12)
+}
+
+test "what the per-step callback collected" {
+    assert_near(zmax[0], REF_LORENZ_ZMAX, 1.0e-12)
+    assert_near(taken[0], 4.0, 0.0)
+    assert_allclose(samples, REF_LORENZ_X_EVERY_HALF, 1.0e-12)
+}
+
+test "rho = 14, the others at their defaults" {
+    u2 = [1.0, 0.0, 0.0]
+    rk4(ignore_step, lorenz, u2, 0.0, 1.0, lorenz_params(10.0, 14.0, 8.0 / 3.0), 1.0e-3)
+    assert_allclose(u2, REF_LORENZ_RHO14_U, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,81 @@
+# PySCF rows on molecules lib/hfref does not carry: water with a ghost
+# hydrogen (test_rhf.py:562: the ghost keeps its basis functions and has no
+# charge), the overlap matrix of test_moleintor.py's benzene with a
+# hand-written C4 basis, and the 8-fold packed ERIs of He and Ne 3 A apart
+# (test_moleintor.py:303). The packs come from scf/suite/ref/stb.
+#
+# test_moleintor.py:96, 100 and 104 assert the same sum through three
+# PySCF entry points (intor, intor_symmetric, intor_asymmetric); here the
+# three rows are the three overlap members of lib/hf (McMurchie-Davidson,
+# Obara-Saika, Gauss-Hermite quadrature), each taken to PySCF's spherical
+# basis on its own.
+#
+#     tools/both-engines.sh scf/suite ghost_intor
+from hf.hf import hf_energy, hf_eri
+from hf.molecule import mol_nalpha, mol_nbeta, Molecule, molecule_packs
+from hf.basis import bas_nao_sph
+from hf.md_onebody import md1_s
+from hf.eri_store import es_len8
+from hf.cart2sph import c2s_basis
+from hf.transform import tr2_blocks
+from hf.opts import scf_checked, SCF_ROHF, ScfOptions
+from hf.os_onebody import os_overlap
+from hf.gh_onebody import gh_overlap
+from hfref.pyscf_tests import (
+    PST_FILE_MOLEINTOR, PST_FILE_RHF, PST_MOLEINTOR_100, PST_MOLEINTOR_100_P, PST_MOLEINTOR_104,
+    PST_MOLEINTOR_104_P, PST_MOLEINTOR_109, PST_MOLEINTOR_109_P, PST_MOLEINTOR_303,
+    PST_MOLEINTOR_303_P, PST_MOLEINTOR_96, PST_MOLEINTOR_96_P, PST_RHF_562, PST_RHF_562_P,
+)
+from scf.suite.ref.sts import sts_fp, sts_row
+from scf.suite.ref.stb import (
+    stb_bzi_atoms, stb_bzi_prims, stb_bzi_shells, STB_BZI_SLICE_AO, stb_ghost_atoms,
+    stb_ghost_prims, stb_ghost_shells, stb_hene_atoms, stb_hene_prims, stb_hene_shells,
+)
+
+#| The sum of |S_ij| of an overlap member's matrix in PySCF's spherical
+#| basis: `rows` limits i to the first `rows` AOs and j to the rest, when
+#| it is below the AO count.
+def sgi_abssum(S: Arr, shells: Arr, rows) {
+    Ss = tr2_blocks(S, c2s_basis(shells), shells)
+    n = len(Ss)
+    if rows >= n {
+        return sum(abs(Ss))
+    }
+    return sum(abs(Ss[0:rows, rows:n]))
+}
+
+test "water with a ghost hydrogen, spin 1: ROHF -75.393287998638741 (test_rhf.py:562)" {
+    sgi_m = Molecule { spin: 1, ..molecule_packs(stb_ghost_atoms(), stb_ghost_shells(), stb_ghost_prims()) }
+    # the ghost carries no charge, so 9 electrons, and adds nothing to E_nuc
+    assert_near(sgi_m.atoms[1, 0], 0.0, 0.0)
+    assert_near(mol_nalpha(sgi_m), 5, 0.0)
+    assert_near(mol_nbeta(sgi_m), 4, 0.0)
+    sgi_r = hf_energy(sgi_m, ScfOptions { method: SCF_ROHF, ..scf_checked() })
+    assert_near(sgi_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 562, sgi_r.energy, PST_RHF_562, PST_RHF_562_P), 1.0, 0.0)
+}
+
+test "benzene with a hand-written C4 basis: sum |S| = 622.29059965181796 from each overlap member, and 99.38188078749701 over the shell slice (test_moleintor.py:96, 100, 104, 109)" {
+    sgi_at = stb_bzi_atoms()
+    sgi_sh = stb_bzi_shells()
+    sgi_pr = stb_bzi_prims()
+    assert_near(bas_nao_sph(sgi_sh), 114, 0.0)
+    sgi_S = md1_s(sgi_at, sgi_sh, sgi_pr)
+    assert_near(sts_row(PST_FILE_MOLEINTOR, 96, sgi_abssum(sgi_S, sgi_sh, 114), PST_MOLEINTOR_96, PST_MOLEINTOR_96_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_MOLEINTOR, 109, sgi_abssum(sgi_S, sgi_sh, STB_BZI_SLICE_AO), PST_MOLEINTOR_109, PST_MOLEINTOR_109_P), 1.0, 0.0)
+    sgi_S = os_overlap(sgi_at, sgi_sh, sgi_pr)
+    assert_near(sts_row(PST_FILE_MOLEINTOR, 100, sgi_abssum(sgi_S, sgi_sh, 114), PST_MOLEINTOR_100, PST_MOLEINTOR_100_P), 1.0, 0.0)
+    sgi_S = gh_overlap(sgi_at, sgi_sh, sgi_pr)
+    assert_near(sts_row(PST_FILE_MOLEINTOR, 104, sgi_abssum(sgi_S, sgi_sh, 114), PST_MOLEINTOR_104, PST_MOLEINTOR_104_P), 1.0, 0.0)
+}
+
+test "He and Ne 3 A apart: fp of the 8-fold packed spherical ERIs is -10.685918926843847 (test_moleintor.py:303)" {
+    # PySCF's s8 layout is this library's packed-8 layout: pairs ij = i(i+1)/2 + j
+    # for i >= j, then the pair of pairs the same way
+    sgi_G = hf_eri(molecule_packs(stb_hene_atoms(), stb_hene_shells(), stb_hene_prims()), scf_checked())
+    assert_near(len(sgi_G), es_len8(19), 0.0)
+    assert_near(sts_row(PST_FILE_MOLEINTOR, 303, sts_fp(sgi_G), PST_MOLEINTOR_303, PST_MOLEINTOR_303_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

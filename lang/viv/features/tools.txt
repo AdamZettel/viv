@@ -1,0 +1,501 @@
+# Tools: the `viv` verbs and the repository's scripts that read, check and
+# measure Viv programs (lang/viv/src/main.rs, lint.rs, graph.rs, tools/).
+
+== run
+title: Run a program in the interpreter
+what: `viv run f.viv` runs the program in the tree-walking interpreter, the same one the
+  browser workbench runs. `-q` drops the `__graph__`, `__trace__`, `__steps__` and
+  `__story__` lines the debug lens prints; `--release` makes `release_mode()` true, so a
+  contract runs one method instead of sweeping; `--json` writes the errors and the
+  failed-assert summary to stderr as one JSON object; `--use p.viv` puts a prelude before
+  the program; `--set NAME=value` replaces a top-level `NAME = <number>` line before the
+  run. A failed assert or hold makes the exit status 1. A `.py` file, or one that starts
+  with `#! lang python`, is translated by py2viv first. The interpreter stops a run past
+  2e9 steps, its guard against a hung loop; `VIV_STEP_BUDGET=2e10 viv run f.viv` raises
+  the limit for a long run that is not a hang.
+when: To try a change without a C compiler, to sweep a parameter with `--set` instead of
+  editing the file, and to give a tool or a model the errors as JSON.
+example: tool-run
+doc: www/src/pages/reference.astro
+see: compile, three-engines, release-mode, set-overrides, py2viv, viv-check
+keywords: run interpreter --release -q --quiet --json --use --set prelude exit status step budget VIV_STEP_BUDGET
+verb: run
+
+== compile
+title: Compile to C or to wasm
+what: `viv f.viv -o f.c` writes one C99 file that holds the program and the runtime it
+  needs; `viv f.viv -o f.wasm` writes a WebAssembly module from the direct wasm backend,
+  which `tools/run-wasm.mjs` runs in node. `--emit tokens`, `--emit ast` and `--emit ir`
+  print the lexer's tokens, the syntax tree or the IR (each node with its content hash)
+  and stop; the IR shows the call a form becomes, such as `2.0 ^ 3`, which is a call of `pow`.
+  The C is built with any C compiler (`cc -O2 f.c -lm`), and prints what the interpreter
+  prints, byte for byte.
+when: For speed (the native build is the fast engine), to ship a program to a browser, or
+  to see how the compiler reads a line before you guess.
+example: tool-compile
+see: run, three-engines, three-engine-identity, release-mode
+keywords: compile -o c wasm emit tokens ast ir native cc backend
+verb: compile
+
+== explorer
+title: The program graph and the explorer
+what: `viv graph f.viv` prints the program as a graph of defs, the steps inside them and the
+  loops that hold them, with each step's inputs and outputs. `--json` is the graph for
+  tools, `--bundle` adds the program as run, its line table, the intent and the debug
+  lens (what the /explore page loads), `--run` runs the program as the explorer does,
+  and `--svg [-o out.svg]` draws the whole program with lib/graphdraw. The explorer page
+  runs the program in your browser and places each moment of the run in this graph, step by
+  step.
+when: To see the structure of a program you did not write before reading its code, and to
+  check that the steps you named give each phase the inputs and outputs you meant.
+example: tool-graph
+see: steps, story, explain, deps, lib-graphdraw
+keywords: graph explorer explore program graph steps bundle svg callgraph
+verb: graph
+
+== atlas
+title: The atlas of a program
+what: `viv atlas f.viv` runs the program once and writes `f.atlas.html`: every def the top
+  level reaches, by module, with its intent, steps and loops, the calls between defs and
+  how many times each ran, and the whole-program picture of `viv graph --svg`. It is one
+  file with the data and the viewer inside (the site's code map); it opens from file://
+  with no network. `-o` names the file, `--text` prints the atlas in the terminal (modules,
+  defs with their intent lines, steps, loops, call counts, the call tree from the top
+  level), `--json` prints the explorer bundle with the counts and the map for tools, and
+  `--no-run` skips the run and shows the calls the text makes.
+when: To see a program of many modules before reading it, to hand someone a map of it they
+  can open anywhere, or to give an agent the call tree with real counts.
+example: tool-atlas
+doc: lang/viv/src/atlas.rs; www/scripts/atlas-viewer-build.mjs
+see: explorer, deps, lib-graphdraw
+keywords: atlas map callgraph call graph counts modules offline html picture call tree
+verb: atlas
+
+== deps
+title: The call graph
+what: `viv deps f.viv` lists every def with its parameter count, the defs it calls and the
+  callers it has (`◂`), then what the top level calls. `--json` gives the same as data.
+  It reads the code; nothing runs.
+when: Before changing a def, to see every caller it has; to find defs nothing calls.
+example: tool-deps
+doc: lang/viv/src/lib.rs
+see: explorer, lsfunc, canon
+keywords: deps dependencies callers callees call graph callgraph json
+verb: deps
+
+== whatis
+title: Look up a variable's glossary entry
+what: `viv whatis f.viv name` prints what the `#:` glossary line says a variable is, and the
+  def (and lines) it belongs to. The glossary is the comment `#: name  meaning` above a
+  def.
+when: Reading unfamiliar numerical code: ask what `m` or `Fock` means instead of tracing
+  its assignments.
+example: tool-whatis
+doc: www/src/pages/reference.astro section Lexical structure
+see: lsvar, lsfunc, doc, intent-lens
+keywords: whatis glossary variable meaning annotation #:
+verb: whatis
+
+== lsfunc
+title: A program's table of contents
+what: `viv lsfunc f.viv` lists every def with its line range, its parameters and the first
+  line of its `#|` doc. `--placeholders` lists only the `placeholder def`s, the defs
+  whose intent is written and whose code is not.
+when: The first look at a module: what it offers and where, before reading any body.
+example: tool-lsfunc
+doc: www/src/pages/reference.astro section Lexical structure
+see: lsvar, src, doc, deps
+keywords: lsfunc functions defs table of contents list placeholders
+verb: lsfunc
+
+== lsvar
+title: The whole variable glossary
+what: `viv lsvar f.viv [def]` prints every `#:` glossary entry, grouped by the def it
+  belongs to, or only those of one def.
+when: To read the names a module uses in one place, or to find a variable with no entry.
+example: tool-lsvar
+doc: www/src/pages/reference.astro section Lexical structure
+see: whatis, lsfunc
+keywords: lsvar variables glossary #:
+verb: lsvar
+
+== src
+title: One def's source
+what: `viv src f.viv name` prints one def with its line numbers, with the annotation
+  comments above it.
+when: To read or quote a single def of a long module without opening the file.
+example: tool-src
+doc: lang/viv/src/lib.rs
+see: lsfunc, doc
+keywords: src source def print function
+verb: src
+
+== expand
+title: The program as the engines read it
+what: `viv expand f.viv` prints the program with its imports spliced in and its names
+  resolved: a qualified name (`nn.rmsnorm`) written as the name it means, and a name two
+  modules define written `<module path>__<name>` in the module that defines it.
+when: To see what an import brings in, or which of two same-named defs a call reaches.
+example: none: its output is the whole of lib/nn for a one-line program
+doc: lang/viv/src/imports.rs
+see: imports, hash-diff-canon
+keywords: expand splice resolve imports namespace
+verb: expand
+
+== imports-migration
+title: Rewrite #! use lines as imports
+what: `viv imports [--write] f.viv ...` replaces each `#! use m` line with `from m import
+  <the names the file reads from m>` (or `import m` when it reads none), followed by a
+  `from` line for each module `m` brought in that the file reads from, so no name comes
+  from a module the file does not import. Every file is read before any is written.
+when: Once, to move a file (or a corpus) from `#! use` to imports; the compiler refuses
+  `#! use` and names the import that replaces it.
+example: none: it rewrites files
+doc: lang/viv/src/imports.rs
+see: imports, expand
+keywords: migrate use import rewrite
+verb: imports
+
+== fix-keywords
+title: Name the builtin options a file writes by position
+what: `viv fix --keywords [--write] f.viv ...` rewrites `sum(X, -1, true)` as `sum(X,
+  axis=-1, keepdims=true)`, and every other builtin option written by position (`take(...,
+  axis=)`, `triu(..., k=)`, `linspace(..., endpoint=)`), keeping a file only when its
+  definitions hash as before: the filled call is the call the engines read either way.
+when: Once, for a file that still writes options by position; the compiler refuses them.
+example: none: it rewrites files
+doc: lang/viv/src/kwargs.rs
+see: keyword-arguments, builtin-options, hash-diff-canon
+keywords: fix keyword option axis keepdims rewrite
+verb: fix
+
+== doc
+title: Annotations as data
+what: `viv doc f.viv` writes the file's annotations as JSON: each def's `#|` what, `#||`
+  how, `#|||` why, `#~` tags, its `#:` glossary and its line notes, with the code. `viv doc
+  f.viv name` prints one def's entry as text, with the defs it calls. The annotations are
+  comments to the compiler; this verb is how tools read them.
+when: To build a page or a tool from a program's own documentation instead of a copy of it.
+example: tool-doc
+doc: www/src/pages/reference.astro section Lexical structure
+see: whatis, lsfunc, intent-lens
+keywords: doc annotations json #| #|| #||| #~ what how why tags
+verb: doc
+
+== lint
+title: Integer literals where a size belongs
+what: `viv lint f.viv` (or a directory) reports an integer literal other than 0, 1 and 2
+  used as an array size (`zeros(37)`), a loop bound (`for i to 37`) or a bound on a
+  variable used as an index. Literals in a `NAME = value` line, in array literals, in a
+  test's expected values and in literal indices are allowed. `--count` prints a count per
+  path. The exit status is 1 when it finds any.
+when: On new code before committing: a size written as a number goes wrong silently when
+  the data it counts changes. Write `len(a)`, `shape(A)[k]` or a named constant.
+example: tool-lint
+doc: lang/viv/src/lint.rs
+see: lint-round, viv-check
+keywords: lint magic numbers literal size bound --count
+verb: lint
+
+== lint-round
+title: Rounding an Int would make unnecessary
+what: `viv lint --round f.viv` lists each `round(...)` whose value is used as an index, a
+  slice bound, a loop bound or an array size, directly or through the variable it is
+  assigned to. With `--count` it prints how many of the file's `round` calls are such
+  uses. An index that is a number must already be a whole number, so these calls either
+  do nothing or hide a table of integers stored as numbers.
+when: When moving code onto `Int`: an Int index or an `[Int]` table makes the rounding go.
+example: tool-lint-round
+doc: lang/viv/src/lint.rs
+see: lint, int-type
+keywords: lint round Int index rounding --round --count
+verb: lint
+
+== formatter
+title: Formatting
+what: This repository has no `viv fmt`. What exists: `viv canon` puts defs in dependency
+  order; `tools/steps/one_line.py --fix` rewrites a step whose body is one short
+  statement into the one-line form `step name: statement`, keeping a file only when its
+  hashes and syntax tree are unchanged. The line-breaking formatter, `npm run vivfmt`, is kept outside this repository (scripts/viv-lint.mjs) for now.
+when: Use `canon` and `one_line.py` here; do not expect a formatter in this repository.
+example: none: there is no formatter verb in this repository
+doc: tools/steps/one_line.py
+see: hash-diff-canon, steps
+keywords: fmt format formatter vivfmt style one-line steps canon
+
+== hash-diff-canon
+title: Content addresses, structural diff and canonical order
+what: `viv hash f.viv` prints, for every def, global and the top level, a node hash (name
+  included) and a body hash (the code alone, from the IR): reformatting moves neither,
+  renaming moves only the node hash. `viv diff old.viv new.viv` compares two versions by
+  those hashes and reports each def as unchanged, edited, renamed (same body, new name),
+  added or removed. `viv canon f.viv` rewrites the file with defs in dependency order,
+  callees first, and is idempotent.
+when: To check that a refactor changed nothing it should not have (the body hashes stay),
+  to review a change def by def, and to detect a rename that a text diff shows as a
+  delete and an add.
+example: tool-hash
+doc: www/src/pages/reference.astro section The CLI
+see: deps, intent-lens, hub-golden
+keywords: hash diff canon content address body hash rename structural diff vcs
+verb: hash
+
+== claims
+title: The claims and their status
+what: `viv claims` lists the claims in claims/ (`--json`: one object; `--only <slug>`:
+  some), each a statement with a Viv program and its
+  vipyr twin, and the status recorded in claims/results.json. `viv claims run` runs the fast
+  ones (`--all`, `--heavy` or `--only <slug>` for others) through tools/claims/run.py;
+  `--check` fails when a program fails, the two disagree on a value both print, or a
+  number of the statement is not established; `--write` records the results.
+when: To see which claims hold and to check one after changing the code it rests on.
+example: none: it reads claims/ and runs Python; tools/claims/run.py --check is the gate's
+doc: tools/claims/run.py
+see: facts
+keywords: claims statement twin vipyr status check
+verb: claims
+
+== facts
+title: Everything the compiler knows about one file, as JSON
+what: `viv facts --json f.viv` prints one JSON object: each def with its span, parameters,
+  signature, three hashes (`ast_hash`, the code as parsed with comments, step headings and
+  the def's own name left out; `closure_hash`, which also covers every def it calls;
+  `ir_hash`, the body hash `viv hash` prints), its intent state, steps, `#|` notes and
+  calls; the tests and the top level with their calls; the imports; the features used.
+when: To feed the program database, `python3 tools/vivdb/vivdb.py build`, which runs it
+  on every file and answers questions such as "what does changing exp move" with
+  `vivdb.py query --saved impact --param target=exp`.
+example: none: its output is a large JSON object; tools/vivdb/test_vivdb.py checks it
+see: hash-diff-canon, deps, intent-lens
+keywords: facts json database vivdb query impact ast_hash closure_hash sqlite
+verb: facts
+
+== plot
+title: Draw a run's figures as SVG
+what: `viv plot [out.txt | -] [-o out.svg] [--width N] [--chart K]` reads the figure
+  records a run printed (from `figure`, `plot`, `scatter`, `bars` and the rest) and writes
+  SVG, the same bytes every time: every chart one under another, or the K-th. With no
+  file, or `-`, it reads stdin, so `viv run -q f.viv | viv plot -o f.svg` draws a run.
+when: To look at a program's figures outside the browser, or to commit a figure that a test
+  can compare byte for byte.
+example: none: it reads another program's output; the figure builtins carry the examples
+see: run, explorer
+keywords: plot svg figure chart records draw --chart --width
+verb: plot
+
+== plot-math
+title: Math in figure labels
+what: A figure label's `$...$` parts are TeX, set as math by `viv plot` and by the site's
+  charts alike: Greek letters, `^` and `_`, `\frac`, `\sqrt`, accents, `\mathrm` and
+  `\text`, operator names such as `\log` set upright, `\sum` and `\int`, `\left(`
+  `\right)`, the spacing commands and the common relations and operators. Titles, axis
+  labels, legend entries, ticks and label marks all take it; text outside the dollars
+  stays as it is, and `\$` is a dollar sign. An unknown command makes `viv plot` fail
+  with the record's line and the column in the label. In a Viv string a backslash is
+  written `\\`.
+when: For a label that is math, such as `$E/A$ (MeV)` or `$\log_{10}\kappa$`, instead of
+  spelling it out in plain text.
+example: plot-math
+doc: lang/viv/src/mathtext.rs
+see: plot, f-strings
+keywords: latex tex mathtext label axis math greek subscript superscript frac dollar
+
+== export
+title: Export a program as one C file and a Python wrapper
+what: `viv export p.export.toml` reads a manifest that names a program's files, its decks,
+  its parameters and its results, and writes `p.c` (the program and its runtime, which
+  `cc -shared` builds into a library), `p.h`, `p.py` (a ctypes wrapper with a typed `run`),
+  a README and a test, by default into `target/export/p`. A run of the library gives the
+  bits a run of the program gives; an error in it raises a Python exception with Viv's
+  message and line, and the next run works. A manifest with `kind = "kernels"` and
+  `[kernels.<name>]` tables exports several defs instead, each a C entry point and a
+  Python function with the def's signature (complex numbers and several results
+  included), after a module initialization that runs once.
+when: To hand a working program to someone who uses Python and has a C compiler, with no
+  Viv toolchain on their machine.
+example: none: it reads a manifest and writes files; tests/export.rs runs one
+see: compile, run
+keywords: export library shared ctypes python manifest deck parameters results kernels kernel collection
+verb: export
+
+== cuda
+title: The CUDA C of a program's GPU kernels
+what: `viv cuda p.viv -o p.cu` writes one CUDA C file: Viv's libm marked for the device, a
+  `__global__` function for each `kernel def` and for each `parallel for` whose body can run
+  on a GPU, and an `extern "C"` launcher for each that computes the grid as the emulator
+  does (the default, or the kernel's `schedule` line), copies the arrays to the device,
+  launches and copies the written ones back. A `parallel for` that cannot be a kernel is
+  listed at the end of the file with the reason. The file is meant for nvcc with
+  `-fmad=false -prec-div=true -prec-sqrt=true -ftz=false`. `--set NAME=value` sets a global constant first,
+  as in a run, so one source gives a file per block shape or tile size.
+when: To take kernels checked by the emulator to a machine with an NVIDIA GPU.
+example: none: it writes a file; tests/cuda.rs checks what it writes
+see: gpu-kernels, parallel-for, export
+keywords: cuda nvcc gpu kernel launcher device generate set constant variant
+verb: cuda
+
+== cas-derivs
+title: The derivative table as a module
+what: `viv cas derivs` prints lib/cas/derivs.viv, the derivative rules of the computer
+  algebra system, written from lib/cas/rules/derivatives.toml, the file grad.rs reads
+  too. So the CAS and autodiff differentiate a builtin by one table.
+when: After editing lib/cas/rules/derivatives.toml, to regenerate lib/cas/derivs.viv.
+example: none: it prints a generated module of several hundred lines
+doc: lib/cas/rules/derivatives.toml
+see: lib-cas, check-phrases-certificates
+keywords: cas derivs derivatives table toml generate
+verb: cas
+
+== py2viv
+title: Numeric Python into Viv
+what: py2viv (tools/py2viv/py2viv.py) translates numeric Python with NumPy into Viv. `viv
+  run prog.py`, `viv check prog.py` and `viv prog.py -o prog.c` translate first, as does
+  a file that starts with `#! lang python`. A translated program behaves as CPython
+  with NumPy runs it, or py2viv refuses it, listing every construct outside the subset
+  at its Python line and column with what to write instead. `def test_x():` becomes a
+  `test` block, and a run-time error is reported at the Python line it came from.
+when: To bring a Python reference or a NumPy prototype into the three engines without
+  rewriting it by hand, and to check a port against the original's output.
+example: tool-py2viv
+doc: tools/py2viv/SUBSET.md; tools/py2viv/RULES.md
+see: run, compare-harness, three-engines
+keywords: py2viv python numpy translate port lang python .py refuse subset
+
+== compare-harness
+title: The Python and Viv pairs
+what: study/compare holds the same small programs in Python and in Viv, topic by topic
+  (basics, strings, maps, records, autodiff, ml, numerics, plotting and more), each pair
+  split into matching `# @@` regions. `study/compare/check.sh` lints them, runs both
+  sides and requires the same printed text, checks each pair's `.gen.json` (which the
+  /compare pages are built from) is current, and runs the three engines; measure.py
+  keeps each measured pair's line and lookup counts current in its notes.
+when: To see how a Python idiom is written in Viv before writing it, and to measure what
+  a language change saves.
+example: none: a harness over study/compare; run study/compare/check.sh
+doc: study/compare/check.sh; study/compare/measure.py
+see: py2viv, three-engines
+keywords: compare python pairs study measure lines check.sh /compare
+
+== algo-harness
+title: The algorithms harness
+what: `python3 tools/algo/check.py` checks lib/algo's specification (lib/algo/algo.spec:
+  each algorithm's postconditions, stability and complexity bound) and the test programs
+  generated from it; `--run` runs each implementation on generated cases, recomputes every
+  property in Python, compares with Python and NumPy, counts comparisons against the
+  bound and runs the three engines. It is part of www's `npm run check`.
+when: Before adding a sort, search or set algorithm to lib/algo, or when checking a
+  hand-written one from the corpus against the specification.
+example: none: a Python harness; run python3 tools/algo/check.py
+doc: tools/algo/check.py
+see: lib-algo, three-engines
+keywords: algo algorithms harness spec postconditions sort search stl check.py
+
+== memcheck
+title: Memory checks of the emitted C
+what: tools/memcheck/memcheck.sh compiles every program of the named directories to C and
+  builds it twice: with AddressSanitizer and UndefinedBehaviorSanitizer, and plainly with
+  a memory report (what the array arena holds at exit, peak resident set, `leaks`). It
+  writes one row per program. tools/memcheck/ci.sh is the gate: every program under the
+  sanitizers, the leak probes (scale.sh, adversarial.sh: no row may grow with the loop
+  length), the `parallel for` probes and the runtime fuzzers; `--quick` takes a few
+  minutes.
+when: After a change to the C emitter, the runtime or ownership rules, before merging.
+example: none: a shell harness over whole directories; run tools/memcheck/ci.sh --quick
+doc: tools/memcheck/ci.sh
+see: memory-lens, parallel-for, three-engines
+keywords: memcheck asan ubsan sanitizer leaks arena memory ci.sh fuzz
+
+== three-engines
+title: Run a directory in three engines
+what: `tools/three-engines.sh DIR [names...]` runs every program in the interpreter, as C
+  built natively, and as wasm from the direct backend in node, and requires every test to
+  pass in each and the three outputs to agree byte for byte. A problem post's tests are
+  meant to fail; for it only the agreement is required. tools/both-engines.sh is the
+  same check without wasm, and `NO_C=1` skips C.
+when: On every directory a change touches, before committing: it is the check that a
+  program means the same thing in every engine.
+example: none: a script over a directory; run tools/three-engines.sh DIR
+doc: tools/three-engines.sh; tools/both-engines.sh
+see: three-engine-identity, compile, run, hub-golden
+keywords: three engines interp native wasm identical output both-engines check
+
+== hub-golden
+title: The golden snapshot of the corpus
+what: `tools/hub-golden.sh record DIR [paths]` writes, for every program of the corpus,
+  its def hashes, AST, IR, C, the wasm module's sha256, and the output and exit status
+  of the interpreter, the native build and the wasm build. `tools/hub-golden.sh compare A
+  B` lists every difference between two snapshots and exits 1 if there is any.
+when: Around a compiler refactor that should change nothing: record before, record after,
+  compare.
+example: none: a script over the whole corpus; run tools/hub-golden.sh record target/golden/NAME
+doc: tools/hub-golden.sh
+see: hash-diff-canon, three-engines
+keywords: golden snapshot record compare refactor corpus hub
+
+== race-engines
+title: Time one program in every engine
+what: `tools/race-engines.sh prog.viv ...` times a program four ways (the interpreter
+  compiled to wasm, the direct wasm backend, C through emcc to wasm, and native C), each
+  around the run alone, best of RUNS, and checks that all four print the same.
+  tools/bounds-cost.sh measures what the array bounds checks cost by building with and
+  without `-DVIV_NO_BOUNDS`.
+when: To decide which engine a page or a job should use, or what a bounds check costs a
+  hot loop.
+example: none: it takes timings; run tools/race-engines.sh bench/jacobi_stencil.viv
+doc: tools/race-engines.sh; tools/bounds-cost.sh
+see: three-engines, release-mode, benchmarks
+keywords: race time timing benchmark engines emcc bounds-cost VIV_NO_BOUNDS speed
+
+== benchmarks
+title: The published benchmark sets
+what: study/benchmarks/viv holds Viv versions of programs from published benchmark sets:
+  the Julia micro benchmarks (`micro/`), the Benchmarks Game (`bg/`), the NAS Parallel
+  Benchmarks (`nas/`), PolyBench (`polybench/`) and numpy-benchmarks translated by py2viv
+  (`npb/`).
+when: To see how a published benchmark reads in Viv, or to time a construct against the
+  languages people compare with before claiming a speed.
+example: none: programs; see study/benchmarks/viv
+doc: study/benchmarks/viv/nas/cg.viv
+see: race-engines, release-mode
+keywords: benchmark julia numpy numba timing results speed
+
+== jupyter-kernel
+title: Viv in Jupyter
+what: tools/jupyter holds a Jupyter kernel for Viv and a converter between Viv notebooks
+  and `.ipynb`. A Viv notebook is a `.viv` file whose `###` blocks are prose cells;
+  running cell N runs cells 1 to N as one program and shows what cell N printed, so the
+  file still runs with `viv run`.
+when: To work on a Viv program cell by cell in Jupyter, or to convert a notebook to a post.
+example: none: it installs a kernel; see tools/jupyter/README.md
+doc: tools/jupyter/README.md
+see: run
+keywords: jupyter notebook ipynb kernel cells prose ###
+
+== code-viewer
+title: A local viewer for branches in flight
+what: `node tools/viewer.mjs` serves http://localhost:4400, a code viewer that reads git on
+  every request: every branch is a choice in the top bar and opens on the files it changed
+  against main, each with its diff, highlighted as viv-lang.org highlights code.
+when: To read work on a branch before it is merged.
+example: none: a local web server; run node tools/viewer.mjs
+doc: tools/viewer.mjs
+see: hash-diff-canon
+keywords: viewer branches diff git local server review
+
+== features
+title: The feature catalog
+what: `viv features` prints what Viv has, by area: syntax, types, arrays, autodiff,
+  correctness, the lenses, tools, performance, libraries, and the builtins, phrases, CLI
+  verbs, lenses and modules read from the compiler's own tables. `viv features NAME`
+  prints one feature (what it does, when to use it, an example and its output, the
+  design doc, related features) or one area; `--search WORDS` ranks features by the words;
+  `--json` prints the whole catalog as data. `--usage [paths]` counts how often each
+  feature is used in the corpus, and lists the places where code does by hand what a
+  feature provides.
+when: Before writing code: ask what Viv already does, instead of writing a loop, a getter
+  or a sort that a feature replaces. After writing it: run `--usage` on the new code.
+example: none: it is this tool
+doc: lang/viv/features
+see: lint, lsfunc
+keywords: features catalog search usage underuse what can viv do help reference
+verb: features

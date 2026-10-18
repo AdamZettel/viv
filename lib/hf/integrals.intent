@@ -1,0 +1,373 @@
+module lib/hf/integrals
+  The integrals Hartree-Fock needs, each stage behind one call that can run
+  several independent implementations and require them to agree.
+
+  A Hartree-Fock energy needs four kinds of numbers from the basis set: the
+  contracted coefficients, the one-electron matrices S (overlap), T (kinetic
+  energy) and V (nuclear attraction), the electron repulsion integrals (ERIs)
+  `(ij|kl)`, and, for a spherical basis, the same numbers moved from Cartesian
+  to spherical functions. Each stage has a registry: an array of functions
+  that compute the same thing by methods that share no algebra, production
+  member first. A contract def runs the members a mask selects through
+  lib/hf/sweep, takes their elementwise median as the answer, and fails when
+  any member is farther from it than the stage's tolerance. With
+  `release_mode()`, or a mask that selects one member, only that member runs.
+
+int_contract_closed  @cdc86fb3
+  why   The registry's production member: the normalization lib/hf/basis
+        already computes, wrapped to the `(atoms, shells, prims)` signature
+        every contraction member has.
+  atoms   the atoms table; not read, it is there for the signature
+  shells  the shells table, one row per shell
+  prims   the primitives table: each primitive's exponent and coefficient
+
+int_prim_overlaps  @c8473cb1
+  why   The numeric contraction needs the overlaps of one shell's primitives
+        from an integral code. Making each primitive a one-primitive shell at
+        the origin lets an ordinary overlap member compute them.
+  shells  the shells table
+  prims   the primitives table
+  s       the shell whose primitives are wanted
+  which   which overlap code computes them: `0` md1_s, anything else os_overlap
+  l       the shell's angular momentum
+  np      how many primitives the shell has
+  p0      the row of its first primitive in prims
+  nc      how many Cartesian components a shell of this l has
+  at      a one-atom table at the origin
+  sh      the temporary shells table: one shell per primitive, all on that atom
+  pr      the temporary primitives table: the shell's exponents, coefficient 1
+  S       the overlap matrix of every component of the temporary shells
+
+  = sh#2   each primitive becomes its own shell, with the angular momentum of the one it came from
+  = pr#2   the exponent is copied; the coefficient is set to 1 so the overlap is that of the normalized primitive
+  = S#2    member `0` computes the overlaps by McMurchie-Davidson
+  = S#3    any other `which` uses Obara-Saika; the result keeps entry `[p nc, q nc]`, the first component of each shell, since every component gives the same radial overlap
+
+int_contract_by  @f0fbc4fd
+  why   It is the numeric form of the normalization: the self-overlap of the
+        contracted shell is taken from an integral code, not the closed
+        formula, so the two share only the radial factor.
+  shells  the shells table
+  prims   the primitives table
+  which   the overlap member to use, as in int_prim_overlaps
+  cn      the result: one normalized contraction coefficient per primitive
+  c       the current shell's coefficients
+  ss      the self-overlap of the contracted shell with the unscaled coefficients
+  scale   the factor that makes that self-overlap 1
+
+bas_contract_numeric  @64df4039
+  atoms   the atoms table; not read
+  shells  the shells table
+  prims   the primitives table
+
+bas_contract_numeric_os  @da4a7240
+  atoms   the atoms table; not read
+  shells  the shells table
+  prims   the primitives table
+
+int_contract_methods  @023b5a22
+  what  The contraction registry: closed form first, then the two numeric
+        members, one taking the overlaps from McMurchie-Davidson and one from
+        Obara-Saika.
+  why   Three routes to the same coefficients that share only the radial
+        factor, so a slip in either integral code or in the formula shows up
+        as a dissent [test "the numeric contraction agrees with the closed form on water 6-31G* and random shells"].
+
+int_overlap_methods  @88d693b8
+  what  The overlap registry: McMurchie-Davidson (`md1_s`, production),
+        Obara-Saika (`os_overlap`) and Gauss-Hermite quadrature (`gh_overlap`).
+  why   Two recurrences and a quadrature that share no code. lib/hf/hf runs
+        the production member alone unless the options ask for a cross-check
+        [test "S, T and V from every member match PySCF on water 6-31G*"].
+
+int_kinetic_methods  @7d03c24a
+  what  The kinetic-energy registry: `md1_t` (production), `os_kinetic` and
+        `gh_kinetic`, from the same three families as the overlap.
+
+int_nuclear_methods  @2b41cee9
+  what  The nuclear-attraction registry: `md1_v` (production) and `os_nuclear`.
+  why   It has no quadrature member, because the Coulomb potential of a
+        nucleus is singular and Gauss-Hermite points integrate only smooth
+        factors.
+
+int_eri_methods  @da5f6456
+  what  The electron-repulsion registry: McMurchie-Davidson on the kernels
+        lib/cas generated (`mdg_screened`, production), the general
+        McMurchie-Davidson code with Schwarz screening (`mderi_screened`) and
+        without (`mderi_full`), Head-Gordon-Pople (`hgp_eri`) and Rys
+        quadrature (`rys_eri`). Each returns the packed-8 vector of
+        lib/hf/eri_store.
+  why   The generated member is held to the general code it was generated
+        from; HGP and Rys share no recurrence with MD except the Boys
+        function, and all of them agree with each other and with PySCF
+        [test "all five ERI members agree on water STO-3G and match PySCF's full set"].
+        Rys costs far more than the others, so the ERI contract takes a mask
+        and the default runs generated MD and HGP (`INT_ERI_PAIR`).
+
+int_c2s_closed  @dfb604f1
+  why   The sweep driver for this stage passes `(nmax, x)`; this wrapper gives
+        `c2s_closed` that signature, and `x` is not read.
+  l   the angular momentum of the shell
+  x   not read
+
+int_c2s_general  @b985b8de
+  what  Member `1` of the Cartesian-to-spherical registry: `c2s_general(l)`,
+        the general formula for `M_l`, in the `(nmax, x)` signature.
+  l   the angular momentum of the shell
+  x   not read
+
+int_c2s_methods  @52c04c9e
+  what  The Cartesian-to-spherical registry: the closed tables for small l
+        (production) and the general formula.
+
+int_tr2_methods  @637dd663
+  what  The registry that moves a one-electron matrix to spherical functions,
+        `M^T X M`: shell block by shell block (`tr2_blocks`, production), or
+        as two dense matrix products (`tr2_dense`).
+
+int_tr2_back_methods  @fd736f23
+  what  The registry that moves a spherical density back to Cartesian
+        functions, `M D M^T`: block by block (`tr2_back_blocks`) or dense
+        (`tr2_back_dense`).
+  why   Only int_cart2 uses it, and no program calls int_cart2; the direct
+        J/K member does its own back-transform inline.
+
+int_tr4_methods  @8efa4dd2
+  what  The registry that moves packed ERIs from Cartesian to spherical
+        functions: shell block by shell block (`tr4_blocks`, production), or
+        one index at a time on the unpacked tensor (`tr4_quarter`).
+  why   `tr4_quarter` unpacks to `[n, n, n, n]`, so int_tr4_mask lets it run
+        only for small bases.
+
+int_jk_methods  @95075073
+  why   lib/hf/jk holds the in-core members and cannot use this module, so
+        the registry that adds the two direct members lives here. `opts[OPT_JK]`
+        picks the member the SCF runs.
+
+int_mask_has  @43e741e5
+  why   A mask lets a caller choose which members of a registry run: bit k
+        set means member k runs. The expensive Rys member can then be left
+        out by default [test "each registry holds the members the page lists"].
+  mask  the member mask; `0` selects every member
+  k     the member's index in the registry
+
+int_mask_count  @f6fa7b4e
+  why   The drivers need to know whether more than one member runs, and
+        which one runs first, before they build the comparison table.
+  mask   the member mask
+  n      how many members the registry has
+  first  the first selected member, `-1` if none
+  c      how many members are selected so far
+  m      the member being tested
+
+int_run3  @0598b82e
+  why   The one place the registry is run and compared for the three-array
+        signature; int_sweep3 and int_check3 differ only in what they do
+        with the verdict. The median, not member 0's result, is returned, so a
+        bad production member is blamed instead of the members that disagree
+        with it [test "the masked driver runs the selected members and blames by registry index"].
+  ms       the registry
+  mask     which members run
+  x1       the first argument every member receives
+  x2       the second
+  x3       the third
+  N        how many numbers a member returns
+  rep      the report: blamed member, flat index, worst deviation, members run
+  release  `1` to run only the first selected member
+  cnt      how many members are selected
+  f        the first selected member's registry index
+  ix       the flat indices `0 .. N-1`, to read any shape as a vector
+  T        `[cnt, N]`: one row per member run, its result flattened
+  who      the registry index of each row's member
+  out      the first member's result; the consensus is written into it at the end
+  r        the next free row of T
+  cur      the result of the member being run
+  C        the elementwise median of the rows
+
+  = rep     one member runs alone: the report says nothing was compared and names that member
+  = out     each member gets its own copies of the arguments (`x1 + 0.0`), so one that writes into them cannot change what the next one sees
+  = rep#2   the blamed row of the table is turned back into the member's index in the registry
+
+int_sweep3  @324efe4a
+  why   Every integral stage of lib/hf/hf goes through here: in debug runs a
+        dissent stops the program at the stage where it happened.
+  ms       the registry
+  mask     which members run
+  x1       the first argument every member receives
+  x2       the second
+  x3       the third
+  N        how many numbers a member returns
+  tol      the largest relative deviation from the median allowed
+  rep      the report, filled by int_run3
+  release  `1` when the program runs in release mode
+  R        the consensus
+
+int_check3  @d41e38b1
+  why   Tests plant a bad member and need the verdict as a value, not a failed
+        assertion [test "the masked driver runs the selected members and blames by registry index"].
+  ms    the registry
+  mask  which members run
+  x1    the first argument every member receives
+  x2    the second
+  x3    the third
+  N     how many numbers a member returns
+  tol   the largest relative deviation allowed
+  rep   the report
+  out   receives the consensus
+  R     the consensus from int_run3
+  ix    the flat indices `0 .. N-1`
+
+int_run5  @15a0cd11
+  why   A Viv def is typed by the one registry signature it is called with, so
+        the five-argument J/K members need a driver of their own; it is
+        int_run3 with two more arguments.
+  ms       the J/K registry
+  mask     which members run
+  x1       the packed ERIs
+  x2       the basis blob, for the direct member
+  x3       the basis blob again
+  x4       the densities
+  x5       the run's options
+  N        how many numbers a member returns
+  rep      the report
+  release  `1` to run only the first selected member
+  cnt      how many members are selected
+  f        the first selected member's registry index
+  ix       the flat indices `0 .. N-1`
+  T        one row per member run, its result flattened
+  who      the registry index of each row's member
+  out      the first member's result, then the consensus
+  r        the next free row of T
+  cur      the result of the member being run
+  C        the elementwise median of the rows
+
+int_sweep5  @bcc02152
+  what  Run the selected J/K members and return their consensus, failing when
+        any member is farther from it than `tol`: int_sweep3 for the J/K
+        signature.
+  ms       the J/K registry
+  mask     which members run
+  x1       the packed ERIs
+  x2       the basis blob
+  x3       the basis blob again
+  x4       the densities
+  x5       the run's options
+  N        how many numbers a member returns
+  tol      the largest relative deviation allowed
+  rep      the report
+  release  `1` when the program runs in release mode
+  R        the consensus
+
+int_check5  @24809f85
+  what  int_check3 for the J/K signature: the consensus goes into `out`, and
+        the verdict is returned instead of asserted.
+  why   Only int_anchor calls it; no test uses it yet.
+  ms    the J/K registry
+  mask  which members run
+  x1    the packed ERIs
+  x2    the basis blob
+  x3    the basis blob again
+  x4    the densities
+  x5    the run's options
+  N     how many numbers a member returns
+  tol   the largest relative deviation allowed
+  rep   the report
+  out   receives the consensus
+  R     the consensus from int_run5
+  ix    the flat indices `0 .. N-1`
+
+int_contract  @cfb68be5
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  rep     the report of the sweep
+
+int_overlap  @f66f3d38
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  rep     the report of the sweep
+  n       how many Cartesian basis functions
+
+int_kinetic  @cf2003fa
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  rep     the report of the sweep
+  n       how many Cartesian basis functions
+
+int_nuclear  @f0891fbd
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  rep     the report of the sweep
+  n       how many Cartesian basis functions
+
+int_eri  @219b2931
+  why   lib/hf/hf computes the ERIs once per run through this call, with the
+        mask its options give.
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  mask    which members run
+  rep     the report of the sweep
+  n       how many Cartesian basis functions
+
+int_c2s  @e900f300
+  why   Only the tests call it; lib/hf/hf builds the whole matrix with c2s_basis.
+  l     the angular momentum
+  rep   the report of the sweep
+  N     how many entries `M_l` has
+
+int_sph2  @3e72431c
+  X       the matrix in Cartesian functions, `[nao_cart, nao_cart]`
+  M       the Cartesian-to-spherical matrix, `[nao_cart, nao_sph]`
+  shells  the shells table, which tells the block members where each shell's block is
+  rep     the report of the sweep
+  ns      how many spherical basis functions
+
+int_cart2  @b1199c34
+  why   Nothing in the repository calls it; the direct J/K member moves its
+        densities with its own loops.
+  D       one density in spherical functions, `[nao_sph, nao_sph]`
+  M       the Cartesian-to-spherical matrix
+  shells  the shells table
+  rep     the report of the sweep
+  nc      how many Cartesian basis functions
+
+int_tr4_mask  @07f47874
+  why   Memory: the unpacked tensor grows as the fourth power of the basis
+        size.
+  shells  the shells table
+
+int_sph4  @f0d61b79
+  Gp      the packed-8 ERIs over Cartesian functions
+  M       the Cartesian-to-spherical matrix
+  shells  the shells table
+  rep     the report of the sweep
+  ns      how many spherical basis functions
+
+int_jk  @bbaef3aa
+  why   The tests call it to cross-check the J/K members; the SCF runs one
+        member through jk_of instead.
+  Gp      the packed-8 ERIs, for the in-core members
+  blob    the basis blob, for the direct members
+  D       the densities, `[ndens, n, n]`
+  opts    the run's options
+  mask    which members run
+  rep     the report of the sweep
+  sh      the shape of D
+  N       how many numbers J and K hold together
+
+int_anchor  @e3d487c4
+  why   A def that takes a registry is compiled for the registry it is called
+        with; with no call site at all it would not compile. This def gives
+        each such driver one.
+  entry the compiler, which types each registry driver from this call when
+        a program uses the module without calling it; never run
+  x    a placeholder array for every argument
+  rep  a report vector
+  out  a place for the check drivers' consensus
+  a    the ERI driver's result
+  b    the J/K driver's result
+  v    the check drivers' verdicts, added

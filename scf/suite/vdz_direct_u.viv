@@ -1,0 +1,35 @@
+# PySCF's max_memory=0 UHF rows for water cc-pVDZ (test_h2o_vdz.py:104 and
+# test_uhf.py:301): the direct J/K member, which recomputes the ERIs from the
+# basis every iteration, on both spin densities at once. test_uhf.py:301
+# starts from a zero density pair. See vdz_direct_r.viv for why these rows
+# have a program of their own.
+#
+#     tools/both-engines.sh scf/suite vdz_direct_u
+from hf.hf import hf_scf, hf_setup
+from hf.molecule import molecule_packs
+from hf.scf_loop import ScfSetup
+from hf.opts import scf_checked, SCF_UHF, ScfOptions
+from hf.guess import GS_ZERO
+from hf.jk_direct import INT_JK_DIRECT
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.pyscf_tests import (
+    PST_FILE_H2O_VDZ, PST_FILE_UHF, PST_H2O_VDZ_104, PST_H2O_VDZ_104_P, PST_UHF_301,
+    PST_UHF_301_P,
+)
+from scf.suite.ref.sts import sts_row
+
+sdu_m = molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+sdu_o = ScfOptions { method: SCF_UHF, jk: INT_JK_DIRECT, ..scf_checked() }
+sdu_p = hf_setup(sdu_m, sdu_o)
+
+test "direct UHF from the core guess and from a zero density pair: -76.02676567312075 and -76.026765673119627 (test_h2o_vdz.py:104, test_uhf.py:301)" {
+    sdu_r = hf_scf(sdu_p)
+    assert_near(sdu_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 104, sdu_r.energy, PST_H2O_VDZ_104, PST_H2O_VDZ_104_P), 1.0, 0.0)
+    sdu_r = hf_scf(ScfSetup { options: ScfOptions { guess: GS_ZERO, ..sdu_o }, ..sdu_p })
+    assert_near(sdu_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 301, sdu_r.energy, PST_UHF_301, PST_UHF_301_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

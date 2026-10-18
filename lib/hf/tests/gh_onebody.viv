@@ -1,0 +1,127 @@
+# The tests of lib/hf/gh_onebody that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/gh_onebody does not load the references.
+from hf.gh_onebody import (
+    gh_block, gh_kinetic, gh_overlap, gh_rule, GH_T_PRIMS_LMAX, GH_T_PRIMS_ROWS,
+)
+from hf.basis import (
+    AT_LEN, AT_X, AT_Y, AT_Z, bas_contract, bas_ncart, bas_nsph, PR_COEF, PR_EXP, PR_LEN,
+    SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+)
+from hfref.prims import PRIMS_NCASE, PRIMS_NPICK, prims_picks, prims_s, prims_shells, prims_t
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_prims, water631gs_cart_s_unit,
+    water631gs_cart_shells, water631gs_cart_t_unit,
+)
+from hfref.water_tzvp import (
+    watertzvp_atoms, watertzvp_prims, watertzvp_s_unit, watertzvp_shells, watertzvp_t_unit,
+)
+
+#| Test helper: the largest gaps of S and T over the eight picks of every
+#| prims case. l_a and l_b reach 3, so the rule has 5 nodes (`lmax + 2`, as
+#| gh_rule_for picks).
+def gh_t_prims_gaps() {
+    SH = prims_shells()
+    PK = prims_picks()
+    RS = prims_s()
+    RT = prims_t()
+    R = gh_rule(GH_T_PRIMS_LMAX + 2)
+    at = zeros(2, AT_LEN)
+    sh = zeros(2, SH_LEN)
+    pr = zeros(2, PR_LEN)
+    ws = 0.0
+    wt = 0.0
+    for k to PRIMS_NCASE {
+        gh_t_prims_case(SH, k, at, sh, pr)
+        cn = bas_contract(sh, pr)
+        bs = gh_block(at, sh, pr, cn, R, 0, 1, 0)
+        bt = gh_block(at, sh, pr, cn, R, 0, 1, 1)
+        for p to PRIMS_NPICK {
+            q = PRIMS_NPICK * k + p
+            ws = max(ws, abs(bs[PK[q, 0], PK[q, 1]] - RS[q]))
+            wt = max(wt, abs(bt[PK[q, 0], PK[q, 1]] - RT[q]))
+        }
+    }
+    return ws, wt
+}
+
+#| Test helper: the largest abs(A - B) over two square matrices.
+def gh_t_gap(A: Arr, B: Arr) {
+    return max(abs(A - B))
+}
+
+#| Test helper: fill `atoms`, `shells` and `prims` with the first two shells
+#| (a and b) of case `k` of lib/hfref/prims, one primitive each.
+def gh_t_prims_case(SH: Arr, k, atoms: Arr, shells: Arr, prims: Arr) {
+    c0 = 0
+    for r to 2 {
+        row = GH_T_PRIMS_ROWS * k + r
+        atoms[r, AT_X] = SH[row, 2]
+        atoms[r, AT_Y] = SH[row, 3]
+        atoms[r, AT_Z] = SH[row, 4]
+        shells[r, SH_ATOM] = r
+        shells[r, SH_L] = SH[row, 0]
+        shells[r, SH_NPRIM] = 1
+        shells[r, SH_P0] = r
+        shells[r, SH_CART0] = c0
+        shells[r, SH_NCART] = bas_ncart(SH[row, 0])
+        shells[r, SH_NSPH] = bas_nsph(SH[row, 0])
+        prims[r, PR_EXP] = SH[row, 1]
+        prims[r, PR_COEF] = 1.0
+        c0 = c0 + bas_ncart(SH[row, 0])
+    }
+    return 0.0
+}
+
+test "S and T match water 6-31G* (Cartesian d) from PySCF within 1e-13" {
+    gh_at = water631gs_cart_atoms()
+    gh_sh = water631gs_cart_shells()
+    gh_pr = water631gs_cart_prims()
+    # measured: 2.3e-15 and 3.2e-14
+    assert_lt(gh_t_gap(gh_overlap(gh_at, gh_sh, gh_pr), water631gs_cart_s_unit()), 1.0e-13)
+    assert_lt(gh_t_gap(gh_kinetic(gh_at, gh_sh, gh_pr), water631gs_cart_t_unit()), 1.0e-13)
+}
+
+test "S and T match water def2-TZVP, with its f shells, within 1e-13" {
+    gh_at = watertzvp_atoms()
+    gh_sh = watertzvp_shells()
+    gh_pr = watertzvp_prims()
+    # measured: 2.6e-15 and 5.7e-14
+    assert_lt(gh_t_gap(gh_overlap(gh_at, gh_sh, gh_pr), watertzvp_s_unit()), 1.0e-13)
+    assert_lt(gh_t_gap(gh_kinetic(gh_at, gh_sh, gh_pr), watertzvp_t_unit()), 1.0e-13)
+}
+
+test "every single-primitive pair up to (f|f) in prims matches within 1e-13" {
+    gh_ws, gh_wt = gh_t_prims_gaps()
+    assert_lt(gh_ws, 1.0e-13)
+    assert_lt(gh_wt, 1.0e-13)
+}
+
+test "one node too few breaks the kinetic integral, one more changes nothing" {
+    # the rule is exact, not converged: n = lmax + 2 is the smallest exact
+    # rule, and a larger one agrees to rounding
+    gh_at = water631gs_cart_atoms()
+    gh_sh = water631gs_cart_shells()
+    gh_pr = water631gs_cart_prims()
+    gh_cn = bas_contract(gh_sh, gh_pr)
+    # shell 5 is the oxygen d shell (l = 2), so 4 nodes are needed
+    gh_sd = 5
+    gh_nx = round(gh_sh[gh_sd, SH_L]) + 2
+    gh_exact = gh_block(gh_at, gh_sh, gh_pr, gh_cn, gh_rule(gh_nx), gh_sd, gh_sd, 1)
+    gh_more = gh_block(gh_at, gh_sh, gh_pr, gh_cn, gh_rule(gh_nx + 3), gh_sd, gh_sd, 1)
+    gh_short = gh_block(gh_at, gh_sh, gh_pr, gh_cn, gh_rule(gh_nx - 1), gh_sd, gh_sd, 1)
+    gh_d1 = 0.0
+    gh_d2 = 0.0
+    for gh_r to shape(gh_exact)[0] {
+        for gh_c to shape(gh_exact)[1] {
+
+            gh_d1 = max(gh_d1, abs(gh_more[gh_r, gh_c] - gh_exact[gh_r, gh_c]))
+            gh_d2 = max(gh_d2, abs(gh_short[gh_r, gh_c] - gh_exact[gh_r, gh_c]))
+        }
+    }
+    assert_lt(gh_d1, 1.0e-14)
+    assert_gt(gh_d2, 1.0e-3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

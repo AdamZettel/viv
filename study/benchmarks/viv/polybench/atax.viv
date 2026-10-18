@@ -1,0 +1,33 @@
+#! timing
+# PolyBench/C 4.2.1 atax: y := A^T (A x).
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/kernels/atax/atax.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+M = 38
+N = 42
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    x = [1 + i / N for i to N]
+    A = [[((i + j) % N) / (5 * M) for j to N] for i to M]
+    return A, x
+}
+
+# A vector on the left of @ is a row, so (A x) @ A is A^T (A x) without
+# forming A^T.
+def kernel(A, x) {
+    return (A @ x) @ A
+}
+
+A, x = init()
+t0 = clock()
+y = kernel(A, x)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("y", y)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

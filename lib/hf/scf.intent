@@ -1,0 +1,69 @@
+module lib/hf/scf
+  Hartree-Fock from a molecule in one call: `rhf(mol)`, `uhf(mol)`,
+  `rohf(mol)`, or `scf_with(mol, options)` for anything the defaults do not
+  cover. Each is two calls, `integrals(mol, o)` for the setup and
+  `scf(setup)` for the SCF loop of lib/hf/scf_loop, and returns an
+  `ScfResult`. Every stage on that path is its production member, called by
+  name; the cross-checked pipeline is lib/hf/hf, in the verification layer.
+
+  The molecule comes from lib/hf/mole as PySCF writes it,
+  `molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")`, or from
+  atomic numbers, coordinates and a basis table with `molecule_from`.
+
+scf_blob  @fa405fa9
+  why   The direct J/K members recompute the integrals at every iteration
+        instead of storing them, so they need the basis rather than the
+        integrals.
+  mol   the molecule: atoms, shells, primitives, and whether it is spherical
+
+scf_run_options  @cd1a7806
+  why   The averaged guess runs an SCF of its own on packed integrals, which
+        a direct run does not have.
+  o     the options the caller asked for
+
+scf_setup_of  @c617d952
+  why   A caller that computed the integrals itself (the lock ladder compares
+        them with PySCF's first) builds the setup from those.
+  mol   the molecule, for the electron counts and the nuclear repulsion
+  H     the core Hamiltonian, `[n, n]`
+  S     the overlap matrix, `[n, n]`
+  G     the packed repulsion integrals, or the direct member's basis blob
+  o     the run's options
+
+integrals  @b3a1cebc
+  why   Everything the SCF needs from the molecule, in one record, so the
+        loop never sees the molecule: the matrices, the electron counts and
+        the nuclear repulsion.
+  mol   the molecule
+  o     the run's options; `jk` decides between packed integrals and the blob
+  S     the overlap matrix in the run's functions, `[n, n]`
+  H     the core Hamiltonian in the run's functions, `[n, n]`
+  G     what the J/K stage reads: the packed repulsion integrals, or the
+        basis blob for a direct run
+
+  one_electron   compute the overlap S and the one-electron Hamiltonian H
+  two_electron   compute the electron repulsion integrals, or the basis description for a direct build
+  return the setup
+
+scf_with  @6de2512c
+  why   The one call behind rhf, uhf and rohf: a caller who needs a guess,
+        accelerator or J/K builder other than the production one changes
+        that field of the options and passes them here.
+  mol   the molecule: atoms, charge, spin and basis functions (lib/hf/molecule)
+  o     the run's options (lib/hf/opts): method, guess, accelerator,
+        tolerances
+  setup  the setup: every integral, the electron counts and the nuclear repulsion
+  r      the SCF's result: energy, orbitals, densities, convergence record
+
+  integrals      build the setup: every integral and the electron counts
+  scf            solve the Hartree-Fock equations with them
+  return the result
+
+rhf  @387f7b4a
+  mol   the molecule; it should have an even number of electrons and spin `0`
+
+uhf  @4b687b4c
+  mol   the molecule; its `spin` is the number of unpaired electrons
+
+rohf  @a5be78bb
+  mol   the molecule; its `spin` is the number of unpaired electrons

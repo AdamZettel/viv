@@ -1,0 +1,95 @@
+# Spitzer-Harm (1953) conductivity: the electrical conductivity of a fully ionized
+# plasma from the linearized Fokker-Planck collision operator. The essential physics
+# is that Coulomb collisions are velocity-dependent -- the deflection frequency goes
+# as nu(v) ~ 1/v^3, so fast electrons barely collide and carry most of the current.
+#
+# Solving the steady Lorentz-gas balance  (e/m) E d f0/dv_z = C_ei(f1)  gives a
+# perturbation f1 = (e E v_z / kT) / nu(v) * f0, and the current j = -e int v_z f1
+# is the Chapman-Enskog integral
+#
+#     sigma_L = (4 pi e^2)/(3 m v_th^2 nu_hat) * int_0^inf v^7 f_M(v) dv .
+#
+# The integrand v^7 f_M peaks at v = sqrt(7) v_th ~ 2.6 v_th: the current is carried
+# by supra-thermal electrons, not the bulk. This is the Z -> infinity (Lorentz) limit.
+# Electron-electron collisions, which conserve momentum among electrons, reduce it by
+# the Spitzer-Harm factor gamma_E(Z) (their 1953 numerical result): 0.582 at Z=1,
+# rising to 1 as Z -> infinity. The final resistivity matches the NRL Spitzer value.
+
+pi = 3.141592653589793
+e = 1.602176634e-19
+me = 9.1093837015e-31
+eps0 = 8.8541878128e-12
+EV = 1.602176634e-19
+
+# --- Lorentz-gas conductivity by the velocity-space current integral ---
+def lorentz_sigma(ne, T_eV, Z, lnL) {
+    kT = T_eV * EV
+    vth = sqrt(kT / me)
+    ni = ne / Z
+    # electron-ion deflection frequency  nu(v) = nu_hat / v^3
+    nu_hat = ni * Z * Z * e * e * e * e * lnL / (2.0 * pi * eps0 * eps0 * me * me)
+    Nv = 4000
+    vmax = 8.0 * vth
+    dv = vmax / Nv
+    pref = ne * pow(2.0 * pi * vth * vth, -1.5)
+    I7 = 0.0
+    for i to Nv {
+        v = (i + 0.5) * dv
+        fM = pref * exp(-v * v / (2.0 * vth * vth))
+        I7 = I7 + pow(v, 7.0) * fM * dv
+    }
+    return (4.0 * pi * e * e) / (3.0 * me * vth * vth * nu_hat) * I7
+}
+
+# Spitzer-Harm e-e correction gamma_E(Z) (1953 table)
+def gammaE(Z) {
+    g = 0.582
+    if Z > 1.5 { g = 0.683 }
+    if Z > 3.0 { g = 0.785 }
+    if Z > 8.0 { g = 0.923 }
+    return g
+}
+
+# --- a test plasma ---
+ne = 1.0e19
+T_eV = 100.0
+Z = 1.0
+lnL = 10.0
+kT = T_eV * EV
+vth = sqrt(kT / me)
+
+sigma_L = lorentz_sigma(ne, T_eV, Z, lnL)
+sigma_Sp = gammaE(Z) * sigma_L
+eta_Sp = 1.0 / sigma_Sp
+
+# NRL Formulary parallel Spitzer resistivity (Ohm m), T in eV
+eta_NRL = 1.03e-4 * Z * lnL * pow(T_eV, -1.5)
+
+# --- validation 1: the numerical 7th moment vs its analytic value ---
+# int v^7 f_M dv = 48 ne v_th^5 / (2 pi)^{3/2}
+ni = ne / Z
+nu_hat = ni * Z * Z * e * e * e * e * lnL / (2.0 * pi * eps0 * eps0 * me * me)
+I7_num = sigma_L * (3.0 * me * vth * vth * nu_hat) / (4.0 * pi * e * e)
+I7_exact = 48.0 * ne * pow(vth, 5.0) / pow(2.0 * pi, 1.5)
+
+# --- validation 2: the current is carried by supra-thermal electrons ---
+# the integrand v^7 exp(-v^2/2vth^2) peaks at v = sqrt(7) vth
+vpeak = sqrt(7.0) * vth
+vpeak_over_vth = vpeak / vth
+
+# --- validation 3: T^{-3/2} scaling (resistivity at T and 4T) ---
+eta_T = 1.0 / (gammaE(Z) * lorentz_sigma(ne, T_eV, Z, lnL))
+eta_4T = 1.0 / (gammaE(Z) * lorentz_sigma(ne, 4.0 * T_eV, Z, lnL))
+T_ratio = eta_T / eta_4T          # expect 4^{3/2} = 8
+
+show sigma_L        # Lorentz (Z->inf) conductivity, S/m
+show sigma_Sp       # Spitzer conductivity with e-e correction, S/m
+show eta_Sp         # Spitzer resistivity, Ohm m
+show eta_NRL        # NRL Spitzer value, Ohm m
+show I7_num         # 7th moment from the integral
+show I7_exact       # 7th moment, analytic
+show vpeak_over_vth # peak of the current spectrum, in v_th (sqrt 7 = 2.646)
+show T_ratio        # resistivity ratio eta(T)/eta(4T), expect 8
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

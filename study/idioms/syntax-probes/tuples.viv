@@ -1,0 +1,137 @@
+###
+Several results in all three engines (gap R5): `return a, b`, `a, b = f(x)`,
+swaps, `B, C, H, W = shape(X)`. A def that returns several values returns a
+record the compiler declares for it; the caller unpacks it.
+###
+
+record Pt { x: Num, y: Num }
+
+def divmod2(a, b) {
+    q = floor(a / b)
+    return q, a - q * b
+}
+
+def center(x: Arr) {
+    m = sum(x) / len(x)
+    return m, x - m
+}
+
+def forward(a, b) {
+    return divmod2(a, b)
+}
+
+def fib2(n) {
+    if n == 0 {
+        return 0, 1
+    }
+    p, c = fib2(n - 1)
+    return c, p + c
+}
+
+def kinds(a) {
+    return a > 0, a * 1i, Pt { x: a, y: -a }
+}
+
+def draws() {
+    return rand(), rand()
+}
+
+def bubble(v: Arr) {
+    for i to len(v) {
+        for j to len(v) - 1 - i {
+            if v[j] > v[j + 1] {
+                v[j], v[j + 1] = v[j + 1], v[j]
+            }
+        }
+    }
+}
+
+def sq(x: Arr) {
+    return sum(x * x)
+}
+
+q, r = divmod2(17, 5)
+show q
+show r
+m, dev = center([1, 2, 3, 6])
+show m
+show dev
+
+a = 1
+b = 2
+a, b = b, a
+show a
+show b
+
+X = zeros(2, 3, 4, 5)
+B, C, H, W = shape(X)
+show B * 1000 + C * 100 + H * 10 + W
+
+f0, f1 = fib2(30)
+show f0
+show f1
+
+ok, zc, p = kinds(3)
+show ok
+show zc
+show p.y
+
+v = [5, 1, 4, 2, 3]
+bubble(v)
+show v
+
+lo, hi = [-1, 1]
+show hi - lo
+
+loss, g = value_and_grad(sq, [1, 2, 3])
+show loss
+show g
+
+test "every value of a return, in order" {
+    s, t = forward(7, 2)
+    assert_near(s, 3, 0)
+    assert_near(t, 1, 0)
+}
+
+test "a swap reads every old value first" {
+    x = 1
+    y = 2
+    z = 3
+    x, y, z = z, x, y
+    assert_near(x, 3, 0)
+    assert_near(y, 1, 0)
+    assert_near(z, 2, 0)
+}
+
+test "the values of a return are computed left to right" {
+    srand(7)
+    r1 = rand()
+    r2 = rand()
+    srand(7)
+    u, w = draws()
+    assert_near(u, r1, 0)
+    assert_near(w, r2, 0)
+}
+
+test "a call whose values are dropped still runs" {
+    srand(5)
+    draws()
+    u = rand()
+    srand(5)
+    r1 = rand()
+    r2 = rand()
+    r3 = rand()
+    assert_near(u, r3, 0)
+}
+
+test "unpacking in a loop rebinds" {
+    acc = 0
+    for k to 5 {
+        d, e = divmod2(k * 7, 3)
+        acc = acc + d * 10 + e
+    }
+    assert_near(acc, 224, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

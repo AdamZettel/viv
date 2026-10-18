@@ -1,0 +1,72 @@
+# Watching the simulator run: a record per executed instruction for a
+# step-through view, and instruction-mix counts.
+
+from rv32.bits import hex32
+from rv32.sim import Machine, Instr, decode, execute, load_word, op_name, op_class, machine
+from rv32.asm import assemble
+
+CLASSES = ["alu", "muldiv", "load", "store", "branch", "jump", "system"]
+
+#| One executed instruction: where it was, its word and mnemonic, the
+#| register it wrote (0 when none) and the value written there.
+record Step {
+    pc: Int
+    word: Int
+    op: Str
+    rd: Int
+    value: Int
+}
+
+#| The first `count` instructions the machine executes, one Step each.
+def trace(m: Machine, count: Int) -> [Step] {
+    steps: [Step] = []
+    while not m.halted and len(steps) < count {
+        pc = m.pc
+        word = load_word(m, pc)
+        ins = decode(word)
+        m = execute(m, ins)
+        steps = append(steps, Step { pc: pc, word: word, op: op_name(ins.op), rd: ins.rd, value: m.regs[ins.rd] })
+    }
+    return steps
+}
+
+#| A line of a listing: address, word and mnemonic.
+def describe(s: Step) -> Str {
+    return f"{hex32(s.pc)}  {hex32(s.word)}  {s.op}"
+}
+
+#| Run to the end (or `limit` instructions), counting the instructions of
+#| each class in CLASSES; the machine and the counts.
+def mix(m: Machine, limit: Int) {
+    counts = int_zeros(len(CLASSES))
+    while not m.halted and m.steps < limit {
+        ins = decode(load_word(m, m.pc))
+        k = find_class(op_class(ins.op))
+        counts[k] = counts[k] + 1
+        m = execute(m, ins)
+    }
+    return m, counts
+}
+
+#| The index of class `name` in CLASSES.
+def find_class(name: Str) -> Int {
+    for k to len(CLASSES) {
+        if CLASSES[k] == name {
+            return int(k)
+        }
+    }
+    stop(f"no instruction class `{name}`")
+    return -1
+}
+
+test "a trace names each instruction and the value it wrote" {
+    steps = trace(machine(assemble("li a0, 5\nli a7, 93\necall\n").image, 0), 2)
+    assert_true(len(steps) == 2)
+    assert_true(steps[0].op == "addi")
+    assert_true(steps[0].rd == 10)
+    assert_true(steps[0].value == 5)
+    assert_true(describe(steps[1]) == "00000004  05d00893  addi")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

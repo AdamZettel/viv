@@ -1,0 +1,45 @@
+#! timing
+# PolyBench/C 4.2.1 fdtd-2d: the 2-D finite-difference time-domain method
+# (Yee's scheme) for Ex, Ey and Hz, with a source on the first row of Ey.
+# Reference: upstream/polybench-c-4.2.1/stencils/fdtd-2d/fdtd-2d.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+TMAX = 20
+NX = 20
+NY = 30
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    ex = [[(i * (j + 1)) / NX for j to NY] for i to NX]
+    ey = [[(i * (j + 2)) / NY for j to NY] for i to NX]
+    hz = [[(i * (j + 3)) / NX for j to NY] for i to NX]
+    fict = [t for t to TMAX]
+    return ex, ey, hz, fict
+}
+
+# Each field update reads only the other fields, so each is one whole-array
+# statement over the slices the C loops cover.
+def kernel(ex, ey, hz, fict) {
+    for t to TMAX {
+        ey[0, :] = fict[t]
+        ey[1:NX, :] = ey[1:NX, :] - 0.5 * (hz[1:NX, :] - hz[0:NX - 1, :])
+        ex[:, 1:NY] = ex[:, 1:NY] - 0.5 * (hz[:, 1:NY] - hz[:, 0:NY - 1])
+        hz[0:NX - 1, 0:NY - 1] = hz[0:NX - 1, 0:NY - 1] - 0.7 * (ex[0:NX - 1, 1:NY] - ex[0:NX - 1, 0:NY - 1] + ey[1:NX, 0:NY - 1] - ey[0:NX - 1, 0:NY - 1])
+    }
+    return ex, ey, hz
+}
+
+ex, ey, hz, fict = init()
+t0 = clock()
+ex, ey, hz = kernel(ex, ey, hz, fict)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("ex", ex)
+    dump("ey", ey)
+    dump("hz", hz)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

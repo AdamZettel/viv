@@ -1,0 +1,116 @@
+# Velocity: counts, sums and distinct counts per user over trailing windows.
+#
+# Input: one row per event, sorted by (user, ts); ts in int64 nanoseconds.
+# The window of a row at time t holds the user's rows j with
+#
+#     t - W <= ts_j < t
+#
+# so the left edge is inclusive, the right edge exclusive: the row itself and
+# every row at the same instant are left out.
+#
+#   n_1h, n_24h        rows in the 1-hour and 24-hour windows
+#   sum_24h            amount summed over the 24-hour window, in row order
+#   distinct_24h       distinct merchants in the 24-hour window
+
+from rows import group_end, instant_end
+
+NS_PER_S: Int = 1000000000
+HOUR: Int = 3600 * NS_PER_S
+DAY: Int = 24 * HOUR
+
+record Velocity {
+    n_1h: [Int]
+    n_24h: [Int]
+    sum_24h: Arr
+    distinct_24h: [Int]
+}
+
+#| Trailing-window counts, the 24-hour amount sum and the 24-hour count of
+#| distinct merchants, for events sorted by (user, ts), current instant excluded.
+#|| Two left pointers per user, one per window; a count per merchant tracks the
+#|| distinct merchants as rows enter and leave the 24-hour window.
+#||| The sum is taken afresh over the window, left to right, so it is the same
+#||| float a plain loop over the window gives, not a running total that drifts.
+#: user  the entity key, sorted ascending
+#: ts  event time, int64 nanoseconds, ascending within a user
+#: amount  the event's amount
+#: merchant  the merchant of the event, any Int
+#@ c2d7b628
+def velocity(user: [Int], ts: [Int], amount: Arr, merchant: [Int]) -> Velocity {
+    n = len(ts)
+    n1 = int_zeros(n)
+    n24 = int_zeros(n)
+    s24 = zeros(n)
+    d24 = int_zeros(n)
+    uniq, mid = factorize(merchant)
+    count = int_zeros(len(uniq))
+    g: Int = 0
+    while g < n {
+        stop_at = group_end(user, ts, g, "velocity")
+        left_1h: Int = g
+        left_24h: Int = g
+        entered: Int = g
+        distinct: Int = 0
+        i: Int = g
+        while i < stop_at {
+            t = ts[i]
+            same = instant_end(ts, i, stop_at)
+            step enter "rows before the instant enter the windows" {
+                while entered < i {
+                    if count[mid[entered]] == 0 {
+                        distinct += 1
+                    }
+                    count[mid[entered]] += 1
+                    entered += 1
+                }
+            }
+            step leave "rows older than the windows leave them" {
+                while ts[left_1h] < t - HOUR {
+                    left_1h += 1
+                }
+                while ts[left_24h] < t - DAY {
+                    count[mid[left_24h]] -= 1
+                    if count[mid[left_24h]] == 0 {
+                        distinct -= 1
+                    }
+                    left_24h += 1
+                }
+            }
+            step fill "every row of the instant sees the same windows" {
+                total = 0.0
+                for j from left_24h to i {
+                    total += amount[j]
+                }
+                for k from i to same {
+                    n1[k] = i - left_1h
+                    n24[k] = i - left_24h
+                    s24[k] = total
+                    d24[k] = distinct
+                }
+            }
+            i = same
+        }
+        step reset "clear the merchant counts the user left behind" {
+            for j from left_24h to entered {
+                count[mid[j]] = 0
+            }
+        }
+        g = stop_at
+    }
+    return Velocity { n_1h: n1, n_24h: n24, sum_24h: s24, distinct_24h: d24 }
+}
+
+test "the window holds t - W <= ts_j < t" {
+    user: [Int] = [1, 1, 1, 1, 2]
+    ts: [Int] = [0, HOUR, HOUR, 2 * HOUR, 5]
+    amount = [1.0, 2.0, 4.0, 8.0, 16.0]
+    merchant: [Int] = [7, 7, 9, 7, 7]
+    v = velocity(user, ts, amount, merchant)
+    assert_true(v.n_1h[0] == 0 and v.n_1h[1] == 1 and v.n_1h[2] == 1 and v.n_1h[3] == 2)
+    assert_true(v.n_24h[3] == 3 and v.distinct_24h[3] == 2 and v.distinct_24h[1] == 1)
+    assert_near(v.sum_24h[3], 7.0, 0.0)
+    assert_true(v.n_24h[4] == 0 and v.distinct_24h[4] == 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

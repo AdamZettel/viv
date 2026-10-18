@@ -1,0 +1,38 @@
+#! timing
+# PolyBench/C 4.2.1 3mm: G := (A*B)*(C*D).
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/kernels/3mm/3mm.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+NI = 16
+NJ = 18
+NK = 20
+NL = 22
+NM = 24
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    A = [[((i * j + 1) % NI) / (5 * NI) for j to NK] for i to NI]
+    B = [[((i * (j + 1) + 2) % NJ) / (5 * NJ) for j to NJ] for i to NK]
+    C = [[(i * (j + 3) % NL) / (5 * NL) for j to NM] for i to NJ]
+    D = [[((i * (j + 2) + 2) % NK) / (5 * NK) for j to NL] for i to NM]
+    return A, B, C, D
+}
+
+def kernel(A, B, C, D) {
+    E = A @ B
+    F = C @ D
+    return E @ F
+}
+
+A, B, C, D = init()
+t0 = clock()
+G = kernel(A, B, C, D)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("G", G)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

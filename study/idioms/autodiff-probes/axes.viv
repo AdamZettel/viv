@@ -1,0 +1,208 @@
+###
+Reverse mode through the array vocabulary: reductions along an axis (with
+and without keepdims) and of the whole array, broadcasting between arrays of
+different ranks, reshapes, axis permutations, `take` along an axis, and `@`
+on stacks of matrices. Each gradient is checked entry by entry against
+central differences.
+
+`fd_grad(f, x)` perturbs one entry of `x` at a time by +-h, through its flat
+index, so it works for an array of any rank. With h = 1e-5 the truncation
+error is about h^2 |f'''| / 6 and the rounding error about eps |f| / h; for
+the functions here, whose values and third derivatives stay below 10, both
+are under 1e-9, and an entry is checked to 1e-7. Where the gradient has a
+closed form (a sum, a mean, a product, the subgradient of a maximum) it is
+checked against that, at rounding.
+###
+
+H = 1.0e-5
+FD_TOL = 1.0e-7
+
+#| The central-difference gradient of a def of one array, flattened.
+def fd_grad(f, x: Arr) {
+    g = zeros(numel(x))
+    for i to numel(x) {
+        at = [i]
+        xp = x + 0.0
+        xm = x + 0.0
+        put(xp, at, take(x, at) + H)
+        put(xm, at, take(x, at) - H)
+        g[i] = (f(xp) - f(xm)) / (2.0 * H)
+    }
+    return g
+}
+
+#| The largest difference between a gradient (any shape) and its central difference.
+def fd_miss(g: Arr, fd: Arr) {
+    return max(abs(ravel(g) - fd))
+}
+
+#| A rank-3 test array of shape (2, 3, 4) with entries between -1 and 1, none repeated.
+def cube() {
+    return sin(reshape(arange(24.0), 2, 3, 4) * 0.7 + 0.3)
+}
+
+# weights that make each output entry count differently
+W2 = reshape(arange(6.0), 2, 3) * 0.25 - 0.5
+W3 = reshape(arange(12.0), 3, 4) * 0.1 - 0.4
+W4 = cos(reshape(arange(8.0), 2, 4))
+
+def sums(x: Arr) {
+    return sum(sum(x * x, axis=0) * W3) + sum(sum(x, axis=1) * W4) + sum(tanh(sum(x, axis=-1, keepdims=true)) * reshape(W2, 2, 3, 1))
+}
+
+def means(x: Arr) {
+    return sum(mean(x * x, axis=2) * W2) + sum(mean(x, axis=0, keepdims=true) * W3)
+}
+
+def variances(x: Arr) {
+    return sum(var(x, axis=-1) * W2) + sum(std(x, axis=1, keepdims=true) * reshape(W4, 2, 1, 4))
+}
+
+def products(x: Arr) {
+    return sum(prod(x, axis=1) * W4) + sum(prod(x + 2.0, axis=0, keepdims=true) * W3)
+}
+
+def extremes(x: Arr) {
+    return sum(amax(x, axis=2) * W2) + sum(amin(x, axis=1, keepdims=true) * reshape(W4, 2, 1, 4))
+}
+
+def wholes(x: Arr) {
+    return mean(x) * var(x) + std(x) - prod(x[0, 0:2, 1:3] + 1.5) + amax(x) * 3.0 - 2.0 * amin(x)
+}
+
+def broadcasts(x: Arr) {
+    # (2, 3, 4) against (3, 4), (3, 1), (4) and (1, 3, 1)
+    a = x * W3 + reshape(W2[0, :], 3, 1)
+    b = a / (2.0 + reshape(W2[1, :], 1, 3, 1) * x)
+    return sum(b * b) + sum(max(x, W3) * 0.5) - sum(min(x, W4[0, :]))
+}
+
+def lower_rank(v: Arr) {
+    # v is (3, 4): broadcast against the fixed rank-3 cube
+    return sum(tanh(cube() * v - v)) + sum((cube() / (3.0 + v)) * W3)
+}
+
+def shapes(x: Arr) {
+    r = reshape(x, 4, 6)
+    t = transpose(x, axes=[2.0, 0.0, 1.0])
+    s = swapaxes(x, 0, 2)
+    return sum(r * r * reshape(arange(24.0), 4, 6)) + sum(t[1, :, :] * W2) + sum(ravel(s) * ravel(cube())) + sum(flatten(x)[3:9])
+}
+
+def gathers(x: Arr) {
+    # take along each axis, with a repeated index
+    return sum(take(x, [2.0, 0.0, 2.0], axis=1) * reshape(arange(24.0), 2, 3, 4)) + sum(take(x, [3.0, 3.0], axis=-1) * x[:, :, 0:2])
+}
+
+def products_of_vectors(v: Arr) {
+    return dot(v, v * v) + norm(v) * 2.0
+}
+
+# `@` on stacks of matrices: a stack times a matrix, a stack times a stack, a
+# matrix times a stack, and a vector on either side
+STACK = cos(reshape(arange(40.0), 2, 4, 5) * 0.3)
+VEC4 = [0.5, -1.0, 0.25, 2.0]
+
+def stack_left(x: Arr) {
+    return sum(tanh(x @ transpose(W3) @ W3) * 0.5) + sum((x @ STACK) * reshape(arange(30.0), 2, 3, 5) * 0.01)
+}
+
+def stack_right(s: Arr) {
+    return sum(tanh(cube() @ s)) + sum((W3 @ s) * (W3 @ s)) + sum(tanh(VEC4 @ s))
+}
+
+def stack_vector(v: Arr) {
+    return sum(tanh(cube() @ v)) + sum((v @ STACK) * (v @ STACK))
+}
+
+test "sum along each axis, with and without keepdims" {
+    x = cube()
+    assert_lt(fd_miss(grad(sums, x), fd_grad(sums, x)), FD_TOL)
+    # sum(x, 1) times W4: each entry's gradient is the weight of its column
+    assert_near(max(abs(grad(sums, x) - 2.0 * x * W3 - reshape(W4, 2, 1, 4) - reshape(W2, 2, 3, 1) * (1.0 - tanh(sum(x, axis=-1, keepdims=true)) * tanh(sum(x, axis=-1, keepdims=true))))), 0.0, 1.0e-14)
+}
+
+test "mean, var and std along an axis" {
+    x = cube()
+    assert_lt(fd_miss(grad(means, x), fd_grad(means, x)), FD_TOL)
+    assert_lt(fd_miss(grad(variances, x), fd_grad(variances, x)), FD_TOL)
+}
+
+test "prod along an axis, right where an entry is zero" {
+    x = cube()
+    assert_lt(fd_miss(grad(products, x), fd_grad(products, x)), FD_TOL)
+    # with a zero entry, the other entries of its lane get no gradient from
+    # prod(x, 1), and the zero gets the product of the others
+    z = x + 0.0
+    z[1, 1, 2] = 0.0
+    g = grad(products, z)
+    lane = z[1, :, 2]
+    assert_near(g[1, 1, 2] - prod(z[:, 1, 2] + 2.0) / (z[1, 1, 2] + 2.0) * W3[1, 2], W4[1, 2] * lane[0] * lane[2], 1.0e-14)
+    assert_near(g[1, 0, 2] - prod(z[:, 0, 2] + 2.0) / (z[1, 0, 2] + 2.0) * W3[0, 2], 0.0, 1.0e-14)
+}
+
+test "amax and amin along an axis send the gradient to the extreme entry" {
+    x = cube()
+    assert_lt(fd_miss(grad(extremes, x), fd_grad(extremes, x)), FD_TOL)
+}
+
+test "amax along an axis shares the gradient evenly on a tie, as torch.amax" {
+    x = cube()
+    top = amax(x[0, 1, :])
+    x[0, 1, 0] = top
+    x[0, 1, 3] = top
+    g = grad(extremes, x)
+    # amax(x, 2)[0, 1] has weight W2[0, 1]; now two or more entries hold the maximum
+    hits = x[0, 1, :] == top
+    low = amin(x, axis=1, keepdims=true)
+    w = reshape(W4, 2, 1, 4)
+    for j to 4 {
+        from_min = 0.0
+        if x[0, 1, j] == low[0, 0, j] {
+            from_min = w[0, 0, j]
+        }
+        assert_near(g[0, 1, j], hits[j] * W2[0, 1] / sum(hits) + from_min, 1.0e-15)
+    }
+}
+
+test "mean, var, std, prod, amax and amin of the whole array" {
+    x = cube()
+    assert_lt(fd_miss(grad(wholes, x), fd_grad(wholes, x)), FD_TOL)
+}
+
+test "broadcasting between arrays of different ranks" {
+    x = cube()
+    assert_lt(fd_miss(grad(broadcasts, x), fd_grad(broadcasts, x)), FD_TOL)
+    # the lower-rank operand collects the adjoint of every entry it was broadcast to
+    v = W3 + 0.1
+    assert_lt(fd_miss(grad(lower_rank, v), fd_grad(lower_rank, v)), FD_TOL)
+}
+
+test "reshape, ravel, flatten, transpose with axes, and swapaxes" {
+    x = cube()
+    assert_lt(fd_miss(grad(shapes, x), fd_grad(shapes, x)), FD_TOL)
+}
+
+test "take along an axis, an index repeated" {
+    x = cube()
+    assert_lt(fd_miss(grad(gathers, x), fd_grad(gathers, x)), FD_TOL)
+}
+
+test "dot and norm" {
+    v = [0.3, -0.8, 1.1, 0.4]
+    g = grad(products_of_vectors, v)
+    assert_allclose(g, 3.0 * v * v + 2.0 * v / norm(v), 1.0e-15)
+    assert_lt(fd_miss(g, fd_grad(products_of_vectors, v)), FD_TOL)
+}
+
+test "@ on stacks of matrices, the batch axes broadcast" {
+    x = cube()
+    assert_lt(fd_miss(grad(stack_left, x), fd_grad(stack_left, x)), FD_TOL)
+    s = STACK + 0.0
+    assert_lt(fd_miss(grad(stack_right, s), fd_grad(stack_right, s)), FD_TOL)
+    v = VEC4 + 0.0
+    assert_lt(fd_miss(grad(stack_vector, v), fd_grad(stack_vector, v)), FD_TOL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

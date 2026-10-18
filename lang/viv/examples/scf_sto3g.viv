@@ -1,0 +1,837 @@
+# Molecule-driven restricted Hartree-Fock in STO-3G.
+#
+# The basis is assembled from an element library (H, He, C, N, O, F) given only
+# the atoms; the McMurchie-Davidson engine handles the s/p integrals. This is the
+# reusable driver behind the molecule database (tests/molecule_db.rs), which
+# substitutes the MOL_BEGIN..MOL_END block per molecule and checks the energy
+# against known values. Default molecule = water (E = -74.9420787, Crawford).
+
+pi = 3.141592653589793
+n_prim = 3
+
+# =====================================================================
+# McMurchie-Davidson integral engine (molecule-independent).
+# =====================================================================
+
+# Boys function F_n(T) = integral_0^1 t^(2n) exp(-T t^2) dt.
+def boys_n(nn, T) {
+    if T < 1.0e-12 {
+        return 1.0 / (2.0 * nn + 1.0)
+    }
+    return simpson(fn(t) -> pow(t, 2.0 * nn) * exp(-T * t * t), 0.0, 1.0, 100)
+}
+
+# Hermite expansion coefficient E_t^{ij} (1D), exponents a,b, Qx = Ax - Bx.
+def hermite_E(i, j, t, Qx, a, b) {
+    if i < 0.0 { return 0.0 }
+    if j < 0.0 { return 0.0 }
+    if t < 0.0 { return 0.0 }
+    if t > i + j { return 0.0 }
+    p = a + b
+    if i == 0.0 {
+        if j == 0.0 {
+            mu = a * b / p
+            return exp(-mu * Qx * Qx)
+        }
+        xpb = a / p * Qx
+        return (0.5 / p * hermite_E(i, j - 1.0, t - 1.0, Qx, a, b)
+             + xpb * hermite_E(i, j - 1.0, t, Qx, a, b)
+             + (t + 1.0) * hermite_E(i, j - 1.0, t + 1.0, Qx, a, b))
+    }
+    xpa = -b / p * Qx
+    return (0.5 / p * hermite_E(i - 1.0, j, t - 1.0, Qx, a, b)
+         + xpa * hermite_E(i - 1.0, j, t, Qx, a, b)
+         + (t + 1.0) * hermite_E(i - 1.0, j, t + 1.0, Qx, a, b))
+}
+
+# Hermite Coulomb integral R_{tuv}^n.
+def hermite_R(t, u, v, nn, p, PCx, PCy, PCz, RPC2) {
+    if t == 0.0 {
+        if u == 0.0 {
+            if v == 0.0 {
+                return pow(-2.0 * p, nn) * boys_n(nn, p * RPC2)
+            }
+            res = PCz * hermite_R(t, u, v - 1.0, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+            if v > 1.0 {
+                res += (v - 1.0) * hermite_R(t, u, v - 2.0, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+            }
+            return res
+        }
+        res = PCy * hermite_R(t, u - 1.0, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+        if u > 1.0 {
+            res += (u - 1.0) * hermite_R(t, u - 2.0, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+        }
+        return res
+    }
+    res = PCx * hermite_R(t - 1.0, u, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+    if t > 1.0 {
+        res += (t - 1.0) * hermite_R(t - 2.0, u, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+    }
+    return res
+}
+
+def overlap_1d(i, j, Qx, a, b) {
+    return hermite_E(i, j, 0.0, Qx, a, b) * sqrt(pi / (a + b))
+}
+
+# 1D kinetic energy matrix element (differentiate the ket twice).
+def kinetic_1d(i, j, Qx, a, b) {
+    term = b * (2.0 * j + 1.0) * overlap_1d(i, j, Qx, a, b)
+    term += -2.0 * b * b * overlap_1d(i, j + 2.0, Qx, a, b)
+    term += -0.5 * j * (j - 1.0) * overlap_1d(i, j - 2.0, Qx, a, b)
+    return term
+}
+
+# =====================================================================
+# Primitive integrals over two/four basis functions (reading bf data
+# by index from the globals defined in the MOLECULE/BASIS block).
+# =====================================================================
+
+def prim_overlap(a, b, mu, nu) {
+    sx = overlap_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    sy = overlap_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    sz = overlap_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    return sx * sy * sz
+}
+
+def prim_kinetic(a, b, mu, nu) {
+    sx = overlap_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    sy = overlap_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    sz = overlap_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    tx = kinetic_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    ty = kinetic_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    tz = kinetic_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    return tx * sy * sz + sx * ty * sz + sx * sy * tz
+}
+
+def prim_nuclear(a, b, mu, nu, Cx, Cy, Cz) {
+    la = bfL[mu]
+    ma = bfM[mu]
+    na = bfN[mu]
+    lb = bfL[nu]
+    mb = bfM[nu]
+    nb = bfN[nu]
+    p = a + b
+    Px = (a * bfCx[mu] + b * bfCx[nu]) / p
+    Py = (a * bfCy[mu] + b * bfCy[nu]) / p
+    Pz = (a * bfCz[mu] + b * bfCz[nu]) / p
+    PCx = Px - Cx
+    PCy = Py - Cy
+    PCz = Pz - Cz
+    RPC2 = PCx * PCx + PCy * PCy + PCz * PCz
+    qx = bfCx[mu] - bfCx[nu]
+    qy = bfCy[mu] - bfCy[nu]
+    qz = bfCz[mu] - bfCz[nu]
+    val = 0.0
+    for t to la + lb + 1.0 {
+        for u to ma + mb + 1.0 {
+            for v to na + nb + 1.0 {
+                e = hermite_E(la, lb, t, qx, a, b) * hermite_E(ma, mb, u, qy, a, b) * hermite_E(na, nb, v, qz, a, b)
+                val += e * hermite_R(t, u, v, 0.0, p, PCx, PCy, PCz, RPC2)
+            }
+        }
+    }
+    return 2.0 * pi / p * val
+}
+
+def prim_eri(a, b, c, d, mu, nu, lam, sig) {
+    p = a + b
+    q = c + d
+    Px = (a * bfCx[mu] + b * bfCx[nu]) / p
+    Py = (a * bfCy[mu] + b * bfCy[nu]) / p
+    Pz = (a * bfCz[mu] + b * bfCz[nu]) / p
+    Qx = (c * bfCx[lam] + d * bfCx[sig]) / q
+    Qy = (c * bfCy[lam] + d * bfCy[sig]) / q
+    Qz = (c * bfCz[lam] + d * bfCz[sig]) / q
+    alpha = p * q / (p + q)
+    PQx = Px - Qx
+    PQy = Py - Qy
+    PQz = Pz - Qz
+    RPQ2 = PQx * PQx + PQy * PQy + PQz * PQz
+    qx1 = bfCx[mu] - bfCx[nu]
+    qy1 = bfCy[mu] - bfCy[nu]
+    qz1 = bfCz[mu] - bfCz[nu]
+    qx2 = bfCx[lam] - bfCx[sig]
+    qy2 = bfCy[lam] - bfCy[sig]
+    qz2 = bfCz[lam] - bfCz[sig]
+    val = 0.0
+    for t1 to bfL[mu] + bfL[nu] + 1.0 {
+        for u1 to bfM[mu] + bfM[nu] + 1.0 {
+            for v1 to bfN[mu] + bfN[nu] + 1.0 {
+                e1 = hermite_E(bfL[mu], bfL[nu], t1, qx1, a, b) * hermite_E(bfM[mu], bfM[nu], u1, qy1, a, b) * hermite_E(bfN[mu], bfN[nu], v1, qz1, a, b)
+                for t2 to bfL[lam] + bfL[sig] + 1.0 {
+                    for u2 to bfM[lam] + bfM[sig] + 1.0 {
+                        for v2 to bfN[lam] + bfN[sig] + 1.0 {
+                            e2 = hermite_E(bfL[lam], bfL[sig], t2, qx2, c, d) * hermite_E(bfM[lam], bfM[sig], u2, qy2, c, d) * hermite_E(bfN[lam], bfN[sig], v2, qz2, c, d)
+                            sign = pow(-1.0, t2 + u2 + v2)
+                            val += e1 * e2 * sign * hermite_R(t1 + t2, u1 + u2, v1 + v2, 0.0, alpha, PQx, PQy, PQz, RPQ2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 2.0 * pow(pi, 2.5) / (p * q * sqrt(p + q)) * val
+}
+
+# Contracted integrals: sum primitive integrals weighted by contraction coeffs.
+def cont_overlap(mu, nu) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            s += bfC[mu, ka] * bfC[nu, kb] * prim_overlap(bfA[mu, ka], bfA[nu, kb], mu, nu)
+        }
+    }
+    return s
+}
+
+def cont_kinetic(mu, nu) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            s += bfC[mu, ka] * bfC[nu, kb] * prim_kinetic(bfA[mu, ka], bfA[nu, kb], mu, nu)
+        }
+    }
+    return s
+}
+
+def cont_nuclear(mu, nu, Cx, Cy, Cz) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            s += bfC[mu, ka] * bfC[nu, kb] * prim_nuclear(bfA[mu, ka], bfA[nu, kb], mu, nu, Cx, Cy, Cz)
+        }
+    }
+    return s
+}
+
+def cont_eri(mu, nu, lam, sig) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            for kc to n_prim {
+                for kd to n_prim {
+                    coef = bfC[mu, ka] * bfC[nu, kb] * bfC[lam, kc] * bfC[sig, kd]
+                    s += coef * prim_eri(bfA[mu, ka], bfA[nu, kb], bfA[lam, kc], bfA[sig, kd], mu, nu, lam, sig)
+                }
+            }
+        }
+    }
+    return s
+}
+
+# =====================================================================
+# MOLECULE-DRIVEN STO-3G HARTREE-FOCK.
+# The basis is built automatically from an element library given only the
+# atoms (nuclear charge + position, in bohr). The molecule block below is the
+# default (water, Crawford geometry, E = -74.9420787); the database harness
+# substitutes the MOL_BEGIN..MOL_END section for each molecule.
+# =====================================================================
+
+# === MOL_BEGIN ===
+n_atoms = 3
+mol_charge = 0.0
+atom_Z = zeros(n_atoms)
+atom_x = zeros(n_atoms)
+atom_y = zeros(n_atoms)
+atom_z = zeros(n_atoms)
+atom_Z[0] = 8.0
+atom_x[0] = 0.0
+atom_y[0] = -0.143225816552
+atom_z[0] = 0.0
+atom_Z[1] = 1.0
+atom_x[1] = 1.638036840407
+atom_y[1] = 1.136548822547
+atom_z[1] = 0.0
+atom_Z[2] = 1.0
+atom_x[2] = -1.638036840407
+atom_y[2] = 1.136548822547
+atom_z[2] = 0.0
+# === MOL_END ===
+
+# STO-3G primitive exponents per element (rows indexed by nuclear charge Z).
+# The contraction coefficients are element-independent (canonical STO-3G).
+# e1s = 1s exponents; esp = 2sp (shared 2s/2p); e3sp = 3sp (shared 3s/3p, period 3).
+e1s = zeros(19, 3)
+esp = zeros(19, 3)
+e3sp = zeros(19, 3)
+e1s[1, 0] = 3.42525091
+e1s[1, 1] = 0.62391373
+e1s[1, 2] = 0.16885540
+e1s[2, 0] = 6.36242139
+e1s[2, 1] = 1.15892300
+e1s[2, 2] = 0.31364979
+e1s[3, 0] = 16.1195750
+e1s[3, 1] = 2.9362007
+e1s[3, 2] = 0.7946505
+esp[3, 0] = 0.6362897
+esp[3, 1] = 0.1478601
+esp[3, 2] = 0.0480887
+e1s[4, 0] = 30.1678710
+e1s[4, 1] = 5.4951153
+e1s[4, 2] = 1.4871927
+esp[4, 0] = 1.3148331
+esp[4, 1] = 0.3055389
+esp[4, 2] = 0.0993707
+e1s[5, 0] = 48.7911130
+e1s[5, 1] = 8.8873622
+e1s[5, 2] = 2.4052670
+esp[5, 0] = 2.2369561
+esp[5, 1] = 0.5198205
+esp[5, 2] = 0.1690618
+e1s[6, 0] = 71.6168370
+e1s[6, 1] = 13.0450960
+e1s[6, 2] = 3.5305122
+esp[6, 0] = 2.9412494
+esp[6, 1] = 0.6834831
+esp[6, 2] = 0.2222899
+e1s[7, 0] = 99.1061690
+e1s[7, 1] = 18.0523120
+e1s[7, 2] = 4.8856602
+esp[7, 0] = 3.7804559
+esp[7, 1] = 0.8784966
+esp[7, 2] = 0.2857144
+e1s[8, 0] = 130.7093200
+e1s[8, 1] = 23.8088610
+e1s[8, 2] = 6.4436083
+esp[8, 0] = 5.0331513
+esp[8, 1] = 1.1695961
+esp[8, 2] = 0.3803890
+e1s[9, 0] = 166.6791300
+e1s[9, 1] = 30.3608120
+e1s[9, 2] = 8.2168207
+esp[9, 0] = 6.4648032
+esp[9, 1] = 1.5022812
+esp[9, 2] = 0.4885885
+e1s[10, 0] = 207.0156100
+e1s[10, 1] = 37.7081510
+e1s[10, 2] = 10.2052970
+esp[10, 0] = 8.2463151
+esp[10, 1] = 1.9162662
+esp[10, 2] = 0.6232293
+# Period 3 (Na-Ar) adds a 3s/3p shell (e3sp), with element-independent 3s/3p
+# contraction coefficients (in the builder below). Only Mg is populated here, as a
+# validation probe of the period-3 machinery: the Mg atom gives -197.02, matching
+# the known closed-shell STO-3G value. The remaining period-3 exponents must be
+# copied from a basis-set source (e.g. Basis Set Exchange) before use -- this is
+# deliberately left blank rather than reconstructed from memory.
+e1s[12, 0] = 299.2374000
+e1s[12, 1] = 54.5064700
+e1s[12, 2] = 14.7515750
+esp[12, 0] = 15.1218200
+esp[12, 1] = 3.5135930
+esp[12, 2] = 1.1428570
+e3sp[12, 0] = 1.3954482
+e3sp[12, 1] = 0.3893265
+e3sp[12, 2] = 0.1523267
+
+# Count basis functions and electrons. H/He: 1s only (1 function); period 2
+# (Li-Ne): 1s,2s,2p (5); period 3 (Na-Ar): +3s,3p (9).
+n_basis = 0.0
+n_elec = 0.0
+for i to n_atoms {
+    z = atom_Z[i]
+    n_elec += z
+    if z <= 2.0 {
+        n_basis += 1.0
+    }
+    else {
+        if z <= 10.0 {
+            n_basis += 5.0
+        }
+        else {
+            n_basis += 9.0
+        }
+    }
+}
+n_elec -= mol_charge
+n_occ = n_elec / 2.0
+
+bfL = zeros(n_basis)
+bfM = zeros(n_basis)
+bfN = zeros(n_basis)
+bfCx = zeros(n_basis)
+bfCy = zeros(n_basis)
+bfCz = zeros(n_basis)
+bfA = zeros(n_basis, n_prim)
+bfC = zeros(n_basis, n_prim)
+
+# Set basis function `idx`: center, angular momentum (l,m,n), and three
+# primitive exponents / (normalized-primitive) contraction coefficients.
+def set_bf(idx, cx, cy, cz, l, m, n, a0, a1, a2, c0, c1, c2) {
+    bfCx[idx] = cx
+    bfCy[idx] = cy
+    bfCz[idx] = cz
+    bfL[idx] = l
+    bfM[idx] = m
+    bfN[idx] = n
+    bfA[idx, 0] = a0
+    bfA[idx, 1] = a1
+    bfA[idx, 2] = a2
+    lt = l + m + n
+    bfC[idx, 0] = c0 * pow(2.0 * a0 / pi, 0.75) * pow(4.0 * a0, lt / 2.0)
+    bfC[idx, 1] = c1 * pow(2.0 * a1 / pi, 0.75) * pow(4.0 * a1, lt / 2.0)
+    bfC[idx, 2] = c2 * pow(2.0 * a2 / pi, 0.75) * pow(4.0 * a2, lt / 2.0)
+}
+
+# Build the basis: a 1s on every atom, plus 2s and 2p (x,y,z) on first-row atoms.
+idx = 0.0
+for i to n_atoms {
+    z = atom_Z[i]
+    cx = atom_x[i]
+    cy = atom_y[i]
+    cz = atom_z[i]
+    set_bf(idx, cx, cy, cz, 0.0, 0.0, 0.0, e1s[z, 0], e1s[z, 1], e1s[z, 2], 0.15432897, 0.53532814, 0.44463454)
+    idx += 1.0
+    if z > 2.0 {
+        set_bf(idx, cx, cy, cz, 0.0, 0.0, 0.0, esp[z, 0], esp[z, 1], esp[z, 2], -0.09996723, 0.39951283, 0.70011547)
+        idx += 1.0
+        set_bf(idx, cx, cy, cz, 1.0, 0.0, 0.0, esp[z, 0], esp[z, 1], esp[z, 2], 0.15591627, 0.60768372, 0.39195739)
+        idx += 1.0
+        set_bf(idx, cx, cy, cz, 0.0, 1.0, 0.0, esp[z, 0], esp[z, 1], esp[z, 2], 0.15591627, 0.60768372, 0.39195739)
+        idx += 1.0
+        set_bf(idx, cx, cy, cz, 0.0, 0.0, 1.0, esp[z, 0], esp[z, 1], esp[z, 2], 0.15591627, 0.60768372, 0.39195739)
+        idx += 1.0
+        if z > 10.0 {
+            set_bf(idx, cx, cy, cz, 0.0, 0.0, 0.0, e3sp[z, 0], e3sp[z, 1], e3sp[z, 2], -0.3088442, 0.1960641, 0.8542530)
+            idx += 1.0
+            set_bf(idx, cx, cy, cz, 1.0, 0.0, 0.0, e3sp[z, 0], e3sp[z, 1], e3sp[z, 2], -0.1215468, 0.5715228, 0.5498949)
+            idx += 1.0
+            set_bf(idx, cx, cy, cz, 0.0, 1.0, 0.0, e3sp[z, 0], e3sp[z, 1], e3sp[z, 2], -0.1215468, 0.5715228, 0.5498949)
+            idx += 1.0
+            set_bf(idx, cx, cy, cz, 0.0, 0.0, 1.0, e3sp[z, 0], e3sp[z, 1], e3sp[z, 2], -0.1215468, 0.5715228, 0.5498949)
+            idx += 1.0
+        }
+    }
+}
+
+# Normalize each contracted basis function so <mu|mu> = 1.
+for i to n_basis {
+    nrm = 1.0 / sqrt(cont_overlap(i, i))
+    for k to n_prim {
+        bfC[i, k] = bfC[i, k] * nrm
+    }
+}
+
+# =====================================================================
+# Build integrals and run the SCF.
+# =====================================================================
+S = zeros(n_basis, n_basis)
+H_core = zeros(n_basis, n_basis)
+for mu to n_basis {
+    for nu to n_basis {
+        S[mu, nu] = cont_overlap(mu, nu)
+        v = 0.0
+        for atom to n_atoms {
+            v += -atom_Z[atom] * cont_nuclear(mu, nu, atom_x[atom], atom_y[atom], atom_z[atom])
+        }
+        H_core[mu, nu] = cont_kinetic(mu, nu) + v
+    }
+}
+
+# Two-electron integrals, exploiting the 8-fold permutational symmetry
+# (mu nu|lam sig) = (nu mu|lam sig) = (mu nu|sig lam) = (lam sig|mu nu) = ...
+# Pass 1 (parallel, the expensive part): evaluate only the unique/canonical
+# integrals -- ~8x fewer cont_eri calls. A tuple is canonical when mu>=nu,
+# lam>=sig, and idx(mu,nu)>=idx(lam,sig) with idx(p,q)=p(p+1)/2+q; for those
+# mu is the largest index, so each thread writes only its own eri[mu,...] rows.
+eri = zeros(n_basis, n_basis, n_basis, n_basis)
+parallel for mu to n_basis {
+    for nu to n_basis {
+        for lam to n_basis {
+            for sig to n_basis {
+                canon = false
+                if mu >= nu {
+                    if lam >= sig {
+                        mn = mu * (mu + 1.0) / 2.0 + nu
+                        ls = lam * (lam + 1.0) / 2.0 + sig
+                        if mn >= ls { canon = true }
+                    }
+                }
+                if canon {
+                    eri[mu, nu, lam, sig] = cont_eri(mu, nu, lam, sig)
+                }
+            }
+        }
+    }
+}
+# Pass 2 (serial, cheap): scatter each canonical value to its images. For a
+# canonical tuple the sort below is the identity, so the copy is a harmless no-op.
+for mu to n_basis {
+    for nu to n_basis {
+        for lam to n_basis {
+            for sig to n_basis {
+                a = mu
+                b = nu
+                if nu > mu {
+                    a = nu
+                    b = mu
+                }
+                c = lam
+                d = sig
+                if sig > lam {
+                    c = sig
+                    d = lam
+                }
+                ab = a * (a + 1.0) / 2.0 + b
+                cd = c * (c + 1.0) / 2.0 + d
+                if cd > ab {
+                    ta = a
+                    tb = b
+                    a = c
+                    b = d
+                    c = ta
+                    d = tb
+                }
+                eri[mu, nu, lam, sig] = eri[a, b, c, d]
+            }
+        }
+    }
+}
+
+# Symmetric orthogonalization X = S^{-1/2}.
+s_vals = zeros(n_basis)
+s_vecs = zeros(n_basis, n_basis)
+eig_sym(S, s_vals, s_vecs)
+D_inv_sqrt = zeros(n_basis, n_basis)
+for i to n_basis {
+    D_inv_sqrt[i, i] = 1.0 / sqrt(s_vals[i])
+}
+X = s_vecs @ D_inv_sqrt @ transpose(s_vecs)
+
+# Nuclear repulsion.
+E_nuc = 0.0
+for i to n_atoms {
+    for j to n_atoms {
+        if j > i {
+            dx = atom_x[i] - atom_x[j]
+            dy = atom_y[i] - atom_y[j]
+            dz = atom_z[i] - atom_z[j]
+            E_nuc += atom_Z[i] * atom_Z[j] / sqrt(dx * dx + dy * dy + dz * dz)
+        }
+    }
+}
+
+# Solve the linear system A x = b (n unknowns) by Gaussian elimination with
+# partial pivoting. A and b are overwritten in place; the solution lands in x.
+# (Used to solve the small DIIS coefficient system each SCF cycle.)
+def solve_linear(A, b, x, n) {
+    for k to n {
+        piv = k
+        big = A[k, k]
+        if big < 0.0 { big = -big }
+        for i to n {
+            if i > k {
+                ai = A[i, k]
+                if ai < 0.0 { ai = -ai }
+                if ai > big {
+                    big = ai
+                    piv = i
+                }
+            }
+        }
+        if piv > k {
+            for j to n {
+                tmp = A[k, j]
+                A[k, j] = A[piv, j]
+                A[piv, j] = tmp
+            }
+            tb = b[k]
+            b[k] = b[piv]
+            b[piv] = tb
+        }
+        for i to n {
+            if i > k {
+                f = A[i, k] / A[k, k]
+                for j to n {
+                    A[i, j] = A[i, j] - f * A[k, j]
+                }
+                b[i] = b[i] - f * b[k]
+            }
+        }
+    }
+    for kk to n {
+        i = n - 1.0 - kk
+        s = b[i]
+        for j to n {
+            if j > i {
+                s = s - A[i, j] * x[j]
+            }
+        }
+        x[i] = s / A[i, i]
+    }
+}
+
+# Robust SCF: run from two initial guesses and keep the lower (ground-state)
+# energy. No single guess is universally safe -- the bare core guess sends N2 to
+# a wrong excited solution, while the GWH guess gives the Be atom the wrong
+# (1s^2 2p^2) occupation. Both are valid SCF fixed points, so by the variational
+# principle the true ground state is simply the lower of the two converged energies.
+#   guess 0: core (F0 = H_core)
+#   guess 1: GWH  (F0_ii = H_ii, F0_ij = 0.875*(H_ii+H_jj)*S_ij)
+E_best = 0.0
+have_best = false
+for guess to 2 {
+    F_guess = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            if guess == 0.0 {
+                F_guess[mu, nu] = H_core[mu, nu]
+            }
+            else {
+                if mu == nu {
+                    F_guess[mu, nu] = H_core[mu, mu]
+                }
+                else {
+                    F_guess[mu, nu] = 0.875 * (H_core[mu, mu] + H_core[nu, nu]) * S[mu, nu]
+                }
+            }
+        }
+    }
+Fp = transpose(X) @ F_guess @ X
+eps_vals = zeros(n_basis)
+Cp = zeros(n_basis, n_basis)
+eig_sym(Fp, eps_vals, Cp)
+C = X @ Cp
+P = zeros(n_basis, n_basis)
+for mu to n_basis {
+    for nu to n_basis {
+        psum = 0.0
+        for a to n_occ {
+            psum += C[mu, a] * C[nu, a]
+        }
+        P[mu, nu] = 2.0 * psum
+    }
+}
+
+# SCF accelerated by DIIS (Pulay). The DIIS error e = X^T(FPS - SPF)X is the
+# occupied-virtual gradient (zero at convergence); DIIS extrapolates the Fock
+# matrix from a history of (F_i, e_i) pairs by minimizing the error in their
+# span, converging in far fewer cycles than damped iteration.
+max_diis = 8
+diis_F = zeros(max_diis, n_basis, n_basis)
+diis_E = zeros(max_diis, n_basis, n_basis)
+n_diis = 0.0
+E_total = 0.0
+for iter to 100 {
+    G = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            g = 0.0
+            for lam to n_basis {
+                for sig to n_basis {
+                    g += P[lam, sig] * (eri[mu, nu, lam, sig] - 0.5 * eri[mu, lam, nu, sig])
+                }
+            }
+            G[mu, nu] = g
+        }
+    }
+    F = H_core + G
+    # Electronic energy from the current density and its Fock.
+    E_elec = 0.0
+    for mu to n_basis {
+        for nu to n_basis {
+            E_elec += 0.5 * P[mu, nu] * (H_core[mu, nu] + F[mu, nu])
+        }
+    }
+    E_total = E_elec + E_nuc
+    # DIIS error matrix in the orthonormal basis, and its max element.
+    err_ao = (F @ P @ S) - (S @ P @ F)
+    err = transpose(X) @ err_ao @ X
+    maxerr = 0.0
+    for mu to n_basis {
+        for nu to n_basis {
+            ee = err[mu, nu]
+            if ee < 0.0 { ee = -ee }
+            if ee > maxerr { maxerr = ee }
+        }
+    }
+    if maxerr < 1.0e-9 { break }
+    # Push (F, err) onto the history, shifting out the oldest entry when full.
+    if n_diis == max_diis {
+        for k to (max_diis - 1.0) {
+            for mu to n_basis {
+                for nu to n_basis {
+                    diis_F[k, mu, nu] = diis_F[k + 1.0, mu, nu]
+                    diis_E[k, mu, nu] = diis_E[k + 1.0, mu, nu]
+                }
+            }
+        }
+    }
+    else {
+        n_diis += 1.0
+    }
+    slot = n_diis - 1.0
+    for mu to n_basis {
+        for nu to n_basis {
+            diis_F[slot, mu, nu] = F[mu, nu]
+            diis_E[slot, mu, nu] = err[mu, nu]
+        }
+    }
+    # Build and solve the DIIS system B c = rhs (dimension n_diis + 1), then
+    # replace F by the extrapolation sum_i c_i F_i.
+    if n_diis > 1.0 {
+        nb = n_diis + 1.0
+        B = zeros(nb, nb)
+        rhs = zeros(nb)
+        for ai to n_diis {
+            for bi to n_diis {
+                bsum = 0.0
+                for mu to n_basis {
+                    for nu to n_basis {
+                        bsum += diis_E[ai, mu, nu] * diis_E[bi, mu, nu]
+                    }
+                }
+                B[ai, bi] = bsum
+            }
+        }
+        for ai to n_diis {
+            B[ai, n_diis] = -1.0
+            B[n_diis, ai] = -1.0
+        }
+        rhs[n_diis] = -1.0
+        cvec = zeros(nb)
+        solve_linear(B, rhs, cvec, nb)
+        # A singular B has no coefficients (solve_linear divides 0 by 0): the
+        # error vectors of an atom like Be, whose empty 2p shell stays empty by
+        # symmetry, are all but zero. Then the plain F is kept for this step;
+        # a NaN in F would stop eig_sym.
+        usable = 1.0
+        for ai to nb {
+            if cvec[ai] != cvec[ai] { usable = 0.0 }
+        }
+        if usable > 0.0 {
+            F = zeros(n_basis, n_basis)
+            for ai to n_diis {
+                for mu to n_basis {
+                    for nu to n_basis {
+                        F[mu, nu] = F[mu, nu] + cvec[ai] * diis_F[ai, mu, nu]
+                    }
+                }
+            }
+        }
+    }
+    # New density from the (extrapolated) Fock.
+    Fp = transpose(X) @ F @ X
+    eps_vals = zeros(n_basis)
+    Cp = zeros(n_basis, n_basis)
+    eig_sym(Fp, eps_vals, Cp)
+    C = X @ Cp
+    P = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            psum = 0.0
+            for a to n_occ {
+                psum += C[mu, a] * C[nu, a]
+            }
+            P[mu, nu] = 2.0 * psum
+        }
+    }
+    }
+    # Keep the lower-energy (ground-state) solution across the two guesses, and
+    # save its MOs/orbital energies (a fresh allocation per guess) for MP2.
+    keep = false
+    if not have_best {
+        have_best = true
+        keep = true
+    }
+    else {
+        if E_total < E_best {
+            keep = true
+        }
+    }
+    if keep {
+        E_best = E_total
+        C_best = C
+        eps_best = eps_vals
+    }
+}
+E_total = E_best
+
+# =====================================================================
+# MP2 correlation energy on the converged RHF reference (closed-shell).
+# Transform the AO integrals (chemist notation (mu nu|lam sig)) to the MO basis
+# in four quarter-transforms, then sum the MP2 pair energies. O(N^5) per step.
+# =====================================================================
+mo1 = zeros(n_basis, n_basis, n_basis, n_basis)
+for p to n_basis {
+    for nu to n_basis {
+        for lam to n_basis {
+            for sig to n_basis {
+                s = 0.0
+                for mu to n_basis {
+                    s += C_best[mu, p] * eri[mu, nu, lam, sig]
+                }
+                mo1[p, nu, lam, sig] = s
+            }
+        }
+    }
+}
+mo2 = zeros(n_basis, n_basis, n_basis, n_basis)
+for p to n_basis {
+    for q to n_basis {
+        for lam to n_basis {
+            for sig to n_basis {
+                s = 0.0
+                for nu to n_basis {
+                    s += C_best[nu, q] * mo1[p, nu, lam, sig]
+                }
+                mo2[p, q, lam, sig] = s
+            }
+        }
+    }
+}
+mo3 = zeros(n_basis, n_basis, n_basis, n_basis)
+for p to n_basis {
+    for q to n_basis {
+        for r to n_basis {
+            for sig to n_basis {
+                s = 0.0
+                for lam to n_basis {
+                    s += C_best[lam, r] * mo2[p, q, lam, sig]
+                }
+                mo3[p, q, r, sig] = s
+            }
+        }
+    }
+}
+gmo = zeros(n_basis, n_basis, n_basis, n_basis)
+for p to n_basis {
+    for q to n_basis {
+        for r to n_basis {
+            for t to n_basis {
+                s = 0.0
+                for sig to n_basis {
+                    s += C_best[sig, t] * mo3[p, q, r, sig]
+                }
+                gmo[p, q, r, t] = s
+            }
+        }
+    }
+}
+# E_corr = sum_{ij occ, ab virt} (ia|jb)[2(ia|jb) - (ib|ja)] / (e_i + e_j - e_a - e_b)
+emp2 = 0.0
+for oi to n_occ {
+    for oj to n_occ {
+        for va to n_basis {
+            if va >= n_occ {
+                for vb to n_basis {
+                    if vb >= n_occ {
+                        iajb = gmo[oi, va, oj, vb]
+                        ibja = gmo[oi, vb, oj, va]
+                        denom = eps_best[oi] + eps_best[oj] - eps_best[va] - eps_best[vb]
+                        emp2 += iajb * (2.0 * iajb - ibja) / denom
+                    }
+                }
+            }
+        }
+    }
+}
+e_mp2 = E_total + emp2
+
+show E_total
+show emp2
+show e_mp2
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

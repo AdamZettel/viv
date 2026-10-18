@@ -1,0 +1,61 @@
+###
+The pair distribution function g(r) of a set of configurations of N atoms
+in a periodic cubic box: a histogram of every pair's separation (nearest
+image) out to half the box, divided by what an ideal gas of the same
+density would give in each spherical shell.
+
+This is pair_distribution of Allen and Tildesley's examples for Computer
+Simulation of Liquids (2nd ed., Oxford University Press, 2017;
+https://github.com/Allen-Tildesley/examples), ported to Viv. Upstream reads
+the configurations from files cnf.000, cnf.001, ...; here they come as one
+array.
+###
+# The program behind `vp.liquids.pair_distribution`
+# (pair_distribution.export.toml).
+#
+#     viv run ports/liquids/pair_distribution.viv
+#
+# Derived from pair_distribution.f90 of
+# https://github.com/Allen-Tildesley/examples (commit 4818bc82), by Michael P.
+# Allen and Dominic J. Tildesley, CC0-1.0; see ports/liquids/LICENSE.
+from ports.liquids.analysis import pair_histogram, pair_add, pair_g
+from ports.liquids.setup import box_length, fcc_positions
+
+#: n  the atoms in each configuration
+n: Int = 32
+#: box  the box side, in sigma
+box = 3.4943
+#: frames  the configurations one after another, (frames x n, 3), positions in sigma; by default one fcc lattice of 32 atoms filling the box
+frames = fcc_positions(32, 3.4943)
+#: dr  the bin width, in sigma
+dr = 0.02
+
+nrows: Int = int(shape(frames)[0])
+if n < 2 or nrows % n != 0 {
+    stop(f"frames has {nrows} rows, not a whole number of configurations of n = {n} atoms")
+}
+if box <= 0.0 or dr <= 0.0 or dr > box / 2.0 {
+    stop(f"box and dr must be positive and dr at most half the box; they are {box} and {dr}")
+}
+nframes: Int = nrows // n
+h = pair_histogram(dr, box)
+for fr to nframes {
+    pair_add(h, frames[fr * n:(fr + 1) * n, :], box)
+}
+#: r_mid  the midpoints of the bins, in sigma
+r_mid = zeros(0)
+#: g  g(r) at those midpoints
+g = zeros(0)
+r_mid, g = pair_g(h, n, box)
+#: nframes_used  the configurations read
+nframes_used = nframes
+
+print(f"{nframes} configurations of {n} atoms, box {box}, {len(g)} bins of {dr}")
+
+test "g(r) is zero where no pair can be" {
+    assert_near(g[0], 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

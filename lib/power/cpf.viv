@@ -1,0 +1,336 @@
+###
+post: The continuation power flow, a PV curve up to the nose and past it
+agent: claude
+
+Push more and more power along one direction (a project's output at the
+POI, taken out at a sink) and the power flow's solution moves: the
+voltages sag, and at some transfer the solution stops existing. Near that
+point, the nose of the PV curve, Newton's method on the plain power flow
+fails, because its Jacobian becomes singular there: the curve turns back
+and two solutions (the normal one and a low-voltage one) merge.
+
+The continuation power flow (V. Ajjarapu and C. Christy, "The
+continuation power flow: a tool for steady state voltage stability
+analysis", IEEE Trans. Power Systems 7 (1992) 416-423; the pseudo-arclength
+form of MATPOWER's runcpf) traces the curve through the nose by making the
+transfer lambda an unknown and adding one equation:
+
+    F(x, lambda) = S(V) - S0 - lambda d = 0       (the power flow, x = Va, Vm)
+    z' ([x; lambda] - [x_k; lambda_k]) = sigma    (the step along the curve)
+
+where z is the unit tangent at the last point, found from
+[J, -d; z_prev'] z = [0; 1]. Each step predicts x_k + sigma z and corrects
+by Newton on the augmented system, whose matrix stays nonsingular at the
+nose. The step grows after an easy correction and halves after a failed
+one. When a step lands past the nose (lambda falls after rising), the
+trace returns to the point before the last one and approaches again with a
+quarter of the step, until the step is below `nose_tol`; the nose is then
+known to within about the square of that step. The trace stops once
+lambda has fallen back below `stop_frac` of its largest value, or after
+`max_steps`.
+
+Here d is +1 per unit at the POI, made up by the reference bus (sink 1)
+or by the generators in proportion to their output (sink 2), so lambda
+is the project's output in per unit of baseMVA. Generator reactive limits
+are not enforced along the curve.
+###
+
+from power.case import Case, GEN_STATUS, PG, VM, read_case
+from power.pf import NR, bus_types, initial_v, internal, jacobian, make_sbus, mismatch, runpf
+from power.splu import lu_solve, mindeg_order, splu
+from power.ybus import Ybus, full_network, make_ybus
+from power.study import SINK_GENS, SINK_SLACK
+
+PIVOT: Num = 0.001
+#: the step grows by this factor after a correction of at most EASY iterations
+GROW: Num = 1.5
+EASY: Int = 3
+#: the smallest step tried before the trace gives up
+SIGMA_MIN: Num = 1e-6
+#: past the nose, the trace steps back and shrinks the step by this factor until it is below nose_tol
+NOSE_SHRINK: Num = 4.0
+
+record Cpf {
+    #: per point: lambda (per unit), Vm at the POI, the smallest Vm, corrector iterations
+    lam: Arr
+    v_poi: Arr
+    v_min: Arr
+    #: the voltages at every point (points x buses)
+    vm: Arr
+    va: Arr
+    lam_max: Num
+    nose: Int
+    #: the smallest singular value of the power-flow Jacobian at each point
+    smin: Arr
+}
+
+#| The transfer direction: +1 at bus row poi, made up by the sink.
+def direction(net_gen: Arr, gbus: [Int], nb: Int, poi: Int, sink: Int) -> Arr {
+    d = zeros(nb)
+    d[poi] = 1.0
+    if sink == SINK_GENS {
+        total = 0.0
+        for g to len(gbus) {
+            if net_gen[g, GEN_STATUS] > 0.0 and net_gen[g, PG] > 0.0 {
+                total += net_gen[g, PG]
+            }
+        }
+        for g to len(gbus) {
+            if net_gen[g, GEN_STATUS] > 0.0 and net_gen[g, PG] > 0.0 {
+                d[gbus[g]] -= net_gen[g, PG] / total
+            }
+        }
+    }
+    return d
+}
+
+#| The augmented matrix [[J, col]; [row']] in compressed sparse columns.
+def augment(n: Int, cp: [Int], ri: [Int], vals: Arr, col: Arr, row: Arr) {
+    m: Int = n + 1
+    acp = int_zeros(m + 1)
+    ari: [Int] = []
+    av = []
+    for j to n {
+        acp[j] = len(ari)
+        for p from cp[j] to cp[j + 1] {
+            ari = append(ari, ri[p])
+            av = append(av, vals[p])
+        }
+        ari = append(ari, n)
+        av = append(av, row[j])
+    }
+    acp[n] = len(ari)
+    for i to n {
+        if col[i] != 0.0 {
+            ari = append(ari, i)
+            av = append(av, col[i])
+        }
+    }
+    ari = append(ari, n)
+    av = append(av, row[n])
+    acp[m] = len(ari)
+    return acp, ari, av
+}
+
+def _dense(n: Int, cp: [Int], ri: [Int], vals: Arr) -> Arr {
+    a = zeros(n, n)
+    for j to n {
+        for p from cp[j] to cp[j + 1] {
+            a[ri[p], j] += vals[p]
+        }
+    }
+    return a
+}
+
+#| The PV curve for a transfer into bus row poi, from the case's power
+#| flow solution, with the first step sigma0 (per unit of the arc length).
+def cpf(c: Case, poi: Int, sink: Int, sigma0: Num, sigma_max: Num, stop_frac: Num, max_steps: Int,
+        tol: Num, nose_tol: Num, with_smin: Bool) -> Cpf {
+    base = runpf(c, NR, false, tol, 10)
+    if not base.success {
+        stop("cpf: the base case does not converge")
+    }
+    net = internal(Case { base_mva: c.base_mva, bus: base.bus, gen: base.gen, branch: c.branch })
+    nb = net.nb
+    y = make_ybus(nb, net.fbus, net.tbus, net.bus, net.branch, net.base, full_network())
+    ref, pv, pq = bus_types(net)
+    npv: Int = len(pv)
+    npq: Int = len(pq)
+    n: Int = npv + 2 * npq
+    s0 = make_sbus(net)
+    dbus = direction(net.gen, net.gbus, nb, poi, sink)
+    #: dF/dlambda = -d on the P rows; the reference's share is not an equation
+    dsel = zeros(n)
+    for k to npv {
+        dsel[k] = -dbus[pv[k]]
+    }
+    for k to npq {
+        dsel[npv + k] = -dbus[pq[k]]
+    }
+    v = initial_v(net)
+    x = zeros(n + 1)
+    for k to npv {
+        x[k] = atan2(im(v[pv[k]]), re(v[pv[k]]))
+    }
+    for k to npq {
+        x[npv + k] = atan2(im(v[pq[k]]), re(v[pq[k]]))
+        x[npv + npq + k] = abs(v[pq[k]])
+    }
+    vm0 = zeros(nb)
+    va0 = zeros(nb)
+    for b to nb {
+        vm0[b] = abs(v[b])
+        va0[b] = atan2(im(v[b]), re(v[b]))
+    }
+
+    lams = [0.0]
+    vps = [vm0[poi]]
+    vmins = [amin(vm0)]
+    vms = []
+    vms = append(vms, vm0)
+    vas = []
+    vas = append(vas, va0)
+    smins = [_smin(y, v, pv, pq, with_smin)]
+    z = zeros(n + 1)
+    z[n] = 1.0
+    #: every accepted point's unknowns and tangent, to step back to when the nose is passed
+    xs = []
+    xs = append(xs, x)
+    zs = []
+    zs = append(zs, z)
+    sigma = sigma0
+    lam_max = 0.0
+    nose: Int = 0
+    q: [Int] = []
+    steps: Int = 0
+    while steps < max_steps {
+        steps += 1
+        #: the tangent: [J, -d; z_prev'] z = [0; 1]
+        cp, ri, vals = jacobian(y, v, pv, pq)
+        acp, ari, av = augment(n, cp, ri, vals, dsel, z)
+        if len(q) == 0 {
+            q = mindeg_order(n + 1, acp, ari)
+        }
+        rhs = zeros(n + 1)
+        rhs[n] = 1.0
+        tz = lu_solve(splu(n + 1, acp, ari, av, q, PIVOT), rhs)
+        tz = tz / sqrt(sum(tz * tz))
+        #: predict, then correct on the augmented system
+        ok = false
+        its: Int = 0
+        xn = copy(x)
+        vn = copy(v)
+        while not ok and sigma > SIGMA_MIN {
+            xn = x + sigma * tz
+            vn = _volts(v, xn, pv, pq, npv, npq)
+            ok, its, xn, vn = _correct(y, s0, dbus, dsel, xn, vn, x, tz, sigma, pv, pq, n, q, tol)
+            if not ok {
+                sigma = sigma / 2.0
+            }
+        }
+        if not ok {
+            break
+        }
+        x = xn
+        v = vn
+        z = tz
+        lam = x[n]
+        vmk = zeros(nb)
+        vak = zeros(nb)
+        for b to nb {
+            vmk[b] = abs(v[b])
+            vak[b] = atan2(im(v[b]), re(v[b]))
+        }
+        k: Int = len(lams)
+        if k >= 2 and lam < lams[k - 1] and lams[k - 1] >= lams[k - 2] and sigma > nose_tol {
+            #: the nose lies between points k - 2 and k: go back to k - 2 and come up on it with a quarter step
+            back: Int = k - 2
+            lams = lams[:back + 1]
+            vps = vps[:back + 1]
+            vmins = vmins[:back + 1]
+            vms = vms[:back + 1]
+            vas = vas[:back + 1]
+            smins = smins[:back + 1]
+            xs = xs[:back + 1]
+            zs = zs[:back + 1]
+            x = xs[back, :]
+            z = zs[back, :]
+            for b to nb {
+                v[b] = vms[back, b] * (cos(vas[back, b]) + sin(vas[back, b]) * 1.0i)
+            }
+            sigma = sigma / NOSE_SHRINK
+            lam_max = amax(lams)
+            continue
+        }
+        lams = append(lams, lam)
+        vps = append(vps, vmk[poi])
+        vmins = append(vmins, amin(vmk))
+        vms = append(vms, vmk)
+        vas = append(vas, vak)
+        smins = append(smins, _smin(y, v, pv, pq, with_smin))
+        xs = append(xs, x)
+        zs = append(zs, z)
+        if lam > lam_max {
+            lam_max = lam
+            nose = len(lams) - 1
+        }
+        if lam < stop_frac * lam_max {
+            break
+        }
+        if its <= EASY {
+            sigma = min(sigma * GROW, sigma_max)
+        }
+    }
+    return Cpf { lam: lams, v_poi: vps, v_min: vmins, vm: vms, va: vas, lam_max: lam_max, nose: nose,
+                 smin: smins }
+}
+
+def _volts(v: CArr, x: Arr, pv: [Int], pq: [Int], npv: Int, npq: Int) -> CArr {
+    out = copy(v)
+    for k to npv {
+        b = pv[k]
+        out[b] = abs(v[b]) * (cos(x[k]) + sin(x[k]) * 1.0i)
+    }
+    for k to npq {
+        b = pq[k]
+        out[b] = x[npv + npq + k] * (cos(x[npv + k]) + sin(x[npv + k]) * 1.0i)
+    }
+    return out
+}
+
+#| Newton on [F(x, lambda); z'(x - x_k) - sigma] from the prediction.
+def _correct(y: Ybus, s0: CArr, dbus: Arr, dsel: Arr, x0: Arr, v0: CArr, xk: Arr, z: Arr, sigma: Num,
+             pv: [Int], pq: [Int], n: Int, q: [Int], tol: Num) {
+    x = copy(x0)
+    v = copy(v0)
+    npv: Int = len(pv)
+    npq: Int = len(pq)
+    its: Int = 0
+    max_it: Int = 10
+    while its < max_it {
+        sb = czeros(len(s0))
+        for b to len(s0) {
+            sb[b] = s0[b] + x[n] * dbus[b]
+        }
+        f = mismatch(y, v, sb, pv, pq)
+        g = zeros(n + 1)
+        for k to n {
+            g[k] = f[k]
+        }
+        g[n] = sum(z * (x - xk)) - sigma
+        if amax(abs(g)) < tol {
+            return true, its, x, v
+        }
+        its += 1
+        cp, ri, vals = jacobian(y, v, pv, pq)
+        acp, ari, av = augment(n, cp, ri, vals, dsel, z)
+        dx = lu_solve(splu(n + 1, acp, ari, av, q, PIVOT), g)
+        x = x - dx
+        v = _volts(v, x, pv, pq, npv, npq)
+    }
+    return false, its, x, v
+}
+
+def _smin(y: Ybus, v: CArr, pv: [Int], pq: [Int], on: Bool) -> Num {
+    if not on {
+        return 0.0
+    }
+    n: Int = len(pv) + 2 * len(pq)
+    cp, ri, vals = jacobian(y, v, pv, pq)
+    _, s, _ = svd(_dense(n, cp, ri, vals))
+    return amin(s)
+}
+
+test "case9: the PV curve for 1 pu more at bus 5 has a nose, where the Jacobian is near singular" {
+    c = read_case("lib/power/cases/case9.m")
+    r = cpf(c, 4, SINK_SLACK, 0.5, 1.0, 0.7, 200, 1e-10, 1e-4, true)
+    assert_true(r.lam_max > 1.0)
+    assert_true(r.nose > 0 and r.nose < len(r.lam) - 1)
+    #: the curve passes the nose: the last point is below it, at a lower voltage
+    assert_true(r.lam[len(r.lam) - 1] < r.lam_max)
+    assert_true(r.v_poi[len(r.lam) - 1] < r.v_poi[r.nose])
+    assert_true(r.smin[r.nose] < 0.05 * r.smin[0])
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,86 @@
+###
+title: Put-call parity holds to rounding error
+line: Over 3,000 quotes parity holds to $10^{-15}$ of the spot, and early exercise of an American call never pays.
+claim: Over 3,000 European quotes, Black-Scholes call and put prices satisfy put-call parity to within $10^{-15}$ of the spot price (rounding only). On every 30th quote a 400-step binomial tree gives an American call on a non-dividend stock exactly the European call's price, so early exercise never pays, and the American put is never worth less than the European put.
+topic: finance
+section: option pricing
+reference: Put-call parity $C - P = Se^{-qT} - Ke^{-rT}$, which holds for European options under any model without arbitrage (Stoll, "The relationship between put and call option prices", J. Finance 24 (1969) 801-824); Merton (1973) for why an American call on a stock paying no dividend is never exercised early. The prices are examples/options/bs.viv and crr.viv, what vp.finance.bs_price and crr_price run.
+scope: 3,000 quotes on a grid (spot 60 to 150, strike 100, maturities 0.1 to 3 years, volatilities 10% to 50%, rate 3%, no dividend); the tree has 400 steps. Parity is a property of the formulas, so what this measures is the implementation's rounding.
+lane: ai
+by: claude
+cost: fast
+agree: 1e-12
+###
+
+from examples.options.bs import bs_price
+from examples.options.crr import crr_price
+
+STRIKE = 100.0
+RATE = 0.03
+DIV = 0.0
+N_SPOT: Int = 10
+N_MAT: Int = 6
+N_VOL: Int = 50
+TREE_STEPS: Int = 400
+#: the American comparisons on every 30th quote
+TREE_EVERY: Int = 30
+
+worst_parity = 0.0
+#: the worst parity residual at each spot, for the figure
+parity_by_spot = zeros(N_SPOT)
+worst_call_gap = 0.0
+min_put_premium = 1.0e30
+n_quotes: Int = 0
+for a to N_SPOT {
+    spot = 60.0 + 10.0 * a
+    for b to N_MAT {
+        mat = 0.1 + 0.58 * b
+        for c to N_VOL {
+            vol = 0.1 + 0.4 * c / (N_VOL - 1.0)
+            call = bs_price(spot, STRIKE, mat, RATE, DIV, vol, true)
+            put = bs_price(spot, STRIKE, mat, RATE, DIV, vol, false)
+            parity = call - put - (spot * exp(-DIV * mat) - STRIKE * exp(-RATE * mat))
+            worst_parity = max(worst_parity, abs(parity) / spot)
+            parity_by_spot[a] = max(parity_by_spot[a], abs(parity) / spot)
+            if n_quotes % TREE_EVERY == 0 {
+                am_call = crr_price(spot, STRIKE, mat, RATE, DIV, vol, TREE_STEPS, true, true)
+                eu_call = crr_price(spot, STRIKE, mat, RATE, DIV, vol, TREE_STEPS, true, false)
+                am_put = crr_price(spot, STRIKE, mat, RATE, DIV, vol, TREE_STEPS, false, true)
+                eu_put = crr_price(spot, STRIKE, mat, RATE, DIV, vol, TREE_STEPS, false, false)
+                worst_call_gap = max(worst_call_gap, abs(am_call - eu_call))
+                min_put_premium = min(min_put_premium, am_put - eu_put)
+            }
+            n_quotes = n_quotes + 1
+        }
+    }
+}
+show n_quotes
+show worst_parity
+show worst_call_gap
+show min_put_premium
+
+#: the figure: the worst parity residual at each spot price, against the 1e-15 bound
+PARITY_BOUND = 1.0e-15
+fg_spots = zeros(N_SPOT)
+for fg_a to N_SPOT {
+    fg_spots[fg_a] = 60.0 + 10.0 * fg_a
+}
+figure("Put-call parity residual over 3,000 quotes", "spot price", "worst |C - P - (S - K e^(-rT))| / S")
+yscale("log")
+plot([fg_spots[0], fg_spots[N_SPOT - 1]], [PARITY_BOUND, PARITY_BOUND], "bound 1e-15")
+style("bound 1e-15", "dash s6 nomarker thin")
+scatter(fg_spots, parity_by_spot, "worst residual at this spot")
+
+test "3,000 quotes satisfy put-call parity to 1e-15 of the spot" {
+    assert_true(n_quotes == 3000)
+    assert_lt(worst_parity, 1.0e-15)
+}
+test "the American call equals the European call exactly" {
+    assert_near(worst_call_gap, 0.0, 0.0)
+}
+test "the American put is never worth less than the European put" {
+    assert_true(min_put_premium >= 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

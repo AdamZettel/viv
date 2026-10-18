@@ -1,0 +1,121 @@
+# The Computer Language Benchmarks Game: fasta.
+# Reference: upstream/benchmarksgame/programs/fasta.python3-3.python3
+# (Ian Osgood, Heinrich Acker, Justin Peel, Christopher Sean Forgeron),
+# ported line by line. Differences: viv/NOTES.md.
+
+alu = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGG" + "GAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGA" + "CCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAAT" + "ACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCA" + "GCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGG" + "AGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCC" + "AGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+# iub = list(zip('acgtBDHKMNRSVWY', [0.27, 0.12, 0.12, 0.27] + [0.02] * 11))
+iub_chars = "acgtBDHKMNRSVWY"
+iub_probs = [0.27, 0.12, 0.12, 0.27, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+homosapiens_chars = "acgt"
+homosapiens_probs = [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+
+# make_cumulative: P, the running sums of the probabilities (C, the
+# characters, stay a string indexed by position)
+def make_cumulative(probs: Arr) {
+    P = zeros(len(probs))
+    prob = 0.0
+    for k to len(probs) {
+        prob += probs[k]
+        P[k] = prob
+    }
+    return P
+}
+
+# bisect.bisect (bisect_right): the index after the last entry <= x
+def bisect(a: Arr, x) {
+    lo = 0
+    hi = len(a)
+    while lo < hi {
+        mid = (lo + hi) // 2
+        if x < a[mid] {
+            hi = mid
+        }
+        else {
+            lo = mid + 1
+        }
+    }
+    return lo
+}
+
+def repeat_fasta(src, n) {
+    width = 60
+    is_trailing_line = false
+    count_modifier = 0.0
+
+    len_of_src = len(src)
+    s = src + src + src[:n % len_of_src]
+
+    if n % width != 0 {
+        is_trailing_line = true
+        count_modifier = 1.0
+    }
+
+    count = 0
+    end = (n / width) - count_modifier
+    while count < end {
+        i = count * 60 % len_of_src
+        print(s[i:i + 60])
+        count += 1
+    }
+    if is_trailing_line {
+        print(s[len(s) - (n % width):])
+    }
+    return 0
+}
+
+def random_fasta(chars, probs: Arr, n, seed) {
+    width = 60
+    is_trailing_line = false
+    count_modifier = 0.0
+
+    P = make_cumulative(probs)
+
+    im = 139968.0
+
+    if n % width != 0 {
+        is_trailing_line = true
+        count_modifier = 1.0
+    }
+
+    count = 0.0
+    end = (n / width) - count_modifier
+    while count < end {
+        line = []
+        for i to width {
+            seed = (seed * 3877.0 + 29573.0) % 139968.0
+            line = append(line, chars[bisect(P, seed / im)])
+        }
+        print(join("", line))
+        count += 1.0
+    }
+
+    if is_trailing_line {
+        line = []
+        for i to n % width {
+            seed = (seed * 3877.0 + 29573.0) % 139968.0
+            line = append(line, chars[bisect(P, seed / im)])
+        }
+        print(join("", line))
+    }
+    return seed
+}
+
+def main_() {
+    n = int(strip(read_text("N.txt")))
+    print(">ONE Homo sapiens alu")
+    repeat_fasta(alu, n * 2)
+
+    print(">TWO IUB ambiguity codes")
+    seed = random_fasta(iub_chars, iub_probs, n * 3, 42.0)
+
+    print(">THREE Homo sapiens frequency")
+    random_fasta(homosapiens_chars, homosapiens_probs, n * 5, seed)
+    return 0
+}
+
+main_()
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

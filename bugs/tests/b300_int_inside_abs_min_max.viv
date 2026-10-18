@@ -1,0 +1,26 @@
+# B301 (bugs/ledger.jsonl), found by vivsmith (tools/fuzz): `int(x)`, `len(a)`
+# and an integer literal are Ints where an Int is expected, but `abs`, `min`
+# and `max` of them, and a multiple-return slot holding one, are numbers:
+# `m: Int = abs(int(x))` is refused while `m: Int = abs(k)` (k: Int) is not.
+def g(x: Num) {
+    return x, int(x)
+}
+x = 2.5
+a = [1.0, 2.0]
+m1: Int = abs(int(x))
+m2: Int = min(int(x), int(x))
+m3: Int = max(len(a), 2)
+m4: Int = abs(-5)
+y, m5 = g(x)
+n: Int = m5
+print(m1, m2, m3, m4, n)
+
+test "abs, min and max of Ints are Ints" {
+    assert_true(m1 == 2)
+    assert_true(m2 == 2)
+    assert_true(m3 == 2)
+    assert_true(m4 == 5)
+    assert_true(n == 2)
+}
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

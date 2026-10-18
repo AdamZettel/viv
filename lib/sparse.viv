@@ -1,0 +1,81 @@
+###
+post: Sparse matrices in compressed sparse row form
+agent: claude
+
+A matrix with few nonzeros per row is stored as three arrays, the compressed
+sparse row form that NPB CG, SciPy's `csr_matrix` and most iterative solvers
+use. `vals[k]` is the k-th nonzero, row by row and left to right within a row,
+and `cols[k]` is its column. `rowptr[i]` is where row i starts in `vals`, so
+row i is `vals[rowptr[i]], ..., vals[rowptr[i + 1] - 1]`, and `rowptr[n]` is
+the number of nonzeros.
+
+`rowptr` and `cols` are Int arrays, so an index is never a rounded double.
+
+- `csr_matvec(rowptr, cols, vals, x, y)`: `y = A x`, written into `y`. Each
+  row's sum runs left to right, the order NPB CG's Fortran uses, so the
+  result is the reference's to the bit. Rows are independent, so the loop is
+  a `parallel for`: each pass writes only `y[i]`, which the compiler checks.
+- `csr_from_dense(M)`: the CSR arrays of a dense matrix, dropping zeros.
+- `csr_to_dense(rowptr, cols, vals, ncols)`: the dense matrix back, the
+  check member the tests compare against `@`.
+
+Used with `from sparse import csr_matvec`.
+###
+
+def csr_matvec(rowptr: [Int], cols: [Int], vals: Arr, x: Arr, y: Arr) {
+    rows: Int = len(rowptr) - 1
+    parallel for i to rows {
+        s = 0.0
+        for k from rowptr[i] to rowptr[i + 1] {
+            s += vals[k] * x[cols[k]]
+        }
+        y[i] = s
+    }
+}
+
+def csr_from_dense(M) {
+    n: Int = int(shape(M)[0])
+    m: Int = int(shape(M)[1])
+    nnz: Int = int(sum(M != 0.0))
+    rowptr = int_zeros(n + 1)
+    cols = int_zeros(nnz)
+    vals = zeros(nnz)
+    k: Int = 0
+    for i to n {
+        rowptr[i] = k
+        for j to m {
+            if M[i, j] != 0.0 {
+                cols[k] = j
+                vals[k] = M[i, j]
+                k += 1
+            }
+        }
+    }
+    rowptr[n] = k
+    return rowptr, cols, vals
+}
+
+def csr_to_dense(rowptr: [Int], cols: [Int], vals: Arr, ncols) {
+    n = len(rowptr) - 1
+    M = zeros(n, ncols)
+    for i to n {
+        for k from rowptr[i] to rowptr[i + 1] {
+            M[i, cols[k]] += vals[k]
+        }
+    }
+    return M
+}
+
+test "csr_matvec is A @ x for a small matrix with an empty row" {
+    A = [[4.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0], [2.0, -1.0, 0.0, 3.0]]
+    rowptr, cols, vals = csr_from_dense(A)
+    assert_true(rowptr[3] == 5)
+    x = [1.0, 2.0, 3.0, 4.0]
+    y = zeros(3)
+    csr_matvec(rowptr, cols, vals, x, y)
+    assert_allclose(y, A @ x, 0.0)
+    assert_allclose(csr_to_dense(rowptr, cols, vals, 4), A, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

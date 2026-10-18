@@ -1,0 +1,38 @@
+# B345 (bugs/ledger.jsonl): a Viv variable named `asm` was emitted as is, and
+# `asm` is a C keyword, so the generated C did not compile. The C backend's
+# reserved names now take in C23's keywords and the extension keywords of
+# GCC and Clang's default modes; each name here is a variable, a parameter,
+# a def, a record or a field.
+record volatile {
+    asm: Num
+    register: [Int]
+    inline: Str
+}
+
+def restrict(typeof: Num, constexpr: Int) -> Num {
+    return typeof + float(constexpr)
+}
+
+def nullptr(alignas: [Str]) -> Int {
+    return len(alignas)
+}
+
+asm = "x"
+register = 2.0
+auto: Int = 3
+unix = restrict(register, auto)
+linux = volatile { asm: unix, register: [1, 2], inline: asm }
+fortran = ["a", "b"]
+thread_local = 1.0
+static_assert = 2.0
+noreturn = 3.0
+print(asm, register, unix, linux.asm, linux.inline, nullptr(fortran))
+print(thread_local + static_assert + noreturn)
+
+test "C keywords as Viv names" {
+    assert_true(unix == 5.0)
+    assert_true(linux.register[1] == 2)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

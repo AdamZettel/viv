@@ -1,0 +1,354 @@
+###
+post: The lowest eigenpairs of a symmetric operator, by Lanczos or from its matrix
+agent: claude
+
+`lowest_eigenpairs(apply_h, n, k)` is a contract: the
+k lowest eigenvalues of a symmetric operator on n-vectors, with their
+eigenvectors, lowest first. The operator is a function, `apply_h(x)`
+returning H x (the methods call it `op`), so the caller never builds the matrix unless a method does.
+
+- `lanczos` keeps every vector and orthogonalizes each new one against all
+  of them twice (full reorthogonalization), and restarts with the lowest
+  Ritz vectors when the basis reaches `krylov` vectors (thick restart, Wu
+  and Simon, SIAM Journal on Matrix Analysis and Applications 22, 602
+  (2000)). It stops when the k lowest Ritz pairs all have residual norm
+  under `tol`, or after `max_iter` products.
+- the dense methods form the matrix (`build_matrix` applies H to every
+  unit vector), then find every eigenpair: `householder_ql` by Householder
+  reduction and implicit QL, `jacobi` by cyclic Jacobi rotations (both from
+  lib/hf/eigen). The matrix holds n^2 numbers, so they stop above
+  LOWEST_DENSE_MAX.
+
+The Lanczos loop came from lib/nuclear/shell, whose design follows
+BIGSTICK, which carries this notice:
+
+Copyright (c) 2017 Lawrence Livermore National Security and San Diego State
+University Research Foundation. Permission is hereby granted, free of
+charge, to any person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software,
+and to permit persons to whom the Software is furnished to do so, subject
+to the following conditions: The above copyright notice and this
+permission notice shall be included in all copies or substantial portions
+of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED.
+###
+
+from hf.eigen import eig_jacobi, eig_ql, eig_values, eig_vectors
+
+#: LOWEST_BREAKDOWN  a Lanczos vector shorter than this means the Krylov
+#:     space is invariant: the basis spans the states it can reach
+LOWEST_BREAKDOWN = 1.0e-12
+
+#: LOWEST_CHECK_EVERY  how many Lanczos steps pass between diagonalizations
+#:     of the projected matrix to test convergence (a restart always tests)
+LOWEST_CHECK_EVERY: Int = 5
+
+#: LOWEST_DENSE_MAX  the largest n `build_matrix` will store: 8000^2
+#:     numbers are 512 MB
+LOWEST_DENSE_MAX: Int = 8000
+
+#: LOWEST_KRYLOV_MIN  the fewest Lanczos vectors kept by default (ARPACK's
+#:     and SciPy's eigsh rule: max(2 k + 1, 20))
+LOWEST_KRYLOV_MIN: Int = 20
+
+#: LOWEST_TOL  the default largest residual norm |H v - E v| of a converged
+#:     Lanczos pair
+LOWEST_TOL = 1.0e-8
+
+#: LOWEST_MAX_ITER  the default cap on Lanczos products
+LOWEST_MAX_ITER: Int = 2000
+
+#: default_krylov  how many Lanczos vectors to keep for the k lowest of n:
+#:     max(2 k + 1, LOWEST_KRYLOV_MIN), at most n
+def default_krylov(n: Int, k: Int) -> Int {
+    m: Int = 2 * k + 1
+    if m < LOWEST_KRYLOV_MIN {
+        m = LOWEST_KRYLOV_MIN
+    }
+    if m > n {
+        m = n
+    }
+    return m
+}
+
+#: start_vector  a fixed vector with no symmetry, so it overlaps every state
+def start_vector(n: Int) -> Arr {
+    v = zeros(n)
+    nrm = 0.0
+    for i to n {
+        v[i] = sin(0.7 * float(i) + 0.7) + 0.5 * cos(1.3 * float(i)) + 0.01
+        nrm = nrm + v[i] * v[i]
+    }
+    nrm = sqrt(nrm)
+    for i to n {
+        v[i] = v[i] / nrm
+    }
+    return v
+}
+
+#: lanczos  the nev lowest eigenpairs of the operator op by thick-restart
+#:     Lanczos with full reorthogonalization. At `krylov` vectors (at most n)
+#:     the basis restarts from the lowest Ritz vectors, half way between nev
+#:     and krylov. A Ritz pair's residual norm is beta * |last component of
+#:     its eigenvector of T|, tested every LOWEST_CHECK_EVERY steps; the run
+#:     stops when the nev lowest are all under tol, or after max_iter products.
+#:     Returns the values and the Ritz vectors [nev, n]
+def lanczos(op, n: Int, nev: Int, krylov: Int = default_krylov(n, nev), tol: Num = LOWEST_TOL, max_iter: Int = LOWEST_MAX_ITER) {
+    kmax: Int = krylov
+    if kmax > n {
+        kmax = n
+    }
+    if kmax < nev + 2 and kmax < n {
+        stop("lanczos: krylov must exceed the number of states by at least 2")
+    }
+    keep: Int = nev + (kmax - nev) // 2
+    if keep >= kmax {
+        keep = kmax - 1
+    }
+    Q = zeros(kmax + 1, n)
+    T = zeros(kmax, kmax)
+    q = start_vector(n)
+    for i to n {
+        Q[0, i] = q[i]
+    }
+    x = zeros(n)
+    w = zeros(n)
+    j: Int = 0
+    iters: Int = 0
+    done = false
+    converged = false
+    theta = zeros(1)
+    Y = zeros(1, 1)
+    m: Int = 0
+    while not done {
+        for i to n {
+            x[i] = Q[j, i]
+        }
+        w = op(x)
+        iters += 1
+        # classical Gram-Schmidt, twice; the rows of Q past j are zero
+        for pass to 2 {
+            h = Q @ w
+            w = w - h @ Q
+            for r to j + 1 {
+                T[r, j] = T[r, j] + h[r]
+                if r != j {
+                    T[j, r] = T[r, j]
+                }
+            }
+        }
+        beta = sqrt(dot(w, w))
+        m = j + 1
+        stopping = beta < LOWEST_BREAKDOWN or m == n or iters >= max_iter
+        if stopping or m == kmax or (m >= nev and iters % LOWEST_CHECK_EVERY == 0) {
+            Tm = zeros(m, m)
+            for a to m {
+                for b to m {
+                    Tm[a, b] = T[a, b]
+                }
+            }
+            theta, Y = eig_sym(Tm)
+            nwant: Int = nev
+            if m < nwant {
+                nwant = m
+            }
+            worst = 0.0
+            for k to nwant {
+                res = abs(beta * Y[m - 1, k])
+                if res > worst {
+                    worst = res
+                }
+            }
+            if m >= nev and worst < tol {
+                done = true
+                converged = true
+            }
+            if beta < LOWEST_BREAKDOWN or m == n {
+                done = true
+                converged = m >= nev
+            }
+            if iters >= max_iter {
+                done = true
+            }
+        }
+        if not done {
+            if m == kmax {
+                # thick restart: the keep lowest Ritz vectors, then the residual
+                Qk = zeros(keep, n)
+                for k to keep {
+                    for r to m {
+                        c = Y[r, k]
+                        for i to n {
+                            Qk[k, i] = Qk[k, i] + c * Q[r, i]
+                        }
+                    }
+                }
+                for a to kmax {
+                    for b to kmax {
+                        T[a, b] = 0.0
+                    }
+                }
+                for k to keep {
+                    for i to n {
+                        Q[k, i] = Qk[k, i]
+                    }
+                    T[k, k] = theta[k]
+                }
+                for i to n {
+                    Q[keep, i] = w[i] / beta
+                }
+                for k from keep + 1 to kmax + 1 {
+                    for i to n {
+                        Q[k, i] = 0.0
+                    }
+                }
+                j = keep
+            }
+            else {
+                for i to n {
+                    Q[j + 1, i] = w[i] / beta
+                }
+                j += 1
+            }
+        }
+    }
+    nout: Int = nev
+    if m < nout {
+        nout = m
+    }
+    values = zeros(nout)
+    vecs = zeros(nout, n)
+    for k to nout {
+        values[k] = theta[k]
+        for r to m {
+            c = Y[r, k]
+            for i to n {
+                vecs[k, i] = vecs[k, i] + c * Q[r, i]
+            }
+        }
+    }
+    return values, vecs
+}
+
+#: build_matrix  the n by n matrix of the operator op: column i is op
+#:     applied to the i-th unit vector. It holds n^2 numbers, so it stops
+#:     above LOWEST_DENSE_MAX
+def build_matrix(op, n: Int) -> Arr {
+    if n > LOWEST_DENSE_MAX {
+        stop(f"build_matrix: n is {n}, more than LOWEST_DENSE_MAX = {LOWEST_DENSE_MAX}; use lanczos")
+    }
+    H = zeros(n, n)
+    x = zeros(n)
+    for i to n {
+        x[i] = 1.0
+        y = op(x)
+        x[i] = 0.0
+        for r to n {
+            H[r, i] = y[r]
+        }
+    }
+    return H
+}
+
+#: eig_householder_ql  every eigenpair of the symmetric matrix A by
+#:     Householder reduction and implicit QL (lib/hf/eigen), ascending: the
+#:     values, and the vectors as the columns of a matrix
+def eig_householder_ql(A: Arr) {
+    R = eig_ql(A, A, A)
+    return eig_values(R), eig_vectors(R)
+}
+
+#: eig_cyclic_jacobi  every eigenpair of the symmetric matrix A by cyclic
+#:     Jacobi rotations (lib/hf/eigen, Golub and Van Loan's row order),
+#:     ascending: the values, and the vectors as columns
+def eig_cyclic_jacobi(A: Arr) {
+    R = eig_jacobi(A, A, A)
+    return eig_values(R), eig_vectors(R)
+}
+
+#: lowest_of  the nev lowest of ascending values and their column vectors
+#:     V, as values [nev] and vectors [nev, n]
+def lowest_of(values: Arr, V: Arr, nev: Int) {
+    n = len(values)
+    nout: Int = nev
+    if n < nout {
+        nout = n
+    }
+    low = zeros(nout)
+    vecs = zeros(nout, n)
+    for k to nout {
+        low[k] = values[k]
+        for i to n {
+            vecs[k, i] = V[i, k]
+        }
+    }
+    return low, vecs
+}
+
+#: householder_ql  the nev lowest eigenpairs of op, from its matrix by
+#:     Householder reduction and QL
+def householder_ql(op, n: Int, nev: Int) {
+    values, V = eig_householder_ql(build_matrix(op, n))
+    return lowest_of(values, V, nev)
+}
+
+#: jacobi  the nev lowest eigenpairs of op, from its matrix by cyclic Jacobi
+def jacobi(op, n: Int, nev: Int) {
+    values, V = eig_cyclic_jacobi(build_matrix(op, n))
+    return lowest_of(values, V, nev)
+}
+
+contract lowest_eigenpairs(apply_h, n: Int, k: Int) -> values: Arr, vectors: Arr {
+    intent "the k lowest eigenvalues of a symmetric operator on n-vectors, with eigenvectors, lowest first"
+    methods
+        iterative: lanczos
+        dense: householder_ql, jacobi
+    agree values within relative 1.0e-8
+}
+
+#: laplacian_1d  the second-difference operator on n points with zero ends:
+#:     (H x)[i] = 2 x[i] - x[i - 1] - x[i + 1], whose eigenvalues are
+#:     2 - 2 cos(j pi / (n + 1)), j = 1 .. n
+def laplacian_1d(x: Arr) -> Arr {
+    n = len(x)
+    y = zeros(n)
+    for i to n {
+        y[i] = 2.0 * x[i]
+        if i > 0 {
+            y[i] = y[i] - x[i - 1]
+        }
+        if i < n - 1 {
+            y[i] = y[i] - x[i + 1]
+        }
+    }
+    return y
+}
+
+test "every method finds the exact lowest eigenvalues of the 1-D Laplacian" {
+    n: Int = 60
+    k: Int = 4
+    exact = zeros(k)
+    for j to k {
+        exact[j] = 2.0 - 2.0 * cos(float(j + 1) * pi / float(n + 1))
+    }
+    lz, vl = lowest_eigenpairs(fn(x) -> laplacian_1d(x), n, k)
+    dn, vd = lowest_eigenpairs(fn(x) -> laplacian_1d(x), n, k) using householder_ql
+    jc, vj = lowest_eigenpairs(fn(x) -> laplacian_1d(x), n, k) using jacobi
+    dense, vds = lowest_eigenpairs(fn(x) -> laplacian_1d(x), n, k) using every dense method
+    tight, vt = lanczos(fn(x) -> laplacian_1d(x), n, k, tol = 1.0e-12)
+    every, ve = lowest_eigenpairs(fn(x) -> laplacian_1d(x), n, k) using every method
+    for j to k {
+        assert_near(dn[j], exact[j], 1.0e-12)
+        assert_near(jc[j], exact[j], 1.0e-12)
+        assert_near(dense[j], dn[j], 0.0)
+        assert_near(tight[j], exact[j], 1.0e-12)
+        assert_near(lz[j], exact[j], 1.0e-9)
+        assert_near(every[j], lz[j], 0.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2017 Lawrence Livermore National Security and San Diego State University Research Foundation
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,252 @@
+# The architecture lens of the Hartree-Fock code.
+#
+# It says which layer each module belongs to, which way the layers may depend
+# on each other, what the code may cost a program (budgets), and which stages
+# have several implementations of the same intent (multi-paths). `viv arch
+# check` holds the code to it; `viv arch report scf/story_water.viv` measures
+# one program against it. What the code does not meet yet is recorded in
+# arch_ratchet.json, and may only go down.
+
+system hf  Hartree-Fock: from a molecule and a basis set to the SCF energy
+  covers   lib/hf lib/basis lib/hfref scf lib/xyz
+
+# ---- the library, bottom to top ------------------------------------------------
+
+layer input  library
+  what     the molecule and the basis set: atoms, shells, primitives, and the run's options
+  modules  lib/xyz lib/basis/* lib/hf/basis lib/hf/molecule lib/hf/mole lib/hf/opts
+
+layer integrals  library
+  what     one- and two-electron integrals over the basis, and their move to spherical functions
+  modules  lib/hf/boys lib/hf/hermite lib/hf/md_onebody lib/hf/os_onebody lib/hf/gh_onebody
+           lib/hf/md_eri lib/hf/md_direct lib/hf/mdg_kernels lib/hf/mdg_eri
+           lib/hf/hgp_eri lib/hf/rys_eri lib/hf/eri_store
+           lib/hf/cart2sph lib/hf/transform lib/hf/ao
+
+layer scf  library
+  what     the self-consistent field: orthogonalizer, guess, J and K, Fock matrix, DIIS, eigensolver
+  modules  lib/hf/eigen lib/hf/orthogonalize lib/hf/density lib/hf/jk lib/hf/jk_direct
+           lib/hf/guess lib/hf/accelerate lib/hf/coupling lib/hf/scf_loop
+
+layer response  library
+  what     what is computed from a converged SCF: stability, excitation energies
+  modules  lib/hf/stab lib/hf/casida
+
+layer results  library
+  what     the pipeline behind one call: a molecule in, an energy and orbitals out
+  modules  lib/hf/scf
+
+layer programs  program
+  what     programs that use the library to compute something
+  modules  scf/story_* scf/molecule_text scf/stability lib/hf/gallery/*
+
+# ---- verification: may use anything, and nothing in the library may use it -------
+
+layer crosscheck  verification
+  what     the registries and drivers that run every member of a stage and require
+           agreement (lib/hf/integrals is the integrals' contract page), the pipeline
+           with every integral cross-checked (lib/hf/hf), and the interval and fuzz checks
+  modules  lib/hf/integrals lib/hf/hf lib/hf/sweep lib/hf/iv_sweep lib/hf/interval lib/hf/iv_boys
+           lib/hf/iv_ints lib/hf/fuzz
+
+layer tests  verification
+  what     the library's tests that need reference data or the sweep drivers: each
+           module's in lib/hf/tests/<module>, and lib/hf/rhf, uhf and rohf, which hold
+           the RHF, UHF and ROHF checks against PySCF and no library code
+  modules  lib/hf/tests/* lib/hf/rhf lib/hf/uhf lib/hf/rohf
+
+layer reference  verification
+  what     numbers computed elsewhere (PySCF, mpmath) that the tests compare against
+  modules  lib/hfref/*
+
+layer locks  verification
+  what     programs that lock the code to PySCF, and the metamorphic and coverage runs
+  modules  scf/lock_* scf/meta_* scf/coverage scf/iv_bridge scf/legacy_bridge
+           scf/molecule_packs scf/suite/**
+
+order  input < integrals < scf < response < results < programs
+
+# Code every member of a stage may share without the members counting as one
+# implementation: a fault in it is caught by the reference tests, not by
+# agreement between members.
+shared  lib/hf/basis lib/hf/eri_store lib/hf/opts lib/hf/boys
+  why   the basis table's accessors, the packed-8 index, the options vector, and the
+        Boys function, which is a multi-path of its own checked against mpmath
+
+# The basis table's column layout belongs to the modules that define and build
+# the tables.
+private  AT_* SH_* PR_*
+  owner  lib/hf/basis lib/basis/basis lib/hf/molecule
+  why    the atoms, shells and primitives tables are decoded by lib/hf/basis's accessors
+         (shell_l, shell_atom, shell_cart0, shell_sph0) and built by lib/hf/molecule; a module that
+         reads the columns itself breaks when the layout changes. The integral kernels
+         (md_onebody, os_onebody, gh_onebody, md_eri, md_direct, hgp_eri, rys_eri) and
+         the spherical transforms still read them in their loops: an accessor call
+         there cost 5% of md1_all in the interpreter, 13% in wasm and 4% native, and
+         2 to 7% of tr2_blocks and tr4_blocks (2026-10-01), so they wait for arrays of records
+
+# ---- budgets --------------------------------------------------------------------
+
+budget program scf/story_water
+  modules  20
+  defs     400
+  depth    10
+  why      a water SCF should load the basis set it uses and not the tests of every
+           module, and reach any integral in ten calls from the top
+
+budget def scf_method
+  fanin    2
+  why      the RHF, UHF or ROHF decision belongs where the setup is made, once
+
+budget def scf_with
+  reach    scf_iterate 3
+  why      the public entry point should reach the SCF loop without passing through
+           the older API
+
+# ---- multi-paths: one intent, several implementations that must agree ------------
+
+multipath contract  contracted coefficients of the basis functions, normalized
+  intent    int_contract
+  registry  int_contract_methods
+  members   int_contract_closed bas_contract_numeric bas_contract_numeric_os
+  default   int_contract_closed
+  contract  int_contract within INT_TOL_CN
+  checked   [test "the numeric contraction agrees with the closed form on water 6-31G* and random shells"]
+
+multipath overlap  the overlap matrix S
+  intent    int_overlap
+  registry  int_overlap_methods
+  members   md1_s os_overlap gh_overlap
+  default   md1_s
+  contract  int_overlap within INT_TOL_ONE
+  checked   [test "S, T and V from every member match PySCF on water 6-31G*"]
+
+multipath kinetic  the kinetic energy matrix T
+  intent    int_kinetic
+  registry  int_kinetic_methods
+  members   md1_t os_kinetic gh_kinetic
+  default   md1_t
+  contract  int_kinetic within INT_TOL_ONE
+  checked   [test "S, T and V from every member match PySCF on water 6-31G*"]
+
+multipath nuclear  the nuclear attraction matrix V
+  intent    int_nuclear
+  registry  int_nuclear_methods
+  members   md1_v os_nuclear
+  default   md1_v
+  contract  int_nuclear within INT_TOL_ONE
+  checked   [test "S, T and V from every member match PySCF on water 6-31G*"]
+
+multipath eri  the electron repulsion integrals (ij|kl), packed eightfold
+  intent    int_eri
+  registry  int_eri_methods
+  members   mdg_screened mderi_screened mderi_full hgp_eri rys_eri
+  default   mdg_screened
+  contract  int_eri within INT_TOL_ERI
+  checked   [test "all five ERI members agree on water STO-3G and match PySCF's full set"]
+
+multipath c2s  the Cartesian-to-spherical matrix of one angular momentum
+  intent    int_c2s
+  registry  int_c2s_methods
+  members   int_c2s_closed int_c2s_general
+  default   int_c2s_closed
+  contract  int_c2s within INT_TOL_C2S
+  checked   [test "the spherical transforms reproduce PySCF's 5D water 6-31G* integrals"]
+
+multipath sph2  a one-electron matrix moved to spherical functions
+  intent    int_sph2
+  registry  int_tr2_methods
+  members   tr2_blocks tr2_dense
+  default   tr2_blocks
+  contract  int_sph2 within INT_TOL_TR
+  checked   [test "the spherical transforms reproduce PySCF's 5D water 6-31G* integrals"]
+
+multipath sph4  the electron repulsion integrals moved to spherical functions
+  intent    int_sph4
+  registry  int_tr4_methods
+  members   tr4_blocks tr4_quarter
+  default   tr4_blocks
+  contract  int_sph4 within INT_TOL_TR
+  checked   [test "the spherical transforms reproduce PySCF's 5D water 6-31G* integrals"]
+
+multipath boys  the Boys function F_n(x) for every order up to n
+  intent    boys_values
+  registry  boys_methods
+  members   boys_asym_up boys_series_down boys_quadrature boys_taylor
+  default   boys_series_down
+  contract  within 1e-13 of mpmath [test "the series, the quadrature and the Taylor step each match mpmath to 1e-13"]
+  checked   [test "the series, the quadrature and the Taylor step each match mpmath to 1e-13"]
+
+multipath eri_sph  the electron repulsion integrals over spherical functions
+  registry  int_eri_sph_methods
+  members   mdg_sph mderi_sph tr4_two_pass
+  default   mdg_sph
+  contract  within 1e-14 [test "spherical ERIs block by block match the two-pass transform, and PySCF's 5D water 6-31G* set"]
+  checked   [test "spherical ERIs block by block match the two-pass transform, and PySCF's 5D water 6-31G* set"]
+
+multipath jk  the Coulomb and exchange matrices J and K of a density
+  intent    jk_of
+  registry  int_jk_methods
+  members   jk_packed jk_pairs jk_dense int_jk_direct int_jk_direct_full
+  default   jk_packed
+  contract  int_jk within INT_TOL_JK
+  checked   [test "the three members agree to 1e-12 on water 6-31G (one density) and OH (two)"]
+            [test "direct J/K agrees with the in-core members, Cartesian and spherical"]
+
+multipath jk_build  the next J and K of an SCF iteration: from the change of density or the whole density
+  registry  jk_build_methods
+  members   jk_update jk_rebuild
+  default   jk_update
+  contract  within 1e-12 relative [test "J and K from a change of density, added to the last ones, are the whole build's"]
+  checked   [test "J and K from a change of density, added to the last ones, are the whole build's"]
+            [test "the incremental Fock build lands on the full build's energy, direct and spherical"]
+
+multipath orth  an orthogonalizer X with X^T S X = I
+  intent    orth_of
+  registry  orth_methods
+  members   orth_canon orth_symm orth_chol orth_gs
+  default   orth_canon
+  contract  X^T S X = I within 1e-12 [test "every member gives X^T S X = I to 1e-12 on water 6-31G, water 6-31G* (5D) and He cc-pVDZ"]
+  checked   [test "every member gives X^T S X = I to 1e-12 on water 6-31G, water 6-31G* (5D) and He cc-pVDZ"]
+
+multipath eig  the eigenvalues and eigenvectors of a symmetric matrix
+  intent    eig_of
+  registry  eig_methods
+  members   eig_ql eig_jacobi eig_builtin
+  default   eig_ql
+  contract  eigenvalues within 1e-12 [test "the sweep over the registry agrees on eigenvalues and blames a planted bug"]
+  checked   [test "the three solvers agree on 12 seeded random matrices up to 19 x 19"]
+            [test "the sweep over the registry agrees on eigenvalues and blames a planted bug"]
+
+multipath accel  the next Fock matrix from the history of the iterations
+  intent    accel_extrapolate
+  registry  accel_methods
+  members   accel_cdiis accel_none accel_damp
+  default   accel_cdiis
+  contract  on the converged energy and density, not on each step [test "every preset on water 6-31G converges to PySCF's energy and density"]
+  checked   [test "every preset on water 6-31G converges to PySCF's energy and density"]
+
+multipath guess  the starting density of the SCF
+  intent    gs_of
+  registry  gs_methods
+  members   gs_avg gs_core gs_gwh gs_zero gs_import
+  default   gs_avg
+  contract  on the converged energy, not on the start [test "every preset on water 6-31G converges to PySCF's energy and density"]
+  checked   [test "every preset on water 6-31G converges to PySCF's energy and density"]
+
+# ---- stages with one implementation ----------------------------------------------
+
+stage fock  the Fock matrix F = H + J - K/2
+  members   den_fock
+
+stage energy  the electronic energy from H, F and D
+  members   den_energy
+
+stage commutator  the error vector FDS - SDF that DIIS and the convergence test read
+  members   scf_commutator
+
+stage density  the density from the occupied orbitals
+  members   den_from_vectors
+
+stage nuclear_repulsion  the repulsion of the nuclei
+  members   mol_enuc

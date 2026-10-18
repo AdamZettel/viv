@@ -1,0 +1,152 @@
+module lib/hf/casida  documents every variable
+  Excitation energies of a closed-shell molecule from its Hartree-Fock
+  ground state, by linear response: the Casida equation.
+
+  A molecule absorbs light at the energies of its excited states above the
+  ground state, its excitation energies. Hartree-Fock gives only the ground
+  state: a set of doubly occupied orbitals. Linear response asks how that
+  state responds to a weak field oscillating at frequency $\omega$; the
+  response diverges at the $\omega$ that are excitation energies, and those
+  solve an eigenvalue problem in the space of occupied-virtual pairs $ia$
+  (an electron moved from occupied orbital $i$ to virtual orbital $a$).
+
+  Two matrices over those pairs describe it. $A$ couples one excitation to
+  another: the orbital energy difference $\varepsilon_a - \varepsilon_i$ on
+  its diagonal, plus the change of the electrons' repulsion. $B$ couples an
+  excitation to a de-excitation (an electron moved back). Keeping $B$ gives
+  time-dependent Hartree-Fock (TDHF), also called the random-phase
+  approximation; dropping it leaves $A$ alone, the Tamm-Dancoff
+  approximation (TDA), which is configuration interaction with single
+  excitations. Singlets and triplets (total spin 0 and 1) have different
+  $A$ and $B$.
+
+casida_mo  @e893a2f6
+  how   The orbitals are the eigenvectors of the Fock matrix built from the
+        converged density (lib/hf/stab's orbital pack). The Fock matrix in
+        that orbital basis is diagonal, and its diagonal is the orbital
+        energies. The two-electron integrals move from the atomic-orbital
+        basis to the orbitals by four quarter transformations, one index
+        at a time.
+  why   The Casida matrices are written in the orbital basis: their entries
+        are orbital energies and integrals over orbitals, not over the
+        atomic basis functions the SCF works in.
+  p     the SCF setup: $H$, $S$, the packed integrals, the electron counts
+  r     the converged RHF result
+  n     the number of basis functions
+  orb   the orbital pack `[1, n + 1, m]`: the orbitals' coefficients on the
+        basis functions, and a row of occupation flags
+  m     the number of orbitals, occupied and virtual
+  Fm    the Fock matrix in the orbital basis, `[1, m, m]`: diagonal, since
+        the orbitals are its eigenvectors
+  eps   $\varepsilon$  the orbital energies, lowest first, hartree
+  q     an orbital
+  M     $(pq|rs)$  the two-electron integrals over orbitals, `[m, m, m, m]`
+  nocc  the number of doubly occupied orbitals
+
+  orbitals   the orbitals: the eigenvectors of the Fock matrix of the converged density
+  energies   the orbital energies: the diagonal of the Fock matrix in the orbital basis
+    run        The orbital energies are {eps} hartree, lowest first; the first nocc are occupied.
+  integrals  the two-electron integrals over orbitals, from the atomic-orbital ones by four quarter transformations
+    $$ (pq|rs) = \sum_{\mu\nu\lambda\sigma} C_{\mu p} C_{\nu q} C_{\lambda r} C_{\sigma s}\, (\mu\nu|\lambda\sigma) $$
+
+casida_ab  @9bc8110b
+  how   One pass over every pair of pairs $(ia, jb)$. The pair $ia$ is
+        stored at index `i * nvir + a`, with $a$ counted from the first
+        virtual orbital.
+  why   The triplet matrices lack the Coulomb term $2(ia|jb)$: a triplet
+        excitation flips a spin, and a spin flip moves no net charge, so
+        there is no change of the classical repulsion to add.
+  eps    $\varepsilon$  the orbital energies
+  M      $(pq|rs)$  the integrals over orbitals
+  nocc   $n_o$  the number of occupied orbitals
+  nvir   $n_v$  the number of virtual orbitals
+  spin   `0` for singlets, `1` for triplets
+  A      $A$  the excitation-excitation matrix, `[nov, nov]`
+  B      $B$  the excitation-de-excitation matrix
+  coul   $c$  the weight of the Coulomb term: `2` for singlets, `0` for triplets
+  i      $i$  an occupied orbital
+  a      $a$  a virtual orbital, counted from the first virtual one
+  ia     the row: the pair $ia$
+  j      $j$  an occupied orbital
+  b      $b$  a virtual orbital, counted from the first virtual one
+  jb     the column: the pair $jb$
+
+  $$ A_{ia,jb} = \delta_{ij}\delta_{ab}(\varepsilon_a - \varepsilon_i) + c\,(ia|jb) - (ij|ab), \qquad B_{ia,jb} = c\,(ia|jb) - (ib|ja) $$  [hold "A is symmetric"]
+  = A#2  the Coulomb term, the classical repulsion of the charge moved, minus the exchange term $(ij|ab)$
+  = B#2  the same Coulomb term, minus the exchange term that couples to the de-excitation, $(ib|ja)$
+  = A#3  on the diagonal, the orbital energy difference: the excitation energy if the electrons did not rearrange
+
+casida_tda  @132f3c19
+  why   TDA is the symmetric eigenvalue problem $A X = \omega X$: the
+        excitations interact with each other and not with the
+        de-excitations
+        [test "for one occupied-virtual pair TDA gives A and TDHF gives sqrt(A^2 - B^2)"].
+        eig_sym reads A and leaves it as it was, for TDHF.
+  A  $A$  the excitation-excitation matrix
+  n  the number of occupied-virtual pairs
+  w  $\omega$  the eigenvalues, the TDA excitation energies
+  V  the eigenvectors, the amplitudes $X$ (not used further)
+
+casida_tdhf  @af654937
+  how   The TDHF problem has size $2n$ and is not symmetric. Adding and
+        subtracting its two block rows gives $(A + B)(X + Y) = \omega (X - Y)$
+        and $(A - B)(X - Y) = \omega (X + Y)$, so
+        $(A - B)(A + B)(X + Y) = \omega^2 (X + Y)$. With $R = (A - B)^{1/2}$
+        and $Z = R^{-1}(X + Y)$ this is the symmetric problem
+        $R (A + B) R\, Z = \omega^2 Z$ of size $n$.
+  why   A symmetric problem has real eigenvalues and orthogonal
+        eigenvectors, and a standard solver handles it
+        [test "for one occupied-virtual pair TDA gives A and TDHF gives sqrt(A^2 - B^2)"].
+        The square root needs $A - B$ positive definite; otherwise the
+        energies come back as $-1$
+        [test "an A - B that is not positive definite gives -1 in place of the TDHF energies"].
+  A     $A$  the excitation-excitation matrix
+  B     $B$  the excitation-de-excitation matrix
+  n     the number of occupied-virtual pairs
+  w     the eigenvalues of $A - B$
+  V     the eigenvectors of $A - B$; later of the folded matrix
+  wmin  the lowest eigenvalue of $A - B$
+  Vs    the eigenvectors of $A - B$, each times the square root of its eigenvalue
+  k     an eigenvector
+  R     $(A - B)^{1/2}$  the square root of $A - B$
+  C     $R (A + B) R$  the folded, symmetric matrix
+  lam   $\omega^2$  its eigenvalues
+  om    $\omega$  the TDHF excitation energies, ascending
+
+  $$ \begin{pmatrix} A & B \\ -B & -A \end{pmatrix}\begin{pmatrix} X \\ Y \end{pmatrix} = \omega \begin{pmatrix} X \\ Y \end{pmatrix} \quad\Rightarrow\quad (A - B)^{1/2} (A + B) (A - B)^{1/2} Z = \omega^2 Z $$  [test "for one occupied-virtual pair TDA gives A and TDHF gives sqrt(A^2 - B^2)"]
+  stability    the eigenvalues and eigenvectors of A - B, and the lowest of them
+    why          $A - B$ positive definite means no rotation of the orbitals into complex ones lowers the energy: the ground state is stable against those rotations [hold "A - B is positive definite: the ground state is stable against these rotations"]. For a closed shell the Coulomb terms of $A$ and $B$ cancel in $A - B$, so singlets and triplets share it.
+    run          The lowest eigenvalue of $A - B$ is {wmin} hartree.
+  square_root  R, the square root of A - B, from its eigenvectors and the square roots of its eigenvalues
+    $$ R = (A - B)^{1/2} = V\, \mathrm{diag}(\sqrt{w})\, V^\top $$
+  fold         the symmetric matrix C = R (A + B) R
+    $$ C = (A - B)^{1/2} (A + B) (A - B)^{1/2} $$  [hold "the folded matrix is symmetric"]
+  solve        the eigenvalues of C are the squares of the TDHF energies: their square roots, ascending
+  return the energies
+
+casida_solve  @433df73f
+  how   Build $A$ and $B$ for the spin kind, then solve the TDA problem with
+        $A$ and the TDHF problem with both.
+  why   The lowest TDHF energy is never above the lowest TDA energy. The
+        lowest TDHF $\omega$ is the minimum of a ratio over vectors
+        $(X, Y)$; the vectors with $Y = 0$ are among them, and over those
+        the ratio's minimum is the lowest TDA energy
+        [hold "the lowest TDHF energy is not above the lowest TDA energy"].
+  mo           what the ground state gives: orbital energies, integrals over orbitals, and the occupied and virtual counts
+  spin         CASIDA_SINGLET or CASIDA_TRIPLET
+  nov          the number of occupied-virtual pairs, the size of $A$ and $B$
+  A            $A$  the excitation-excitation matrix
+  B            $B$  the excitation-de-excitation matrix
+  tda          the TDA energies, ascending, hartree
+  lowest_tda   the lowest TDA energy
+  tdhf         the TDHF energies, ascending, hartree
+  lowest_tdhf  the lowest TDHF energy
+
+  build  A and B for this spin kind, from the orbital energies and the integrals
+    run    Each is {nov} by {nov}: one row per occupied-virtual pair.
+  tda    the TDA energies: the eigenvalues of A
+    run    The lowest is {lowest_tda} hartree.
+  tdhf   the TDHF energies, with B
+    predict  $B$ couples each excitation to the de-excitations. Will the lowest energy move up or down from TDA's?
+    run      Down: the lowest is {lowest_tdhf} hartree, against {lowest_tda} for TDA.
+  return both lists

@@ -1,0 +1,34 @@
+#! timing
+# PolyBench/C 4.2.1 syrk: the lower triangle of C := alpha A A^T + beta C;
+# the upper triangle is left as it is.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/blas/syrk/syrk.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+M = 20
+N = 30
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    A = [[((i * j + 1) % N) / N for j to M] for i to N]
+    C = [[((i * j + 2) % M) / M for j to N] for i to N]
+    return C, A
+}
+
+def kernel(alpha, beta, C, A) {
+    return tril(beta * C + alpha * (A @ transpose(A))) + triu(C, k=1)
+}
+
+alpha = 1.5
+beta = 1.2
+C, A = init()
+t0 = clock()
+C = kernel(alpha, beta, C, A)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("C", C)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

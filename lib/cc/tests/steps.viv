@@ -1,0 +1,142 @@
+# The compiler's tests, step by step, in the order chibicc added features
+# (github.com/rui314/chibicc, Rui Ueyama, MIT): most cases are chibicc's
+# own from its test.sh at each step. Each case compiles a program, runs it
+# on the RV32IM simulator and compares the exit code.
+
+from cc.driver import run_c
+
+#| Compile and run src; stop unless it exits with `want`.
+def check(want: Int, src: Str) {
+    m = run_c(src)
+    assert_true(m.halted)
+    if m.exit_code != want {
+        stop(f"`{src}`: want {want}, got {m.exit_code}")
+    }
+}
+
+test "step 1: an integer is the exit code" {
+    check(0, "int main() { return 0; }")
+    check(42, "int main() { return 42; }")
+}
+
+test "step 2: + and -, with spaces between tokens" {
+    check(21, "int main() { return 5+20-4; }")
+    check(41, "int main() { return  12 + 34 - 5 ; }")
+}
+
+test "step 3: * and /, and parentheses" {
+    check(47, "int main() { return 5+6*7; }")
+    check(15, "int main() { return 5*(9-6); }")
+    check(4, "int main() { return (3+5)/2; }")
+}
+
+test "step 4: unary plus and minus" {
+    check(10, "int main() { return -10+20; }")
+    check(10, "int main() { return - -10; }")
+    check(10, "int main() { return - - +10; }")
+}
+
+test "step 5: ==, !=, <, <=, > and >=" {
+    check(0, "int main() { return 0==1; }")
+    check(1, "int main() { return 42==42; }")
+    check(1, "int main() { return 0!=1; }")
+    check(0, "int main() { return 42!=42; }")
+    check(1, "int main() { return 0<1; }")
+    check(0, "int main() { return 1<1; }")
+    check(0, "int main() { return 2<1; }")
+    check(1, "int main() { return 0<=1; }")
+    check(1, "int main() { return 1<=1; }")
+    check(0, "int main() { return 2<=1; }")
+    check(1, "int main() { return 1>0; }")
+    check(0, "int main() { return 1>1; }")
+    check(0, "int main() { return 1>2; }")
+    check(1, "int main() { return 1>=0; }")
+    check(1, "int main() { return 1>=1; }")
+    check(0, "int main() { return 1>=2; }")
+}
+
+
+test "step 6: statements, and return" {
+    check(1, "int main() { return 1; 2; 3; }")
+    check(2, "int main() { 1; return 2; 3; }")
+    check(3, "int main() { 1; 2; return 3; }")
+}
+
+test "step 7: local variables, declared with int" {
+    check(3, "int main() { int a; a=3; return a; }")
+    check(3, "int main() { int a=3; return a; }")
+    check(8, "int main() { int a=3; int z=5; return a+z; }")
+    check(6, "int main() { int a; int b; a=b=3; return a+b; }")
+    check(3, "int main() { int foo=3; return foo; }")
+    check(8, "int main() { int foo123=3; int bar=5; return foo123+bar; }")
+    check(8, "int main() { int x, y; x=3; y=5; return x+y; }")
+    check(8, "int main() { int x=3, y=5; return x+y; }")
+}
+
+test "step 8: blocks and the null statement" {
+    check(3, "int main() {1; {2;} return 3;}")
+    check(5, "int main() { ;;; return 5; }")
+    check(8, "int main() { int a=3; { int b=5; return a+b; } }")
+}
+
+test "step 9: if and else" {
+    check(3, "int main() { if (0) return 2; return 3; }")
+    check(3, "int main() { if (1-1) return 2; return 3; }")
+    check(2, "int main() { if (1) return 2; return 3; }")
+    check(2, "int main() { if (2-1) return 2; return 3; }")
+    check(4, "int main() { if (0) { 1; 2; return 3; } else { return 4; } }")
+    check(3, "int main() { if (1) { 1; 2; return 3; } else { return 4; } }")
+}
+
+test "step 10: for and while" {
+    check(55, "int main() { int i=0; int j=0; for (i=0; i<=10; i=i+1) j=i+j; return j; }")
+    check(3, "int main() { for (;;) {return 3;} return 5; }")
+    check(10, "int main() { int i=0; while(i<10) { i=i+1; } return i; }")
+    check(55, "int main() { int i=0; int j=0; while(i<=10) {j=i+j; i=i+1;} return j; }")
+}
+
+test "step 11: functions, and calls without arguments" {
+    check(3, "int ret3() { return 3; } int main() { return ret3(); }")
+    check(5, "int ret5() { return 5; } int main() { return ret5(); }")
+    check(32, "int main() { return ret32(); } int ret32() { return 32; }")
+}
+
+test "step 12: parameters and arguments, up to eight" {
+    def_add = "int add(int x, int y) { return x+y; } "
+    def_sub = "int sub(int x, int y) { return x-y; } "
+    def_add6 = "int add6(int a, int b, int c, int d, int e, int f) { return a+b+c+d+e+f; } "
+    check(8, def_add + "int main() { return add(3, 5); }")
+    check(2, def_sub + "int main() { return sub(5, 3); }")
+    check(21, def_add6 + "int main() { return add6(1,2,3,4,5,6); }")
+    check(66, def_add6 + "int main() { return add6(1,2,add6(3,4,5,6,7,8),9,10,11); }")
+    check(136, def_add6 + "int main() { return add6(1,2,add6(3,add6(4,5,6,7,8,9),10,11,12,13),14,15,16); }")
+    check(7, "int main() { return add2(3,4); } int add2(int x, int y) { return x+y; }")
+    check(1, "int main() { return sub2(4,3); } int sub2(int x, int y) { return x-y; }")
+    check(55, "int main() { return fib(9); } int fib(int x) { if (x<=1) return 1; return fib(x-1) + fib(x-2); }")
+    check(36, "int add8(int a, int b, int c, int d, int e, int f, int g, int h) { return a+b+c+d+e+f+g+h; } int main() { return add8(1,2,3,4,5,6,7,8); }")
+}
+
+test "step 13: %, !, && and ||" {
+    check(0, "int main() { return !1; }")
+    check(0, "int main() { return !2; }")
+    check(1, "int main() { return !0; }")
+    check(5, "int main() { return 17%6; }")
+    check(1, "int main() { return 0||1; }")
+    check(1, "int main() { return 0||(2-2)||5; }")
+    check(0, "int main() { return 0||0; }")
+    check(0, "int main() { return 0||(2-2); }")
+    check(0, "int main() { return 0&&1; }")
+    check(0, "int main() { return (2-2)&&5; }")
+    check(1, "int main() { return 1&&5; }")
+    check(0, "int main() { int x=0; 0 && (x=1); 1 || (x=2); return x; }")
+}
+
+test "step 14: print_int, the runtime's one function" {
+    m = run_c("int main() { int i; for (i=1; i<=3; i=i+1) print_int(i*i); return 0; }")
+    assert_true(m.output == "1\n4\n9\n")
+    check(7, "int main() { return print_int(7); }")
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2019 Rui Ueyama
+# SPDX-FileCopyrightText: 2026 The Viv authors

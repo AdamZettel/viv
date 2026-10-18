@@ -1,0 +1,160 @@
+###
+Small runs of every algorithm of the liquids port, each result printed to
+17 digits, for tools/three-engines.sh: the interpreter, the C build and the
+wasm build must print the same bytes.
+
+    tools/three-engines.sh ports/liquids/tests
+###
+from ports.liquids.lj import force_all, force_pairs, hessian, hessian_pairs, force_link, hessian_link, verlet_list, verlet_update, potential, mc_sweep, force_sq, sum_sq, wrap
+from ports.liquids.setup import starting_configuration, random_normal, normal_state, expm1, exprel, DIM
+from ports.liquids.eos import a_res_full, a_res_cutshift, state_point, cut_from_full
+from ports.liquids.analysis import pair_histogram, pair_add, pair_g, correlations, correlations_add, correlations_result, diffusion_coefficients, blocking
+from ports.liquids.averages import AVG, MSD, CKE, averages, blk_begin, blk_add, blk_end, run_end
+
+NAT: Int = 108
+DENSITY = 0.75
+TEMPERATURE = 1.0
+#| a short cutoff, so that 108 atoms fill 4 link cells along a side
+R_CUT = 1.2
+DT = 0.005
+NSTEP: Int = 5
+#| frames of the g(r) and correlation-function check
+NFRAME: Int = 6
+#| the length of the series the blocking and averages checks use
+NSERIES: Int = 256
+#| steps in each block of the averages check
+NBLOCKSTEP: Int = 5
+
+def show17(label: Str, x: Num) {
+    print(f"{label} {fmt(x, '.17g')}")
+}
+
+#| velocity Verlet with each neighbor method; the totals after NSTEP steps
+def md_run(mode: Str) {
+    r, v, box = starting_configuration(NAT, DENSITY, TEMPERATURE, 7, zeros(0, DIM), zeros(0, DIM), 0.0)
+    f = zeros(NAT, DIM)
+    vl = verlet_list(NAT, R_CUT / box)
+    pot = 0.0
+    hes = 0.0
+    for step to NSTEP + 1 {
+        if step > 0 {
+            for i to NAT {
+                for k to DIM {
+                    v[i, k] = v[i, k] + 0.5 * DT * f[i, k]
+                    r[i, k] = r[i, k] + DT * v[i, k] / box
+                    r[i, k] = r[i, k] - round(r[i, k])
+                }
+            }
+        }
+        if mode == "link" {
+            t = force_link(r, f, box, R_CUT)
+            pot = t.pot
+            hes = hessian_link(r, f, box, R_CUT)
+        }
+        else {
+            if mode == "verlet" {
+                vl = verlet_update(vl, r)
+                t = force_pairs(r, f, box, R_CUT, vl.pair_i, vl.pair_j)
+                pot = t.pot
+                hes = hessian_pairs(r, f, box, R_CUT, vl.pair_i, vl.pair_j)
+            }
+            else {
+                t = force_all(r, f, box, R_CUT)
+                pot = t.pot
+                hes = hessian(r, f, box, R_CUT)
+            }
+        }
+        if step > 0 {
+            for i to NAT {
+                for k to DIM {
+                    v[i, k] = v[i, k] + 0.5 * DT * f[i, k]
+                }
+            }
+        }
+    }
+    show17(f"md {mode} potential", pot)
+    show17(f"md {mode} kinetic", 0.5 * sum_sq(v))
+    show17(f"md {mode} hessian", hes)
+}
+
+md_run("all")
+md_run("link")
+md_run("verlet")
+
+# Monte Carlo: two sweeps, then the energy of the result from scratch
+r, v, box = starting_configuration(NAT, DENSITY, TEMPERATURE, 7, zeros(0, DIM), zeros(0, DIM), 0.0)
+srand(9.0)
+total = potential(r, box, R_CUT)
+moves: Int = 0
+for sweep to 2 {
+    total, moves = mc_sweep(r, total, box, R_CUT, TEMPERATURE, 0.15)
+}
+show17("mc moves", 1.0 * moves)
+show17("mc running energy", total.pot)
+show17("mc energy afresh", potential(r, box, R_CUT).pot)
+show17("mc force squared", force_sq(r, zeros(NAT, DIM), box, R_CUT))
+
+# the equation of state at two points
+for rho in [0.1, 0.75] {
+    sp = state_point(a_res_full(1.2, rho), 1.2, rho)
+    spc = cut_from_full(sp, 1.2, rho)
+    cs = state_point(a_res_cutshift(1.2, rho), 1.2, rho)
+    show17(f"eos {rho} full p", sp.p)
+    show17(f"eos {rho} full cp", sp.cp)
+    show17(f"eos {rho} cut mu", spc.mu)
+    show17(f"eos {rho} cs e", cs.e)
+}
+
+# g(r), the correlation functions and the averages over a few frames
+h = pair_histogram(0.1, box)
+c = correlations(NAT, 4, 2)
+for fr to NFRAME {
+    x = r * box
+    pair_add(h, x, box)
+    correlations_add(c, x, v, box)
+    for i to NAT {
+        for k to DIM {
+            r[i, k] = r[i, k] + 0.01 * v[i, k] / box
+        }
+    }
+    wrap(r)
+}
+rmid, g = pair_g(h, NAT, box)
+show17("g(r) sum", sum(g))
+vacf, rvcf, msd = correlations_result(c, NAT)
+show17("vacf 3", vacf[3])
+show17("msd 4", msd[4])
+d1, d2 = diffusion_coefficients(vacf, msd, 0.01)
+show17("D vacf", d1)
+show17("D msd", d2)
+
+srand(5.0)
+saved = normal_state()
+series = zeros(NSERIES)
+for t to NSERIES {
+    series[t] = random_normal(1.0, 0.5, saved) + expm1(0.001 * t) + exprel(-0.002 * t)
+}
+mean_a, var_1, err_naive, t_fixed, e_fixed, s_fixed, t_half, e_half, s_half = blocking(series)
+show17("blocking mean", mean_a)
+show17("blocking fixed 0", e_fixed[0])
+show17("blocking halving last", s_half[len(s_half) - 1])
+
+meth: [Int] = [AVG, MSD, CKE]
+acc = averages(meth, [0.0, 1.5, 0.0], 2, 0)
+for b to 2 {
+    blk_begin(acc)
+    for q to NBLOCKSTEP {
+        blk_add(acc, [series[10 * b + q], series[q], series[q + 1]])
+    }
+    blk_end(acc)
+}
+avg, err = run_end(acc)
+show17("averages cke", avg[2])
+show17("averages err", err[1])
+
+test "some Monte Carlo moves were accepted" {
+    assert_true(moves > 0)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

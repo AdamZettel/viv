@@ -1,0 +1,272 @@
+###
+post: The ROHF effective Fock matrix, and why it is not unique
+agent: claude
+
+ROHF keeps one set of spatial orbitals for both spins, split three ways: `Nb`
+closed-shell orbitals holding an alpha and a beta electron, `Na - Nb` open
+orbitals holding one alpha electron each, and the virtual rest. No single
+Fock operator has these orbitals as its eigenvectors. The energy is
+stationary when, in the orbital basis, three off-diagonal blocks vanish, each
+belonging to a different spin Fock matrix:
+
+    closed-open     F_b          (moving a beta electron)
+    open-virtual    F_a          (moving an alpha electron)
+    closed-virtual  (F_a + F_b)/2
+
+The effective Fock matrix puts those blocks off the diagonal and anything
+convenient on it, `F_xx = A_x F_a + B_x F_b` for x = closed, open, virtual.
+The diagonal choice changes the orbital energies and the path of the
+iteration, but not the converged energy or density, since stationarity only
+involves the off-diagonal blocks. The registry `rohf_couplings()` holds four
+published choices of `(A_c, B_c, A_o, B_o, A_v, B_v)`:
+
+    rohf_c_gs        Guest-Saunders (PySCF's)   1/2 1/2   1/2 1/2   1/2  1/2
+    rohf_c_roothaan  Roothaan                  -1/2 3/2   1/2 1/2   3/2 -1/2
+    rohf_c_mcweeny   McWeeny-Diercksen          1/3 2/3   1/3 2/3   2/3  1/3
+    rohf_c_bpd       Binkley-Pople-Dobosh       1/2 1/2   1    0    0    1
+
+Each member takes `(Fab, P, opts)` in the orthonormal basis, with
+`Fab = [F_a', F_b']` and `P = [P_c', P_o']` (the closed and open projectors,
+`P_c' = X^T S Db S X` and `P_o' = X^T S (Da - Db) S X`), and returns the
+effective matrix as `[1, m, m]`.
+
+The SCF error is the commutator of the effective matrix with
+`P_c' + P_o'/2` (`rohf_error`). Its closed-open, open-virtual and
+closed-virtual blocks are the three stationarity blocks above scaled by 1/2,
+1/2 and 1, and it has no diagonal-block part, so it is the same for every
+coupling and vanishes exactly at a stationary point. DIIS extrapolates the
+effective matrix on it.
+
+Orbitals are the eigenvectors of the effective matrix, but they are not
+occupied by its eigenvalues, which depend on the coupling. The `Nb` orbitals
+lowest in `(F_a + F_b)/2` are closed, and the `Na - Nb` lowest in `F_a`
+among the rest are open (`rohf_pick`). PySCF ranks the closed orbitals by
+the eigenvalue of its (Guest-Saunders) effective matrix, whose diagonal
+blocks are `(F_a + F_b)/2`, and the open ones by `F_a`, so the two rules pick
+the same orbitals once the off-diagonal blocks are small.
+
+These are the ROHF pieces of the SCF loop (lib/hf/scf_loop); lib/hf/rohf
+runs them.
+
+Used with `import hf.coupling`.
+###
+
+from hf.opts import opt_new, OPT_ROHF_COUPLING
+from hf.density import den_commutator_sym, den_lowest, den_stack2
+
+# the orbital spaces of an open shell: closed, open and virtual
+ROHF_NSPACE = 3
+
+# the members of rohf_couplings (ScfOptions.rohf_coupling)
+ROHF_C_GS = 0
+ROHF_C_ROOTHAAN = 1
+ROHF_C_MCWEENY = 2
+ROHF_C_BPD = 3
+
+#| The effective matrix `sum_xy Q_x (a_xy F_a + b_xy F_b) Q_y` over the
+#| closed, open and virtual projectors, `[1, m, m]`.
+def rohf_feff(Fab: Arr, P: Arr, ac, bc, ao, bo, av, bv) -> Arr {
+    sh = shape(Fab)
+    m = sh[1]
+    step projectors {
+        # projectors: 0 closed, 1 open, 2 virtual
+        Q = zeros(ROHF_NSPACE, m, m)
+        setslab(Q, 0, slab(P, 0))
+        setslab(Q, 1, slab(P, 1))
+        Qv = -slab(P, 0) - slab(P, 1)
+        for i to m {
+            Qv[i, i] = Qv[i, i] + 1.0
+        }
+        setslab(Q, 2, Qv)
+    }
+    step blocks {
+        # the block operator between spaces x and y as a*F_a + b*F_b
+        ca = [[ac, 0.0, 0.5], [0.0, ao, 1.0], [0.5, 1.0, av]]
+        cb = [[bc, 1.0, 0.5], [1.0, bo, 0.0], [0.5, 0.0, bv]]
+        Rs = zeros(m, m)
+        for x to ROHF_NSPACE {
+            for y to ROHF_NSPACE {
+                G = ca[x, y] * slab(Fab, 0) + cb[x, y] * slab(Fab, 1)
+                Rs = Rs + slab(Q, x) @ G @ slab(Q, y)
+            }
+        }
+    }
+    step symmetrize {
+        # symmetrize away rounding
+        R = zeros(1, m, m)
+        setslab(R, 0, 0.5 * (Rs + transpose(Rs)))
+    }
+    return R
+}
+
+#| Member 0: Guest-Saunders, PySCF's coupling.
+def rohf_c_gs(Fab: Arr, P: Arr, opts: Arr) -> Arr {
+    return rohf_feff(Fab, P, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5)
+}
+
+#| Member 1: Roothaan.
+def rohf_c_roothaan(Fab: Arr, P: Arr, opts: Arr) -> Arr {
+    return rohf_feff(Fab, P, -0.5, 1.5, 0.5, 0.5, 1.5, -0.5)
+}
+
+#| Member 2: McWeeny-Diercksen.
+def rohf_c_mcweeny(Fab: Arr, P: Arr, opts: Arr) -> Arr {
+    return rohf_feff(Fab, P, 1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0)
+}
+
+#| Member 3: Binkley-Pople-Dobosh.
+def rohf_c_bpd(Fab: Arr, P: Arr, opts: Arr) -> Arr {
+    return rohf_feff(Fab, P, 0.5, 0.5, 1.0, 0.0, 0.0, 1.0)
+}
+
+#| The coupling registry, PySCF's first.
+def rohf_couplings() {
+    return [rohf_c_gs, rohf_c_roothaan, rohf_c_mcweeny, rohf_c_bpd]
+}
+
+#| The effective matrix `[1, m, m]` of coupling `opts[OPT_ROHF_COUPLING]`.
+def rohf_effective(Fab: Arr, P: Arr, opts: Arr) -> Arr {
+    ms = rohf_couplings()
+    return apply(ms[round(opts[OPT_ROHF_COUPLING])], Fab, P, opts)
+}
+
+#| The ROHF error `Fe (P_c + P_o/2) - (P_c + P_o/2) Fe`, `[1, m, m]`, by the
+#| one-product commutator of lib/hf/density: the effective matrix is
+#| symmetrized when it is made and both projectors are symmetric.
+def rohf_error(Fe: Arr, P: Arr) {
+    sh = shape(Fe)
+    E = zeros(1, sh[1], sh[2])
+    setslab(E, 0, den_commutator_sym(slab(Fe, 0), slab(P, 0) + 0.5 * slab(P, 1)))
+    return E
+}
+
+#| Which of the orbitals `V[m, m]` (columns) are closed and which open:
+#| `[2, m]`, row 0 the `nb` closed ones (lowest in `(F_a + F_b)/2`, ascending),
+#| row 1 the `na - nb` open ones (lowest in `F_a` among the rest).
+def rohf_pick(V: Arr, m, Fab: Arr, na, nb) {
+    step rank {
+        TA = slab(Fab, 0) @ V
+        TB = slab(Fab, 1) @ V
+        ec = zeros(m)
+        ea = zeros(m)
+        for k to m {
+            ea[k] = sum(V[:, k] * TA[:, k])
+            ec[k] = sum(V[:, k] * 0.5 * (TA[:, k] + TB[:, k]))
+        }
+    }
+    step pick {
+        mask = zeros(m)
+        picked = zeros(2, m)
+        if nb > 0 {
+            closed = den_lowest(ec, nb, mask)
+            picked[0, 0:nb] = closed
+            for c to nb {
+                mask[closed[c]] = 1
+            }
+        }
+        if na > nb {
+            picked[1, 0:na - nb] = den_lowest(ea, na - nb, mask)
+        }
+    }
+    return picked
+}
+
+#| The ROHF spin densities `[2, n, n]` of the orbitals `X V`: each closed
+#| orbital once in both, each open one once in `Da`, in the order picked.
+def rohf_occupy(X: Arr, V: Arr, m, picked: Arr, na, nb) {
+    n = len(X)
+    # the picked orbitals as columns: the closed ones, then the open ones
+    Vp = zeros(m, na)
+    for c to nb {
+        Vp[:, c] = V[0:m, picked[0, c]]
+    }
+    for c to na - nb {
+        Vp[:, nb + c] = V[0:m, picked[1, c]]
+    }
+    #: alpha from all picked orbitals, beta from the closed ones
+    C = X[:, 0:m] @ Vp
+    Db = zeros(n, n)
+    if nb > 0 {
+        Db = C[:, 0:nb] @ transpose(C[:, 0:nb])
+    }
+    return den_stack2(C @ transpose(C), Db)
+}
+
+#| The occupation of each orbital, `[m]`: 2 closed, 1 open, 0 virtual.
+def rohf_occupations(picked: Arr, m, na, nb) {
+    occ = zeros(m)
+    for c to nb {
+        occ[picked[0, c]] = 2
+    }
+    for c to na - nb {
+        occ[picked[1, c]] = 1
+    }
+    return occ
+}
+
+#| The effective matrix `Fu[1, m, m]` with its virtual block raised by
+#| `shift`: `Fu + shift (I - P_c - P_o)`.
+def rohf_level_shift(Fu: Arr, P: Arr, m, shift) -> Arr {
+    Pv = -slab(P, 0) - slab(P, 1)
+    for a to m {
+        Pv[a, a] = Pv[a, a] + 1.0
+    }
+    Fs = zeros(1, m, m)
+    setslab(Fs, 0, slab(Fu, 0) + shift * Pv)
+    return Fs
+}
+
+test "a coupling's effective matrix differs only on the diagonal blocks" {
+    # Build Fa, Fb and projectors on 4 orbitals: 1 closed, 1 open, 2 virtual.
+    rohf_norb = 4
+    rohf_F = zeros(2, rohf_norb, rohf_norb)
+    for rohf_i to rohf_norb {
+        for rohf_j to rohf_norb {
+            rohf_F[0, rohf_i, rohf_j] = 1.0 / (1 + rohf_i + rohf_j)
+            rohf_F[1, rohf_i, rohf_j] = 0.5 / (2 + rohf_i * rohf_j)
+        }
+    }
+    rohf_P = zeros(2, rohf_norb, rohf_norb)
+    rohf_P[0, 0, 0] = 1.0
+    rohf_P[1, 1, 1] = 1.0
+    rohf_o = opt_new()
+    rohf_G = rohf_c_gs(rohf_F, rohf_P, rohf_o)
+    rohf_ms = rohf_couplings()
+    for rohf_k to len(rohf_ms) {
+        rohf_R = apply(rohf_ms[rohf_k], rohf_F, rohf_P, rohf_o)
+        # closed-open is F_b, open-virtual F_a, closed-virtual the average
+        assert_near(rohf_R[0, 0, 1], rohf_F[1, 0, 1], 1.0e-15)
+        assert_near(rohf_R[0, 1, 2], rohf_F[0, 1, 2], 1.0e-15)
+        assert_near(rohf_R[0, 0, 3], 0.5 * (rohf_F[0, 0, 3] + rohf_F[1, 0, 3]), 1.0e-15)
+        assert_near(rohf_R[0, 2, 0], rohf_G[0, 2, 0], 1.0e-15)
+    }
+    # Roothaan's closed-closed entry is -Fa/2 + 3Fb/2
+    rohf_R = rohf_c_roothaan(rohf_F, rohf_P, rohf_o)
+    assert_near(rohf_R[0, 0, 0], -0.5 * rohf_F[0, 0, 0] + 1.5 * rohf_F[1, 0, 0], 1.0e-15)
+    # the error has no diagonal-block part, so it vanishes on the closed-closed entry
+    rohf_E = rohf_error(rohf_R, rohf_P)
+    assert_near(rohf_E[0, 0, 0], 0.0, 1.0e-15)
+}
+
+test "the pick puts the closed orbitals first by the average Fock matrix and the open ones by F_a" {
+    # two orbitals, V = I: the average is lower on orbital 1, F_a on orbital 0
+    rohf_Fab = zeros(2, 2, 2)
+    rohf_Fab[0, 0, 0] = -1.0
+    rohf_Fab[0, 1, 1] = -0.5
+    rohf_Fab[1, 0, 0] = 1.0
+    rohf_Fab[1, 1, 1] = -1.5
+    rohf_V = [[1.0, 0.0], [0.0, 1.0]]
+    rohf_pk = rohf_pick(rohf_V, 2, rohf_Fab, 2, 1)
+    assert_near(rohf_pk[0, 0], 1, 0.0)
+    assert_near(rohf_pk[1, 0], 0, 0.0)
+    rohf_occ = rohf_occupations(rohf_pk, 2, 2, 1)
+    assert_near(rohf_occ[0], 1, 0.0)
+    assert_near(rohf_occ[1], 2, 0.0)
+    rohf_D = rohf_occupy(rohf_V, rohf_V, 2, rohf_pk, 2, 1)
+    assert_near(rohf_D[0, 0, 0] + rohf_D[0, 1, 1], 2.0, 0.0)
+    assert_near(rohf_D[1, 1, 1], 1.0, 0.0)
+    assert_near(rohf_D[1, 0, 0], 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,37 @@
+# RK4 on the logistic equation y' = y (1 - y), y(0) = 0.1.
+# Exact: y(t) = 1 / (1 + 9 exp(-t)).
+
+def rhs(y) {
+    return y * (1.0 - y)
+}
+
+def rk4(y0, t_end, n) {
+    h = t_end / n
+    y = y0
+    for k to n {
+        k1 = rhs(y)
+        k2 = rhs(y + 0.5 * h * k1)
+        k3 = rhs(y + 0.5 * h * k2)
+        k4 = rhs(y + h * k3)
+        y = y + h / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    }
+    return y
+}
+
+exact = 1.0 / (1.0 + 9.0 * exp(-5.0))
+e1 = abs(rk4(0.1, 5.0, 50) - exact)
+e2 = abs(rk4(0.1, 5.0, 100) - exact)
+show e1
+show e2
+order = log(e1 / e2) / log(2.0)
+show order
+
+test "RK4 with h = 0.05 is accurate to 1e-8" {
+    assert_lt(e2, 1.0e-8)
+}
+test "the observed order is four" {
+    assert_near(order, 4.0, 0.2)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

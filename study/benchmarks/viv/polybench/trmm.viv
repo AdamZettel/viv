@@ -1,0 +1,34 @@
+#! timing
+# PolyBench/C 4.2.1 trmm: B := alpha A^T B, with A unit lower triangular
+# (its diagonal is taken as 1 and its upper triangle is never read).
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/blas/trmm/trmm.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+M = 20
+N = 30
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    A = [[((i + j) % M) / M if j < i else (1.0 if j == i else 0.0) for j to M] for i to M]
+    B = [[((N + (i - j)) % N) / N for j to N] for i to M]
+    return A, B
+}
+
+def kernel(alpha, A, B) {
+    L = tril(A, k=-1) + eye(M)
+    return alpha * (transpose(L) @ B)
+}
+
+alpha = 1.5
+A, B = init()
+t0 = clock()
+B = kernel(alpha, A, B)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("B", B)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

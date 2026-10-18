@@ -1,0 +1,215 @@
+###
+post: The small dense kernels randla's drivers need
+agent: claude
+
+Householder QR of a tall matrix (the thin Q and the square R), an
+orthonormal basis for a range (`orth`), and the triangular solves a
+preconditioner applies. Viv's builtins have `svd`, `eig_sym`, `cholesky` and
+`lin_solve` but no QR, and every randomized range finder ends in one.
+
+Used with `from randla.dense import ...`.
+###
+
+#| Householder QR of the m-by-k matrix A, m >= k: returns the thin Q (m by k,
+#| orthonormal columns) and R (k by k, upper triangular) with A = Q R. The
+#| reflector for column j is I - beta v v^T with v[0] = 1 on rows j..m-1
+#| (LAPACK's dgeqr2 convention).
+def householder_qr(A: Arr) {
+    m: Int = int(shape(A)[0])
+    k: Int = int(shape(A)[1])
+    X = copy(A)
+    V = zeros(m, k)
+    betas = zeros(k)
+    for j to k {
+        #: Householder vector; its sign avoids cancellation
+        x = X[j:m, j]
+        normx = norm(x)
+        if normx == 0.0 {
+            continue
+        }
+        alpha = -normx
+        if x[0] < 0.0 {
+            alpha = normx
+        }
+        v = x
+        v[0] = x[0] - alpha
+        v = v / v[0]
+        beta = 2.0 / sum(v * v)
+        V[j:m, j] = v
+        betas[j] = beta
+        X[j, j] = alpha
+        X[j + 1:m, j] = 0.0
+        if j + 1 < k {
+            W = X[j:m, j + 1:k]
+            X[j:m, j + 1:k] = W - outer(v, beta * (v @ W))
+        }
+    }
+    #: Q from the reflectors, last one first
+    R = triu(X[0:k, :])
+    Q = zeros(m, k)
+    for i to k {
+        Q[i, i] = 1.0
+    }
+    for j to k reversed {
+        v = V[j:m, j]
+        W = Q[j:m, j:k]
+        Q[j:m, j:k] = W - outer(v, betas[j] * (v @ W))
+    }
+    return Q, R
+}
+
+# CholeskyQR2's result is kept when |Q^T Q - I| is below this; otherwise
+# orth falls back to Householder
+ORTH_TOL = 1.0e-12
+
+#| The upper triangular R with R^T R = G, and whether every pivot was
+#| positive (false: G is not numerically positive definite).
+def chol_upper(G: Arr) {
+    k: Int = int(shape(G)[0])
+    R = zeros(k, k)
+    for j to k {
+        # rows j and below of R are still zero, so whole columns give the
+        # same dot products as the filled part
+        p = G[j, j] - dot(R[:, j], R[:, j])
+        if not (p > 0.0) {
+            return R, false
+        }
+        R[j, j] = sqrt(p)
+        for c from j + 1 to k {
+            R[j, c] = (G[j, c] - dot(R[:, j], R[:, c])) / R[j, j]
+        }
+    }
+    return R, true
+}
+
+#| One pass of Cholesky QR: Q = Y R^-1 with R^T R = Y^T Y. Cheap (two
+#| products with Y and a k-by-k factorization) and accurate when
+#| cond(Y) is well below 1/sqrt(eps); the flag is false when the Gram
+#| matrix has a nonpositive pivot.
+def cholqr(Y: Arr) {
+    R, ok = chol_upper(transpose(Y) @ Y)
+    if not ok {
+        return Y, false
+    }
+    # Q = Y R^-1 as one matrix product with the k-by-k inverse: R is as
+    # well conditioned as Y's square root, and orth checks the result
+    return Y @ upper_inverse(R), true
+}
+
+#| The inverse of the upper triangular R, column by column.
+def upper_inverse(R: Arr) -> Arr {
+    k: Int = int(shape(R)[0])
+    Ri = zeros(k, k)
+    for j to k {
+        e = zeros(k)
+        e[j] = 1.0
+        Ri[:, j] = solve_upper(R, e)
+    }
+    return Ri
+}
+
+#| An orthonormal basis for the range of the tall matrix Y. CholeskyQR2
+#| (Fukaya, Nakatsukasa, Yanagisawa and Yamamoto 2014) when it succeeds:
+#| two Cholesky QR passes, whose second repairs the first's loss of
+#| orthogonality; checked by |Q^T Q - I| <= ORTH_TOL. When Y is too
+#| ill-conditioned for that (a sketch of a rapidly decaying spectrum often
+#| is), the Q of a Householder QR.
+def orth(Y: Arr) -> Arr {
+    #: CholeskyQR2, kept when Q^T Q = I to ORTH_TOL
+    Q1, ok1 = cholqr(Y)
+    if ok1 {
+        Q2, ok2 = cholqr(Q1)
+        if ok2 {
+            if orth_error(Q2) <= ORTH_TOL {
+                return Q2
+            }
+        }
+    }
+    Q, R = householder_qr(Y)
+    return Q
+}
+
+#| x with R x = b, R upper triangular (back substitution).
+def solve_upper(R: Arr, b: Arr) -> Arr {
+    n: Int = int(shape(R)[0])
+    x = zeros(n)
+    for i to n reversed {
+        s = b[i]
+        if i + 1 < n {
+            s -= dot(R[i, i + 1:n], x[i + 1:n])
+        }
+        x[i] = s / R[i, i]
+    }
+    return x
+}
+
+#| x with R^T x = b, R upper triangular (forward substitution on R^T).
+def solve_upper_t(R: Arr, b: Arr) -> Arr {
+    n: Int = int(shape(R)[0])
+    x = zeros(n)
+    for i to n {
+        s = b[i]
+        if i > 0 {
+            s -= dot(R[0:i, i], x[0:i])
+        }
+        x[i] = s / R[i, i]
+    }
+    return x
+}
+
+#| X with L X = B, L lower triangular and B a matrix (forward substitution,
+#| a row of X at a time).
+def solve_lower_rows(L: Arr, B: Arr) -> Arr {
+    n: Int = int(shape(L)[0])
+    X = zeros_like(B)
+    for i to n {
+        r = B[i, :]
+        if i > 0 {
+            r = r - L[i, 0:i] @ X[0:i, :]
+        }
+        X[i, :] = r / L[i, i]
+    }
+    return X
+}
+
+#| The largest |Q^T Q - I| entry: 0 for orthonormal columns.
+def orth_error(Q: Arr) -> Num {
+    k: Int = int(shape(Q)[1])
+    return amax(abs(transpose(Q) @ Q - eye(k)))
+}
+
+test "Householder QR gives Q R = A with Q orthonormal and R upper triangular" {
+    A = [[2.0, -1.0, 0.5], [1.0, 3.0, -2.0], [0.0, 1.0, 4.0], [-1.0, 2.0, 1.0], [3.0, 0.0, -1.0]]
+    Q, R = householder_qr(A)
+    assert_allclose(Q @ R, A, 1.0e-14)
+    assert_lt(orth_error(Q), 1.0e-15)
+    assert_allclose(tril(R, k=-1), zeros_like(R), 0.0)
+}
+
+test "the triangular solves invert what they claim to" {
+    R = [[2.0, 1.0, -1.0], [0.0, 3.0, 0.5], [0.0, 0.0, -4.0]]
+    b = [1.0, 2.0, 3.0]
+    assert_allclose(R @ solve_upper(R, b), b, 1.0e-15)
+    assert_allclose(transpose(R) @ solve_upper_t(R, b), b, 1.0e-15)
+    L = transpose(R)
+    B = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+    assert_allclose(L @ solve_lower_rows(L, B), B, 1.0e-14)
+}
+
+test "orth falls back to Householder when the Gram matrix is singular" {
+    A = [[2.0, -1.0, 0.5], [1.0, 3.0, -2.0], [0.0, 1.0, 4.0], [-1.0, 2.0, 1.0], [3.0, 0.0, -1.0]]
+    Q1, ok1 = cholqr(A)
+    assert_true(ok1)
+    Q = orth(A)
+    assert_lt(orth_error(Q), ORTH_TOL)
+    assert_allclose(Q @ (transpose(Q) @ A), A, 1.0e-14)
+    # the third column is the sum of the first two: the Gram matrix is singular
+    B = copy(A)
+    B[:, 2] = A[:, 0] + A[:, 1]
+    QB = orth(B)
+    assert_lt(orth_error(QB), 1.0e-15)
+    assert_allclose(QB @ (transpose(QB) @ B), B, 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

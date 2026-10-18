@@ -1,0 +1,206 @@
+###
+post: micrograd in Viv, with the gradient from value_and_grad
+agent: claude
+
+The port of karpathy/micrograd in `micrograd.viv` builds micrograd's engine:
+every number a node on a tape, and a backward pass with one rule per op.
+Here the same MLP and the same loss are ordinary Viv code on a flat
+parameter vector, and `value_and_grad` writes the backward pass. The engine's
+own tests become tests of `grad` on the same expressions.
+###
+
+from params import param_cols, param_count, param_declare, param_offset, param_rows, param_table
+from moons import (
+    HIDDEN, N, P0, REF_ACC, REF_GRAD0, REF_LOSS, REF_PFINAL, STEPS, TORCH_MORE, TORCH_SANITY, X,
+    Y,
+)
+from hand.engine import backward, tape, tape_loss
+
+# ------------------------------------------- engine tests (test_engine.py)
+
+#| test_sanity_check: y and dy/dx at x = -4, where torch gives them.
+def sanity(x) {
+    z = 2.0 * x + 2.0 + x
+    q = max(z, 0.0) + z * x
+    h = max(z * z, 0.0)
+    return h + q + q * x
+}
+
+#| test_more_ops, with a and b as the entries of one vector.
+def more_ops(v: Arr) {
+    a = v[0]
+    b = v[1]
+    c = a + b
+    d = a * b + pow(b, 3.0)
+    c = c + (c + 1.0)
+    c = c + (1.0 + c + (-a))
+    d = d + (d * 2.0 + max(b + a, 0.0))
+    d = d + (3.0 * d + max(b - a, 0.0))
+    e = c - d
+    f = pow(e, 2.0)
+    g = f / 2.0
+    return g + 10.0 / f
+}
+
+test "sanity check: value and dy/dx match torch" {
+    y, dy = value_and_grad(sanity, -4.0)
+    assert_near(y, TORCH_SANITY[0], 0.0)
+    assert_near(dy, TORCH_SANITY[1], 0.0)
+}
+
+test "more ops: value and both gradients match torch" {
+    g, dg = value_and_grad(more_ops, [-4.0, 2.0])
+    assert_near(g, TORCH_MORE[0], 1.0e-12 * abs(TORCH_MORE[0]))
+    assert_near(dg[0], TORCH_MORE[1], 1.0e-12 * abs(TORCH_MORE[1]))
+    assert_near(dg[1], TORCH_MORE[2], 1.0e-12 * abs(TORCH_MORE[2]))
+}
+
+# ----------------------------------------------------------- the MLP (nn.py)
+
+#| MLP(2, [HIDDEN, HIDDEN, 1]). Layer l is a matrix with one row per neuron:
+#| the row holds the neuron's weights, then its bias, as nn.py orders
+#| parameters().
+model = param_table(3)
+L1 = param_declare(model, HIDDEN, 3)
+L2 = param_declare(model, HIDDEN, HIDDEN + 1)
+L3 = param_declare(model, 1, HIDDEN + 1)
+NPARAM = param_count(model)
+
+#| One neuron, its weights from `theta` at `w`: bias plus the weighted
+#| inputs, summed left to right the way Python's sum(..., start) does, then
+#| ReLU unless it is the output layer.
+def neuron(theta: Arr, w, x: Arr, nonlin: Bool) {
+    nin = len(x)
+    act = theta[w + nin]
+    for i to nin {
+        act = act + theta[w + i] * x[i]
+    }
+    if nonlin {
+        return max(act, 0.0)
+    }
+    return act
+}
+
+def layer(theta: Arr, k, x: Arr, nonlin: Bool) {
+    rows = param_rows(model, k)
+    cols = param_cols(model, k)
+    out = zeros(rows)
+    for r to rows {
+        out[r] = neuron(theta, param_offset(model, k) + r * cols, x, nonlin)
+    }
+    return out
+}
+
+def mlp(theta: Arr, x: Arr) {
+    h = layer(theta, L1, x, true)
+    h = layer(theta, L2, h, true)
+    return layer(theta, L3, h, false)[0]
+}
+
+# ------------------------------------------------------ the loss (demo cell)
+
+#| The SVM max-margin loss over every sample plus L2 regularization, summed
+#| in micrograd's order. The accuracy goes in acc[0].
+def loss(theta: Arr, acc: Arr) {
+    losses = zeros(N)
+    hits = 0.0
+    for s to N {
+        xs = zeros(2)
+        xs[0] = X[s, 0]
+        xs[1] = X[s, 1]
+        score = mlp(theta, xs)
+        losses[s] = max(1.0 + score * -Y[s], 0.0)
+        if (Y[s] > 0.0) == (score > 0.0) {
+            hits = hits + 1.0
+        }
+    }
+    data_loss = 0.0
+    for s to N {
+        data_loss = data_loss + losses[s]
+    }
+    data_loss = data_loss * (1.0 / N)
+    reg = 0.0
+    for i to NPARAM {
+        reg = reg + theta[i] * theta[i]
+    }
+    acc[0] = hits / N
+    return data_loss + 1.0e-4 * reg
+}
+
+# ------------------------------------------------------ training (demo cell)
+
+theta = P0
+loss_at = zeros(STEPS)
+acc_at = zeros(STEPS)
+grad0 = zeros(NPARAM)
+acc = zeros(1)
+for k to STEPS {
+    total, dtheta = value_and_grad(loss, theta, acc)
+    if k == 0 {
+        grad0 = dtheta
+    }
+    lr = 1.0 - 0.9 * k / 100.0
+    theta = theta - lr * dtheta
+    loss_at[k] = total
+    acc_at[k] = acc[0]
+    if mod(k, 10) == 0 or k == STEPS - 1 {
+        print(k)
+        print(loss_at[k])
+        print(acc_at[k])
+    }
+}
+show NPARAM
+loss_miss = max(abs(loss_at - REF_LOSS) / REF_LOSS)
+grad_miss = max(abs(grad0 - REF_GRAD0))
+theta_miss = max(abs(theta - REF_PFINAL))
+show loss_miss
+show grad_miss
+show theta_miss
+
+test "first-step gradient matches micrograd" {
+    assert_allclose(grad0, REF_GRAD0, 1.0e-12)
+}
+
+test "loss and accuracy match micrograd at every step" {
+    assert_allclose(loss_at, REF_LOSS, 1.0e-12)
+    assert_allclose(acc_at, REF_ACC, 0.0)
+}
+
+test "final parameters match micrograd" {
+    assert_allclose(theta, REF_PFINAL, 1.0e-10)
+}
+
+test "the trained model separates the moons" {
+    assert_near(acc_at[STEPS - 1], 1.0, 0.0)
+}
+
+###
+## The generated gradient against the hand-written engine
+
+The engine's backward pass (`hand/engine.viv`) at the initial parameters.
+The engine adds each node's gradient into its parents in reverse tape order;
+the generated code adds in reverse statement order, so sums of the same terms
+can round differently: the check is 1e-12 of the largest entry.
+###
+
+test "value_and_grad matches the hand-written engine to 1e-12" {
+    theta = P0
+    hand_acc = zeros(1)
+    total_node = tape_loss(hand_acc)
+    backward(total_node)
+    hand_grad = zeros(NPARAM)
+    for i to NPARAM {
+        hand_grad[i] = tape.grad[i]
+    }
+    ad_acc = zeros(1)
+    ad_loss, ad_grad = value_and_grad(loss, P0, ad_acc)
+    assert_near(ad_loss, tape.data[total_node], 0.0)
+    assert_near(ad_acc[0], hand_acc[0], 0.0)
+    engine_miss = max(abs(ad_grad - hand_grad)) / max(abs(hand_grad))
+    show engine_miss
+    assert_lt(engine_miss, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2020 Andrej Karpathy (karpathy/micrograd)
+# SPDX-FileCopyrightText: 2026 The Viv authors

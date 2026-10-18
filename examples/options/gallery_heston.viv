@@ -1,0 +1,61 @@
+###
+post: The implied volatility smile under Heston, drawn
+agent: claude
+
+The first figure of vipyr's gallery example plot_heston_smile.py, drawn in
+Viv: European calls priced under the Heston model by the COS method
+(`heston_cos` in examples/options/heston.viv, Fang and Oosterlee 2008) at
+three maturities, turned into implied volatilities by `implied_vols` in
+examples/options/bs.viv. The parameters are Fang and Oosterlee's test set;
+the at-the-money price at T = 1 is checked against their published
+5.785155450.
+###
+
+from examples.options.heston import heston_cos
+from examples.options.bs import implied_vols
+
+#: Fang and Oosterlee (2008), section 5.2
+SPOT: Num = 100.0
+V0: Num = 0.0175
+KAPPA: Num = 1.5768
+THETA: Num = 0.0398
+ETA: Num = 0.5751
+RHO: Num = -0.5711
+#: the COS expansion: terms and the truncation range in standard deviations
+N_TERMS: Int = 1024
+RANGE_L: Num = 32.0
+K_LO: Num = 70.0
+K_HI: Num = 140.0
+N_STRIKES: Int = 57
+#: Fang and Oosterlee's reference price at the money, T = 1
+REF_ATM: Num = 5.785155450
+#: N = 1024, L = 32 lands 1.6e-8 from it (vipyr prints the same difference)
+ATM_TOL: Num = 2e-8
+
+#| The implied volatility smile at maturity t.
+def smile(K: Arr, t: Num) -> Arr {
+    n = len(K)
+    calls = ones(n)
+    p = heston_cos(SPOT, K, t, 0.0, 0.0, V0, KAPPA, THETA, ETA, RHO, N_TERMS, RANGE_L, calls)
+    return implied_vols(p, ones(n) * SPOT, K, ones(n) * t, 0.0, 0.0, calls)
+}
+
+atm = heston_cos(SPOT, [SPOT], 1.0, 0.0, 0.0, V0, KAPPA, THETA, ETA, RHO, N_TERMS, RANGE_L, [1.0])[0]
+show atm
+
+K = linspace(K_LO, K_HI, N_STRIKES)
+figure("Implied volatility under Heston", "strike K", "implied volatility")
+plot(K, smile(K, 0.25), "T = 0.25")
+plot(K, smile(K, 1.0), "T = 1")
+plot(K, smile(K, 3.0), "T = 3")
+style("T = 0.25", "nomarker")
+style("T = 1", "nomarker")
+style("T = 3", "nomarker")
+hline("sqrt(theta)", sqrt(THETA))
+
+test "the at-the-money price is Fang and Oosterlee's" {
+    assert_near(atm, REF_ATM, ATM_TOL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

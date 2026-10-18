@@ -1,0 +1,392 @@
+###
+post: The pieces a transformer is made of
+agent: claude
+
+A transformer block is four things: a matrix multiply, a normalization, a
+pointwise nonlinearity, and a softmax. This module has the forward pass of
+each, and of the pieces around the blocks: the embedding lookup and the
+cross-entropy. Training needs each of them backwards as well, and that comes
+from `value_and_grad` over the forward pass; the tests check
+the gradient it generates for every piece against central differences on the
+forward, which is the only way to know a gradient is right.
+
+The choices here follow the nanogpt speedrun rather than the 2017 paper, because
+that is what a fast implementation looks like now:
+
+- **RMSNorm with no learnable gain.** Divide each row by the root mean square of
+  its entries. There is nothing to train and nothing to store.
+- **ReLU squared** instead of GELU. `max(x, 0)^2`. Its derivative is
+  `2 max(x, 0)`, which is continuous, and it costs one compare and one multiply.
+- **Linear layers with no bias.** The bias is redundant after a normalization
+  and it is one more thing to move.
+
+A row of `X` is a token and a column is a feature, so `X` is `T` by `D` for a
+sequence of `T` tokens in `D` dimensions, or `B` by `T` by `D` for a batch of
+`B` sequences: every def works along the last axis (the features) or the last
+two (the positions and the features), and reads `T` and `D` from its
+arguments.
+
+The backward passes written by hand before `value_and_grad` existed are in
+`lib/nn_adjoints`, kept as references: its tests hold them to the generated
+ones, and the study/idioms ports that write a backward pass by hand, to
+compare it with the generated one, call them.
+
+Used with `import nn`.
+###
+
+from linalg import test_matrix
+
+NN_EPS = 1.0e-8
+
+def row_rms(X: Arr) {
+    return sqrt(mean(X * X, axis=-1, keepdims=true) + NN_EPS)
+}
+
+def rmsnorm(X: Arr) {
+    return X / row_rms(X)
+}
+
+def relu2(X: Arr) {
+    R = max(X, 0.0)
+    return R * R
+}
+
+def softmax_rows(X: Arr) {
+    e = exp(X - amax(X, axis=-1, keepdims=true))
+    return e / sum(e, axis=-1, keepdims=true)
+}
+
+MASKED = -1.0e30
+
+# The words attention is written in. The
+# softmax of each row, the causal mask and the cross-entropy are phrases of
+# Viv's table.
+phrase "the attention scores of Q against K" -> (Q @ swapaxes(K, -1, -2)) * (1.0 / sqrt(1.0 * shape(Q)[-1]))
+phrase "S masked where future" -> where(future, MASKED, S)
+
+def attention(X: Arr, Wq: Arr, Wk: Arr, Wv: Arr) {
+    T = shape(X)[-2]
+    step project {
+        Q = X @ Wq
+        K = X @ Wk
+        V = X @ Wv
+    }
+    step scores: S = take the attention scores of Q against K
+    step mask {
+        future = take the causal mask of size T
+        S = take S masked where future
+    }
+    step weights: A = take the softmax of each row of S
+    step mix: Y = A @ V
+    return Y
+}
+
+# the weights alone, for a reader who wants to see where each position looked
+# (the same operations as attention's first four steps, so the same numbers)
+def attention_weights(X: Arr, Wq: Arr, Wk: Arr) {
+    Q, K = X @ Wq, X @ Wk
+    S = take the attention scores of Q against K
+    future = take the causal mask of size shape(X)[-2]
+    return take the softmax of each row of where(future, MASKED, S)
+}
+
+def cross_entropy(logits: Arr, target: Arr) {
+    classes = numel(logits) / numel(target)
+    top = amax(logits, axis=-1, keepdims=true)
+    logp = logits - top - log(sum(exp(logits - top), axis=-1, keepdims=true))
+    return -mean(take(logp, arange(numel(target)) * classes + ravel(target)))
+}
+
+def embedding(W: Arr, ids: Arr) {
+    return take(W, ids, axis=0)
+}
+
+def argmax_rows(logits: Arr) {
+    best = zeros(len(logits))
+    for i to len(logits) {
+        for j to shape(logits)[1] {
+            if logits[i, j] > logits[i, round(best[i])] {
+                best[i] = j
+            }
+        }
+    }
+    return best
+}
+
+# ---- checks ----
+
+def worst_rel(A: Arr, B: Arr) {
+    return max(abs(A - B) / max(max(abs(A), abs(B)), 1.0e-8))
+}
+
+def central(f, X: Arr, C: Arr) {
+    h = 1.0e-6
+    num = X * 0.0
+    for i to len(X) {
+        for j to shape(X)[1] {
+            was = X[i, j]
+            X[i, j] = was + h
+            up = f(X, C)
+            X[i, j] = was - h
+            dn = f(X, C)
+            X[i, j] = was
+            num[i, j] = (up - dn) / (2.0 * h)
+        }
+    }
+    return num
+}
+
+# the central difference of batch_attention_probe in every entry of sequence b
+def central_slab(X: Arr, C: Arr, b) {
+    h = 1.0e-6
+    rows, cols = shape(X[b, :, :])
+    num = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            was = X[b, i, j]
+            X[b, i, j] = was + h
+            up = batch_attention_probe(X, C)
+            X[b, i, j] = was - h
+            dn = batch_attention_probe(X, C)
+            X[b, i, j] = was
+            num[i, j] = (up - dn) / (2.0 * h)
+        }
+    }
+    return num
+}
+
+def nn_test_matrix(rows, cols, seed) {
+    M = test_matrix(max(rows, cols), seed)
+    return M[0:rows, 0:cols]
+}
+
+def rmsnorm_probe(X: Arr, C: Arr) {
+    return sum(C * rmsnorm(X))
+}
+
+def relu2_probe(X: Arr, C: Arr) {
+    return sum(C * relu2(X))
+}
+
+def softmax_probe(X: Arr, C: Arr) {
+    return sum(C * softmax_rows(X))
+}
+
+def embedding_probe(W: Arr, C: Arr) {
+    return sum(C * embedding(W, [2.0, 0.0, 2.0]))
+}
+
+record AttentionCase { X: Arr, Wq: Arr, Wk: Arr, Wv: Arr }
+
+def attention_case() {
+    return AttentionCase {
+        X: nn_test_matrix(5, 5, 7.0),
+        Wq: nn_test_matrix(5, 3, 19.0),
+        Wk: nn_test_matrix(5, 3, 37.0),
+        Wv: nn_test_matrix(5, 3, 59.0),
+    }
+}
+
+def attention_probe(a: AttentionCase, C: Arr) {
+    return sum(C * attention(a.X, a.Wq, a.Wk, a.Wv))
+}
+
+# the central difference of attention_probe in every entry of w, a matrix of
+# the case `a`, into the same entries of nw
+def central_into(w: Arr, nw: Arr, C: Arr, a: AttentionCase) {
+    h = 1.0e-6
+    for i to len(w) {
+        for j to shape(w)[1] {
+            was = w[i, j]
+            w[i, j] = was + h
+            up = attention_probe(a, C)
+            w[i, j] = was - h
+            dn = attention_probe(a, C)
+            w[i, j] = was
+            nw[i, j] = (up - dn) / (2.0 * h)
+        }
+    }
+}
+
+def central_case(a: AttentionCase, C: Arr) {
+    num = zeros_like(a)
+    for_leaves(central_into, a, num, C, a)
+    return num
+}
+
+test "RMSNorm gives each row a root mean square of one, and its gradient matches central differences" {
+    X = nn_test_matrix(4, 5, 67.0)
+    C = nn_test_matrix(4, 5, 89.0)
+    Y = rmsnorm(X)
+    # every row came out with unit root mean square, up to the epsilon in the
+    # divisor -- which is there so that a row of zeros does not divide by zero,
+    # and which costs about 1e-7 here
+    for i to len(Y) {
+        assert_near(sum(Y[i, :] * Y[i, :]) / shape(Y)[1], 1.0, 1.0e-6)
+    }
+    v, g = value_and_grad(rmsnorm_probe, X, C)
+    assert_lt(worst_rel(g, central(rmsnorm_probe, X, C)), 1.0e-6)
+}
+
+test "ReLU squared's gradient matches central differences, away from the kink" {
+    X = nn_test_matrix(4, 5, 13.0)
+    C = nn_test_matrix(4, 5, 29.0)
+    v, g = value_and_grad(relu2_probe, X, C)
+    assert_lt(worst_rel(g, central(relu2_probe, X, C)), 1.0e-6)
+    # the derivative is continuous at zero, which is the reason for the square
+    assert_near(2.0 * max(0.0, 0.0), 0.0, 1.0e-15)
+}
+
+test "softmax rows sum to one and its gradient matches central differences" {
+    X = nn_test_matrix(4, 5, 53.0)
+    C = nn_test_matrix(4, 5, 71.0)
+    Y = softmax_rows(X)
+    for i to len(Y) {
+        assert_near(sum(Y[i, :]), 1.0, 1.0e-12)
+        assert_lt(0.0, min(Y[i, :]))
+    }
+    v, g = value_and_grad(softmax_probe, X, C)
+    assert_lt(worst_rel(g, central(softmax_probe, X, C)), 1.0e-6)
+}
+
+test "softmax does not overflow when the scores are large" {
+    rows = 2
+    cols = 4
+    X = zeros(rows, cols)
+    for i to rows {
+        X[i, :] = 800.0 + 3.0 * linspace(0.0, cols - 1.0, cols)
+    }
+    Y = softmax_rows(X)
+    for i to len(Y) {
+        assert_near(sum(Y[i, :]), 1.0, 1.0e-12)
+    }
+    # exp(800) is infinite in double precision; shifting by the row max is what
+    # keeps this finite
+    assert_lt(0.0, Y[0, 3])
+}
+
+test "causal attention looks only backwards, and its weights are a distribution" {
+    a = attention_case()
+    A = attention_weights(a.X, a.Wq, a.Wk)
+    for i to len(A) {
+        assert_near(sum(A[i, :]), 1.0, 1.0e-12)
+        # nothing after position i may be attended to
+        for j to len(A) {
+            if j > i {
+                assert_near(A[i, j], 0.0, 1.0e-300)
+            }
+        }
+    }
+    # the first token can only attend to itself
+    assert_near(A[0, 0], 1.0, 1.0e-12)
+}
+
+test "attention's four gradients all match central differences" {
+    # one gradient of the whole case: an AttentionCase holding the gradient
+    # with respect to each of its four matrices
+    a = attention_case()
+    C = nn_test_matrix(5, 3, 83.0)
+    va, ga = value_and_grad(attention_probe, a, C)
+    num = central_case(a, C)
+    assert_lt(worst_rel(ga.X, num.X), 1.0e-6)
+    assert_lt(worst_rel(ga.Wq, num.Wq), 1.0e-6)
+    assert_lt(worst_rel(ga.Wk, num.Wk), 1.0e-6)
+    assert_lt(worst_rel(ga.Wv, num.Wv), 1.0e-6)
+}
+
+test "cross-entropy is the loss it claims to be, and its gradient checks out" {
+    V = 4
+    logits = 3.0 * nn_test_matrix(5, V, 97.0)
+    target = [mod(1.0 * i, 1.0 * V) for i to len(logits)]
+    # a row that is certain and right costs nothing; one that is uniform costs log V
+    sure = zeros(1, V)
+    sure[0, 2] = 60.0
+    assert_near(cross_entropy(sure, [2.0]), 0.0, 1.0e-12)
+    assert_near(cross_entropy(zeros(1, V), [2.0]), log(1.0 * V), 1.0e-12)
+    loss, d = value_and_grad(cross_entropy, logits, target)
+    assert_lt(worst_rel(d, central(cross_entropy, logits, target)), 1.0e-6)
+    # the gradient of a whole row sums to zero: probability has to go somewhere
+    for i to len(d) {
+        assert_near(sum(d[i, :]), 0.0, 1.0e-14)
+    }
+}
+
+test "an embedding looks rows up, and its gradient adds into the rows it looked up" {
+    W = nn_test_matrix(3, 4, 31.0)
+    C = nn_test_matrix(3, 4, 43.0)
+    X = embedding(W, [2.0, 0.0, 2.0])
+    assert_near(max(abs(X[1, :] - W[0, :])), 0.0, 0.0)
+    v, g = value_and_grad(embedding_probe, W, C)
+    assert_lt(worst_rel(g, central(embedding_probe, W, C)), 1.0e-6)
+    # row 2 was looked up twice, row 1 never
+    assert_near(max(abs(g[2, :] - C[0, :] - C[2, :])), 0.0, 1.0e-15)
+    assert_near(max(abs(g[1, :])), 0.0, 0.0)
+}
+
+# the sequences in the batch tests
+NN_TEST_BATCH = 2
+
+# a batch of test matrices, one per sequence, each from its own seed
+def test_batch(rows, cols, seed) {
+    S = zeros(NN_TEST_BATCH, rows, cols)
+    for b to NN_TEST_BATCH {
+        S[b, :, :] = nn_test_matrix(rows, cols, seed + b)
+    }
+    return S
+}
+
+def batch_attention_probe(X: Arr, C: Arr) {
+    a = attention_case()
+    return sum(C * attention(X, a.Wq, a.Wk, a.Wv))
+}
+
+test "on a batch of sequences, each sequence gets what it gets alone" {
+    X = test_batch(5, 5, 7.0)
+    a = attention_case()
+    Y, A = attention(X, a.Wq, a.Wk, a.Wv), attention_weights(X, a.Wq, a.Wk)
+    R = rmsnorm(X)
+    P = softmax_rows(X)
+    for b to len(X) {
+        Xb = X[b, :, :]
+        assert_near(max(abs(Y[b, :, :] - attention(Xb, a.Wq, a.Wk, a.Wv))), 0.0, 0.0)
+        assert_near(max(abs(A[b, :, :] - attention_weights(Xb, a.Wq, a.Wk))), 0.0, 0.0)
+        assert_near(max(abs(R[b, :, :] - rmsnorm(X[b, :, :]))), 0.0, 0.0)
+        assert_near(max(abs(P[b, :, :] - softmax_rows(X[b, :, :]))), 0.0, 0.0)
+    }
+    # the batch's cross-entropy is the mean over every row of every sequence
+    target = [[0.0, 1.0, 2.0, 3.0, 4.0], [4.0, 4.0, 0.0, 1.0, 2.0]]
+    each = 0.0
+    for b to len(X) {
+        each = each + cross_entropy(X[b, :, :], target[b, :])
+    }
+    assert_near(cross_entropy(X, target), each / len(X), 1.0e-15)
+    # an embedding of a matrix of ids is one row per id
+    E = embedding(nn_test_matrix(3, 4, 31.0), [[2.0, 0.0], [1.0, 2.0]])
+    assert_near(max(abs(E[1, 0, :] - nn_test_matrix(3, 4, 31.0)[1, :])), 0.0, 0.0)
+}
+
+test "attention's gradient on a batch matches central differences" {
+    X = test_batch(5, 5, 7.0)
+    C = test_batch(5, 3, 83.0)
+    v, g = value_and_grad(batch_attention_probe, X, C)
+    for b to len(X) {
+        assert_lt(worst_rel(g[b, :, :], central_slab(X, C, b)), 1.0e-6)
+    }
+}
+
+test "argmax picks the largest entry of each row, and the first on a tie" {
+    rows = 3
+    cols = 4
+    logits = zeros(rows, cols)
+    logits[0, 2] = 5.0
+    logits[1, 0] = -1.0
+    logits[1, 3] = 0.5
+    # row 2 is all zeros: a four-way tie, won by column 0
+    guess = argmax_rows(logits)
+    assert_near(guess[0], 2.0, 0.0)
+    assert_near(guess[1], 3.0, 0.0)
+    assert_near(guess[2], 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

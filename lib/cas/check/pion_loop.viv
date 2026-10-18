@@ -1,0 +1,86 @@
+###
+post: The pion-loop function's derivative by lib/cas
+agent: claude
+
+`posts/2026-09-25-the-pion-loop-function-by-computer-algebra.viv` built the
+two-pion loop function
+$L(q) = \frac{w}{q}\ln\frac{w + q}{2m_\pi}$, $w = \sqrt{4m_\pi^2 + q^2}$,
+as an expression tape of 11 entries and differentiated it into a tape of 36,
+because nothing on the tape is shared or simplified. Here the same function
+is read into lib/cas from its formula, `cas_diff` differentiates it, and both
+are held to that post's references: a 30-digit Feynman-parameter integral
+for $L$ and mpmath's derivative of it for $dL/dq$
+(`posts/refs/the-pion-loop-function-by-computer-algebra.py`), the same
+numbers to the same tolerances.
+
+Three more routes to the derivative at 200 MeV agree with the CAS's: the
+`differentiate` phrase (forward mode), the same phrase `using the symbolic
+derivative`, and `grad` (reverse mode, lang/viv/src/grad.rs) of a def that
+computes $L$. grad.rs and `cas_diff` take the derivatives of `sqrt` and `log`
+from one table.
+###
+import cas.cas as cas_module
+from cas.calculus import cas_dag_size, cas_diff, cas_subst
+from cas.parse import cas
+from cas.store import cas_sym
+from cas.eval import cas_value_at
+from cas.show import cas_tex, cas_text
+
+MPI = 138.039
+
+L_TEXT = "sqrt(4*m^2 + q^2)/q * log((sqrt(4*m^2 + q^2) + q)/(2*m))"
+q = cas_sym("q")
+L = cas_subst(cas(L_TEXT), cas_sym("m"), cas("138.039"))
+dL = cas_diff(L, q)
+n_L = cas_dag_size(L)
+n_dL = cas_dag_size(dL)
+show n_L, n_dL
+print("dL/dq = " + cas_text(dL))
+print("LaTeX: " + cas_tex(dL))
+
+Q_REF = [1.0, 50.0, 100.0, 200.0, 300.0, 500.0, 700.0, 1000.0]
+L_REF = [1.0000043733362086695, 1.0107925820719110433, 1.0415967652983725786, 1.1464228856495893426, 1.2792753525586836379, 1.5487579788258103122, 1.7848080102098173246, 2.0735239825621998704]
+Q_D = [50.0, 200.0, 500.0]
+DL_REF = [0.00042617365415873921187, 0.0012407510640255769467, 0.0012762845936279545397]
+
+L_cas = zeros(len(Q_REF))
+for j to len(Q_REF) {
+    L_cas[j] = cas_value_at(L, q, Q_REF[j])
+}
+dL_cas = zeros(len(Q_D))
+dL_err = 0.0
+for j to len(Q_D) {
+    dL_cas[j] = cas_value_at(dL, q, Q_D[j])
+    dL_err = max(dL_err, abs(dL_cas[j] - DL_REF[j]))
+}
+show L_cas, dL_cas, dL_err
+
+#| L(q) as a program computes it, for grad.
+def loop_l(qq) {
+    w = sqrt(4.0 * MPI * MPI + qq * qq)
+    return w / qq * log((w + qq) / (2.0 * MPI))
+}
+d_forward = differentiate sqrt(4*MPI^2 + x^2)/x * log((sqrt(4*MPI^2 + x^2) + x)/(2*MPI)) at 200
+d_symbolic = differentiate sqrt(4*MPI^2 + x^2)/x * log((sqrt(4*MPI^2 + x^2) + x)/(2*MPI)) at 200 using the symbolic derivative
+d_reverse = grad(loop_l, 200.0)
+show d_forward, d_symbolic, d_reverse
+
+test "L from the CAS matches the Feynman-parameter integral at all eight momenta to 1e-14" {
+    for j to len(Q_REF) {
+        assert_near(L_cas[j], L_REF[j], 1.0e-14)
+    }
+}
+test "dL/dq from cas_diff matches mpmath's derivative to 2e-17 per MeV, as the post's tape does" {
+    assert_lt(dL_err, 2.0e-17)
+}
+test "the derivative's DAG is smaller than the post's 36-entry tape" {
+    assert_lt(n_dL, 36)
+}
+test "forward mode, the symbolic phrase and reverse mode agree with cas_diff at 200 MeV" {
+    assert_near(d_forward, dL_cas[1], 1.0e-17)
+    assert_near(d_symbolic, dL_cas[1], 1.0e-17)
+    assert_near(d_reverse, dL_cas[1], 1.0e-17)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

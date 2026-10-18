@@ -1,0 +1,123 @@
+# Builtins written in Viv (lang/viv/src/stdlib.rs). A program that calls one
+# of these names, and does not define it, gets the def added before any
+# engine sees the program, so the interpreter, C and wasm run the same code.
+# `sorted`, `unique` and `del` of a real array reach the `viv__*_num` defs
+# through the lowering (and the interpreter), which pick them by the
+# argument's type; `sorted` and `unique` of strings stay the string builtins.
+
+# The sum of the numbers, correctly rounded: Shewchuk's exact partial sums,
+# then the rounding of their total, as CPython's math.fsum computes it. An
+# infinity or a NaN among them gives what `sum` gives.
+def fsum(xs: Arr) -> Num {
+    n = len(xs)
+    p = zeros(n + 1)
+    m = 0.0
+    for k to n {
+        x = xs[k]
+        if x - x != 0.0 {
+            return sum(xs)
+        }
+        i = 0.0
+        for j to m {
+            y = p[j]
+            if abs(x) < abs(y) {
+                t = x
+                x = y
+                y = t
+            }
+            hi = x + y
+            lo = y - (hi - x)
+            if lo != 0.0 {
+                p[i] = lo
+                i = i + 1.0
+            }
+            x = hi
+        }
+        p[i] = x
+        m = i + 1.0
+    }
+    if m == 0.0 {
+        return 0.0
+    }
+    hi = p[m - 1.0]
+    lo = 0.0
+    q = m - 1.0
+    while q > 0.0 {
+        q = q - 1.0
+        x = hi
+        y = p[q]
+        hi = x + y
+        lo = y - (hi - x)
+        if lo != 0.0 {
+            break
+        }
+    }
+    if q > 0.0 and ((lo < 0.0 and p[q - 1.0] < 0.0) or (lo > 0.0 and p[q - 1.0] > 0.0)) {
+        y = lo * 2.0
+        x = hi + y
+        if y == x - hi {
+            hi = x
+        }
+    }
+    return hi
+}
+
+# sqrt(x^2 + y^2) without overflow or underflow on the way: musl's hypot,
+# the one `abs` of a complex number uses.
+def hypot(x: Num, y: Num) -> Num {
+    return abs(complex(x, y))
+}
+
+# |x| with the sign of y, -0.0 counting as negative (a NaN's sign bit cannot
+# be read, so a NaN y gives |x|).
+def copysign(x: Num, y: Num) -> Num {
+    if y < 0.0 or (y == 0.0 and 1.0 / y < 0.0) {
+        return -abs(x)
+    }
+    return abs(x)
+}
+
+# `sorted(xs)` of numbers: a sorted copy, ascending, stable, -0.0 equal to
+# 0.0 and NaN last (NumPy's order, which argsort uses).
+def viv__sorted_num(xs: Arr) -> Arr {
+    return take(xs, argsort(xs), axis=0)
+}
+
+# `unique(xs)` of numbers: the distinct values, ascending, as np.unique
+# gives them (-0.0 and 0.0 one value, the first of them in sorted order;
+# NaNs one value, last).
+def viv__unique_num(xs: Arr) -> Arr {
+    s = take(xs, argsort(xs), axis=0)
+    out = []
+    for k to len(s) {
+        x = s[k]
+        same = k > 0 and (x == s[k - 1] or (x != x and s[k - 1] != s[k - 1]))
+        if not same {
+            out = append(out, x)
+        }
+    }
+    return out
+}
+
+# `del xs[i]` and `pop(xs, i)`: xs without element i (a negative i counts
+# from the end).
+def viv__del_num(xs: Arr, i: Num) -> Arr {
+    n = len(xs)
+    k = i + n if i < 0.0 else i
+    if k < 0.0 or k >= n {
+        stop(f"pop index {i} out of range for a list of {n}")
+    }
+    return concat(xs[:k], xs[k + 1.0:])
+}
+
+def viv__del_strs(xs: [Str], i: Num) -> [Str] {
+    n = len(xs)
+    k = i + n if i < 0.0 else i
+    if k < 0.0 or k >= n {
+        stop(f"pop index {i} out of range for a list of {n}")
+    }
+    return xs[:k] + xs[k + 1.0:]
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

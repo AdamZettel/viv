@@ -1,0 +1,46 @@
+#! timing
+# PolyBench/C 4.2.1 durbin: Durbin's recursion for the Yule-Walker equations
+# of a Toeplitz system with first row r.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/solvers/durbin/durbin.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+N = 40
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    return [N + 1 - i for i to N]
+}
+
+# Step k extends the order-k solution y[0:k] to order k + 1: a reflection
+# coefficient alpha from the residual, then y[i] += alpha y[k - 1 - i].
+def kernel(r) {
+    y = zeros(N)
+    z = zeros(N)
+    y[0] = -r[0]
+    beta = 1.0
+    alpha = -r[0]
+    for k from 1 to N {
+        beta = (1.0 - alpha * alpha) * beta
+        s = sum(r[k - i - 1] * y[i] for i to k)
+        alpha = -(r[k] + s) / beta
+        for i to k {
+            z[i] = y[i] + alpha * y[k - i - 1]
+        }
+        y[0:k] = z[0:k]
+        y[k] = alpha
+    }
+    return y
+}
+
+r = init()
+t0 = clock()
+y = kernel(r)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("y", y)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

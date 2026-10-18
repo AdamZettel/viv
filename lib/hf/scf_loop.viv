@@ -1,0 +1,617 @@
+###
+post: The SCF loop every Hartree-Fock method runs
+agent: claude
+
+Hartree-Fock replaces the electron-electron repulsion by the average field of
+the other electrons. That field depends on the orbitals, and the orbitals
+depend on the field, so the equations are solved by iteration: guess a
+density, build the Fock matrix from it, diagonalize, occupy the lowest
+orbitals, and repeat until the density stops changing. The converged density
+is a fixed point of that map, and a fixed point is also a stationary point of
+the energy: `F D S - S D F = 0`.
+
+`scf_iterate` is that loop, written once for RHF (one total density), UHF (a
+density per spin) and ROHF (a density per spin, one set of orbitals). One
+iteration, with `X^T S X = I` (`m` columns kept):
+
+1. `J`, `K` from the densities; the Fock matrices (`F = H + J - K/2` for
+   RHF, `F_s = H + J_a + J_b - K_s` otherwise).
+2. The energy, `E = E_nuc + (1/2) sum_d Tr D_d (H + F_d)`.
+3. The commutator in the orthonormal basis: `F' P' - P' F'` per density for
+   RHF and UHF; for ROHF the effective matrix of lib/hf/coupling and its
+   commutator with `P_c' + P_o'/2`.
+4. Stop when the energy changed less than `e_tol` and the largest commutator
+   element is below `grad_tol`. The density returned is the one this
+   iteration started from, so the energy, the density and the error all
+   describe the same state.
+5. Otherwise DIIS picks the matrix to diagonalize (from the iteration after
+   `diis_start` on; before that the new Fock matrix as it is), a level shift
+   (when one is set) raises the virtual block, and the lowest orbitals give
+   the next densities.
+
+Each iteration allocates what it computes and keeps only the new density;
+a compiled loop frees the rest when the iteration ends,
+so 200 iterations run in the memory of one [test "200 iterations run in
+fixed memory and stay on the solution"] (lib/hf/rhf).
+
+**The stages** each have several members, picked by a field of the run's
+`ScfOptions` (lib/hf/opts): the guess (`gs_of`), the orthogonalizer
+(`orth_of`), the eigensolver (`eig_of`), the accelerator
+(`accel_extrapolate`), the ROHF coupling and the J/K builder (`jk_of`). Each
+of those calls its members by name, so the default options run the
+production members directly; the registries that list the members are for
+the tests and sweeps that run them side by side.
+
+**One entry point.** `scf_solve(setup, start)` runs every method from
+spin densities `start[2, n, n]`: RHF adds them, UHF and ROHF iterate on them,
+and ROHF with fewer alpha than beta electrons runs with the counts swapped and
+swaps the densities back. The three ways in are thin:
+
+    scf(setup)                     from the guess setup.options.guess
+    scf_run_from(setup, Da, Db)    from given spin densities (import mode)
+    scf_step(setup, Da, Db)        one plain step: F from D, diagonalize, occupy
+
+`scf(setup)` is what lib/hf/scf's `rhf`, `uhf`, `rohf` and `scf_with` run
+after `integrals(mol, o)` has built the setup.
+
+At a converged state `scf_step` gives the densities back, which checks the
+Fock build, the diagonalization and the occupation rule against PySCF one
+step at a time, whatever path an iteration took.
+
+**The result** is an `ScfResult`: the energy, whether it converged and after
+how many iterations, the densities and orbitals (total, then per spin in
+`alpha` and `beta`), the largest `|F D S - S D F|` in the AO basis (`grad`),
+`<S^2>` (0 for RHF) and the energy by a second formula (`energy_check`,
+`E_nuc + Tr D H + (1/2) Tr D J - (1/4) Tr D K` for RHF). For RHF the
+top-level orbitals are the spatial ones with occupations 2 and 0, and each
+spin holds half the density. For ROHF they are the eigenvectors of the
+effective matrix with occupations 2, 1 and 0. For UHF they are the alpha
+orbitals. `fock` is the Fock matrix for RHF and the average of the spin Fock
+matrices otherwise.
+
+Used with `import hf.scf_loop`.
+###
+
+from hf.opts import (
+    opt_array, OPT_EIGEN, SCF_AUTO, scf_defaults, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions,
+)
+from hf.eri_store import es_index8, es_len8
+from hf.eigen import eig_of, eig_values, eig_vectors
+from hf.orthogonalize import orth_of, orth_rank
+from hf.density import (
+    den_ao_commutator, den_commutator_sym, den_energy, den_fock, den_from_vectors, den_maxabs,
+    den_orth, den_orth_density_sx, den_s2, den_stack1, den_stack2,
+)
+from hf.guess import gs_of
+from hf.jk import jk_of, jk_update
+from hf.jk_direct import INT_JK_DIRECT
+from hf.accelerate import accel_extrapolate, accel_new, ACCEL_NONE, accel_push
+from hf.coupling import (
+    rohf_effective, rohf_error, rohf_level_shift, rohf_occupations, rohf_occupy, rohf_pick,
+)
+
+#| What an SCF run is given: the core Hamiltonian `h = T + V`, the overlap
+#| `s`, the packed integrals `eri` (or the basis blob a direct J/K member
+#| reads), the electron counts, the nuclear repulsion, the options, and the
+#| method the run uses (`SCF_RHF`, `SCF_UHF` or `SCF_ROHF`), decided once
+#| when the setup is made (`scf_setup`).
+record ScfSetup {
+    h: Arr
+    s: Arr
+    eri: Arr
+    nalpha: Num
+    nbeta: Num
+    enuc: Num
+    options: ScfOptions
+    method: Num
+}
+
+#| One spin's part of a result.
+record Orbitals {
+    mo_coeff: Arr
+    mo_energy: Arr
+    mo_occ: Arr
+    density: Arr
+    fock: Arr
+}
+
+#| What an SCF run returns.
+record ScfResult {
+    energy: Num
+    converged: Num
+    iterations: Num
+    method: Num
+    density: Arr
+    mo_coeff: Arr
+    mo_energy: Arr
+    mo_occ: Arr
+    fock: Arr
+    alpha: Orbitals
+    beta: Orbitals
+    grad: Num
+    s2: Num
+    energy_check: Num
+}
+
+#| The commutator step's products, in the orthonormal basis: the matrix DIIS
+#| extrapolates and its error, the error's largest element, the densities
+#| (RHF and UHF: one per density; ROHF: the closed and open projectors) and
+#| the spin Fock matrices.
+record ScfError {
+    matrix: Arr
+    error: Arr
+    norm: Num
+    density: Arr
+    spin_fock: Arr
+}
+
+#| A setup from the matrices, the electron counts, the nuclear repulsion and
+#| the options.
+#@ 4d2a9224
+def scf_setup(H: Arr, S: Arr, G: Arr, na, nb, enuc, o: ScfOptions) -> ScfSetup {
+    return ScfSetup { h: H, s: S, eri: G, nalpha: na, nbeta: nb, enuc: enuc, options: o, method: scf_method(o, na, nb) }
+}
+
+#| The same setup with options `o`, its method decided again from them.
+#| A record update that changes the options' method or the electron counts
+#| would keep the old method; this and `scf_setup` are the ways to change
+#| them.
+def scf_setup_with(setup: ScfSetup, o: ScfOptions) -> ScfSetup {
+    return scf_setup(setup.h, setup.s, setup.eri, setup.nalpha, setup.nbeta, setup.enuc, o)
+}
+
+#| The method options `o` ask for with `na` alpha and `nb` beta electrons:
+#| `o.method`, where automatic means RHF for equal spin counts and UHF
+#| otherwise. `scf_setup` asks it once and stores the answer in the setup.
+#@ 8b2ce83c
+def scf_method(o: ScfOptions, na, nb) {
+    m = round(o.method)
+    if m != SCF_AUTO {
+        return m
+    }
+    if na == nb {
+        return SCF_RHF
+    }
+    return SCF_UHF
+}
+
+#| The column array the registry members read (lib/hf/opts).
+#@ 435eeacb
+def scf_opts(setup: ScfSetup) {
+    return opt_array(setup.options, setup.nalpha, setup.nbeta, setup.enuc)
+}
+
+#| Electrons per orbital: two for the RHF total density, one for a spin density.
+#@ 60a561ec
+def scf_weight(setup: ScfSetup) {
+    if setup.method == SCF_RHF {
+        return 2.0
+    }
+    return 1.0
+}
+
+#| The orbitals density d fills: `nalpha` for RHF and for alpha, `nbeta`
+#| for beta.
+#@ 0c964866
+def scf_nocc(setup: ScfSetup, d) {
+    if d < 1 {
+        return setup.nalpha
+    }
+    return setup.nbeta
+}
+
+#| The full-rebuild interval of the incremental Fock build: `fock_rebuild`
+#| when the run builds J and K with the production direct member, `0` (every
+#| build from the whole density) otherwise. In core a build costs the same
+#| whatever the density, so only the direct member gains from it.
+def scf_incremental(setup: ScfSetup) {
+    if round(setup.options.jk) == INT_JK_DIRECT {
+        return max(0, round(setup.options.fock_rebuild))
+    }
+    return 0
+}
+
+#| How many matrices DIIS extrapolates: one per density for RHF and UHF, the
+#| one effective matrix for ROHF.
+#@ 442be429
+def scf_nmatrix(setup: ScfSetup, nd) {
+    if setup.method == SCF_ROHF {
+        return 1
+    }
+    return nd
+}
+
+#| The same setup with the spin counts exchanged.
+#@ 01d1b947
+def scf_swapped(setup: ScfSetup) -> ScfSetup {
+    return ScfSetup { nalpha: setup.nbeta, nbeta: setup.nalpha, ..setup }
+}
+
+#| The energy a second way, from J and K directly instead of from the Fock
+#| matrix: `E_nuc + Tr D H + (1/2) Tr D J - (1/4) Tr D K` for one total
+#| density, `E_nuc + Tr Dt H + (1/2) Tr Dt Jt - (1/2) sum_s Tr D_s K_s` for two.
+def scf_energy2(H: Arr, JK: Arr, D: Arr, enuc) {
+    Da = transpose(slab(D, 0))
+    if len(D) < 2 {
+        return enuc + sum(Da * (H + 0.5 * slab(JK, 0) - 0.25 * slab(JK, 1)))
+    }
+    Db = transpose(slab(D, 1))
+    eh = sum((Da + Db) * (H + 0.5 * (slab(JK, 0) + slab(JK, 2))))
+    return enuc + eh - 0.5 * sum(Da * slab(JK, 1) + Db * slab(JK, 3))
+}
+
+#| The Fock matrices and densities in the orthonormal basis of `X` (its `m`
+#| columns), the matrix DIIS extrapolates and its error. `U` is `S X`, which
+#| the loop computes once.
+def scf_commutator(setup: ScfSetup, X: Arr, U: Arr, F: Arr, D: Arr, opts: Arr) -> ScfError {
+    nd = len(D)
+    m = shape(X)[1]
+    Fo = zeros(nd, m, m)
+    for d to nd {
+        setslab(Fo, d, den_orth(X, slab(F, d), m))
+    }
+    if setup.method == SCF_ROHF {
+        # the closed and open projectors, P_c' from Db and P_o' from Da - Db
+        P = den_stack2(den_orth_density_sx(U, slab(D, 1)), den_orth_density_sx(U, slab(D, 0) - slab(D, 1)))
+        Fe = rohf_effective(Fo, P, opts)
+        E = rohf_error(Fe, P)
+        return ScfError { matrix: Fe, error: E, norm: den_maxabs(E), density: P, spin_fock: Fo }
+    }
+    P = zeros(nd, m, m)
+    E = zeros(nd, m, m)
+    norm = 0.0
+    for d to nd {
+        Pd = den_orth_density_sx(U, slab(D, d))
+        Ed = den_commutator_sym(slab(Fo, d), Pd)
+        setslab(P, d, Pd)
+        setslab(E, d, Ed)
+        norm = max(norm, den_maxabs(Ed))
+    }
+    return ScfError { matrix: Fo, error: E, norm: norm, density: P, spin_fock: Fo }
+}
+
+#| `Fnext` (the matrices about to be diagonalized, `[k, m, m]`) with the
+#| virtual orbitals raised by `shift`: `Fnext + shift (I - P'/w)` per spin for
+#| RHF and UHF, where `P'/w` projects on the occupied orbitals, and
+#| `Fnext + shift (I - P_c' - P_o')` for ROHF.
+def scf_level_shift(setup: ScfSetup, Fnext: Arr, comm: ScfError, shift) -> Arr {
+    m = shape(Fnext)[1]
+    if setup.method == SCF_ROHF {
+        return rohf_level_shift(Fnext, comm.density, m, shift)
+    }
+    #: I - P'/w projects onto the virtual orbitals
+    w = scf_weight(setup)
+    Fs = copy(Fnext)
+    for d to len(Fnext) {
+        Q = -slab(comm.density, d) / w
+        for a to m {
+            Q[a, a] = Q[a, a] + 1.0
+        }
+        setslab(Fs, d, slab(Fnext, d) + shift * Q)
+    }
+    return Fs
+}
+
+#| The eigen-decomposition of each matrix of `Fnext`: a stack of eigensolver
+#| results, `[k, m + 1, m]` (lib/hf/eigen).
+#@ 95287578
+def scf_diagonalize(Fnext: Arr, opts: Arr) {
+    sh = shape(Fnext)
+    eigs = zeros(sh[0], sh[1] + 1, sh[1])
+    for d to sh[0] {
+        setslab(eigs, d, eig_of(slab(Fnext, d), opts[OPT_EIGEN]))
+    }
+    return eigs
+}
+
+#| The next densities from the eigenvectors in `eigs`: the lowest orbitals of
+#| each density for RHF and UHF, the closed and open ones for ROHF.
+#@ eb987221
+def scf_occupy(setup: ScfSetup, X: Arr, eigs: Arr, comm: ScfError) {
+    m = shape(X)[1]
+    if setup.method == SCF_ROHF {
+        V = eig_vectors(slab(eigs, 0))
+        return rohf_occupy(X, V, m, rohf_pick(V, m, comm.spin_fock, setup.nalpha, setup.nbeta), setup.nalpha, setup.nbeta)
+    }
+    n = len(X)
+    nd = len(eigs)
+    D = zeros(nd, n, n)
+    for d to nd {
+        setslab(D, d, den_from_vectors(X, eig_vectors(slab(eigs, d)), m, 0, scf_nocc(setup, d), scf_weight(setup)))
+    }
+    return D
+}
+
+#| The loop: iterate from the densities `D0` (`[1, n, n]` for RHF, `[2, n, n]`
+#| otherwise) until the energy and the commutator settle, or `max_iter`
+#| iterations have run.
+def scf_iterate(setup: ScfSetup, D0: Arr) -> ScfResult {
+    n = len(setup.h)
+    nd = len(D0)
+    opts = scf_opts(setup)
+    step orthonormal_basis {
+        # the kept columns only: m of them
+        X = orth_of(setup.s, opts)
+        X = X[:, 0:orth_rank(X)]
+        U = setup.s @ X
+    }
+    step start {
+        diis = accel_new(scf_nmatrix(setup, nd), shape(X)[1], opts)
+        D = D0
+        JK = zeros(2 * nd, n, n)
+        # the incremental Fock build: the density J and K were last built
+        # from, and how many builds since the last one from the whole density
+        incr = scf_incremental(setup)
+        Dbuilt = D0
+        since = 0
+        F = zeros(nd, n, n)
+        e = 0.0
+        eprev = 0.0
+        conv = 0
+        it = 0
+    }
+    for it from 1 to setup.options.max_iter + 1 {
+        step coulomb_exchange {
+            if incr > 0 and it > 1 and since + 1 < incr {
+                JK = jk_update(setup.eri, D, Dbuilt, JK, opts)
+                since = since + 1
+            }
+            else {
+                JK = jk_of(setup.eri, D, opts)
+                since = 0
+            }
+            Dbuilt = D
+        }
+        step fock {
+            F = den_fock(setup.h, JK, nd)
+        }
+        step energy {
+            e = den_energy(setup.h, F, D, nd, setup.enuc)
+        }
+        step commutator {
+            comm = scf_commutator(setup, X, U, F, D, opts)
+        }
+        if it > 1 and abs(e - eprev) < setup.options.e_tol and comm.norm < setup.options.grad_tol {
+            if since > 0 {
+                # J and K came from a change of density, whose screening and
+                # sums leave noise near the convergence test's size: from here
+                # on build them from the whole density, starting with this D,
+                # and test again before stopping
+                incr = 0
+                since = 0
+                continue
+            }
+            conv = 1
+            break
+        }
+        eprev = e
+        step diis {
+            # the first `diis_start` iterations' Fock matrices stay out of
+            # the history (PySCF's diis_start_cycle)
+            if it > setup.options.diis_start {
+                accel_push(diis, comm.matrix, comm.error)
+                Fnext = accel_extrapolate(diis, opts)
+            }
+            else {
+                Fnext = comm.matrix
+            }
+        }
+        if setup.options.level_shift > 0.0 {
+            step level_shift {
+                Fnext = scf_level_shift(setup, Fnext, comm, setup.options.level_shift)
+            }
+        }
+        step diagonalize {
+            eigs = scf_diagonalize(Fnext, opts)
+        }
+        step new_density {
+            D = scf_occupy(setup, X, eigs, comm)
+        }
+    }
+    step result {
+        r = scf_result(setup, X, D, F, JK, e, conv, it, opts)
+    }
+    return r
+}
+
+#| `X V`: orbitals as AO coefficients, `[n, m]`.
+#@ bf7650c2
+def scf_coefficients(X: Arr, V: Arr) {
+    return X @ V
+}
+
+#| The aufbau occupations of `m` orbitals with `nocc` filled, `w` each.
+#@ f2eba142
+def scf_aufbau(m, nocc, w) {
+    occ = zeros(m)
+    occ[0:min(nocc, m)] = w
+    return occ
+}
+
+#| The orbitals of one Fock matrix `Fd[n, n]`: its eigenvectors in the
+#| orthonormal basis of `X`, the lowest `nocc` filled with `w` electrons each.
+#@ 05421be8
+def scf_orbitals(X: Arr, Fd: Arr, D: Arr, nocc, w, opts: Arr) -> Orbitals {
+    m = shape(X)[1]
+    R = eig_of(den_orth(X, Fd, m), opts[OPT_EIGEN])
+    return Orbitals { mo_coeff: scf_coefficients(X, eig_vectors(R)), mo_energy: eig_values(R), mo_occ: scf_aufbau(m, nocc, w), density: D, fock: Fd }
+}
+
+#| The result record of a run that ended with densities D, Fock matrices F
+#| (and their J and K) built from the densities before them, energy e,
+#| convergence flag `conv` and `it` iterations.
+def scf_result(setup: ScfSetup, X: Arr, D: Arr, F: Arr, JK: Arr, e, conv, it, opts: Arr) -> ScfResult {
+    method = setup.method
+    m = shape(X)[1]
+    nd = len(D)
+    step convergence {
+        grad = 0.0
+        for d to nd {
+            grad = max(grad, den_ao_commutator(F, d, D, d, setup.s))
+        }
+        s2 = 0.0
+        if nd > 1 {
+            s2 = den_s2(D, setup.s, setup.nalpha, setup.nbeta)
+        }
+        e2 = scf_energy2(setup.h, JK, D, setup.enuc)
+    }
+    if method == SCF_RHF {
+        step closed_shell {
+            half = slab(D, 0) * 0.5
+            a = scf_orbitals(X, slab(F, 0), half, setup.nalpha, 1.0, opts)
+        }
+        return ScfResult { energy: e, converged: conv, iterations: it, method: method, density: slab(D, 0), mo_coeff: a.mo_coeff, mo_energy: a.mo_energy, mo_occ: a.mo_occ * 2.0, fock: a.fock, alpha: a, beta: a, grad: grad, s2: s2, energy_check: e2 }
+    }
+    total = slab(D, 0) + slab(D, 1)
+    favg = (slab(F, 0) + slab(F, 1)) * 0.5
+    if method == SCF_ROHF {
+        step shared_orbitals {
+            comm = scf_commutator(setup, X, setup.s @ X, F, D, opts)
+            R = eig_of(slab(comm.matrix, 0), opts[OPT_EIGEN])
+            V = eig_vectors(R)
+            C = scf_coefficients(X, V)
+            occ = rohf_occupations(rohf_pick(V, m, comm.spin_fock, setup.nalpha, setup.nbeta), m, setup.nalpha, setup.nbeta)
+            a = Orbitals { mo_coeff: C, mo_energy: eig_values(R), mo_occ: min(occ, 1.0), density: slab(D, 0), fock: slab(F, 0) }
+            b = Orbitals { mo_coeff: C, mo_energy: eig_values(R), mo_occ: max(occ - 1.0, 0.0), density: slab(D, 1), fock: slab(F, 1) }
+        }
+        return ScfResult { energy: e, converged: conv, iterations: it, method: method, density: total, mo_coeff: C, mo_energy: eig_values(R), mo_occ: occ, fock: favg, alpha: a, beta: b, grad: grad, s2: s2, energy_check: e2 }
+    }
+    step spin_orbitals {
+        a = scf_orbitals(X, slab(F, 0), slab(D, 0), setup.nalpha, 1.0, opts)
+        b = scf_orbitals(X, slab(F, 1), slab(D, 1), setup.nbeta, 1.0, opts)
+    }
+    return ScfResult { energy: e, converged: conv, iterations: it, method: method, density: total, mo_coeff: a.mo_coeff, mo_energy: a.mo_energy, mo_occ: a.mo_occ, fock: favg, alpha: a, beta: b, grad: grad, s2: s2, energy_check: e2 }
+}
+
+#| The same result with the two spins exchanged.
+#@ ab829052
+def scf_unswap(r: ScfResult) -> ScfResult {
+    return ScfResult { alpha: r.beta, beta: r.alpha, ..r }
+}
+
+#| The one way into the loop: iterate from spin densities `start[2, n, n]`
+#| (in the setup's spin order) with the method the setup asks for.
+def scf_solve(setup: ScfSetup, start: Arr) -> ScfResult {
+    method = setup.method
+    # the method was decided when the setup was made; a setup changed by a
+    # record update that asks for another one did not go through
+    # scf_setup or scf_setup_with
+    if method != scf_method(setup.options, setup.nalpha, setup.nbeta) {
+        stop("scf_solve: the setup's method is not the one its options and electron counts ask for; change them with scf_setup_with or scf_setup")
+    }
+    if method == SCF_RHF {
+        return scf_iterate(setup, den_stack1(slab(start, 0) + slab(start, 1)))
+    }
+    if method == SCF_ROHF and setup.nalpha < setup.nbeta {
+        # only the number of open orbitals matters: run with the counts
+        # swapped, then give the spins back
+        return scf_unswap(scf_iterate(scf_swapped(setup), den_stack2(slab(start, 1), slab(start, 0))))
+    }
+    return scf_iterate(setup, start)
+}
+
+#| The SCF of a setup: from the guess `setup.options.guess`, the method the
+#| setup asks for, iterated until it converges.
+def scf(setup: ScfSetup) -> ScfResult {
+    n = len(setup.h)
+    step guess {
+        start = gs_of(setup.h, setup.s, setup.eri, zeros(2, n, n), scf_opts(setup))
+    }
+    step solve {
+        r = scf_solve(setup, start)
+    }
+    return r
+}
+
+#| From the spin densities `Da` and `Db` (for RHF, any split of the total
+#| density, such as half of it each).
+#@ 3b548fd3
+def scf_run_from(setup: ScfSetup, Da: Arr, Db: Arr) -> ScfResult {
+    return scf_solve(setup, den_stack2(Da, Db))
+}
+
+#| One plain step from `Da`, `Db`: build F, diagonalize, occupy, with no
+#| extrapolation and no level shift. The result's energy and Fock matrices
+#| are those of the densities given; its densities are the new ones.
+def scf_step(setup: ScfSetup, Da: Arr, Db: Arr) -> ScfResult {
+    plain = ScfOptions { max_iter: 1, accelerator: ACCEL_NONE, level_shift: 0.0, e_tol: -1.0, ..setup.options }
+    return scf_solve(ScfSetup { options: plain, ..setup }, den_stack2(Da, Db))
+}
+
+#| The spin densities of a result as the `[nd, n, n]` stack the loop carries:
+#| the total density for RHF, alpha then beta otherwise.
+#@ 1e6af102
+def scf_densities(r: ScfResult) {
+    if r.method == SCF_RHF {
+        return den_stack1(r.density)
+    }
+    return den_stack2(r.alpha.density, r.beta.density)
+}
+
+#| The largest difference between two results' densities: the total
+#| density for RHF, spin by spin otherwise.
+#@ ca94d6ef
+def scf_density_gap(a: ScfResult, b: ScfResult) {
+    if a.method == SCF_RHF {
+        return max(abs(a.density - b.density))
+    }
+    return max(max(abs(a.alpha.density - b.alpha.density)), max(abs(a.beta.density - b.beta.density)))
+}
+
+# ---- tests ------------------------------------------------------------------------
+
+#| Test helper: PySCF's atom-free model (test_rhf.py:757, test_uhf.py:374):
+#| a diagonal h, S = I, one on-site integral (ii|ii) per orbital, no nuclei.
+#~ test
+#@ ce5f656d
+def scf_t_model(na, nb, method) -> ScfSetup {
+    h = [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 2.0]]
+    s = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    g = zeros(es_len8(len(h)))
+    for i to len(h) {
+        g[es_index8(i, i, i, i)] = 0.2
+    }
+    return scf_setup(h, s, g, na, nb, 0.0, ScfOptions { method: method, ..scf_defaults() })
+}
+
+test "one entry point runs all three methods: the atom-free model gives 0.2 closed and 1.0 as a triplet" {
+    # RHF: both electrons in orbital 0, E = 2 h_00 + (00|00)
+    scf_r = scf(scf_t_model(1, 1, SCF_AUTO))
+    assert_near(scf_r.method, SCF_RHF, 0.0)
+    assert_near(scf_r.converged, 1.0, 0.0)
+    assert_lt(abs(scf_r.energy - 0.2), 1.0e-12)
+    assert_near(sum(scf_r.mo_occ), 2, 0.0)
+    assert_near(scf_r.mo_occ[0], 2, 0.0)
+    # the triplet: one alpha electron in each of orbitals 0 and 1, E = 0 + 1,
+    # and same-spin J and K cancel; UHF and ROHF agree, and so does ROHF with
+    # the spins the other way round
+    scf_u = scf(scf_t_model(2, 0, SCF_AUTO))
+    assert_near(scf_u.method, SCF_UHF, 0.0)
+    assert_lt(abs(scf_u.energy - 1.0), 1.0e-12)
+    assert_lt(abs(scf_u.s2 - 2.0), 1.0e-12)
+    assert_near(sum(scf_u.alpha.mo_occ), 2, 0.0)
+    assert_near(sum(scf_u.beta.mo_occ), 0, 0.0)
+    scf_o = scf(scf_t_model(2, 0, SCF_ROHF))
+    assert_lt(abs(scf_o.energy - 1.0), 1.0e-12)
+    assert_near(sum(scf_o.mo_occ), 2, 0.0)
+    scf_f = scf(scf_t_model(0, 2, SCF_ROHF))
+    assert_lt(abs(scf_f.energy - 1.0), 1.0e-12)
+    assert_near(max(abs(scf_f.beta.density - scf_o.alpha.density)), 0.0, 1.0e-14)
+}
+
+test "a converged density is the plain step's fixed point, and the energy formulas agree" {
+    scf_p = scf_t_model(1, 1, SCF_RHF)
+    scf_r = scf(scf_p)
+    scf_f = scf_step(scf_p, scf_r.alpha.density, scf_r.beta.density)
+    assert_near(scf_f.iterations, 1, 0.0)
+    assert_lt(scf_density_gap(scf_f, scf_r), 1.0e-14)
+    assert_lt(abs(scf_f.energy - scf_r.energy), 1.0e-14)
+    assert_lt(abs(scf_r.energy_check - scf_r.energy), 1.0e-14)
+    # a run started there stops after its second iteration, the first that can
+    # compare energies
+    scf_x = scf_run_from(scf_p, scf_r.alpha.density, scf_r.beta.density)
+    assert_near(scf_x.iterations, 2, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

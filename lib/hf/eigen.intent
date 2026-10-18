@@ -1,0 +1,284 @@
+module lib/hf/eigen
+  The symmetric eigensolver the SCF calls once per iteration: the Fock
+  matrix, written in an orthonormal basis, is diagonalized, and its lowest
+  eigenvectors are the occupied orbitals. Three solvers that share no
+  numerical code (only the final sort and sign fix) sit in a registry, so
+  the tests can hold each against the others: Householder reduction plus
+  QL iteration (the one production runs), cyclic Jacobi, and the language's
+  builtin `eig_sym`. Each returns `[n + 1, n]`: the eigenvalues in row `0`,
+  ascending, and the eigenvectors as the columns of the rows after it.
+
+eig_sort  @5587613a
+  why   The SCF fills the lowest orbitals first, so it needs the eigenvalues
+        in order; sorting the same way in every member lets their results be
+        compared column by column.
+  d  the eigenvalues, `[n]`, sorted in place
+  V  the eigenvectors as columns, `[n, n]`, moved with their eigenvalues
+  n  the matrix size
+  i  the position being filled with the smallest remaining eigenvalue
+  k  the column holding that smallest one
+  p  its value
+  j  a later position being compared
+  t  the column held during the swap
+
+eig_fix_signs  @22f4be6e
+  why   An eigenvector is defined only up to its sign. Fixing the sign by one
+        rule makes two members' vectors comparable, and keeps the SCF's
+        orbitals from flipping between iterations.
+  V    the eigenvectors as columns, flipped in place
+  n    the matrix size
+  k    the column being fixed
+  big  the largest magnitude seen in that column so far
+  at   the row where it was seen; the first one wins a tie
+  i    the row being read
+
+eig_pack  @d726f077
+  why   The members of a registry must return one type; eigenvalues and
+        vectors travel together in one array.
+  d  the eigenvalues
+  V  the eigenvectors as columns
+  n  the matrix size
+  R  the result, `[n + 1, n]`
+
+eig_tred2  @f3c13a2c
+  why   A symmetric matrix can be brought to tridiagonal form (nonzero only
+        on the diagonal and next to it) by $n - 2$ reflections, and QL
+        iteration on a tridiagonal matrix costs order $n$ per step instead of
+        $n^2$. This is the standard route (EISPACK's tred2, in JAMA's form),
+        kept close to its source so it can be checked line by line.
+  V  on entry the symmetric matrix, transposed; on return the transpose of
+     the orthogonal transformation that makes it tridiagonal, which QL goes
+     on to rotate into the eigenvectors. Stored transposed so the inner
+     loops walk along rows
+  d  on return the diagonal of the tridiagonal matrix
+  e  on return its subdiagonal, `e[i]` below `d[i]`, with `e[0]` unused
+  n  the matrix size
+  i  the row being reduced, from the last up
+  scale  the sum of magnitudes of the row's entries left of the diagonal; the
+         row is divided by it before squaring, so the squares cannot
+         overflow or underflow
+  h  the squared length of the scaled row; after the reflection, the
+     reflection's normalizer
+  f  an entry of the row, then running dot products
+  g  $\pm$ the row's length, signed opposite to `f` so subtracting it does not
+     cancel
+  hh the correction that makes the reflected columns stay symmetric
+  k  an index along the row
+  j  a column being updated
+  i2 the column whose transformation is being accumulated into `V`
+
+  = d        start from the last row of the matrix
+  = scale#2  add up the row's magnitudes left of the diagonal
+  = e        a row that is already zero needs no reflection
+  = g        the length of the scaled row, which becomes the new subdiagonal entry
+  = hh       the symmetric update's correction: $K = f / 2h$ in the Householder formulas
+  = i2       multiply the reflections together into `V`, from the smallest block up
+
+eig_tql2  @d330e6e5
+  why   QL with an implicit shift is the standard way to finish a
+        tridiagonal eigenproblem: each eigenvalue converges quickly once the
+        shift is close to it, and the rotations are applied to `V` as they
+        happen, so the eigenvectors come out with the eigenvalues. JAMA's
+        tql2, kept close to its source.
+  V     on entry the transformation from eig_tred2 (transposed); on return the eigenvectors as rows
+  d     on entry the diagonal; on return the eigenvalues, not sorted
+  e     on entry the subdiagonal; used as work space
+  n     the matrix size
+  f     the sum of the shifts applied so far, added back to each eigenvalue
+  tst1  the largest $|d_l| + |e_l|$ seen so far: a subdiagonal entry below
+        machine epsilon times this counts as zero
+  most  the largest number of QL steps any one eigenvalue needed
+  l     the eigenvalue being found
+  m     the first negligible subdiagonal entry at or after `l`: the block
+        from `l` to `m` is the part still coupled to `l`
+  it    the QL steps spent on this eigenvalue
+  going `1` while the eigenvalue has not converged
+  g     the current estimate of the eigenvalue
+  p     the shift's intermediate, then the running value the rotations carry
+  r     $\sqrt{p^2 + 1}$, then the length that each rotation normalizes
+  dl1   the diagonal entry after `l` once the shift is applied
+  h     the amount the shift moved the diagonal, then rotation work values
+  c     the cosine of the current rotation; `c2` and `c3` keep the previous two
+  s     the sine of the current rotation; `s2` keeps the previous one
+  el1   the subdiagonal entry after `l`, kept for the final update
+  i     the row of the rotation, moving up from `m - 1` to `l`
+  k     the row of `V` a rotation is applied to
+
+  = tst1#2  the scale that decides when a subdiagonal entry is negligible
+  = m#2     look down the subdiagonal for the first negligible entry; the block above it is still coupled
+  = p       the Wilkinson shift: the eigenvalue of the leading two by two block that is nearer $d_l$
+  = f#2     subtract the shift from the rest of the block and remember it
+  = s#2     one Givens rotation, chasing the bulge up from `m` to `l`
+  = p#4     the new subdiagonal entry at `l`; the step has converged when it is negligible
+  = going#2 stop when `e[l]` is negligible, or after `EIG_TQL2_MAXIT` steps
+  = most#2  record the steps this eigenvalue took
+
+eig_ql  @ca5f26ea
+  why   The production member: Householder plus QL costs order $n^3$ with a
+        small constant and is the method LAPACK and EISPACK use for dense
+        symmetric matrices.
+  A     the symmetric matrix, `[n, n]`
+  B     not read; the stage signature is shared with the orthogonalizers
+  opts  not read
+  n     the matrix size
+  V     `A` transposed, which the two phases turn into the eigenvectors as
+        rows (so their inner loops walk along rows); transposed back at the end
+  d     the eigenvalues
+  e     the subdiagonal, work space
+
+eig_jacobi_angle  @6f4f97c1
+  why   One Jacobi rotation's angle, kept apart so the sweep reads as the
+        loop over pairs.
+  how   With `tau = (aqq - app) / (2 apq)` the tangent is the smaller root
+        of `t^2 + 2 tau t - 1 = 0`, `t = sign(tau) / (|tau| + sqrt(1 +
+        tau^2))` (Golub and Van Loan's Algorithm 8.5.1). For huge `|tau|` the root
+        is `1 / (2 tau)`, which avoids squaring `tau`.
+  app   the first diagonal entry of the block
+  apq   the off-diagonal entry to zero, not zero
+  aqq   the second diagonal entry
+  tau   half the cotangent of twice the angle
+  t     the tangent of the angle
+  c     the cosine
+
+eig_jacobi_raw  @01806116
+  why   Jacobi works on the full matrix and never forms a tridiagonal, so a
+        mistake in the Householder reduction cannot hide in both members.
+  how   The cyclic Jacobi method of Golub and Van Loan (*Matrix
+        Computations*, 4th ed., Algorithm 8.5.3), pairs in row order. Each
+        rotation `W <- J^T W J` zeroes one pair and changes the two rows and
+        columns it couples. The two diagonal entries move by `-t a_pq` and
+        `+t a_pq` instead of through the row and column
+        updates, which keeps their rounding to one operation. A pair is
+        skipped and set to zero when `|a_pq| <= eps sqrt(|a_pp a_qq|)`, the
+        relative test of Demmel and Veselic, or when it is below
+        `eps^2 |A|_F`, which stands in for that test when a diagonal entry is
+        zero. The module header gives the references.
+  A     the symmetric matrix, not changed
+  d     on return the eigenvalues, unsorted
+  V     on return the eigenvectors as columns, the product of the rotations
+  n     the matrix size
+  floor_pq the absolute size below which a pair counts as zero
+  sweeps the sweeps run so far
+  rotated whether the current sweep has rotated a pair; a sweep without one ends the iteration
+  p     the row of the pair
+  q     its column
+  w_pq  the pair's entry
+  w_pp  the first diagonal entry it couples
+  w_qq  the second
+  c     the rotation's cosine
+  s     its sine
+  t     its tangent
+  k     a row or column rotated along with the pair
+  wkp   entry `(k, p)` before the rotation
+  wkq   entry `(k, q)` before the rotation
+  vkp   entry `(k, p)` of `V` before the rotation
+  vkq   entry `(k, q)` of `V` before the rotation
+  i     a diagonal position read out at the end
+
+  = floor_pq  the absolute floor for a negligible pair
+  = rotated#2 a new sweep starts with nothing rotated
+  = w_pq      the pair to zero; an exact zero needs nothing
+  = w_pp      read the block the rotation acts on, then find its angle
+  = vkp       accumulate the rotation into `V`, whose columns become the eigenvectors
+
+eig_jacobi  @d6eb7853
+  why   The second opinion for eig_ql in the tests and the sweep.
+  A     the symmetric matrix
+  B     not read
+  opts  not read
+  n     the matrix size
+  d     the eigenvalues
+  V     the eigenvectors as columns
+
+eig_builtin  @61cc9ec5
+  why   A third solver written outside this library, so an error in both
+        of this module's own members would still show against it.
+  A     the symmetric matrix
+  B     not read
+  opts  not read
+  n     the matrix size
+  d     the eigenvalues
+  V     the eigenvectors as columns
+
+eig_methods  @9f0f0f61
+  why   The SCF picks its eigensolver by index (`ScfOptions.eigensolver`),
+        and a sweep can run every member on the same matrix.
+
+eig_of  @6a169a82
+  why   The one call the SCF makes to diagonalize, whichever member the
+        options pick. It calls each member by name, so the default reaches
+        the QL solver without a registry; `eig_methods()` lists the same
+        members for the tests that run them side by side.
+  A   the symmetric matrix
+  k   the member's index in eig_methods
+  m   `k` rounded: `EIG_QL`, `EIG_JACOBI` or `EIG_BUILTIN`
+
+eig_values  @ecaaaa88
+  R     a member's result
+
+eig_vectors  @afe8f2e3
+  R  a member's result
+
+eig_residual  @503ece32
+  why   Checks a result without any other solver: every eigenpair must
+        satisfy $A v = \lambda v$.
+  A      the symmetric matrix
+  R      a member's result
+  V      its eigenvectors as columns
+  AV     $A V$
+  worst  the largest entry of $A V - V \Lambda$ seen so far
+  k      the eigenpair
+
+eig_orth_defect  @24d5859c
+  why   The eigenvectors of a symmetric matrix are orthonormal; the SCF's
+        density assumes it.
+  R      a member's result
+  V      its eigenvectors as columns
+  E      $V^\top V - I$
+  a      a diagonal position
+
+eig_projector_gap  @25b74c5a
+  R1     one member's result
+  R2     another member's result
+  k      how many of the lowest vectors span the space compared
+  V1     the lowest k vectors of R1
+  V2     the lowest k vectors of R2
+
+eig_fnorm  @58a88086
+  why   eig_agreement divides the residual by it, so the tolerance is
+        relative to the matrix's size.
+  A  a square matrix
+
+eig_random_sym  @1792d110
+  n     the matrix size
+  seed  the generator's starting state
+  st    the generator's state
+  A     the matrix
+  v     one entry, mapped to $(-1, 1)$
+  i     the row being filled
+  j     the column, up to the diagonal; the entry goes to both $(i, j)$ and $(j, i)$
+
+eig_known_spectrum  @160a0749
+  why   A test that knows the right eigenvalues does not have to trust any
+        of the members.
+  lam   the eigenvalues the matrix should have
+  seed  the seed of the random matrix whose eigenvectors become $Q$
+  n     the matrix size
+  Q     an orthogonal matrix, the eigenvectors of a random symmetric matrix
+  d     that random matrix's eigenvalues, not used
+  QL    $Q \operatorname{diag}(\lambda)$: each column of Q times its eigenvalue
+  k     a column
+  A     $Q \operatorname{diag}(\lambda) Q^\top$, symmetrized on return
+
+eig_agreement  @1c308cde
+  A    the symmetric matrix
+  k    how many lowest vectors count as occupied
+  ms   the registry
+  R0   member `0`'s result, the one the others are compared with
+  nrm  the Frobenius norm of `A`
+  vg   the largest eigenvalue gap to member `0`
+  pg   the largest projector gap to member `0`
+  rs   the largest residual, relative to `max(nrm, 1)`
+  od   the largest orthogonality defect
+  m    the member being compared
+  R    its result

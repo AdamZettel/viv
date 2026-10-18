@@ -1,0 +1,87 @@
+# Sessions: gap-based sessionization per user.
+#
+# Input: one row per event, sorted by (user, ts); ts in int64 nanoseconds.
+# A session is a run of a user's events in which no two consecutive events
+# are more than `gap` apart. A gap of exactly `gap` keeps the session going;
+# a longer one starts a new session. Rows at the same instant share a session.
+#
+#   session_start      ts of the session's first event (with user, the session's id)
+#   session_index      how many sessions of the user started before this one
+#   secs_since_start   (ts - session_start) in seconds
+#   n_prev_in_session  events of the session with an earlier ts (same instant excluded)
+#
+# Every output at a row reads only rows of the same user with ts <= the row's ts.
+
+from rows import group_end, instant_end
+
+NS_PER_S: Int = 1000000000
+
+record Sessions {
+    session_start: [Int]
+    session_index: [Int]
+    secs_since_start: Arr
+    n_prev_in_session: [Int]
+}
+
+#| Gap-based sessions for events sorted by (user, ts): each row's session start,
+#| the session's index within the user, the seconds since the session started and
+#| the number of earlier events in the session.
+#|| One pass per user, one instant at a time: a gap longer than `gap` before an
+#|| instant closes the session.
+#||| A session id built from a global running counter would change when an
+#||| earlier user gains sessions in the future; the start time does not.
+#: user  the entity key, sorted ascending
+#: ts  event time, int64 nanoseconds, ascending within a user
+#: gap  the longest gap, in nanoseconds, that keeps a session open
+#@ 27f60b7d
+def sessions(user: [Int], ts: [Int], gap: Int) -> Sessions {
+    n = len(ts)
+    start = int_zeros(n)
+    index = int_zeros(n)
+    secs = zeros(n)
+    nprev = int_zeros(n)
+    g: Int = 0
+    while g < n {
+        stop_at = group_end(user, ts, g, "sessions")
+        s_start: Int = ts[g]
+        s_index: Int = 0
+        s_count: Int = 0
+        i: Int = g
+        while i < stop_at {
+            same = instant_end(ts, i, stop_at)
+            step split "a gap longer than the limit opens a new session" {
+                if i > g and ts[i] - ts[i - 1] > gap {
+                    s_start = ts[i]
+                    s_index += 1
+                    s_count = 0
+                }
+            }
+            step fill "the rows of the instant share the session and its past" {
+                for k from i to same {
+                    start[k] = s_start
+                    index[k] = s_index
+                    nprev[k] = s_count
+                    secs[k] = float(ts[k] - s_start) / float(NS_PER_S)
+                }
+                s_count += same - i
+            }
+            i = same
+        }
+        g = stop_at
+    }
+    return Sessions { session_start: start, session_index: index, secs_since_start: secs, n_prev_in_session: nprev }
+}
+
+test "a gap of exactly the limit keeps the session; a longer one splits it" {
+    user: [Int] = [1, 1, 1, 1, 2]
+    ts: [Int] = [0, 10, 10, 30, 0]
+    s = sessions(user, ts, 20)
+    assert_true(s.session_index[3] == 0 and s.session_start[3] == 0)
+    t = sessions(user, ts, 19)
+    assert_true(t.session_index[3] == 1 and t.session_start[3] == 30)
+    assert_true(s.n_prev_in_session[1] == 1 and s.n_prev_in_session[2] == 1 and s.n_prev_in_session[3] == 3)
+    assert_true(s.session_index[4] == 0 and s.n_prev_in_session[4] == 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,105 @@
+# PySCF's water cc-pVDZ RHF rows replayed (test_h2o_vdz.py and test_rhf.py):
+# the energy in PySCF's spherical basis through several J/K members and
+# guesses, the Cartesian basis, the orbital gradient at convergence and the
+# one-electron energy.
+#
+# The integrals are computed here (one- and two-electron, every integral
+# member swept on the spherical set) and the SCF runs on them. The direct
+# (max_memory=0) rows are in vdz_direct_*.viv, because a direct SCF in the
+# interpreter recomputes the ERIs every iteration.
+#
+# test_rhf.py's module-level `mf` runs at conv_tol 1e-10 and several rows
+# compare against it (356, 711, 728); the SCF here converges further than
+# that (energy change below 1e-12 and commutator below 1e-9), and each row
+# asks for the state to the places it states. `symmetry=1` rows run the same
+# plain SCF: this code builds no symmetry-adapted orbitals.
+#
+#     tools/both-engines.sh scf/suite vdz_rhf
+from hf.hf import hf_gap, hf_scf, hf_setup, hf_step
+from hf.molecule import Molecule, molecule_packs
+from hf.scf_loop import scf_densities, scf_opts, scf_setup, scf_setup_with, ScfResult, ScfSetup
+from hf.opts import scf_checked, scf_defaults, SCF_RHF, SCF_ROHF, ScfOptions
+from hf.guess import GS_CORE, GS_ZERO
+from hf.jk import JK_PAIRS
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.pyscf_tests import (
+    PST_FILE_H2O_VDZ, PST_FILE_RHF, PST_H2O_VDZ_111, PST_H2O_VDZ_111_P, PST_H2O_VDZ_141,
+    PST_H2O_VDZ_141_P, PST_H2O_VDZ_45, PST_H2O_VDZ_45_P, PST_RHF_261, PST_RHF_261_P,
+    PST_RHF_276, PST_RHF_276_P, PST_RHF_280, PST_RHF_280_P, PST_RHF_356, PST_RHF_356_P,
+    PST_RHF_406, PST_RHF_406_P, PST_RHF_477, PST_RHF_477_P, PST_RHF_689, PST_RHF_689_P,
+    PST_RHF_697, PST_RHF_697_P, PST_RHF_711, PST_RHF_711_P, PST_RHF_728, PST_RHF_728_P,
+    pst_water_atoms,
+)
+from scf.suite.ref.sts import sts_eig, sts_orbital_gradient, sts_row
+
+#| One SCF; asserts convergence.
+def svr_run(p: ScfSetup) -> ScfResult {
+    r = hf_scf(p)
+    assert_near(r.converged, 1.0, 0.0)
+    return r
+}
+
+#| The setup `p` with options `o`.
+def svr_with(p: ScfSetup, o: ScfOptions) -> ScfSetup {
+    return scf_setup_with(p, o)
+}
+
+svr_m = molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+svr_o = ScfOptions { method: SCF_RHF, ..scf_checked() }
+svr_p = hf_setup(svr_m, svr_o)
+svr_r = svr_run(svr_p)
+
+test "the lib/hfref water is test_rhf.py's molecule; RHF -76.026765673119627 (test_h2o_vdz.py:45, 141; test_rhf.py:356, 477, 728)" {
+    assert_lt(hf_gap(svr_m.atoms, pst_water_atoms(), 12), 1.0e-15)
+    svr_e = svr_r.energy
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 45, svr_e, PST_H2O_VDZ_45, PST_H2O_VDZ_45_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 141, svr_e, PST_H2O_VDZ_141, PST_H2O_VDZ_141_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 356, svr_e, PST_RHF_356, PST_RHF_356_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 477, svr_e, PST_RHF_477, PST_RHF_477_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 728, svr_e, PST_RHF_728, PST_RHF_728_P), 1.0, 0.0)
+}
+
+test "the energy restored from a checkpoint is the energy of the stored density, to 12 places (test_rhf.py:711)" {
+    # update_from_chk reads e_tot back; the equivalent here is the energy of
+    # the converged density, recomputed from it
+    svr_f = hf_step(svr_p, svr_r.alpha.density, svr_r.beta.density)
+    assert_near(sts_row(PST_FILE_RHF, 711, svr_f.energy, PST_RHF_711, PST_RHF_711_P), 1.0, 0.0)
+}
+
+test "the orbital gradient at convergence is below 5e-7 (test_rhf.py:280)" {
+    svr_g = sts_orbital_gradient(svr_p.h, svr_p.s, svr_p.eri, scf_densities(svr_r), scf_opts(svr_p), 1)
+    assert_near(sts_row(PST_FILE_RHF, 280, svr_g, PST_RHF_280, PST_RHF_280_P), 1.0, 0.0)
+}
+
+test "without screening (the pair-matrix J/K member) the energy is the same (test_h2o_vdz.py:111)" {
+    svr_x = svr_run(svr_with(svr_p, ScfOptions { jk: JK_PAIRS, ..svr_o }))
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 111, svr_x.energy, PST_H2O_VDZ_111, PST_H2O_VDZ_111_P), 1.0, 0.0)
+}
+
+test "from a zero density, RHF and the ROHF driver on the closed shell land on the same state (test_rhf.py:689, 697)" {
+    svr_x = svr_run(svr_with(svr_p, ScfOptions { guess: GS_ZERO, ..svr_o }))
+    assert_near(sts_row(PST_FILE_RHF, 689, svr_x.energy, PST_RHF_689, PST_RHF_689_P), 1.0, 0.0)
+    svr_x = svr_run(svr_with(svr_p, ScfOptions { guess: GS_ZERO, method: SCF_ROHF, ..svr_o }))
+    assert_near(sts_row(PST_FILE_RHF, 697, svr_x.energy, PST_RHF_697, PST_RHF_697_P), 1.0, 0.0)
+}
+
+test "one electron in the core Hamiltonian's lowest orbital: -23.867818585778764 (test_rhf.py:261, 276)" {
+    # PySCF's HF1e diagonalizes the core Hamiltonian once. Here it is an SCF
+    # with one electron started from the same core guess: J and K cancel on
+    # the occupied orbital, so the start is the fixed point, E = e_0 + E_nuc
+    svr_one = scf_setup(svr_p.h, svr_p.s, svr_p.eri, 1, 0, svr_p.enuc, ScfOptions { guess: GS_CORE, method: SCF_ROHF, ..svr_o })
+    svr_x = svr_run(svr_one)
+    assert_near(sts_row(PST_FILE_RHF, 261, svr_x.energy, PST_RHF_261, PST_RHF_261_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 276, svr_x.energy, PST_RHF_276, PST_RHF_276_P), 1.0, 0.0)
+    svr_R = sts_eig(svr_p.h, svr_p.s, scf_opts(svr_p))
+    assert_lt(abs(svr_x.energy - svr_R[0, 0] - svr_p.enuc), 1.0e-11)
+}
+
+test "Cartesian cc-pVDZ (25 AOs): RHF -76.027107008870573 (test_rhf.py:406)" {
+    svr_c = hf_setup(Molecule { cart: 1, ..svr_m }, ScfOptions { method: SCF_RHF, ..scf_defaults() })
+    svr_x = svr_run(svr_c)
+    assert_near(sts_row(PST_FILE_RHF, 406, svr_x.energy, PST_RHF_406, PST_RHF_406_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

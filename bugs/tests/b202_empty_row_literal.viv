@@ -1,0 +1,24 @@
+# B202 (bugs/ledger.jsonl): the literal `[[]]` was a 1 x 0 matrix in the
+# interpreter and C but a rank-1 empty array in wasm, whose runtime read a
+# column count of 0 as "rank 1". A rank-1 literal now says so with -1.
+def one(m) {
+    if m == 0 {
+        return [[]]
+    }
+    return [[1.0, 2.0]]
+}
+
+e = one(0)
+print(e)
+print(shape(e), shape([[], []]), shape([]))
+widths = [len(row) for row in rows(one(1))]
+print(widths)
+
+test "[[]] is a 1 x 0 matrix in every engine" {
+    assert_true(shape(e)[0] == 1 and shape(e)[1] == 0)
+    assert_true(len(shape([[], []])) == 2)
+    assert_true(len(shape([])) == 1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

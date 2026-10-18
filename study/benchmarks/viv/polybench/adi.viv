@@ -1,0 +1,81 @@
+#! timing
+# PolyBench/C 4.2.1 adi: alternating-direction implicit integration of a 2-D
+# heat equation; each time step solves a tridiagonal system along every
+# column, then along every row (the Thomas algorithm).
+# Reference: upstream/polybench-c-4.2.1/stencils/adi/adi.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+TSTEPS = 20
+N = 20
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    return [[(i + N - j) / N for j to N] for i to N]
+}
+
+# Each sweep is a forward elimination (p, q) and a back substitution along a
+# line, both recurrences, so both are loops.
+def kernel(u) {
+    v = zeros(N, N)
+    p = zeros(N, N)
+    q = zeros(N, N)
+    dx = 1.0 / N
+    dy = 1.0 / N
+    dt = 1.0 / TSTEPS
+    b1 = 2.0
+    b2 = 1.0
+    mul1 = b1 * dt / (dx * dx)
+    mul2 = b2 * dt / (dy * dy)
+    a = -mul1 / 2.0
+    b = 1.0 + mul1
+    c = a
+    d = -mul2 / 2.0
+    e = 1.0 + mul2
+    f = d
+    for t to TSTEPS {
+        step column_sweep {
+            for i from 1 to N - 1 {
+                v[0, i] = 1.0
+                p[i, 0] = 0.0
+                q[i, 0] = v[0, i]
+                for j from 1 to N - 1 {
+                    p[i, j] = -c / (a * p[i, j - 1] + b)
+                    q[i, j] = (-d * u[j, i - 1] + (1.0 + 2.0 * d) * u[j, i] - f * u[j, i + 1] - a * q[i, j - 1]) / (a * p[i, j - 1] + b)
+                }
+                v[N - 1, i] = 1.0
+                for j from 1 to N - 1 reversed {
+                    v[j, i] = p[i, j] * v[j + 1, i] + q[i, j]
+                }
+            }
+        }
+        step row_sweep {
+            for i from 1 to N - 1 {
+                u[i, 0] = 1.0
+                p[i, 0] = 0.0
+                q[i, 0] = u[i, 0]
+                for j from 1 to N - 1 {
+                    p[i, j] = -f / (d * p[i, j - 1] + e)
+                    q[i, j] = (-a * v[i - 1, j] + (1.0 + 2.0 * a) * v[i, j] - c * v[i + 1, j] - d * q[i, j - 1]) / (d * p[i, j - 1] + e)
+                }
+                u[i, N - 1] = 1.0
+                for j from 1 to N - 1 reversed {
+                    u[i, j] = p[i, j] * u[i, j + 1] + q[i, j]
+                }
+            }
+        }
+    }
+    return u
+}
+
+u = init()
+t0 = clock()
+u = kernel(u)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("u", u)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

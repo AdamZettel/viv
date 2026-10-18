@@ -1,0 +1,182 @@
+###
+post: Random draws, each one a formula over rand()
+agent: claude
+
+Viv's `rand()` is Park-Miller MINSTD: `srand(seed)` sets the state to
+`floor(|seed|) mod 2147483646 + 1`, and each `rand()` moves it to
+`16807 * state mod 2147483647` and returns `state / 2147483647`, a number in
+(0, 1). Every product stays below 2^53, so the state is exact in a double, the
+interpreter and compiled C and wasm draw the same stream, and a Python program
+can replay it (`tools/random_replay.py`).
+
+The draws here are plain Viv over that one generator, so they are identical in
+every engine by construction. Each is documented as the exact formula it
+computes, draw by draw, so a reference implementation can replay it:
+
+- `randn()`: Box-Muller, cosine branch. `u1 = rand()` first, then
+  `u2 = rand()`, and the result is `sqrt(-2 log(u1)) * cos(2 pi u2)`. One
+  normal per two uniforms; the sine branch is not kept.
+- `randn_matrix(rows, cols)`: `randn()` for each entry, row by row.
+- `randint(lo, hi)`: an integer in `[lo, hi)`, `lo + floor(rand() * (hi - lo))`,
+  as Python's `random.randrange(lo, hi)` and `torch.randint(lo, hi)` bound it.
+- `shuffle(a)`: Fisher-Yates in place, from the top index down. For
+  `i = n - 1, ..., 1`, `j = floor(rand() * (i + 1))` and `a[i]` swaps with `a[j]`.
+- `randperm(n)`: `shuffle(arange(n))`.
+- `choice(p)`: an index drawn with the probabilities `p` (a 1-D array that sums
+  to 1) by inverting the cumulative sum at one draw: `u = rand()`, and the answer
+  is the first `k` with `u < p[0] + ... + p[k]`, or the last index if rounding
+  leaves the sum short of `u`.
+- `arange(n)`: `[0, 1, ..., n - 1]`.
+- `pi`: 3.141592653589793, the double nearest pi.
+
+`mean` and `std` are in `lib/stats`, so a program that draws numbers but keeps
+a variable called `std` can still use this module.
+
+Used with `import random`.
+###
+
+pi = 3.141592653589793
+
+def randn() {
+    u1 = rand()
+    u2 = rand()
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * pi * u2)
+}
+
+def randn_matrix(rows, cols) {
+    Z = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            Z[i, j] = randn()
+        }
+    }
+    return Z
+}
+
+def randint(lo, hi) {
+    return lo + floor(rand() * (hi - lo))
+}
+
+def arange(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+
+def shuffle(a: Arr) {
+    n = len(a)
+    for k to n - 1 {
+        i = n - 1 - k
+        j = floor(rand() * (i + 1))
+        t = a[i]
+        a[i] = a[j]
+        a[j] = t
+    }
+}
+
+def randperm(n) {
+    a = arange(n)
+    shuffle(a)
+    return a
+}
+
+# `take an index drawn from p`
+phrase "an index drawn from p" -> choice(p)
+
+def choice(p: Arr) {
+    u = rand()
+    cum = 0.0
+    for k to len(p) {
+        cum = cum + p[k]
+        if u < cum {
+            return k
+        }
+    }
+    return len(p) - 1
+}
+
+test "the draws are the ones Python replays from the same formulas" {
+    # ---- replayed by tools/random_replay.py ----
+    REF_NORMALS = [4.16423517651071, -1.2113924334265904, 0.017206071253852796, -1.2683694313171443, -1.2785648787291637, 1.2992678807294153]
+    REF_INTS = [1.0, -2.0, -1.0, -2.0, -1.0, -3.0, -3.0, 0.0, -1.0, 0.0, 1.0, 0.0]
+    REF_PERM = [4.0, 2.0, 0.0, 9.0, 3.0, 6.0, 8.0, 5.0, 1.0, 7.0]
+    REF_SHUFFLED = [1.0, 3.0, 0.0, 5.0, 4.0, 2.0]
+    REF_PICKS = [3.0, 3.0, 3.0, 3.0, 3.0, 0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0]
+    REF_MATRIX = [0.8780776068193649, 0.14222157296111898, -0.25575333479964757, 0.20002329140596345, -1.6022623520720096, 1.6526685392112672]
+    REF_AFTER = 0.13033570914079234
+    # ---- end of the replayed block ----
+    srand(7.0)
+    normals = zeros(len(REF_NORMALS))
+    for k to len(normals) {
+        normals[k] = randn()
+    }
+    ints = zeros(len(REF_INTS))
+    for k to len(ints) {
+        ints[k] = randint(-3.0, 4.0)
+    }
+    perm = randperm(len(REF_PERM))
+    a = arange(len(REF_SHUFFLED))
+    shuffle(a)
+    p = [0.1, 0.2, 0.3, 0.4]
+    picks = zeros(len(REF_PICKS))
+    for k to len(picks) {
+        picks[k] = choice(p)
+    }
+    rt_rows = 2
+    rt_cols = 3
+    Z = randn_matrix(rt_rows, rt_cols)
+    after = rand()
+    # log and cos are Viv's own libm here and the platform's in Python
+    assert_allclose(normals, REF_NORMALS, 1.0e-14)
+    assert_allclose(ints, REF_INTS, 0.0)
+    assert_allclose(perm, REF_PERM, 0.0)
+    assert_allclose(a, REF_SHUFFLED, 0.0)
+    assert_allclose(picks, REF_PICKS, 0.0)
+    assert_allclose(take(Z, arange(len(REF_MATRIX))), REF_MATRIX, 1.0e-14)
+    # the same number of draws was taken: the next one agrees exactly
+    assert_near(after, REF_AFTER, 0.0)
+}
+
+test "a permutation holds every index once, and randint stays in its range" {
+    srand(11.0)
+    rp_n = 50
+    rp_draws = 1000
+    perm = randperm(rp_n)
+    seen = zeros(rp_n)
+    for k to len(perm) {
+        seen[perm[k]] = seen[perm[k]] + 1.0
+    }
+    assert_true(all(seen == 1.0))
+    lo_ok = true
+    for k to rp_draws {
+        r = randint(2.0, 5.0)
+        lo_ok = lo_ok and r >= 2.0 and r < 5.0 and r == floor(r)
+    }
+    assert_true(lo_ok)
+}
+
+test "10000 normals have mean near 0 and spread near 1; choice follows p" {
+    srand(3.0)
+    rn_n = 10000
+    z = zeros(rn_n)
+    for k to len(z) {
+        z[k] = randn()
+    }
+    # the standard errors of the mean and the spread are 0.01 and about 0.007
+    m = sum(z) / len(z)
+    assert_lt(abs(m), 0.03)
+    assert_lt(abs(sqrt(sum((z - m) * (z - m)) / len(z)) - 1.0), 0.03)
+    p_pick = [0.2, 0.5, 0.3]
+    counts = zeros(len(p_pick))
+    for k to rn_n {
+        c = choice(p_pick)
+        counts[c] = counts[c] + 1.0
+    }
+    assert_lt(abs(counts[1] / rn_n - p_pick[1]), 0.02)
+    assert_near(pi, acos(-1.0), 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

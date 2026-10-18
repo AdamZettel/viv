@@ -1,0 +1,181 @@
+###
+Translated from mlp_grad.py by py2viv 0.2.0 (numeric Python -> Viv).
+Python source sha256: 95e04e7749dcd038c2a29bfdd9da7ca0e32c4f4c67de94cdd808ccb1a0fa62ab
+Each print(...) is one print(...) line; fmt(x) writes a float as Python's repr does.
+A `raise`, a failed assert and every guard `stop` with Python's exception line.
+###
+
+#| 0, 1, ..., n - 1.
+def py_iota(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+
+#| a / b with a float: ZeroDivisionError on a zero divisor.
+def py_div_f(a, b) {
+    if b == 0 {
+        stop("ZeroDivisionError: float division by zero")
+    }
+    return a / b
+}
+
+#| An array size, as NumPy takes it: ValueError for a negative one (Viv would make an empty
+#| array).
+def py_size(n) {
+    if n < 0 {
+        stop("ValueError: negative dimensions are not allowed")
+    }
+    return n
+}
+
+#| The shape NumPy broadcasts two shapes da and db to (aligned at the last axis, a length 1
+#| stretched); the run stops where NumPy raises ValueError.
+def py_bdims(da: Arr, db: Arr) {
+    n = len(da)
+    if len(db) > n {
+        n = len(db)
+    }
+    e = zeros(n)
+    for i to n {
+        x = 1
+        y = 1
+        if i >= n - len(da) {
+            x = da[i - n + len(da)]
+        }
+        if i >= n - len(db) {
+            y = db[i - n + len(db)]
+        }
+        if x == y or y == 1 {
+            e[i] = x
+        }
+        else {
+            if x == 1 {
+                e[i] = y
+            }
+            else {
+                stop("ValueError: operands could not be broadcast together with shapes")
+            }
+        }
+    }
+    return e
+}
+
+#| The flat indices, in row-major order of the shape e, of the entries of an array of shape d
+#| that broadcasting to e reads (a length 1 of d is read again along that axis of e).
+def py_bidx(d: Arr, e: Arr) {
+    n = len(e)
+    m = len(d)
+    st = zeros(n)
+    s = 1
+    for k to m {
+        j = m - 1 - k
+        if d[j] != 1 {
+            st[j + n - m] = s
+        }
+        s = s * d[j]
+    }
+    idx = zeros(1)
+    for i to n {
+        w = e[i]
+        nxt = zeros(len(idx) * w)
+        for p to len(idx) {
+            for c to w {
+                nxt[p * w + c] = idx[p] + c * st[i]
+            }
+        }
+        idx = nxt
+    }
+    return idx
+}
+
+#| a broadcast to the shape e (a shape py_bdims gave for a and another array): a itself when
+#| it has that shape, else a new array whose entries are copies of a's.
+def py_bto(a: Arr, e: Arr) {
+    d = shape(a)
+    if len(d) == len(e) {
+        if all(d == e) {
+            return a
+        }
+    }
+    return py_shaped(take(a, py_bidx(d, e)), e)
+}
+
+#| a - b of two real arrays, broadcast.
+def py_bsub(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) - py_bto(b, e)
+}
+
+#| The entries of f, row-major, as an array of shape e (a vector of 1 to 4 lengths).
+def py_shaped(f: Arr, e: Arr) {
+    if len(e) == 1 {
+        return f
+    }
+    if len(e) == 2 {
+        z = zeros(e[0], e[1])
+    }
+    else {
+        if len(e) == 3 {
+            z = zeros(e[0], e[1], e[2])
+        }
+        else {
+            z = zeros(e[0], e[1], e[2], e[3])
+        }
+    }
+    put(z, py_iota(numel(z)), f)
+    return z
+}
+
+def loss__arg3(W2, W1, X, Y) {
+    return loss(W1, X, Y, W2)
+}
+
+# A two-layer NumPy MLP's loss and its gradient with respect to the first weight matrix,
+# by Viv's reverse mode (value_and_grad).
+# 
+# Under CPython, `from viv import value_and_grad` is tools/py2viv/pyshim/viv.py, which
+# differentiates by the complex step; grad_preview.py also compares with torch in float64.
+# # py2viv: rtol=1e-13 atol=1e-16
+def loss(W1: Arr, X: Arr, Y: Arr, W2: Arr) {
+    H = tanh(X @ W1)
+    P = H @ W2
+    d = py_bsub(P, Y)
+    return py_div_f(sum(d * d), numel(d))
+}
+N = 16
+D = 4
+K = 8
+O = 2
+X = zeros(py_size(N), py_size(D))
+Y = zeros(py_size(N), py_size(O))
+W1 = zeros(py_size(D), py_size(K))
+W2 = zeros(py_size(K), py_size(O))
+for i to N {
+    for j to D {
+        X[i, j] = sin(0.3 * i + 0.7 * j)
+    }
+    for j to O {
+        Y[i, j] = cos(0.5 * i - 0.2 * j)
+    }
+}
+for i to D {
+    for j to K {
+        W1[i, j] = 0.5 * sin(1.3 * i + 0.4 * j + 0.1)
+    }
+}
+for i to K {
+    for j to O {
+        W2[i, j] = 0.5 * cos(0.9 * i + 1.1 * j)
+    }
+}
+l, g1 = value_and_grad(loss, W1, X, Y, W2)
+print("loss", fmt(l))
+print("dloss/dW1", fmt(g1))
+l2, g2 = value_and_grad(loss__arg3, W2, W1, X, Y)
+print("dloss/dW2", fmt(g2))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

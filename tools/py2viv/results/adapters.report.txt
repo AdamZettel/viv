@@ -1,0 +1,66 @@
+py2viv 0.2.0 differential report: adapters.py
+reference: CPython+NumPy 3.11.5 1.24.4, 0.18 s
+viv engines: interp 0.02 s; c 0.19 s; wasm 0.23 s
+engines agree byte for byte: yes
+tolerance (declared): |viv - python| <= 1e-13 + 1e-12 |python| per number
+  inexact operation (line 17): np.dot (BLAS sums in its own order)
+  inexact operation (line 25): sin (Viv's libm is not the platform's)
+  inexact operation (line 25): cos (Viv's libm is not the platform's)
+  inexact operation (line 26): np.fft.fft (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)
+  inexact operation (line 29): abs of a complex number (libm's hypot)
+  inexact operation (line 30): np.fft.ifft (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)
+  inexact operation (line 36): np.linalg.solve (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)
+  inexact operation (line 38): @ (BLAS sums in its own order)
+  inexact operation (line 39): np.linalg.cholesky (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)
+  inexact operation (line 41): np.linalg.inv (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)
+  inexact operation (line 46): np.linalg.eigvalsh (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)
+Viv's printed text is CPython's byte for byte: no (read back and compared by value)
+
+values, exact (every print argument, Python's recorded at full precision; Viv's identical in every engine):
+line  value                           n numpy                    viv                      max|dev|  max rel   verdict
+15    b                               4 [-1.0, 0.25, ...]        [-1.0, 0.25, ...]        0         0         bitwise
+16    a                               4 [0.5, -1.0, ...]         [0.5, -1.0, ...]         0         0         bitwise
+17    np.dot(a, b)                    1 0.75                     0.75                     0         0         bitwise
+19    s[0]                            1 -1.0                     -1.0                     0         0         bitwise
+19    s[3]                            1 2.0                      2.0                      0         0         bitwise
+27    X.real                          8 [1.9999999999999996, -3. [1.9999999999999996, -2. 3.4e-16   1.1       within
+28    X.imag                          8 [0.0, -4.0, ...]         [0.0, -4.0, ...]         0         0         bitwise
+29    np.abs(X)                       8 [1.9999999999999996, 4.0 [1.9999999999999996, 4.0 1.2e-16   1.1       within
+31    y.real                          8 [0.75, 0.957106781186547 [0.75, 0.957106781186547 1.1e-16   2.4e-16   within
+37    sol                             3 [-0.07352941176470587, 0 [-0.07352941176470587, 0 0         0         bitwise
+38    np.max(np.abs(A @ sol - rh      1 0.0                      0.0                      0         0         bitwise
+40    L                               9 [2.0, 0.0, ...]          [2.0, 0.0, ...]          0         0         bitwise
+42    Ainv                            9 [0.2794117647058823, -0. [0.2794117647058823, -0. 6.9e-18   1.5e-16   within
+46    np.linalg.eigvalsh(A)           3 [1.8816802101698977, 2.3 [1.8816802101698982, 2.3 8.9e-16   3.7e-16   within
+
+printed text (Viv's values formatted by Python's own str/repr/format and NumPy's printing):
+line  verdict   max|dev|   max rel   python  |  viv (as Python prints it)
+1     identical 0          0         sorted [-1.    0.25  0.5   2.  ]
+2     identical 0          0         original untouched [ 0.5  -1.    2.    0.25]
+3     identical 0          0         dot(a, sort(a)) 0.75
+4     identical 0          0         sorted() of an array -1.0 2.0
+5     within    1.2e-16    0.9       fft real parts [ 2.00000000e+00 -3.33066907e-16  2.00000000e+00  1.11022302e-16  |  fft real parts [ 2.00000000e+00 -2.10602227e-16  2.00000000e+00  2
+6     within    3.4e-16    1.1         3.33066907e-16  1.11022302e-16  2.00000000e+00 -3.33066907e-16]  |    3.33066907e-16  2.33486982e-16  2.00000000e+00 -6.77576192e-16]
+7     identical 0          0         fft imaginary parts [ 0.00000000e+00 -4.00000000e+00 -5.55111512e-16  0.00000000e+00
+8     identical 0          0           0.00000000e+00  0.00000000e+00  5.55111512e-16  4.00000000e+00]
+9     within    1e-16      0.9       |X| [2.00000000e+00 4.00000000e+00 2.00000000e+00 1.11022302e-16  |  |X| [2.00000000e+00 4.00000000e+00 2.00000000e+00 2.10602227e-16
+10    within    1.2e-16    1.1        3.33066907e-16 1.11022302e-16 2.00000000e+00 4.00000000e+00]  |   3.33066907e-16 2.33486982e-16 2.00000000e+00 4.00000000e+00]
+11    identical 0          0         ifft(fft(x)) real [ 0.75        0.95710678  0.75        0.95710678  0.75       -0.45710678
+12    identical 0          0          -1.25       -0.45710678]
+13    identical 0          0         solve [-0.07352941  0.57058824  1.44705882]
+14    identical 0          0         residual 0.0
+15    identical 0          0         cholesky [[2.         0.         0.        ]
+16    identical 0          0          [0.5        1.6583124  0.        ]
+17    identical 0          0          [0.25       0.07537784 1.38989862]]
+18    identical 0          0         inv [[ 0.27941176 -0.08823529 -0.05882353]
+19    identical 0          0          [-0.08823529  0.36470588 -0.02352941]
+20    identical 0          0          [-0.05882353 -0.02352941  0.51764706]]
+21    identical 0          0         eigvalsh [1.88168021 2.38676037 4.73155942]
+lines: 17 identical, 4 within; numbers compared: 68
+
+tests:
+  test_ifft_inverts_fft                    python PASS   viv PASS
+  test_solve_residual                      python PASS   viv PASS
+  test_sort_copies                         python PASS   viv PASS
+
+verdict: PASS (within the declared tolerance)

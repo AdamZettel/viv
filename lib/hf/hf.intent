@@ -1,0 +1,275 @@
+module lib/hf/hf
+  The Hartree-Fock pipeline as the verification layer runs it. lib/hf/scf
+  computes each stage by its production member (`integrals(mol, o)`, then
+  `scf(setup)`); here, with `cross_check` on (`scf_checked()`), every
+  integral stage runs each of its methods (lib/hf/integrals) and asserts
+  that they agree, and with it off each def hands over to the production
+  one. The input is a `Molecule` (lib/hf/molecule) and an `ScfOptions`
+  record (lib/hf/opts); the output is an `ScfResult` (lib/hf/scf_loop).
+
+  The lock helpers at the end hold a molecule against PySCF's stored
+  integrals and energies; the lock ladder (scf/lock_*.viv) calls them.
+
+hf_eri  @f0774fb2
+  why   The repulsion integrals are the costly stage: `n^4/8` distinct
+        numbers. Packing them by the eight-fold symmetry of `(ij|kl)` keeps
+        one copy of each.
+  mol   the molecule: atoms, shells and primitives
+  o     the run's options: `cross_check`, and the member mask it uses
+  rep   the sweep's report
+  G     the packed repulsion integrals over Cartesian functions: `(ij|kl)` is
+        the Coulomb repulsion between the charge distributions `i j` and `k l`
+  m     the transform members to run: all that apply to the shells, or the
+        production one alone
+  ns    the number of spherical functions
+  G5    the packed repulsion integrals over spherical functions
+
+  compute        compute the integrals over Cartesian functions, comparing the methods in the mask
+  if the run is spherical
+    transform      transform all four indices to spherical functions
+  return the packed integrals
+
+hf_setup  @a037c134
+  mol   the molecule
+  o     the run's options
+  S     the overlap matrix in the run's functions, `[n, n]`
+  H     the core Hamiltonian in the run's functions, `[n, n]`
+  G     what the J/K stage reads: the packed repulsion integrals, or the
+        basis blob for a direct run
+
+  one_electron   compute the overlap S and the one-electron Hamiltonian H
+  two_electron   compute the electron repulsion integrals, or the basis description for a direct build
+  return the setup
+
+hf_energy  @8a9e2ae3
+  why   Water STO-3G gives PySCF's energy
+        [test "water STO-3G from the packs: RHF, and UHF on the closed shell, give PySCF's energy"],
+        and so does water 6-31G* in spherical functions
+        [test "water 6-31G* in 5D from the packs gives PySCF's spherical energy"].
+  mol   the molecule
+  o     the run's options
+  p     the setup: every integral and the electron counts
+  r     the SCF's result: energy, orbitals, densities, convergence record
+
+  integrals      build the setup: every integral and the electron counts
+  scf            solve the Hartree-Fock equations with them
+  return the result
+
+hf_gap  @bcfc79ae
+  what  The largest difference between two arrays over their first N
+        entries, in row-major order.
+  A     one array
+  B     the other array, the same length or longer
+  N     how many entries, in row-major order, to compare
+  ix    the flat indexes `0..N-1`
+  a     A's first N entries
+  b     B's first N entries
+  w     the largest gap seen so far
+  i     the entry being compared
+
+hf_eri_oracle  @51b5bfd0
+  what  Compare packed repulsion integrals with a sampled reference, for a
+        basis too large to store every integral: the worst sampled gap, the
+        worst gap on the pair diagonal, and the relative gaps of two
+        checksums.
+  why   PySCF's full list of integrals for a larger basis is too big to
+        store in the repository; sampled entries, the pair diagonal and two
+        checksums catch a wrong integral without it.
+  G      the packed repulsion integrals to check
+  idx    the packed indexes of the sampled entries
+  val    PySCF's values at those indexes
+  diag   PySCF's pair-diagonal values `(ij|ij)`
+  sumsq  PySCF's sum of squares of every integral
+  wsum   PySCF's seeded weighted sum of every integral
+  seed   the seed of the weights of that sum
+  worst  the largest gap on the pair diagonal so far
+  p      a pair index on the diagonal
+  cs     the two checksums of G
+
+hf_lock_report  @80cede00
+  why   A converged density that one more plain step leaves in place is a
+        true fixed point, not a run that stopped early.
+  p     the setup to run
+  eref  PySCF's energy for it, hartree
+  r     the converged result
+  f     the result of one plain step from r's densities
+
+  scf            run the SCF
+  fixed          take one plain step from the result and measure how far it moves
+  return the report
+
+hf_lock_assert  @f56e0821
+  why   The commutator is held for RHF and UHF only: at a converged ROHF
+        state the spin Fock matrices do not commute with their densities.
+  r     the lock report
+  p     the setup it came from, for the method
+
+hf_oracle_assert  @89035d67
+  what  Assert a sampled-oracle report: every entry within `1e-12`.
+  g     the report `hf_eri_oracle` returns
+
+hf_lock_full  @c0f42851
+  mol   the molecule, spherical
+  Gc    PySCF's packed Cartesian repulsion integrals
+  Gs    PySCF's packed spherical repulsion integrals
+  Su    PySCF's Cartesian overlap matrix
+  Hu    PySCF's Cartesian core Hamiltonian
+  Ss    PySCF's spherical overlap matrix
+  Hs    PySCF's spherical core Hamiltonian
+  e6    PySCF's RHF energy in Cartesian functions
+  e5    PySCF's RHF energy in spherical functions
+  mask  the repulsion-integral members to run and compare
+  cart  the same molecule in Cartesian functions
+  o     cross-checked options: every member of every stage runs
+  nc    the number of Cartesian functions
+  ns    the number of spherical functions
+  rep   the sweep's report
+  G     the Cartesian repulsion integrals computed here
+  S     the Cartesian overlap matrix computed here
+  H     the Cartesian core Hamiltonian computed here
+  p     the setup of one run
+  r6    the Cartesian run's lock report
+  r     the spherical run's lock report
+  M     the Cartesian-to-spherical matrix
+  G5    the spherical repulsion integrals computed here
+  S5    the spherical overlap matrix computed here
+  H5    the spherical core Hamiltonian computed here
+
+  integrals      compute the Cartesian integrals and compare them with the reference
+  cart           run RHF on Cartesian functions and check the report
+  transform      transform the integrals to spherical functions and compare them
+  sph            run RHF on spherical functions and check the report
+  return the two energy gaps
+
+hf_lock_sampled  @e2d48fcc
+  mol   the molecule, spherical
+  ci    the packed indexes of the Cartesian samples
+  cv    PySCF's Cartesian values at them
+  cd    PySCF's Cartesian pair diagonal
+  cs    PySCF's Cartesian checksums: sum of squares, seeded sum
+  si    the packed indexes of the spherical samples
+  sv    PySCF's spherical values at them
+  sd    PySCF's spherical pair diagonal
+  ss    PySCF's spherical checksums
+  seed  the seed of the checksums' weights
+  Su    PySCF's Cartesian overlap matrix
+  Hu    PySCF's Cartesian core Hamiltonian
+  Ss    PySCF's spherical overlap matrix
+  Hs    PySCF's spherical core Hamiltonian
+  e6    PySCF's RHF energy in Cartesian functions
+  e5    PySCF's RHF energy in spherical functions
+  cart  `1` to run the Cartesian RHF too
+  m6    the same molecule in Cartesian functions
+  o     cross-checked options
+  nc    the number of Cartesian functions
+  ns    the number of spherical functions
+  rep   the sweep's report
+  G     the Cartesian repulsion integrals computed here
+  S     the Cartesian overlap matrix computed here
+  H     the Cartesian core Hamiltonian computed here
+  de6   the Cartesian energy gap, `0` when that run is skipped
+  p     the Cartesian setup
+  r     its lock report
+  M     the Cartesian-to-spherical matrix
+  G5    the spherical repulsion integrals computed here
+  S5    the spherical overlap matrix computed here
+  H5    the spherical core Hamiltonian computed here
+  p5    the spherical setup
+  r5    its lock report
+
+  integrals      compute the Cartesian integrals and check them against the samples
+  if the reference has a Cartesian energy
+    cart           run RHF on Cartesian functions and check the report
+  transform      transform the integrals to spherical functions and check them
+  sph            run RHF on spherical functions and check the report
+  return the two energy gaps
+
+hf_eri_mask  @9b343f13
+  why   Cross-checking runs two integral methods and compares them; a
+        production run pays for one. The mask is a bit set of registry
+        members, so the choice is made here and nowhere else.
+  o     the run's options: `cross_check` and `eri_members` decide the mask
+  m     the members the options ask for, as a whole number
+
+hf_one_mask  @3b6b6308
+  o     the run's options; only `cross_check` is read
+
+hf_c2s  @f39a86e4
+  why   The pipeline needs the same matrix for S, H and the repulsion
+        integrals of a spherical run; this names it once.
+  mol   the molecule; only its shells are read
+
+hf_to_ao  @5223482a
+  why   The integral methods work in Cartesian functions. A molecule asked
+        to run in spherical functions (`5D`, `7F`) gets its one-electron
+        matrices transformed here, through the same sweep that compares
+        transform methods when cross-checking is on.
+  X     a one-electron matrix over Cartesian functions, `[nc, nc]`
+  mol   the molecule, which says whether the run is spherical
+  o     the run's options, for the member mask
+  rep   the sweep's report: how many methods ran and how far apart they were
+  ns    the number of spherical functions
+
+hf_overlap  @a6b7322a
+  why   S is the metric of the basis: two basis functions on different
+        atoms overlap, so the orbitals solve `F C = S C e` rather than an
+        ordinary eigenproblem.
+  mol   the molecule: atoms, shells and primitives
+  o     the run's options: `cross_check` runs every member
+  rep   the sweep's report
+  n     the number of Cartesian basis functions
+  S     the overlap matrix over Cartesian functions, `[n, n]`: `S[i, j]` is
+        the integral of basis function i times basis function j
+
+hf_hcore  @70c60354
+  why   The core Hamiltonian is the part of the Fock matrix that does not
+        depend on the density: the kinetic energy of one electron and its
+        attraction to the nuclei.
+  mol   the molecule: atoms, shells and primitives
+  o     the run's options: `cross_check` runs every member
+  rep   the sweep's report
+  n     the number of Cartesian basis functions
+  T     the kinetic energy matrix, `[n, n]`
+  V     the nuclear attraction matrix, `[n, n]`: every nucleus, summed
+
+hf_blob  @e9e65bfb
+  why   The lock ladder and the suites build direct runs by hand; this is
+        lib/hf/scf's blob under the name they use.
+  mol   the molecule: atoms, shells, primitives, and whether it is spherical
+
+hf_two_electron  @24513bcb
+  why   The SCF loop takes one array for the two-electron part and hands it
+        to the J/K builder the options pick; this puts the right thing in it.
+  mol   the molecule
+  o     the run's options; `jk` picks the J/K builder
+
+hf_setup_of  @ce92c773
+  why   The lock ladder computes the integrals itself and compares them with
+        PySCF's before the SCF; this lets it build the setup from those
+        (lib/hf/scf's `scf_setup_of`).
+  mol   the molecule, for the electron counts and the nuclear repulsion
+  H     the core Hamiltonian, `[n, n]`
+  S     the overlap matrix, `[n, n]`
+  G     the packed repulsion integrals, or the direct member's basis blob
+  o     the run's options
+
+hf_scf  @597a424c
+  p     the setup: integrals, electron counts, nuclear repulsion and options
+
+hf_scf_from  @91f2843e
+  p     the setup
+  Da    the starting density of the alpha electrons, `[n, n]`
+  Db    the starting density of the beta electrons, `[n, n]`
+
+hf_step  @70d2ec15
+  p     the setup
+  Da    the alpha density to step from, `[n, n]`
+  Db    the beta density to step from, `[n, n]`
+
+hf_electron_gap  @a18a11d5
+  why   A density that lost or gained electrons still converges to a wrong
+        answer; this catches it in the iteration it happens.
+  setup  the setup: S, method and electron counts
+  D     the densities, `[nd, n, n]`
+  gap   the largest miscount so far
+  d     the density being counted

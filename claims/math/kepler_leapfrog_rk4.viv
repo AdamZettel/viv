@@ -1,0 +1,125 @@
+###
+title: Leapfrog holds a planet's energy for 100,000 orbits
+line: Leapfrog's energy error is the same after 100,000 periods as after 10,000, while RK4's grows 10 times.
+claim: Integrating a Kepler orbit of eccentricity 0.5 for 100,000 periods with 200 steps per period, the leapfrog (velocity Verlet) energy error stays bounded (its largest value over the last 10,000 periods is within a factor of 1.5 of its largest over the first 10,000), while classical fourth-order Runge-Kutta's energy error grows in proportion to time (it is between 5 and 15 times larger at 100,000 periods than at 10,000).
+topic: math
+section: differential equations
+reference: The exact energy -1/(2a) = -0.5 of the orbit (G M = 1, a = 1); Hairer, Lubich and Wanner, Geometric Numerical Integration (2nd ed., 2006), chapters I and IX: a symplectic method conserves a modified energy, so its energy error does not drift, while a non-symplectic method's energy error drifts linearly.
+scope: One orbit, one step size, Kepler problem in the plane. The claim is about growth over time, not size: at this step size RK4's energy error is already larger than leapfrog's after 10,000 periods, and a smaller step would delay that, not prevent it. Round-off over 2e7 steps also adds a slow random walk to both.
+lane: ai
+by: claude
+cost: heavy
+###
+
+#: pi
+PI_K = 4.0 * atan(1.0)
+ECC = 0.5
+STEPS_PER_ORBIT: Int = 200
+N_ORBITS: Int = 100000
+#: the windows compared: the first and last WINDOW orbits, and RK4 at WINDOW and at N_ORBITS
+WINDOW: Int = 10000
+ENERGY_EXACT = -0.5
+
+def energy(x: Num, y: Num, vx: Num, vy: Num) -> Num {
+    return 0.5 * (vx * vx + vy * vy) - 1.0 / sqrt(x * x + y * y)
+}
+
+#| The four derivatives of (x, y, vx, vy) under 1 / r^2 attraction.
+def accel(x: Num, y: Num) {
+    r3 = pow(x * x + y * y, 1.5)
+    return -x / r3, -y / r3
+}
+
+dt = 2.0 * PI_K / STEPS_PER_ORBIT
+#: start at perihelion: r = a (1 - e), speed from vis-viva
+x0 = 1.0 - ECC
+vy0 = sqrt((1.0 + ECC) / (1.0 - ECC))
+lx = x0
+ly = 0.0
+lvx = 0.0
+lvy = vy0
+rx = x0
+ry = 0.0
+rvx = 0.0
+rvy = vy0
+lf_first = 0.0
+lf_last = 0.0
+rk_at_window = 0.0
+rk_at_end = 0.0
+#: the figure's samples: both energy errors at perihelion every CHECK_EVERY orbits
+CHECK_EVERY: Int = 1000
+N_CHECKS: Int = 100
+fg_orbit = zeros(N_CHECKS)
+fg_lf = zeros(N_CHECKS)
+fg_rk = zeros(N_CHECKS)
+fg_next: Int = 0
+for orbit to N_ORBITS {
+    for s to STEPS_PER_ORBIT {
+        #: leapfrog: half kick, drift, half kick
+        ax, ay = accel(lx, ly)
+        lvx = lvx + 0.5 * dt * ax
+        lvy = lvy + 0.5 * dt * ay
+        lx = lx + dt * lvx
+        ly = ly + dt * lvy
+        ax, ay = accel(lx, ly)
+        lvx = lvx + 0.5 * dt * ax
+        lvy = lvy + 0.5 * dt * ay
+        #: classical RK4
+        a1x, a1y = accel(rx, ry)
+        a2x, a2y = accel(rx + 0.5 * dt * rvx, ry + 0.5 * dt * rvy)
+        a3x, a3y = accel(rx + 0.5 * dt * (rvx + 0.5 * dt * a1x), ry + 0.5 * dt * (rvy + 0.5 * dt * a1y))
+        a4x, a4y = accel(rx + dt * (rvx + 0.5 * dt * a2x), ry + dt * (rvy + 0.5 * dt * a2y))
+        nx = rx + dt * (rvx + dt * (a1x + a2x + a3x) / 6.0)
+        ny = ry + dt * (rvy + dt * (a1y + a2y + a3y) / 6.0)
+        rvx = rvx + dt * (a1x + 2.0 * a2x + 2.0 * a3x + a4x) / 6.0
+        rvy = rvy + dt * (a1y + 2.0 * a2y + 2.0 * a3y + a4y) / 6.0
+        rx = nx
+        ry = ny
+        el = abs(energy(lx, ly, lvx, lvy) - ENERGY_EXACT)
+        if orbit < WINDOW {
+            lf_first = max(lf_first, el)
+        }
+        if orbit >= N_ORBITS - WINDOW {
+            lf_last = max(lf_last, el)
+        }
+    }
+    if orbit == WINDOW - 1 {
+        rk_at_window = abs(energy(rx, ry, rvx, rvy) - ENERGY_EXACT)
+    }
+    if (orbit + 1) % CHECK_EVERY == 0 {
+        fg_orbit[fg_next] = orbit + 1.0
+        fg_lf[fg_next] = abs(energy(lx, ly, lvx, lvy) - ENERGY_EXACT)
+        fg_rk[fg_next] = abs(energy(rx, ry, rvx, rvy) - ENERGY_EXACT)
+        fg_next = fg_next + 1
+    }
+}
+rk_at_end = abs(energy(rx, ry, rvx, rvy) - ENERGY_EXACT)
+leapfrog_growth = lf_last / lf_first
+rk4_growth = rk_at_end / rk_at_window
+show lf_first
+show lf_last
+show rk_at_window
+show rk_at_end
+show leapfrog_growth
+show rk4_growth
+
+#: the figure: the energy error at perihelion every 1,000 orbits
+figure("Energy error of a Kepler orbit over 100,000 periods", "orbits", "|E - E_exact|")
+xscale("log")
+yscale("log")
+plot(fg_orbit, fg_rk, "RK4")
+style("RK4", "s2 nomarker")
+plot(fg_orbit, fg_lf, "leapfrog")
+style("leapfrog", "s1 nomarker")
+
+test "leapfrog: the energy error over the last 10,000 periods is within a factor of 1.5 of the first 10,000's" {
+    assert_lt(leapfrog_growth, 1.5)
+    assert_gt(leapfrog_growth, 1.0 / 1.5)
+}
+test "RK4: the energy error is 5 to 15 times larger at 100,000 periods than at 10,000" {
+    assert_gt(rk4_growth, 5.0)
+    assert_lt(rk4_growth, 15.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

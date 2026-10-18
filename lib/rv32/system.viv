@@ -1,0 +1,35 @@
+# Assemble a program, load it into a fresh machine and run it: the three
+# steps every test of lib/rv32 and lib/cc takes.
+
+from rv32.asm import assemble, Program
+from rv32.sim import INSTR_BYTES, Machine, machine, run
+
+STEP_LIMIT: Int = 10000000     # instructions before a run is cut off
+
+#| The address of label `name` in an assembled program, or 0 when it has none.
+def entry(p: Program, name: Str) -> Int {
+    for k to len(p.labels) {
+        if p.labels[k] == name {
+            return p.addrs[k]
+        }
+    }
+    return 0
+}
+
+#| Assemble `text`, start at `_start` (or address 0) and run until the
+#| program exits or `limit` instructions have run.
+def run_asm(text: Str, limit: Int) -> Machine {
+    p = assemble(text)
+    return run(machine(p.image, entry(p, "_start")), limit)
+}
+
+test "a program starts at _start and exits with a0" {
+    text = "j _start\nli a0, 1\n_start: li a0, 7\nli a7, 93\necall\n"
+    assert_true(entry(assemble(text), "_start") == 2 * INSTR_BYTES)
+    m = run_asm(text, STEP_LIMIT)
+    assert_true(m.halted)
+    assert_true(m.exit_code == 7)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

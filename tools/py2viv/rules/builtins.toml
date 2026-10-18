@@ -1,0 +1,479 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# Python builtins and the math module: py2viv's translation rules (format: ../RULES.md).
+#
+# A call's rules are tried in file order (builtins.toml, then numpy.toml); the first that
+# does not decline translates the call or refuses it. Exactness is stated per rule, from
+# SUBSET.md's "What is exact" and the differential runs in ../results/ (mapping.py unless
+# another file is named). Every rule's `tests` are the inputs of its generated differential
+# test (check_rules.py), which also tries each argument as an expression, at the edge values
+# (0, -0.0, a negative, NaN, infinities, complex) and with an argument too many or missing.
+#
+# Parameters are named as Python names them where Python accepts them as keywords, and are
+# positional-only (`/`) where it does not (builtins, math, NumPy's ufuncs), so a keyword
+# Python would reject is refused.
+
+# ---------------------------------------------------------------- numbers
+
+[[rule]]
+id = "abs"
+match = ["abs(x, /)", "np.abs(x, /)", "np.absolute(x, /)", "math.fabs(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:33 np.abs(x), :45 math.fabs, :46 abs(-2.5): bitwise; correctly rounded in both (SUBSET.md)"
+cases = [
+  { if = "x.kind == 'bool'", refuse = "abs of a Bool", hint = "Use a number." },
+  { if = "module == 'math' and not x.scalar and x.kind != 'unknown'", refuse = "{name} of {x.words}", hint = "math functions take one number (Python raises TypeError); use np.abs for an array." },
+  { if = "module == 'math' and x.kind == 'cnum'", refuse = "{name} of a complex number", hint = "Python raises TypeError; use abs(z)." },
+  { if = "name == 'abs' and x.arr and x.container == 'list'", refuse = "abs of a list", hint = "Python raises TypeError (abs of a list); use np.abs." },
+  { if = "x.arr and x.py == 'bool'", refuse = "{name} of a Bool array", hint = "NumPy keeps it a Bool array; use a number array." },
+  { if = "x.kind in ['cnum', 'carr']", inexact = "abs of a complex number (libm's hypot)", exactness = "tolerance", rtol = 1.2e-16, atol = 0.0, evidence = "adapters.py:29 np.abs(X) of a complex vector: within 1.2e-16 absolute" },
+  { viv = "abs({x})", type = "arr(x.rank) if x.kind == 'carr' else (T('arr', x.rank, x.py, 'nd') if x.arr else (NUM_F if x.kind == 'cnum' or module == 'math' else x))" },
+]
+tests = [{ x = -2.5 }, { x = [-1.5, 0.0, 2.0] }, { x = -3 }]
+
+[[rule]]
+id = "min-max"
+match = ["min(x, /, *rest)", "max(x, /, *rest)"]
+exactness = "exact"
+evidence = "mapping.py:29 max(v), min(w): bitwise; py_bmax keeps Python's order (the first entry, replaced only by a greater one), so NaN and signs of zero come out as CPython's"
+cases = [
+  { if = "nkw > 0", refuse = "{name} with key= or default=", hint = "Write the loop." },
+  { eval = [] },
+  { if = "nargs == 1 and not x.arr", refuse = "{name} of one number", hint = "Pass an array or two numbers." },
+  { if = "nargs == 1 and x.rank != 1", refuse = "{name} of {x.words}", hint = "Python compares the rows (a NumPy matrix raises ValueError); pass a vector." },
+  { if = "nargs == 1 and x.kind == 'carr'", refuse = "{name} of a complex array", hint = "Python cannot order complex numbers." },
+  { if = "nargs == 1 and x.py == 'int'", viv = "{name}({x})", type = "NUM_I" },
+  { if = "nargs == 1 and x.py == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Python returns the int or the float it finds; make them all floats." },
+  { if = "nargs == 1 and x.py == 'bool'", refuse = "{name} of a Bool array", hint = "Python returns a Bool; use numbers." },
+  { if = "nargs == 1", use = ["py_b{name}"], viv = "py_b{name}({x})", type = "NUM_F" },
+  { hook = "fold_minmax" },
+]
+tests = [{ x = [3.0, -1.0, 2.0] }, { x = 1.5, rest = [2.5, -0.5] }, { x = [3, -1, 2] }]
+
+[[rule]]
+id = "len"
+match = "len(x, /)"
+exactness = "exact"
+evidence = "a shape read"
+cases = [
+  { if = "not x.arr and x.kind != 'unknown'", refuse = "len of {x.words}", hint = "len takes an array." },
+  { viv = "len({x})", type = "NUM_I" },
+]
+tests = [{ x = [1.0, 2.0, 3.0] }, { x = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]] }]
+
+[[rule]]
+id = "float"
+match = ["float(x=None, /)", "np.float64(x=None, /)"]
+exactness = "exact"
+evidence = "mapping.py:46 float(3): bitwise"
+cases = [
+  { if = "nargs == 0", viv = "0.0", type = "NUM_F" },
+  { if = "x.strlit in ['inf', '+inf', 'infinity']", viv = "(1.0 / 0.0)", type = "NUM_F" },
+  { if = "x.strlit in ['-inf', '-infinity']", viv = "(-1.0 / 0.0)", type = "NUM_F" },
+  { if = "x.strlit == 'nan'", viv = "(0.0 / 0.0)", type = "NUM_F" },
+  { if = "x.strlit != None", refuse = "float of a string", hint = "Write the number." },
+  { eval = ["x"] },
+  { if = "x.arr", refuse = "{name} of {x.words}", hint = "Python raises TypeError (np.float64 gives an array); convert the entries in a loop." },
+  { if = "x.kind == 'cnum'", refuse = "{name} of a complex number", hint = "Python raises TypeError; take z.real." },
+  { if = "x.kind == 'bool'", use = ["py_b01"], viv = "py_b01({x})", type = "NUM_F" },
+  { viv = "{x}", type = "NUM_F if x.kind == 'num' else x", prec = "x.prec" },
+]
+tests = [{ x = 3 }, { x = "inf" }, { x = true }, { x = -2.5 }]
+
+[[rule]]
+id = "int"
+match = ["int(x, /)", "math.trunc(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:46 int(-7.9): bitwise; py_trunc rounds toward zero as Python does"
+cases = [
+  { if = "x.kind == 'bool'", use = ["py_b01"], viv = "py_b01({x})", type = "NUM_I" },
+  { if = "x.arr", refuse = "int of an array", hint = "Write the loop." },
+  { if = "x.kind == 'cnum'", refuse = "{name} of a complex number", hint = "Python raises TypeError." },
+  { if = "x.strlit != None", refuse = "int of a string", hint = "Write the number." },
+  { if = "x.py == 'int'", viv = "{x}", type = "NUM_I", prec = "x.prec" },
+  { use = ["py_trunc"], viv = "py_trunc({x})", type = "NUM_I" },
+]
+tests = [{ x = -7.9 }, { x = 2.5 }, { x = -0.5 }, { x = 7 }]
+
+[[rule]]
+id = "np.trunc"
+match = "np.trunc(x, /)"
+exactness = "exact"
+evidence = "py_nptrunc: ceil below zero, floor otherwise, so -0.5 gives -0.0 and NaN and the infinities pass through, as C's trunc, which NumPy calls"
+cases = [
+  { if = "x.arr", refuse = "np.trunc of an array", hint = "Loop over the entries." },
+  { if = "x.kind == 'cnum'", refuse = "np.trunc of a complex number", hint = "NumPy raises TypeError." },
+  { if = "x.kind == 'bool'", use = ["py_b01"], viv = "py_b01({x})", type = "NUM_F" },
+  { use = ["py_nptrunc"], viv = "py_nptrunc({x})", type = "NUM_F" },
+]
+tests = [{ x = -7.9 }, { x = 2.5 }, { x = -0.5 }, { x = 7 }]
+
+[[rule]]
+id = "round"
+match = "round(number, ndigits=None)"
+exactness = "exact"
+evidence = "mapping.py:46 round(2.5), round(-3.5): bitwise; py_round sends halves to the even neighbor"
+cases = [
+  { if = "ndigits.given", refuse = "round(x, ndigits)", hint = "Python rounds the decimal digits exactly; print with a format instead, or multiply, round, divide." },
+  { eval = ["number"] },
+  { if = "number.arr", refuse = "round of an array", hint = "Python raises TypeError; round the entries one at a time." },
+  { if = "number.kind == 'cnum'", refuse = "round of a complex number", hint = "Python raises TypeError." },
+  { if = "number.kind == 'bool'", use = ["py_b01"], viv = "py_b01({number})", type = "NUM_I" },
+  { if = "number.py == 'int'", viv = "{number}", type = "NUM_I", prec = "number.prec" },
+  { use = ["py_round"], viv = "py_round({number})", type = "NUM_I" },
+]
+tests = [{ number = 2.5 }, { number = -2.5 }, { number = 3.5 }, { number = 1e300 }, { number = 7 }]
+
+[[rule]]
+id = "np.round"
+match = ["np.round(a, decimals=0)", "np.around(a, decimals=0)"]
+exactness = "exact"
+evidence = "py_npround: half to even, -0.0 kept (np.round(-0.4) is -0.0), SUBSET.md 'What is exact'"
+cases = [
+  { if = "decimals.given or a.arr", refuse = "{name} with decimals or of an array", hint = "Round numbers one at a time with round(x)." },
+  { if = "a.kind in ['cnum', 'bool']", refuse = "{name} of {a.words}", hint = "Round a real number." },
+  { if = "a.py == 'int'", viv = "{a}", type = "NUM_I", prec = "a.prec" },
+  { use = ["py_npround"], viv = "py_npround({a})", type = "NUM_F" },
+]
+tests = [{ a = 2.5 }, { a = -0.5 }, { a = 3 }]
+
+[[rule]]
+id = "np.rint"
+match = "np.rint(x, /)"
+exactness = "exact"
+evidence = "as np.round of a number; of an int a float (NumPy's rint of an int is a float64)"
+cases = [
+  { if = "x.arr", refuse = "np.rint of an array", hint = "Round numbers one at a time with round(x)." },
+  { if = "x.kind in ['cnum', 'bool']", refuse = "np.rint of {x.words}", hint = "Round a real number." },
+  { use = ["py_npround"], viv = "py_npround({x})", type = "NUM_F" },
+]
+tests = [{ x = 2.5 }, { x = -0.5 }, { x = 3 }]
+
+[[rule]]
+id = "pow"
+match = "pow(base, exp, mod=None)"
+exactness = "exact"
+evidence = "a rewrite: pow(a, b) is a ** b, and the operator's own class applies (an int power is exact by squaring; a float power is Viv's libm pow, which the operator records as inexact)"
+cases = [
+  { if = "mod.given", refuse = "{name} with a modulus", hint = "Write (a ** b) % m." },
+  { eval = ["base", "exp"] },
+  { python = "base ** exp" },
+]
+tests = [{ base = 2, exp = 10 }, { base = 2.0, exp = 0.5 }]
+
+[[rule]]
+id = "math.pow"
+match = "math.pow(x, y, /)"
+exactness = "tolerance"
+rtol = 2.3e-16
+atol = 0.0
+evidence = "mapping.py:46 pow(2.0, 10): bitwise; Viv's libm pow, 1 ulp against the platform's (check_rules.py: math.pow(1.5, 18.0) is 1 ulp off, 1.57e-16 relative)"
+cases = [
+  { eval = ["x", "y"] },
+  { if = "not (x.kind in ['num', 'unknown'] and y.kind in ['num', 'unknown'])", refuse = "math.pow of {x.words} and {y.words}", hint = "math.pow takes two real numbers (Python raises TypeError otherwise); use np.power for arrays." },
+  { inexact = "pow (Viv's libm is not the platform's)" },
+  { use = ["py_mpow"], viv = "py_mpow({x}, {y})", type = "NUM_F" },
+]
+tests = [{ x = 2.0, y = 10 }, { x = 1.5, y = -2.5 }]
+
+[[rule]]
+id = "np.power"
+match = "np.power(x, y, /)"
+exactness = "tolerance"
+rtol = 2.3e-16
+atol = 0.0
+evidence = "mapping.py:38 np.power(p, 1.5): within 1.5e-16 relative; check_rules.py: 0.5 ** 1.5 is 1 ulp off (1.57e-16 relative)"
+cases = [
+  { eval = ["x", "y"] },
+  { if = "x.kind in ['cnum', 'carr', 'bool'] or y.kind in ['cnum', 'carr', 'bool'] or (x.arr and x.py == 'bool') or (y.arr and y.py == 'bool')", refuse = "np.power of {x.words} and {y.words}", hint = "Only real numbers and real arrays." },
+  { if = "x.py == 'int' and y.py == 'int'", refuse = "np.power of two ints", hint = "NumPy's integer power wraps at 2^63 and raises on a negative exponent; make one of them a float." },
+  { if = "x.arr and y.arr and x.rank != y.rank", refuse = "np.power of a rank-{x.rank} and a rank-{y.rank} array", hint = "NumPy broadcasts them; loop instead (R9).", gap = "R9" },
+  { inexact = "pow (Viv's libm is not the platform's)" },
+  { if = "y.arr", refuse = "np.power with an array exponent", hint = "Viv's ^ takes a number exponent; write the loop." },
+  { if = "x.arr", use = ["py_apow"], viv = "py_apow({x}, {y})", type = "arr(x.rank)" },
+  { viv = "{x:91} ^ {y:80}", type = "NUM_F", prec = "90" },
+]
+tests = [{ x = [0.1, 0.5, 2.0], y = 1.5 }, { x = 2.0, y = -0.5 }, { x = [1, 2, 3], y = 0.5 }]
+
+# ---------------------------------------------------------------- reductions and copies
+
+[[rule]]
+id = "sum"
+match = "sum(x, /, start=None)"
+exactness = "exact"
+evidence = "mapping.py:28: the builtin left to right over an array (py_lsum) and CPython 3.12's compensated sum over a list of floats (py_fsum312), an integer sum exact below 2^53 (py_isum); SUBSET.md 'What is exact'"
+cases = [
+  { if = "start.given", refuse = "sum with a start value", hint = "Add it after." },
+  { if = "x.syntax == 'GeneratorExp'", hook = "reduce_gen", args = ["x", "sum"] },
+  { eval = ["x"] },
+  { if = "not x.arr and x.kind != 'unknown'", refuse = "sum of {x.words}", hint = "sum takes an array." },
+  { if = "x.kind == 'unknown'", viv = "sum({x})", type = "NUM_F" },
+  { if = "x.rank != 1", refuse = "the builtin sum of {x.words}", hint = "Python adds the rows (an array, or a TypeError for lists); use np.sum for every entry." },
+  { if = "x.kind == 'carr'", refuse = "the sum of a complex array", hint = "Sum the real and imaginary parts." },
+  { if = "x.py in ['int', 'bool']", use = ["py_isum"], viv = "py_isum({x})", type = "NUM_I" },
+  { if = "x.py == 'mixed'", refuse = "the sum of a list mixing ints and floats", hint = "Python adds the ints exactly first; make them all floats." },
+  { if = "x.container == 'list' and host_py >= [3, 12] and np_imported", refuse = "the builtin sum of a list of floats in a program that uses NumPy, under Python 3.12 or later", hint = "From 3.12 the builtin sum compensates exact Python floats and adds NumPy's float64 plainly, and a list may hold either; sum with np.sum, or add in a loop." },
+  { if = "x.container == 'list' and host_py >= [3, 12]", use = ["py_fsum312"], viv = "py_fsum312({x})", type = "NUM_F" },
+  { use = ["py_lsum"], viv = "py_lsum({x})", type = "NUM_F" },
+]
+tests = [{ x = [0.1, 0.2, 0.3] }, { x = [1, 2, 3] }, { x = [-0.0, -0.0] }, { x = [0.1, 0.7, 1e16, -1e16, 0.3, 0.2, 0.9, 0.4, 0.6, 1.1] }]
+
+[[rule]]
+id = "np.sum"
+match = "np.sum(a, axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:28 np.sum(M): bitwise; NumPy's pairwise sum (py_npsum), an integer sum exact below 2^53 (py_isum); SUBSET.md 'What is exact'"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr and a.kind != 'unknown'", refuse = "sum of {a.words}", hint = "sum takes an array." },
+  { if = "a.kind == 'unknown'", viv = "sum({a})", type = "NUM_F" },
+  { if = "a.kind == 'carr'", refuse = "the sum of a complex array", hint = "Sum the real and imaginary parts." },
+  { if = "a.py in ['int', 'bool']", use = ["py_isum"], viv = "py_isum({a})", type = "NUM_I" },
+  { if = "a.py == 'mixed'", refuse = "the sum of a list mixing ints and floats", hint = "Python adds the ints exactly first; make them all floats." },
+  { if = "in_grad", inexact = "np.sum left to right inside a differentiated def (Viv's grad cannot follow the pairwise recursion)", viv = "sum({a})", type = "NUM_F", exactness = "tolerance", rtol = 1e-13, atol = 1e-16, evidence = "mlp_grad.py:16, inside a def that grad differentiates: held to mlp_grad.py's declared rtol 1e-13, atol 1e-16" },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed and not in_grad and a.py == 'float'", use = ["py_npsum"], viv = "py_npsum(transpose({a}))", type = "NUM_F" },
+  { use = ["py_npsum"], viv = "py_npsum({a})", type = "NUM_F" },
+]
+tests = [{ a = [0.1, 0.2, 0.3] }, { a = [[1.0, 2.5], [-3.0, 0.25]] }, { a = [-0.0, -0.0] }]
+
+[[rule]]
+id = "all"
+match = ["all(x, /)", "any(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:37: bitwise"
+cases = [
+  { if = "x.syntax == 'GeneratorExp'", hook = "reduce_gen", args = ["x", "{name}"] },
+  { eval = ["x"] },
+  { if = "not x.arr", refuse = "{name} of {x.words}", hint = "Pass an array (a mask)." },
+  { if = "x.rank != 1", refuse = "the builtin {name} of {x.words}", hint = "Python tests each row's truth (a NumPy matrix raises ValueError); use np.{name}." },
+  { if = "x.kind == 'carr'", refuse = "{name} of a complex array", hint = "Test the parts." },
+  { viv = "{name}({x})", type = "BOOL" },
+]
+tests = [{ x = [1.0, 1.0, 0.0] }, { x = [0.0, 0.0, 1.0] }, { x = [1.0, 2.0, 3.0] }]
+
+[[rule]]
+id = "np.all"
+match = ["np.all(a, axis=None)", "np.any(a, axis=None)"]
+exactness = "exact"
+evidence = "mapping.py:37 np.all: bitwise"
+cases = [
+  { if = "axis.given", refuse = "{name} with axis=", hint = "Reductions along an axis are R9; write the loop.", gap = "R9" },
+  { eval = ["a"] },
+  { if = "not a.arr", refuse = "{short} of {a.words}", hint = "Pass an array (a mask)." },
+  { if = "a.kind == 'carr'", refuse = "{name} of a complex array", hint = "Test the parts." },
+  { viv = "{short}({a})", type = "BOOL" },
+]
+tests = [{ a = [1.0, 1.0, 0.0] }, { a = [[1.0, 2.0], [3.0, 4.0]] }]
+
+[[rule]]
+id = "sorted"
+match = "sorted(x, /)"
+exactness = "exact"
+evidence = "adapters.py:15-19 and mapping.py:47: bitwise; an adapter, since Viv's sort(a) sorts in place and returns 0"
+guard = "no NaN, and not 0.0 with -0.0 (py_sort stops at run time on either)"
+cases = [
+  { if = "nkw > 0", refuse = "{name} with key=, reverse= or axis=", hint = "Sort a copy with np.sort(a), then read it backward." },
+  { eval = ["x"] },
+  { if = "not (x.arr and x.rank == 1) or x.kind == 'carr' or x.py == 'bool'", refuse = "{name} of {x.words}", hint = "Sort a vector." },
+  { use = ["py_sort"], viv = "py_sort({x})", type = "T('arr', 1, x.py, 'list')" },
+]
+tests = [{ x = [0.5, -1.0, 2.0, 0.25] }, { x = [3, -1, 2] }]
+
+[[rule]]
+id = "np.sort"
+match = "np.sort(a, axis=-1)"
+exactness = "exact"
+evidence = "adapters.py:15-19: bitwise; an adapter, since Viv's sort(a) sorts in place and returns 0"
+guard = "no NaN, and not 0.0 with -0.0 (py_sort stops at run time on either)"
+cases = [
+  { if = "axis.given", refuse = "{name} with key=, reverse= or axis=", hint = "Sort a copy with np.sort(a), then read it backward." },
+  { eval = ["a"] },
+  { if = "not (a.arr and a.rank == 1) or a.kind == 'carr' or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Sort a vector." },
+  { use = ["py_sort"], viv = "py_sort({a})", type = "T('arr', 1, a.py, 'nd')" },
+]
+tests = [{ a = [0.5, -1.0, 2.0, 0.25] }]
+
+[[rule]]
+id = "list"
+match = "list(x, /)"
+exactness = "exact"
+evidence = "mapping.py:47: a copy"
+cases = [
+  { if = "not x.arr", refuse = "{name} of {x.words}", hint = "Pass an array." },
+  { if = "x.rank != 1", refuse = "list of {x.words}", hint = "Python's list of rows shares the rows (of a NumPy matrix: a list of row arrays); copy with np.copy." },
+  { if = "x.kind == 'carr'", refuse = "copying a complex array", hint = "Allocate czeros(n) and copy in a loop." },
+  { use = ["py_copy"], viv = "py_copy({x})", type = "T('arr', x.rank, x.py, 'list')" },
+]
+tests = [{ x = [3.0, -1.0, 2.5] }]
+
+[[rule]]
+id = "np.copy"
+match = "np.copy(a)"
+exactness = "exact"
+evidence = "mapping.py:47 np.copy(v): bitwise"
+cases = [
+  { if = "not a.arr", refuse = "{name} of {a.words}", hint = "Pass an array." },
+  { if = "a.kind == 'carr'", refuse = "copying a complex array", hint = "Allocate czeros(n) and copy in a loop." },
+  { use = ["py_copy"], viv = "py_copy({a})", type = "T('arr', a.rank, a.py, 'nd')" },
+]
+tests = [{ a = [3.0, -1.0, 2.5] }, { a = [[1, 2], [3, 4]] }]
+
+# ---------------------------------------------------------------- the math module
+
+[[rule]]
+id = "math.floor-ceil"
+match = ["math.floor(x, /)", "math.ceil(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:45 math.floor(-2.5), math.ceil(-2.5): bitwise; py_mfloor stops where math.floor raises (NaN, infinity)"
+cases = [
+  { if = "not x.scalar and x.kind != 'unknown'", refuse = "{name} of {x.words}", hint = "math functions take one number (Python raises TypeError); use np.{short} for an array." },
+  { if = "x.kind == 'cnum'", refuse = "{name} of a complex number", hint = "Python raises TypeError." },
+  { if = "x.kind == 'bool'", use = ["py_b01"], viv = "py_b01({x})", type = "NUM_I" },
+  { if = "x.py == 'int'", viv = "{x}", type = "NUM_I", prec = "x.prec" },
+  { use = ["py_m{short}"], viv = "py_m{short}({x})", type = "NUM_I" },
+]
+tests = [{ x = -2.5 }, { x = 2.0 }, { x = 7 }]
+
+[[rule]]
+id = "math.fmod"
+match = "math.fmod(x, y, /)"
+exactness = "exact"
+evidence = "mapping.py:45 math.fmod(-7.0, 3.0): bitwise; fmod is exact in IEEE arithmetic; py_mfmod stops where math.fmod raises"
+cases = [
+  { eval = [] },
+  { if = "not (x.kind in ['num', 'unknown'] and y.kind in ['num', 'unknown'])", refuse = "math.fmod of {x.words} and {y.words}", hint = "math.fmod takes two real numbers (Python raises TypeError otherwise)." },
+  { use = ["py_mfmod"], viv = "py_mfmod({x}, {y})", type = "NUM_F" },
+]
+tests = [{ x = -7.0, y = 3.0 }, { x = 7.5, y = -2.0 }]
+
+[[rule]]
+id = "np.fmod"
+match = "np.fmod(x, y, /)"
+exactness = "exact"
+evidence = "fmod is exact in IEEE arithmetic; Viv's mod is C's fmod"
+cases = [
+  { eval = ["x", "y"] },
+  { if = "x.kind in ['cnum', 'carr', 'bool'] or y.kind in ['cnum', 'carr', 'bool'] or (x.arr and x.py == 'bool') or (y.arr and y.py == 'bool')", refuse = "np.fmod of {x.words} and {y.words}", hint = "Only real numbers and real arrays." },
+  { if = "x.py == 'int' and y.py == 'int'", refuse = "np.fmod of two ints", hint = "NumPy's integer fmod gives 0 for a zero divisor; make one of them a float." },
+  { if = "x.arr or y.arr", refuse = "np.fmod of an array", hint = "Viv's mod takes numbers; loop over the entries with np.fmod of numbers." },
+  { viv = "mod({x}, {y})", type = "NUM_F" },
+]
+tests = [{ x = -7.0, y = 3.0 }, { x = 7.5, y = -2.0 }]
+
+[[rule]]
+id = "math.isclose"
+match = "math.isclose(a, b, *, rel_tol=1e-09, abs_tol=0.0)"
+exactness = "exact"
+evidence = "a comparison, py_isclose: isclose's own formula and defaults"
+cases = [
+  { eval = ["a", "b", "rel_tol", "abs_tol"] },
+  { if = "not (a.kind in ['num', 'unknown'] and b.kind in ['num', 'unknown'])", refuse = "math.isclose of {a.words} and {b.words}", hint = "math.isclose takes real numbers (Python raises TypeError otherwise); use np.allclose for arrays." },
+  { use = ["py_isclose"], viv = "py_isclose({a}, {b}, {rel_tol}, {abs_tol})", type = "BOOL" },
+]
+tests = [{ a = 0.30000000000000004, b = 0.3 }, { a = 1.0, b = 1.5, rel_tol = 0.5 }, { a = 1.0, b = 1.25, abs_tol = 0.1 }]
+
+[[rule]]
+id = "isnan"
+match = ["math.isnan(x, /)", "np.isnan(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:41 np.isnan(x[0]): bitwise"
+cases = [
+  { if = "module == 'math' and not x.scalar and x.kind != 'unknown'", refuse = "{name} of {x.words}", hint = "math functions take one number (Python raises TypeError); use np.isnan for an array." },
+  { if = "x.kind in ['cnum', 'carr']", refuse = "{name} of a complex value", hint = "Test the real and imaginary parts." },
+  { if = "x.kind == 'bool' or (x.arr and x.py == 'bool')", refuse = "{name} of a Bool", hint = "A Bool is never NaN or infinite; test a number." },
+  { viv = "{x:51} != {x:51}", type = "arr(x.rank, 'bool') if x.arr else BOOL", prec = "50" },
+]
+tests = [{ x = 1.0 }, { x = "nan" }, { x = [1.0, "nan", "inf"] }]
+
+[[rule]]
+id = "isinf"
+match = ["math.isinf(x, /)", "np.isinf(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:49 math.isinf(math.inf), np.isinf(x[0]): bitwise"
+cases = [
+  { if = "module == 'math' and not x.scalar and x.kind != 'unknown'", refuse = "{name} of {x.words}", hint = "math functions take one number (Python raises TypeError); use np.isinf for an array." },
+  { if = "x.kind in ['cnum', 'carr']", refuse = "{name} of a complex value", hint = "Test the real and imaginary parts." },
+  { if = "x.kind == 'bool' or (x.arr and x.py == 'bool')", refuse = "{name} of a Bool", hint = "A Bool is never NaN or infinite; test a number." },
+  { viv = "abs({x}) == (1.0 / 0.0)", type = "arr(x.rank, 'bool') if x.arr else BOOL", prec = "50" },
+]
+tests = [{ x = "inf" }, { x = 1.0 }, { x = [1.0, "-inf", "nan"] }]
+
+[[rule]]
+id = "isfinite"
+match = ["math.isfinite(x, /)", "np.isfinite(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:49 math.isfinite(1.0): bitwise"
+cases = [
+  { if = "x.arr", refuse = "{name} of an array", hint = "Loop over the entries." },
+  { if = "x.kind == 'cnum'", refuse = "{name} of a complex value", hint = "Test the real and imaginary parts." },
+  { if = "x.kind == 'bool'", refuse = "{name} of a Bool", hint = "A Bool is always finite; test a number." },
+  { viv = "abs({x}) < (1.0 / 0.0)", type = "BOOL", prec = "50" },
+]
+tests = [{ x = 1.0 }, { x = "nan" }, { x = "-inf" }]
+
+[[rule]]
+id = "math.integer-functions"
+match = ["math.factorial(...)", "math.comb(...)", "math.perm(...)", "math.gcd(...)", "math.lcm(...)", "math.isqrt(...)"]
+exactness = "refuse"
+lift = "an Int type (typed_array_elements.md), or an integer adapter per function"
+cases = [
+  { refuse = "{name}", hint = "Integer functions are not mapped: write the loop (results above 2^53 are inexact in Viv)." },
+]
+
+# ---------------------------------------------------------------- refused builtins
+
+[[rule]]
+id = "dynamic-python"
+match = ["isinstance(...)", "type(...)", "id(...)", "hash(...)", "getattr(...)", "setattr(...)", "hasattr(...)", "eval(...)", "exec(...)", "globals(...)", "locals(...)", "vars(...)", "dir(...)"]
+exactness = "refuse"
+lift = "none planned: the numeric subset is statically typed"
+cases = [
+  { refuse = "`{name}`", hint = "Dynamic Python is outside the numeric subset." },
+]
+
+[[rule]]
+id = "strings"
+match = ["input(...)", "open(...)"]
+exactness = "refuse"
+lift = "none planned for input (a program reads its data from files); open is translated where it is read or written whole (strs.py: open(p).read(), `with open(p) as f`, a loop over its lines)"
+cases = [
+  { refuse = "`{name}`", hint = "py2viv reads a file whole: open(p).read(), open(p).readlines(), `for line in open(p)`, `with open(p) as f` (read, a loop, write), Path(p).read_text(); a program's input comes from a file." },
+]
+
+[[rule]]
+id = "range-outside-for"
+match = "range(...)"
+exactness = "refuse"
+lift = "none needed: np.arange is the array form"
+cases = [
+  { refuse = "range outside a for loop", hint = "Use np.arange(n) for an array of indices." },
+]
+
+[[rule]]
+id = "iterators-outside-for"
+match = ["enumerate(...)", "zip(...)", "reversed(...)", "map(...)", "filter(...)", "iter(...)", "next(...)"]
+exactness = "refuse"
+lift = "none planned: a for header is the only place these are read"
+cases = [
+  { refuse = "`{name}` outside a for loop header", hint = "A for loop, a comprehension, or a generator read by sum, min, max, sorted, list and the like reads these, and next reads a generator expression; write the loop over indices." },
+]
+
+[[rule]]
+id = "divmod"
+match = "divmod(...)"
+exactness = "refuse"
+gap = "R5"
+cases = [
+  { refuse = "divmod (a tuple)", hint = "Write a // b and a % b.", gap = "R5" },
+]
+
+[[rule]]
+id = "containers"
+match = ["tuple(...)", "set(...)", "frozenset(...)"]
+exactness = "refuse"
+lift = "dict(...) is not a rule: dict(), dict(zip(ks, vs)) and dict(d) of a map translate (maps.py, a Viv map), dict(a=1, b=2) and dict(d) of a dict with literal keys (classes.py, a record)"
+cases = [
+  { refuse = "`{name}`", hint = "Viv arrays hold numbers; key by integer index, or use a dict (a Viv map) or a dict literal with constant keys (a record)." },
+]

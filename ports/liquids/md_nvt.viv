@@ -1,0 +1,363 @@
+###
+Molecular dynamics of Lennard-Jones atoms at constant N, V and T, the
+temperature held by a Nose-Hoover chain of three thermostats, integrated
+by the time-reversible splitting of Martyna, Tuckerman, Tobias and Klein
+(1996): velocity Verlet for the atoms, wrapped in quarter and half steps
+of the chain. The potential is cut and shifted at r_cut. A run returns the
+block and run averages of the energy, pressure and temperatures, the heat
+capacity from the energy's fluctuations, the conserved quantity of the
+extended system and its fluctuation, the final configuration, and, when it
+samples the trajectory, g(r), the correlation functions and the diffusion
+coefficient.
+
+This is md_nvt_lj of Allen and Tildesley's examples for Computer
+Simulation of Liquids (2nd ed., Oxford University Press, 2017;
+https://github.com/Allen-Tildesley/examples), ported to Viv. If you use
+it, cite the book.
+###
+# The program behind `vp.liquids.md_nvt` (md_nvt.export.toml).
+#
+#     viv run ports/liquids/md_nvt.viv     (in the interpreter: slow at the default size; vipyr compiles it)
+#
+# Derived from md_nvt_lj.f90 (and the md_nvt_lj_ll build of it) of
+# https://github.com/Allen-Tildesley/examples (commit 4818bc82), by Michael
+# P. Allen and Dominic J. Tildesley, CC0-1.0; see ports/liquids/LICENSE.
+# Upstream's run seeds its generator afresh after reading the starting
+# configuration; so does this one (srand(seed) again before the thermostat
+# momenta are drawn).
+from ports.liquids.lj import Pot, VerletList, force_all, force_pairs, force_link, verlet_list, verlet_update, wrap, potential_lrc, pressure_lrc, sum_sq, check_box
+from ports.liquids.setup import starting_configuration, random_normal, normal_state, exprel, DIM
+from ports.liquids.averages import AVG, MSD, averages, blk_begin, blk_add, blk_end, run_end
+from ports.liquids.analysis import pair_histogram, pair_add, pair_g, correlations, correlations_add, correlations_result, diffusion_coefficients
+
+#: n  the number of atoms, 4 nc^3 for the fcc start (32, 108, 256, 500, 864, ...); ignored when r_start is given
+n: Int = 256
+#: density  the number density N / V; sets the box side when r_start is not given
+density = 0.75
+#: temperature  the thermostat's temperature, and that of the starting velocities
+temperature = 1.0
+#: tau  the thermostat's time scale: the chain's inertias are Q_1 = g T tau^2 and Q_j = T tau^2
+tau = 2.0
+#: r_cut  the potential's cutoff, in sigma; at most half the box
+r_cut = 2.5
+#: dt  the time step, in units of sigma sqrt(m / epsilon)
+dt = 0.005
+#: nblock  the number of blocks the run is averaged in
+nblock: Int = 10
+#: nstep  the steps per block (upstream's default is 20000)
+nstep: Int = 1000
+#: neighbors  how pairs are found: "all" pairs, "link" lists of cells (needs a box of 3 r_cut or more), or "verlet" lists
+neighbors = "all"
+#: seed  the seed of the random numbers: the starting velocities, then (seeded again) the thermostat momenta
+seed: Int = 1
+#: r_start  a starting configuration (N, 3), in sigma, instead of the fcc lattice; box_start must come with it
+r_start = zeros(0, DIM)
+#: v_start  the starting velocities (N, 3) that go with r_start
+v_start = zeros(0, DIM)
+#: box_start  the box side of r_start, in sigma
+box_start = 0.0
+#: sample  every this many steps, the configuration goes into g(r) and the correlation functions; 0: none
+sample: Int = 0
+#: gr_dr  the bin width of g(r), in sigma
+gr_dr = 0.02
+#: nt  the correlation functions run over 0 to nt samples apart
+nt: Int = 200
+#: origin_interval  a time origin every this many samples
+origin_interval: Int = 10
+
+#| the length of the Nose-Hoover chain
+M_CHAIN: Int = 3
+# the averaged variables, in upstream's order
+E_CS: Int = 0
+P_CS: Int = 1
+E_FULL: Int = 2
+P_FULL: Int = 3
+T_KIN: Int = 4
+T_CONFIG: Int = 5
+CONSERVED: Int = 6
+CV_CS: Int = 7
+CV_FULL: Int = 8
+CONSERVED_MSD: Int = 9
+NVAR: Int = 10
+
+if nblock < 1 or nstep < 0 {
+    stop(f"nblock must be at least 1 and nstep at least 0; they are {nblock} and {nstep}")
+}
+if temperature <= 0.0 or tau <= 0.0 {
+    stop(f"temperature and tau must be positive; they are {temperature} and {tau}")
+}
+
+#: box  the box side, in sigma
+r, v, box = starting_configuration(n, density, temperature, seed, r_start, v_start, box_start)
+nat: Int = int(shape(r)[0])
+check_box(box, r_cut)
+#: rho  the number density N / V
+rho = nat / (box * box * box)
+
+srand(1.0 * seed)
+g = 3.0 * (nat - 1)
+q = zeros(M_CHAIN)
+for j to M_CHAIN {
+    q[j] = temperature * (tau * tau)
+}
+q[0] = g * temperature * (tau * tau)
+eta = zeros(M_CHAIN)
+p_eta = zeros(M_CHAIN)
+saved = normal_state()
+for j to M_CHAIN {
+    p_eta[j] = random_normal(0.0, sqrt(temperature), saved)
+}
+for j to M_CHAIN {
+    p_eta[j] = p_eta[j] * sqrt(q[j])
+}
+
+f = zeros(nat, DIM)
+vl = verlet_list(nat, r_cut / box)
+
+#| One force evaluation by the chosen method, and the Verlet list.
+def evaluate(r: Arr, f: Arr, box: Num, r_cut: Num, mode: Str, vl: VerletList) {
+    if mode == "link" {
+        return force_link(r, f, box, r_cut), vl
+    }
+    if mode == "verlet" {
+        vl2 = verlet_update(vl, r)
+        return force_pairs(r, f, box, r_cut, vl2.pair_i, vl2.pair_j), vl2
+    }
+    return force_all(r, f, box, r_cut), vl
+}
+
+#| U1: the drift, r += t v (box units), wrapped.
+def u1_propagator(r: Arr, v: Arr, t: Num, box: Num) {
+    nat: Int = int(shape(r)[0])
+    for i to nat {
+        for k to DIM {
+            r[i, k] = r[i, k] + t * v[i, k] / box
+            r[i, k] = r[i, k] - round(r[i, k])
+        }
+    }
+}
+
+#| U2: the kick, v += t f.
+def u2_propagator(v: Arr, f: Arr, t: Num) {
+    nat: Int = int(shape(v)[0])
+    for i to nat {
+        for k to DIM {
+            v[i, k] = v[i, k] + t * f[i, k]
+        }
+    }
+}
+
+#| U3: the first thermostat scales the velocities, and every eta moves.
+def u3_propagator(v: Arr, eta: Arr, p_eta: Arr, q: Arr, t: Num) {
+    nat: Int = int(shape(v)[0])
+    s = exp(-t * p_eta[0] / q[0])
+    for i to nat {
+        for k to DIM {
+            v[i, k] = v[i, k] * s
+        }
+    }
+    for j to len(eta) {
+        eta[j] = eta[j] + t * p_eta[j] / q[j]
+    }
+}
+
+#| U4: the thermostat momenta, one at a time from j_start to j_stop
+#| (inclusive, either way), each driven by the one before it and damped by
+#| the one after it.
+def u4_propagator(v: Arr, p_eta: Arr, q: Arr, t: Num, j_start: Int, j_stop: Int, g: Num, temperature: Num) {
+    m: Int = len(p_eta)
+    stride: Int = 1
+    if j_start > j_stop {
+        stride = -1
+    }
+    j: Int = j_start
+    while j != j_stop + stride {
+        gj = 0.0
+        if j == 0 {
+            gj = sum_sq(v) - g * temperature
+        }
+        else {
+            gj = (p_eta[j - 1] * p_eta[j - 1] / q[j - 1]) - temperature
+        }
+        if j == m - 1 {
+            p_eta[j] = p_eta[j] + t * gj
+        }
+        else {
+            x = t * p_eta[j + 1] / q[j + 1]
+            c = exprel(-x)
+            p_eta[j] = p_eta[j] * exp(-x) + t * gj * c
+        }
+        j = j + stride
+    }
+}
+
+#| The ten variables of one step: upstream's calc_variables.
+def variables(t: Pot, v: Arr, f: Arr, box: Num, r_cut: Num, eta: Arr, p_eta: Arr, q: Arr, g: Num,
+              temperature: Num) -> Arr {
+    nat: Int = int(shape(v)[0])
+    vol = box * box * box
+    rho = nat / vol
+    kin = 0.5 * sum_sq(v)
+    fsq = sum_sq(f)
+    ext_p = 0.0
+    for j to len(p_eta) {
+        ext_p += 0.5 * (p_eta[j] * p_eta[j]) / q[j]
+    }
+    ext_eta = 0.0
+    for j from 1 to len(eta) {
+        ext_eta += eta[j]
+    }
+    ext = ext_p + temperature * (g * eta[0] + ext_eta)
+    eng = kin + t.pot
+    out = zeros(NVAR)
+    out[E_CS] = eng / nat
+    out[P_CS] = rho * temperature + t.vir / vol
+    out[E_FULL] = potential_lrc(rho, r_cut) + (kin + t.cut) / nat
+    out[P_FULL] = pressure_lrc(rho, r_cut) + rho * temperature + t.vir / vol
+    out[T_KIN] = 2.0 * kin / g
+    out[T_CONFIG] = fsq / t.lap
+    out[CONSERVED] = (eng + ext) / nat
+    out[CV_CS] = (kin + t.pot) / (temperature * sqrt(1.0 * nat))
+    out[CV_FULL] = (kin + t.cut) / (temperature * sqrt(1.0 * nat))
+    out[CONSERVED_MSD] = (eng + ext) / nat
+    return out
+}
+
+total, vl = evaluate(r, f, box, r_cut, neighbors, vl)
+if total.ovr {
+    stop("two atoms overlap in the starting configuration")
+}
+first = variables(total, v, f, box, r_cut, eta, p_eta, q, g, temperature)
+
+meth: [Int] = [AVG, AVG, AVG, AVG, AVG, AVG, AVG, MSD, MSD, MSD]
+acc = averages(meth, zeros(NVAR), nblock, T_KIN)
+#: energy_series  e_cs at every step
+energy_series = zeros(nblock * nstep)
+gr_h = pair_histogram(gr_dr, box)
+corr = correlations(nat, nt, origin_interval)
+if sample > 0 {
+    pair_add(gr_h, r * box, box)
+    correlations_add(corr, r * box, v, box)
+}
+last: Int = M_CHAIN - 1
+step: Int = 0
+for blk to nblock {
+    blk_begin(acc)
+    for stp to nstep {
+        u4_propagator(v, p_eta, q, dt / 4.0, last, 0, g, temperature)
+        u3_propagator(v, eta, p_eta, q, dt / 2.0)
+        u4_propagator(v, p_eta, q, dt / 4.0, 0, last, g, temperature)
+        u2_propagator(v, f, dt / 2.0)
+        u1_propagator(r, v, dt, box)
+        total, vl = evaluate(r, f, box, r_cut, neighbors, vl)
+        if total.ovr {
+            stop(f"two atoms overlap at step {step + 1}")
+        }
+        u2_propagator(v, f, dt / 2.0)
+        u4_propagator(v, p_eta, q, dt / 4.0, last, 0, g, temperature)
+        u3_propagator(v, eta, p_eta, q, dt / 2.0)
+        u4_propagator(v, p_eta, q, dt / 4.0, 0, last, g, temperature)
+        vals = variables(total, v, f, box, r_cut, eta, p_eta, q, g, temperature)
+        blk_add(acc, vals)
+        energy_series[step] = vals[E_CS]
+        step = step + 1
+        if sample > 0 and step % sample == 0 {
+            pair_add(gr_h, r * box, box)
+            correlations_add(corr, r * box, v, box)
+        }
+    }
+    blk_end(acc)
+}
+avg, err = run_end(acc)
+
+# ---- the run averages and their errors
+#: e_cs  the energy per atom, cut-and-shifted potential
+e_cs = avg[E_CS]
+#: e_cs_err  its standard error from the block averages
+e_cs_err = err[E_CS]
+#: p_cs  the pressure, cut-and-shifted potential (with the thermostat's T in the ideal part)
+p_cs = avg[P_CS]
+#: p_cs_err  its standard error
+p_cs_err = err[P_CS]
+#: e_full  the energy per atom with the long-range correction: an estimate for the full potential
+e_full = avg[E_FULL]
+#: e_full_err  its standard error
+e_full_err = err[E_FULL]
+#: p_full  the pressure with the long-range correction
+p_full = avg[P_FULL]
+#: p_full_err  its standard error
+p_full_err = err[P_FULL]
+#: t_kin  the kinetic temperature, 2 K / (3N - 3)
+t_kin = avg[T_KIN]
+#: t_kin_err  its standard error
+t_kin_err = err[T_KIN]
+#: t_config  the configurational temperature, |F|^2 / lap U
+t_config = avg[T_CONFIG]
+#: t_config_err  its standard error
+t_config_err = err[T_CONFIG]
+#: conserved  the conserved energy of the atoms and the chain, per atom
+conserved = avg[CONSERVED]
+#: cv_cs  the heat capacity per atom from the fluctuations of the energy, cut-and-shifted
+cv_cs = avg[CV_CS]
+#: cv_cs_err  its standard error
+cv_cs_err = err[CV_CS]
+#: cv_full  the same from the cut (not shifted) potential energy, an estimate for the full potential
+cv_full = avg[CV_FULL]
+#: cv_full_err  its standard error
+cv_full_err = err[CV_FULL]
+#: conserved_msd  the mean-square deviation of the conserved energy per atom within a block, averaged over blocks
+conserved_msd = avg[CONSERVED_MSD]
+#: blocks  the block averages, one row per block, columns e_cs, p_cs, e_full, p_full, t_kin, t_config, conserved, cv_cs, cv_full, conserved_msd
+blocks = acc.blocks
+#: initial  the same ten variables at the start
+initial = first
+
+# ---- the final state
+#: r_final  the final positions (N, 3), in sigma, in the box centered on the origin
+r_final = r * box
+#: v_final  the final velocities (N, 3)
+v_final = v
+#: p_eta_final  the chain's final momenta
+p_eta_final = p_eta
+#: eta_final  the chain's final coordinates
+eta_final = eta
+
+# ---- from the samples (sample > 0; empty otherwise)
+#: gr_r  the midpoints of the g(r) bins, in sigma
+gr_r = zeros(0)
+#: gr  g(r) at those midpoints
+gr = zeros(0)
+#: vacf  the velocity autocorrelation function <v(0) . v(t)> at corr_time
+vacf = zeros(0)
+#: rvcf  <v(0) . (r(t) - r(0))>
+rvcf = zeros(0)
+#: msd  the mean-square displacement <|r(t) - r(0)|^2>
+msd = zeros(0)
+#: d_vacf  the diffusion coefficient, one third of the integral of the VACF over the range
+d_vacf = 0.0
+#: d_msd  the diffusion coefficient, one sixth of the slope of the MSD over the second half of the range
+d_msd = 0.0
+if sample > 0 {
+    gr_r, gr = pair_g(gr_h, nat, box)
+    vacf, rvcf, msd = correlations_result(corr, nat)
+    d_vacf, d_msd = diffusion_coefficients(vacf, msd, sample * dt)
+}
+#: corr_time  the times of the correlation functions: 0 to nt samples, sample dt apart
+corr_time = linspace(0.0, nt * sample * dt, nt + 1)
+
+print(f"N = {nat}  rho = {fmt(rho, '.6f')}  T = {temperature}  tau = {tau}  dt = {dt}  {nblock} blocks of {nstep} steps  neighbors: {neighbors}")
+print(f"E/N cs = {fmt(e_cs, '.6f')} +- {fmt(e_cs_err, '.6f')}  P cs = {fmt(p_cs, '.6f')} +- {fmt(p_cs_err, '.6f')}  T kin = {fmt(t_kin, '.6f')} +- {fmt(t_kin_err, '.6f')}")
+print(f"E/N full = {fmt(e_full, '.6f')}  P full = {fmt(p_full, '.6f')}  Cv/N = {fmt(cv_full, '.4f')} +- {fmt(cv_full_err, '.4f')}  conserved MSD = {fmt(conserved_msd, '.4e')}")
+
+test "the total momentum stays zero" {
+    for k to DIM {
+        assert_near(sum(v_final[:, k]), 0.0, 1.0e-9 * nat)
+    }
+}
+test "the extended energy is conserved: its spread within a block is far below T^2" {
+    assert_true(conserved_msd < 1.0e-3 * temperature * temperature)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

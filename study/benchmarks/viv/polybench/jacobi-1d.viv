@@ -1,0 +1,39 @@
+#! timing
+# PolyBench/C 4.2.1 jacobi-1d: the 3-point Jacobi stencil, alternating
+# between A and B.
+# Reference: upstream/polybench-c-4.2.1/stencils/jacobi-1d/jacobi-1d.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+TSTEPS = 20
+N = 30
+DUMP = 1
+
+from polybench import dump
+
+# PolyBench's weight (a third, to five digits).
+THIRD = 0.33333
+
+def init() {
+    A = [(i + 2) / N for i to N]
+    B = [(i + 3) / N for i to N]
+    return A, B
+}
+
+def kernel(A, B) {
+    for t to TSTEPS {
+        B[1:N - 1] = THIRD * (A[0:N - 2] + A[1:N - 1] + A[2:N])
+        A[1:N - 1] = THIRD * (B[0:N - 2] + B[1:N - 1] + B[2:N])
+    }
+    return A
+}
+
+A, B = init()
+t0 = clock()
+A = kernel(A, B)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("A", A)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

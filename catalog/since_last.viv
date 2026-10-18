@@ -1,0 +1,87 @@
+# Time since the last event of a given type, per user.
+#
+# Input: one row per event, sorted by (user, ts); ts in int64 nanoseconds;
+# hit = 1 on the events of the type asked about.
+#
+#   secs_since_hit   seconds since the user's latest event of the type with
+#                    ts < t; NaN when there is none ("never")
+#   secs_since_prev  seconds since the user's latest event of any type with
+#                    ts < t; NaN for the user's first instant
+#
+# Rows at the row's own instant, the row included, do not count.
+
+from rows import group_end, instant_end
+
+NS_PER_S: Int = 1000000000
+
+record SinceLast {
+    secs_since_hit: Arr
+    secs_since_prev: Arr
+}
+
+#| Seconds since the user's previous event of the type and of any type, for
+#| events sorted by (user, ts), NaN where there was none.
+#|| One pass per user, one instant at a time; the instant's rows are read before
+#|| they become the latest events.
+#||| NaN for "never" keeps a missing history apart from a gap of zero seconds.
+#: user  the entity key, sorted ascending
+#: ts  event time, int64 nanoseconds, ascending within a user
+#: hit  1 on events of the type asked about, else 0
+#@ caf3bd02
+def since_last(user: [Int], ts: [Int], hit: [Int]) -> SinceLast {
+    n = len(ts)
+    since_hit = zeros(n)
+    since_prev = zeros(n)
+    never = 0.0 / 0.0
+    g: Int = 0
+    while g < n {
+        stop_at = group_end(user, ts, g, "since_last")
+        have_hit = false
+        last_hit: Int = 0
+        i: Int = g
+        while i < stop_at {
+            t = ts[i]
+            same = instant_end(ts, i, stop_at)
+            step read "the instant's rows see the events before it" {
+                a = never
+                if have_hit {
+                    a = float(t - last_hit) / float(NS_PER_S)
+                }
+                b = never
+                if i > g {
+                    b = float(t - ts[i - 1]) / float(NS_PER_S)
+                }
+                for k from i to same {
+                    since_hit[k] = a
+                    since_prev[k] = b
+                }
+            }
+            step update "an event of the type at this instant becomes the latest" {
+                for k from i to same {
+                    if hit[k] != 0 {
+                        have_hit = true
+                        last_hit = t
+                    }
+                }
+            }
+            i = same
+        }
+        g = stop_at
+    }
+    return SinceLast { secs_since_hit: since_hit, secs_since_prev: since_prev }
+}
+
+test "never is NaN and the current instant does not count" {
+    user: [Int] = [1, 1, 1, 1]
+    ts: [Int] = [0, 2 * NS_PER_S, 2 * NS_PER_S, 5 * NS_PER_S]
+    hit: [Int] = [0, 1, 0, 0]
+    s = since_last(user, ts, hit)
+    assert_true(s.secs_since_hit[0] != s.secs_since_hit[0] and s.secs_since_hit[2] != s.secs_since_hit[2])
+    assert_near(s.secs_since_hit[3], 3.0, 0.0)
+    assert_true(s.secs_since_prev[0] != s.secs_since_prev[0])
+    assert_near(s.secs_since_prev[2], 2.0, 0.0)
+    assert_near(s.secs_since_prev[3], 3.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

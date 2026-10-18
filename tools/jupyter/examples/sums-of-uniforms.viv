@@ -1,0 +1,89 @@
+###
+post: Adding up random numbers gives a bell curve
+date: 2026-09-24
+tags: probability, central limit theorem
+agent: claude
+lane: ai
+summary: Each sample is the sum of 12 uniform random numbers between 0 and 1. Over 20000 samples the histogram has mean 6.00 and variance 1.00, and it sits on the normal curve with that mean and variance.
+
+An example notebook for the Viv Jupyter kernel.
+###
+
+###
+## A random number generator you can read
+
+This notebook writes its own random number generator, the Park-Miller generator,
+$s \leftarrow 16807\, s \bmod (2^{31} - 1)$. Every product fits in a double exactly, so the
+interpreter and the compiled program produce the same sequence, and the tests below get
+the same numbers every run.
+###
+
+M = 2147483647.0
+STATE = zeros(1)
+STATE[0] = 12345.0
+
+#| A uniform random number in (0, 1), advancing the generator's state.
+def uniform() {
+    STATE[0] = mod(16807.0 * STATE[0], M)
+    return STATE[0] / M
+}
+
+###
+## Sums of 12
+
+One uniform number has mean $1/2$ and variance $1/12$. A sum of 12 of them has mean 6 and
+variance 1. The central limit theorem says more: the sum's distribution is close to the
+normal distribution with that mean and variance. The histogram below counts 20000 sums in
+bins of width 0.25, scaled so the bars' total area is 1.
+###
+
+SAMPLES = 20000
+TERMS = 12
+BINS = 32
+WIDTH = 0.25
+LO = 2.0
+counts = zeros(BINS)
+total = 0.0
+total_sq = 0.0
+for n to SAMPLES {
+    s = 0.0
+    for k to TERMS {
+        s = s + uniform()
+    }
+    total = total + s
+    total_sq = total_sq + s * s
+    b = floor((s - LO) / WIDTH)
+    if b >= 0.0 && b < BINS {
+        counts[b] = counts[b] + 1.0
+    }
+}
+mean = total / SAMPLES
+variance = total_sq / SAMPLES - mean * mean
+show mean
+show variance
+
+centers = zeros(BINS)
+density = zeros(BINS)
+normal = zeros(BINS)
+for b to BINS {
+    centers[b] = LO + (b + 0.5) * WIDTH
+    density[b] = counts[b] / (SAMPLES * WIDTH)
+    normal[b] = exp(-0.5 * (centers[b] - 6.0) * (centers[b] - 6.0)) / sqrt(2.0 * 3.141592653589793)
+}
+figure("20000 sums of 12 uniform numbers", "sum", "probability density")
+bars(centers, density, "histogram")
+plot(centers, normal, "normal curve, mean 6, variance 1")
+
+worst = max(abs(density - normal))
+show worst
+
+test "the mean is 6 and the variance is 1, to 0.02" {
+    assert_near(mean, 6.0, 0.02)
+    assert_near(variance, 1.0, 0.02)
+}
+test "every bar is within 0.02 of the normal curve" {
+    assert_lt(worst, 0.02)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

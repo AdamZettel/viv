@@ -1,0 +1,105 @@
+###
+post: One self-consistent field loop for any basis
+agent: claude
+
+`scf` runs a self-consistent field: from densities, the mean fields; from
+the fields, the single-particle Hamiltonian of every block; each block's
+lowest eigenpairs, filled with particles by energy; from the occupied
+states, new densities; the next densities by mixing the old and the new;
+and again, until the energy changes by less than `e_tol` between passes.
+
+The basis and the physics come in as a value `sys` and the functions that
+act on it (Section 2, form 1). Each is called
+with `sys` first:
+
+| function | returns | does |
+|---|---|---|
+| `n_groups(sys)` | Int | the particle kinds (neutrons and protons; spin channels) |
+| `n_blocks(sys)` | Int | the Hamiltonian blocks of one kind, as (l, j) on a spherical basis |
+| `fields_of(sys, d, g)` | Arr | the fields of kind g from the densities d |
+| `build_block(sys, f, g, k)` | Int | builds block k of kind g from the fields f and keeps it in sys |
+| `solve_blocks(sys, g, it)` | Int | the occupied eigenpairs of every block of kind g, kept in sys; returns 1 when the occupation was chosen again |
+| `add_densities(sys, g, d_out)` | Arr | adds the densities of kind g's occupied states into d_out |
+| `energy_of(sys, d)` | Num | the total energy of the densities d |
+| `mix_step(x_in, x_out, hist)` | MixStep | the next densities (lib/scf/mix: a program passes a def that calls `mix_densities`, so its `using` and `settings` lines choose the mixer) |
+
+The densities are one flat array, in whatever order the basis packs them.
+The energy is that of the mixed densities, the ones the next pass starts
+from, and the run stops when it changes by less than `e_tol` after more
+than `min_iter` passes.
+
+lib/skyrme/spherical.viv is the first basis: a uniform radial mesh, with a
+tridiagonal (l, j) block solved by Sturm bisection and inverse iteration.
+
+Used with `from scf.loop import scf`.
+###
+from scf.mix import MixHistory, MixStep, mix_start
+
+#| What a self-consistent field run ends with: the densities the last pass
+#| mixed, their energy, the passes taken, whether the energy settled, how
+#| many passes after the first chose the occupation again, and the last
+#| pass's largest density change |x_out - x_in|.
+record ScfRun {
+    d: Arr
+    energy: Num
+    passes: Int
+    converged: Bool
+    refills: Int
+    residual: Num
+}
+
+#| One self-consistent field, for any basis and physics given as sys and
+#| the functions that act on it (the table above).
+def scf(sys, d0: Arr, n_groups, n_blocks, fields_of, build_block, solve_blocks, add_densities, energy_of, mix_step, e_tol: Num, max_iter: Int, min_iter: Int) -> ScfRun {
+    step start {
+        d = d0
+        hist = mix_start(len(d0))
+        e_old = 0.0
+        e = 0.0
+        it: Int = 0
+        done = false
+        refills: Int = 0
+        residual = 0.0
+    }
+    while not done and it < max_iter {
+        it += 1
+        d_out = zeros(len(d))
+        for g to n_groups(sys) {
+            step fields {
+                f = fields_of(sys, d, g)
+            }
+            step hamiltonians {
+                for k to n_blocks(sys) {
+                    build_block(sys, f, g, k)
+                }
+            }
+            step eigenpairs {
+                if solve_blocks(sys, g, it) > 0 and it > 1 {
+                    refills += 1
+                }
+            }
+            step densities {
+                d_out = add_densities(sys, g, d_out)
+            }
+        }
+        step mix {
+            st = mix_step(d, d_out, hist)
+            d = st.x
+            hist = st.hist
+            residual = st.residual
+        }
+        step energy {
+            e = energy_of(sys, d)
+        }
+        step convergence {
+            if abs(e - e_old) < e_tol and it > min_iter {
+                done = true
+            }
+            e_old = e
+        }
+    }
+    return ScfRun { d: d, energy: e, passes: it, converged: done, refills: refills, residual: residual }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

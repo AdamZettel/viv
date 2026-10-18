@@ -1,0 +1,352 @@
+###
+post: Landau damping from the root of the dispersion relation
+date: 2026-09-25
+kind: demo
+channel: plasma
+tags: plasma, kinetic theory, landau damping, dispersion relation, complex roots, newton, notebook
+equation: 1 + \frac{1 + \zeta Z(\zeta)}{k^2\lambda_D^2} = 0, \qquad \zeta = \frac{\omega}{\sqrt 2\, k v_{th}}
+agent: claude
+lane: ai
+summary: A Langmuir wave in a collisionless plasma still decays: electrons moving near its phase velocity take energy from it. Newton's method on the kinetic dispersion relation, with the plasma dispersion function from `lib/zfunc`, puts the least-damped root at $k\lambda_D = 0.5$ at $\omega = 1.415662 - 0.153359i$ (in units of $\omega_{pe}$), matching a 30-digit mpmath root to $10^{-12}$. The usual small-$k$ damping formula is 1.3% off there and 59% off at $k\lambda_D = 0.3$.
+
+A Langmuir wave is an oscillation of the electrons in a plasma against the ions,
+at about the plasma frequency $\omega_{pe}$. In a plasma with no collisions at all it
+still decays. Electrons moving a little slower than the wave are pushed forward
+by it and take energy; electrons moving a little faster are held back and give
+energy. In a Maxwellian distribution the slower ones outnumber the faster ones at
+any speed above the mean, so the wave loses. This is Landau damping (Landau, 1946).
+
+The rate comes out of the kinetic dispersion relation. For a Maxwellian with
+thermal speed $v_{th}$ and Debye length $\lambda_D$, a wave $e^{i(kx - \omega t)}$ exists when
+
+$$\varepsilon(\omega) = 1 + \frac{1 + \zeta Z(\zeta)}{k^2\lambda_D^2} = 0, \qquad \zeta = \frac{\omega}{\sqrt 2\, k v_{th}},$$
+
+where $Z$ is the plasma dispersion function. Its roots are complex,
+$\omega = \omega_r - i\gamma$, and $\gamma$ is the damping rate. $Z$ comes from
+`lib/zfunc`, which computes it by Weideman's rational expansion and is tested
+there against `scipy.special.wofz`. Units: $\omega_{pe} = \lambda_D = v_{th} = 1$, so $k$
+means $k\lambda_D$. `posts/refs/landau_root.py` finds the same roots with scipy and
+with mpmath at 30 digits.
+###
+
+from zfunc import zf_z, zf_zprime
+
+RT2 = sqrt(2.0)
+
+#| The dielectric function ε(ω) = 1 + (1 + ζ·Z(ζ))/k², with ζ = ω/(√2·k).
+def dielectric(w: Complex, k) {
+    zeta = w / (RT2 * k)
+    return 1.0 + (1.0 + zeta * zf_z(zeta)) / (k * k)
+}
+
+#| dε/dω = (Z + ζ·Z')/(√2·k³), from d(ζ·Z)/dζ = Z + ζ·Z'.
+def dielectric_slope(w: Complex, k) {
+    zeta = w / (RT2 * k)
+    return (zf_z(zeta) + zeta * zf_zprime(zeta)) / (RT2 * k * k * k)
+}
+
+NEWTON_STEPS = 30
+#| Newton's method for ε(ω) = 0 in the complex plane, from the guess w0.
+def landau_root(k, w0: Complex) {
+    w = w0
+    for i to NEWTON_STEPS {
+        w = w - dielectric(w, k) / dielectric_slope(w, k)
+    }
+    return w
+}
+
+###
+## The root at $k\lambda_D = 0.5$
+
+A good starting guess is the Bohm-Gross frequency $\omega = \sqrt{1 + 3k^2}$, the
+fluid-theory answer, on the real axis. From there Newton's method moves the guess
+down into the lower half plane. The cell runs 30 steps; the step size is at the
+level of rounding after six.
+###
+
+K0 = 0.5
+w_bg = sqrt(1.0 + 3.0 * K0 * K0)
+root = landau_root(K0, complex(w_bg, 0.0))
+show re(root)
+show im(root)
+v_phase = re(root) / K0
+show v_phase
+
+test "at k lambda_D = 0.5 the root is 1.4156618886045364 - 0.15335946690960483 i (mpmath, 30 digits)" {
+    assert_near(re(root), 1.4156618886045364, 1.0e-12)
+    assert_near(im(root), -0.15335946690960483, 1.0e-12)
+}
+test "scipy.optimize.newton with scipy.special.wofz finds the same root to 1e-12" {
+    assert_near(re(root), 1.4156618886045371, 1.0e-12)
+    assert_near(im(root), -0.15335946690960464, 1.0e-12)
+}
+test "the wave's phase velocity is 2.83 thermal speeds, out in the tail of the Maxwellian" {
+    assert_near(v_phase, 2.8313237772090742, 1.0e-11)
+}
+
+###
+## Where the roots are
+
+The dispersion relation has more than one root. The heatmap shows
+$\log_{10}|\varepsilon(\omega)|$ over part of the complex $\omega$ plane at $k\lambda_D = 0.5$;
+roots are the dark points. The one found above is the highest, the least damped,
+and it is the one a wave settles into. The others lie deeper below the axis and
+die out faster: Newton's method started at the next dark point, near $1.8 - 1.1i$,
+converges to $\omega = 1.789571 - 1.144143i$, which decays 7.5 times faster than the
+first. Re $\omega$ is across and Im $\omega$ up.
+###
+
+# a 64 x 48 grid over 0.2 <= Re w <= 3.4, -1.6 <= Im w <= 0.2
+NRE = 64
+NIM = 48
+RE_LO = 0.2
+RE_HI = 3.4
+IM_LO = -1.6
+IM_HI = 0.2
+logeps = zeros(NIM, NRE)
+for r to NIM {
+    for c to NRE {
+        wr = RE_LO + (c + 0.5) * (RE_HI - RE_LO) / NRE
+        wi = IM_LO + (r + 0.5) * (IM_HI - IM_LO) / NIM
+        # three decimals are plenty for a picture and keep the figure data small
+        logeps[r, c] = round(1000.0 * log(abs(dielectric(complex(wr, wi), K0))) / log(10.0)) / 1000.0
+    }
+}
+figure("$\\log_{10} |\\epsilon(\\omega)|$ at $k\\lambda_D = 0.5$", "$\\mathrm{Re}\\,\\omega/\\omega_{pe}$", "$\\mathrm{Im}\\,\\omega/\\omega_{pe}$", RE_LO, RE_HI, IM_LO, IM_HI)
+origin("lower")
+plot2d(logeps, "$\\log_{10} |\\epsilon|$")
+
+# the next root down, from the dark point near 1.8 - 1.1i in the picture
+root2 = landau_root(K0, complex(1.8, -1.1))
+show re(root2)
+show im(root2)
+test "the next root, 1.7895705949216291 - 1.1441430104277659 i (mpmath), is damped 7.5 times faster" {
+    assert_near(re(root2), 1.7895705949216291, 1.0e-12)
+    assert_near(im(root2), -1.1441430104277659, 1.0e-12)
+    assert_near(im(root2) / im(root), 7.46, 0.01)
+}
+
+###
+## Against the small-$k$ formula
+
+For long waves, $k\lambda_D \ll 1$, the phase velocity is far out in the tail and the
+damping can be expanded. The usual result is
+
+$$\gamma \approx \sqrt{\frac{\pi}{8}}\,\frac{\omega_{pe}}{(k\lambda_D)^3}\exp\left(-\frac{1}{2k^2\lambda_D^2} - \frac32\right).$$
+
+The cell follows the root from $k\lambda_D = 0.2$ to $0.6$, each Newton solve starting
+from the previous root. At $0.5$ the formula gives $0.1514$ against the exact $0.1534$,
+1.3% low. That agreement is an accident of where the error changes sign: at $0.3$
+the formula gives $0.0200$ against $0.0126$, 59% too high, and at $0.2$ it is still 18%
+high. The real part is above Bohm-Gross by 0.5% at $0.2$ and by 7% at $0.5$.
+###
+
+N_K = 41
+ks = linspace(0.2, 0.6, N_K)
+w_re = zeros(N_K)
+damp = zeros(N_K)
+bg = zeros(N_K)
+weak = zeros(N_K)
+guess = complex(sqrt(1.0 + 3.0 * ks[0] * ks[0]), 0.0)
+for i to N_K {
+    kk = ks[i]
+    guess = landau_root(kk, guess)
+    w_re[i] = re(guess)
+    damp[i] = -im(guess)
+    bg[i] = sqrt(1.0 + 3.0 * kk * kk)
+    weak[i] = sqrt(3.141592653589793 / 8.0) / (kk * kk * kk) * exp(-1.0 / (2.0 * kk * kk) - 1.5)
+}
+# ks[10] = 0.3 and ks[30] = 0.5 on this grid of step 0.01
+I_03 = 10
+I_05 = 30
+show damp[0]
+show damp[I_03]
+show weak[I_03] / damp[I_03]
+show weak[I_05] / damp[I_05]
+# the formula's error relative to the root: negative is low, positive high
+weak_err_05 = weak[I_05] / damp[I_05] - 1.0
+weak_err_03 = weak[I_03] / damp[I_03] - 1.0
+weak_err_02 = weak[0] / damp[0] - 1.0
+show weak_err_05
+show weak_err_03
+show weak_err_02
+
+test "along the curve the roots at k = 0.2, 0.3, 0.5 are the mpmath roots to 1e-11" {
+    assert_near(w_re[0], 1.0639843406877026, 1.0e-11)
+    assert_near(damp[0], 5.510741476862848e-5, 1.0e-11)
+    assert_near(w_re[I_03], 1.1598464805919138, 1.0e-11)
+    assert_near(damp[I_03], 0.012620368421117154, 1.0e-11)
+    assert_near(damp[I_05], 0.15335946690960483, 1.0e-11)
+}
+test "the small-k formula is 1.3% low at k = 0.5, 59% high at 0.3 and 18% high at 0.2" {
+    assert_near(weak[I_05] / damp[I_05], 0.9871397786075161, 1.0e-9)
+    assert_near(weak[I_03] / damp[I_03], 1.5863729682065133, 1.0e-9)
+    assert_near(weak[0] / damp[0], 1.1819719537886595, 1.0e-6)
+    assert_near(ks[I_03], 0.3, 1.0e-15)
+    assert_near(weak_err_05, 0.9871397786075161 - 1.0, 1.0e-9)
+    assert_near(weak_err_03, 1.5863729682065133 - 1.0, 1.0e-9)
+    assert_near(weak_err_02, 1.1819719537886595 - 1.0, 1.0e-6)
+}
+test "the small-k formula gives 0.1514 at k = 0.5 and 0.0200 at k = 0.3" {
+    # the formula evaluated in double precision by Python's math module
+    assert_near(weak[I_05], 0.151387230212514, 1.0e-12)
+    assert_near(weak[I_03], 0.020020611312067026, 1.0e-12)
+}
+test "Re omega exceeds Bohm-Gross by 0.54% at k = 0.2 and 7.0% at k = 0.5" {
+    assert_near(w_re[0] / bg[0] - 1.0, 1.0639843406877026 / 1.0583005244258363 - 1.0, 1.0e-10)
+    assert_near(w_re[I_05] / bg[I_05] - 1.0, 1.4156618886045364 / 1.3228756555322954 - 1.0, 1.0e-10)
+}
+
+# the engines' complex arithmetic differs in the last few bits; the curves are drawn
+# from values rounded to 1e-10, well below what a plot can show
+damp_plot = zeros(N_K)
+w_re_plot = zeros(N_K)
+for i to N_K {
+    damp_plot[i] = round(1.0e10 * damp[i]) / 1.0e10
+    w_re_plot[i] = round(1.0e10 * w_re[i]) / 1.0e10
+}
+
+figure("Damping rate of the least-damped Langmuir wave", "$k\\lambda_D$", "$\\gamma/\\omega_{pe}$")
+yscale("log")
+plot(ks, damp_plot, "exact root")
+plot(ks, weak, "small-k formula")
+style("small-k formula", "dash")
+
+figure("Frequency of the least-damped Langmuir wave", "$k\\lambda_D$", "$\\omega_r/\\omega_{pe}$")
+plot(ks, w_re_plot, "exact root")
+plot(ks, bg, "Bohm-Gross, $\\sqrt{1 + 3k^2}$")
+style("Bohm-Gross, $\\sqrt{1 + 3k^2}$", "dash")
+
+
+###
+## The wave itself
+
+The root says how fast a wave decays; the last cell watches one decay. It
+solves the linearized Vlasov equation for one Fourier mode, $f = f_0(v) +
+f_1(v, t)\,e^{ikx}$ at $k\lambda_D = 0.5$, on 512 velocities from $-8$ to $8$:
+
+$$\partial_t f_1 = -ikv\,f_1 + E_1 f_0'(v), \qquad E_1 = \frac{i}{k}\int f_1\,dv,$$
+
+from a density bump $f_1(v, 0) = f_0(v)$, by fourth-order Runge-Kutta with
+$\Delta t = 0.05$. Nothing in it knows about $Z$ or the root. The field
+oscillates and its peaks fall on a straight line in $\log|E_1|$; the slope of
+that line is the measured damping rate, and the spacing of the peaks, half a
+period, gives the frequency. Both are compared with the root above.
+###
+
+VL_NV = 512
+VL_VMAX = 8.0
+VL_DT = 0.05
+VL_STEPS = 800
+# peaks before this time still carry the faster roots
+VL_T_SKIP = 8.0
+# every this many steps the field is recorded for the figure
+VL_EVERY = 2
+VL_MAX_PEAKS = 64
+
+vl_v = linspace(-VL_VMAX, VL_VMAX, VL_NV)
+vl_dv = vl_v[1] - vl_v[0]
+vl_f0 = exp(-0.5 * vl_v * vl_v) / sqrt(2.0 * 3.141592653589793)
+vl_df0 = -vl_v * vl_f0
+vl_kv = K0 * vl_v
+
+#| The field of the perturbation (fr + i fi): E1 = (i / k) * integral of f1 dv.
+#@ 0a19710e
+def vlasov_field(fr: Arr, fi: Arr) {
+    sr = sum(fr) * vl_dv
+    si = sum(fi) * vl_dv
+    return -si / K0, sr / K0
+}
+
+#| The time derivative of f1 in the linearized Vlasov equation, as its real and imaginary parts.
+#@ 7a194a57
+def vlasov_rate(fr: Arr, fi: Arr) {
+    er, ei = vlasov_field(fr, fi)
+    return vl_kv * fi + er * vl_df0, -vl_kv * fr + ei * vl_df0
+}
+
+vl_fr = vl_f0 + 0.0
+vl_fi = zeros(VL_NV)
+vl_nrec = VL_STEPS / VL_EVERY + 1
+vl_t = zeros(vl_nrec)
+vl_er = zeros(vl_nrec)
+vl_ei = zeros(vl_nrec)
+vl_abs = zeros(VL_STEPS + 1)
+e0r, e0i = vlasov_field(vl_fr, vl_fi)
+vl_abs[0] = sqrt(e0r * e0r + e0i * e0i)
+vl_er[0] = e0r
+vl_ei[0] = e0i
+for n to VL_STEPS {
+    a1r, a1i = vlasov_rate(vl_fr, vl_fi)
+    a2r, a2i = vlasov_rate(vl_fr + 0.5 * VL_DT * a1r, vl_fi + 0.5 * VL_DT * a1i)
+    a3r, a3i = vlasov_rate(vl_fr + 0.5 * VL_DT * a2r, vl_fi + 0.5 * VL_DT * a2i)
+    a4r, a4i = vlasov_rate(vl_fr + VL_DT * a3r, vl_fi + VL_DT * a3i)
+    vl_fr = vl_fr + (VL_DT / 6.0) * (a1r + 2.0 * a2r + 2.0 * a3r + a4r)
+    vl_fi = vl_fi + (VL_DT / 6.0) * (a1i + 2.0 * a2i + 2.0 * a3i + a4i)
+    enr, eni = vlasov_field(vl_fr, vl_fi)
+    vl_abs[n + 1] = sqrt(enr * enr + eni * eni)
+    if mod(n + 1, VL_EVERY) == 0 {
+        rec = (n + 1) / VL_EVERY
+        vl_t[rec] = (n + 1) * VL_DT
+        vl_er[rec] = enr
+        vl_ei[rec] = eni
+    }
+}
+
+# the peaks of |E1|, each placed by a parabola through log|E1| at three steps
+peak_t = zeros(VL_MAX_PEAKS)
+peak_log = zeros(VL_MAX_PEAKS)
+n_peaks = 0
+for n from 1 to VL_STEPS {
+    if n * VL_DT > VL_T_SKIP and vl_abs[n] > vl_abs[n - 1] and vl_abs[n] >= vl_abs[n + 1] and n_peaks < VL_MAX_PEAKS {
+        ym = log(vl_abs[n - 1])
+        y0 = log(vl_abs[n])
+        yp = log(vl_abs[n + 1])
+        shift = 0.5 * (ym - yp) / (ym - 2.0 * y0 + yp)
+        peak_t[n_peaks] = (n + shift) * VL_DT
+        peak_log[n_peaks] = y0 - 0.25 * (ym - yp) * shift
+        n_peaks = n_peaks + 1
+    }
+}
+# least-squares lines: log peak against time, and peak time against its index
+pt = peak_t[0:n_peaks]
+pl = peak_log[0:n_peaks]
+pi_idx = linspace(0.0, n_peaks - 1.0, n_peaks)
+mt = sum(pt) / n_peaks
+ml = sum(pl) / n_peaks
+mi = sum(pi_idx) / n_peaks
+gamma_measured = -sum((pt - mt) * (pl - ml)) / sum((pt - mt) * (pt - mt))
+half_period = sum((pi_idx - mi) * (pt - mt)) / sum((pi_idx - mi) * (pi_idx - mi))
+omega_measured = 3.141592653589793 / half_period
+gamma_root = -im(root)
+show n_peaks
+show gamma_measured
+show gamma_root
+show omega_measured
+gamma_rel_gap = abs(gamma_measured / gamma_root - 1.0)
+omega_rel_gap = abs(omega_measured / re(root) - 1.0)
+show gamma_rel_gap
+show omega_rel_gap
+
+# the line through the peaks at the root's rate, from the measured fit's height at t = 0
+fit_log0 = ml + gamma_measured * mt
+vl_line = zeros(vl_nrec)
+for i to vl_nrec {
+    vl_line[i] = round(1.0e10 * exp(fit_log0 - gamma_root * vl_t[i])) / 1.0e10
+    vl_er[i] = round(1.0e10 * vl_er[i]) / 1.0e10
+    vl_ei[i] = round(1.0e10 * vl_ei[i]) / 1.0e10
+}
+figure("The field of a Langmuir wave at k lambda_D = 0.5, from the linearized Vlasov equation", "t omega_pe", "E1")
+plot(vl_t, vl_er, "Re E1")
+plot(vl_t, vl_ei, "Im E1")
+plot(vl_t, vl_line, "decay at the root's rate")
+style("decay at the root's rate", "dash")
+
+test "the measured damping rate and frequency are the root's within 1e-4, relative" {
+    assert_lt(gamma_rel_gap, 1.0e-4)
+    assert_lt(omega_rel_gap, 1.0e-4)
+    assert_lt(10.0, n_peaks)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

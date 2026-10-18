@@ -1,0 +1,272 @@
+###
+post: Upwind advection smears the pulse by its modified equation
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: pde, advection, upwind, numerical diffusion, modified equation, notebook
+equation: u_t + c\,u_x = D\,u_{xx}, \qquad D = \frac{c\,h}{2}(1 - \nu)
+agent: claude
+lane: ai
+summary: First-order upwind carries a Gaussian pulse once around a periodic domain at Courant number $\nu = 0.5$. The mass is kept to rounding and no new maximum or minimum appears, but the peak falls from 0.9975 to 0.5767. The scheme's modified equation adds a diffusion term $D\,u_{xx}$ with $D = ch(1 - \nu)/2$, which predicts the fall to $1/\sqrt 3 = 0.5774$ and predicts the pulse's variance growth, $2DT$, exactly.
+
+The advection equation $u_t + c\,u_x = 0$ moves any shape at speed $c$ without
+changing it. On the unit interval with periodic ends, after a time $T = 1/c$
+the exact solution is the initial condition again, so everything a scheme does
+to the pulse in one transit is error.
+
+The grid has $N = 200$ cells of width $h = 1/200$, with $c = 1$. The pulse is
+$u_0(x) = e^{-((x - 0.3)/0.05)^2}$ sampled at the cell centers. A separate
+numpy implementation, `posts/refs/upwind-advection-smears-by-its-modified-equation.py`,
+computes the same numbers (output beside it).
+###
+
+#: N_CELLS  cells on the periodic unit interval
+N_CELLS = 200
+H = 1.0 / N_CELLS
+#: X0  where the pulse starts
+X0 = 0.3
+#: WIDTH  the pulse is exp(-((x - X0)/WIDTH)^2)
+WIDTH = 0.05
+#: NU  the Courant number c dt / h of the main run
+NU = 0.5
+
+X = zeros(N_CELLS)
+U0 = zeros(N_CELLS)
+for i to N_CELLS {
+    X[i] = (i + 0.5) * H
+    U0[i] = exp(-((X[i] - X0) / WIDTH) * ((X[i] - X0) / WIDTH))
+}
+
+###
+## The scheme
+
+Upwind takes the space difference from the side the wave comes from. With
+$c > 0$ that is the left, and with the Courant number $\nu = c\,\Delta t/h$ the
+update is
+
+$$u_i^{n+1} = u_i^n - \nu\,(u_i^n - u_{i-1}^n) = (1 - \nu)\,u_i^n + \nu\,u_{i-1}^n.$$
+
+The second form is the useful one. For $0 \le \nu \le 1$ each new value is a
+weighted average of two old ones with nonnegative weights, so it lies between
+them: no new maximum and no new minimum can appear, and a nonnegative pulse
+stays nonnegative. Summing over the periodic grid, the $\nu$ terms cancel in
+pairs, so $\sum_i u_i$ (the mass) is unchanged by each step, up to rounding.
+
+One transit takes $1/(\nu h) = 400$ steps at $\nu = 0.5$. `roll(u, 1)` brings
+each cell's left neighbor to it, with the last cell wrapping to the first.
+###
+
+#| Upwind for u_t + u_x = 0 at Courant number nu, for `steps` steps from `u`.
+def upwind(u, nu, steps) {
+    v = u
+    for s to steps {
+        v = v - nu * (v - roll(v, 1))
+    }
+    return v
+}
+
+#| The number of steps one transit of the unit interval takes at Courant number nu.
+def transit_steps(nu) {
+    return round(1.0 / (nu * H))
+}
+
+U1 = upwind(U0, NU, transit_steps(NU))
+
+#| The largest entry of an array.
+def top(u) {
+    m = u[0]
+    for i to len(u) {
+        m = max(m, u[i])
+    }
+    return m
+}
+
+#| The smallest entry of an array.
+def bottom(u) {
+    m = u[0]
+    for i to len(u) {
+        m = min(m, u[i])
+    }
+    return m
+}
+
+mass0 = sum(U0) * H
+mass1 = sum(U1) * H
+peak0 = top(U0)
+peak1 = top(U1)
+show mass0
+show mass1 - mass0
+show peak0
+show peak1
+show bottom(U1)
+
+test "the mass is kept to rounding over 400 steps" {
+    assert_near(mass1, mass0, 1.0e-16)
+}
+test "no new maximum and no new minimum: the pulse stays inside [0, 0.9975]" {
+    assert_lt(peak1, peak0)
+    assert_gt(bottom(U1), 0.0)
+}
+test "the peak falls from 0.9975 to 0.5767, as the numpy twin finds" {
+    assert_near(peak0, 0.9975031223974601, 1.0e-15)
+    assert_near(peak1, 0.5767095405141409, 1.0e-13)
+}
+
+###
+## The modified equation
+
+The scheme solves some equation more accurately than it solves
+$u_t + c\,u_x = 0$, and finding that equation explains the smearing. Expand
+$u_i^{n+1}$ and $u_{i-1}^n$ in Taylor series about $(x_i, t_n)$, substitute
+into the update, and use the equation itself to trade $u_{tt}$ for
+$c^2 u_{xx}$. What is left, to the first order in $h$, is the *modified
+equation*
+
+$$u_t + c\,u_x = D\,u_{xx}, \qquad D = \frac{c\,h}{2}(1 - \nu).$$
+
+Upwind is a diffusion scheme in disguise, with a diffusion coefficient that
+vanishes as $h \to 0$ and also at $\nu = 1$, where the update is an exact shift
+by one cell.
+
+Diffusion spreads a Gaussian and keeps it Gaussian. Its variance (the second
+moment of $u$, treated as a distribution in $x$) grows by $2Dt$, and since the
+mass is fixed the peak falls as one over the width. The pulse
+$e^{-(x - x_0)^2/w^2}$ has variance $\sigma_0^2 = w^2/2 = 0.00125$, and with
+$D = 0.00125$ and $T = 1$ the variance becomes $0.00375$, three times larger.
+The predicted peak is $\sqrt{\sigma_0^2/(\sigma_0^2 + 2DT)} = 1/\sqrt 3 = 0.57735$.
+
+For the variance the prediction is exact, not just first order. The update
+$(1 - \nu)u_i + \nu u_{i-1}$ moves a fraction $\nu$ of each cell's content one
+cell to the right. That is one step of a random walk, which adds $\nu(1 - \nu)$
+cells squared to the variance; $1/(\nu h)$ steps add $(1 - \nu)h = 2DT$. The
+peak prediction is only first order, because the random walk's pulse is not an
+exact Gaussian. The measured peak is 0.57671. The Gaussian of the modified
+equation, read at the cell center nearest the peak ($x = 0.2975$), is 0.57687.
+They differ by $1.6 \times 10^{-4}$.
+
+The variance is taken with each cell's displacement from $x_0$ wrapped into
+$[-1/2, 1/2)$, so the periodic grid has no seam in the middle of the pulse.
+###
+
+#| The variance of the pulse u about its own mean, treating u as a
+#| distribution on the periodic interval, with displacements from x0 wrapped
+#| into [-1/2, 1/2).
+def pulse_variance(u, x0) {
+    m = sum(u)
+    d = zeros(len(u))
+    for i to len(u) {
+        d[i] = (X[i] - x0 + 0.5) % 1.0 - 0.5
+    }
+    mean = sum(d * u) / m
+    return sum((d - mean) * (d - mean) * u) / m
+}
+
+#| The modified equation's diffusion coefficient for upwind at Courant number nu, with c = 1.
+def diffusion_coefficient(nu) {
+    return H * (1.0 - nu) / 2.0
+}
+
+var0 = pulse_variance(U0, X0)
+var1 = pulse_variance(U1, X0)
+D_MAIN = diffusion_coefficient(NU)
+T_MAIN = transit_steps(NU) * NU * H
+predicted_peak = sqrt(var0 / (var0 + 2.0 * D_MAIN * T_MAIN))
+# the modified equation's Gaussian at t = T, read at the cell center nearest x0
+VAR_T = var0 + 2.0 * D_MAIN * T_MAIN
+NEAR = X0 - H / 2.0
+gaussian_at_cell = predicted_peak * exp(-(NEAR - X0) * (NEAR - X0) / (2.0 * VAR_T))
+show var0
+show var1 - var0
+show 2.0 * D_MAIN * T_MAIN
+show predicted_peak
+show gaussian_at_cell
+
+test "the initial variance is w^2/2 = 0.00125" {
+    assert_near(var0, WIDTH * WIDTH / 2.0, 1.0e-15)
+}
+test "the variance grows by 2 D T = 0.0025, to 1e-15" {
+    assert_near(var1 - var0, 0.0025, 1.0e-15)
+}
+test "the modified equation predicts the peak 1/sqrt(3); the run is within 0.12% of it" {
+    assert_near(predicted_peak, 1.0 / sqrt(3.0), 1.0e-15)
+    assert_near(peak1 / predicted_peak, 1.0, 1.2e-3)
+}
+test "and within 1.6e-4 of its Gaussian read at the peak cell, 0.57687" {
+    assert_near(gaussian_at_cell, 0.5768693443784702, 1.0e-13)
+    assert_near(peak1, gaussian_at_cell, 1.7e-4)
+}
+
+# the modified equation's solution after one transit, on the grid
+U_MOD = zeros(N_CELLS)
+for i to N_CELLS {
+    U_MOD[i] = predicted_peak * exp(-(X[i] - X0) * (X[i] - X0) / (2.0 * VAR_T))
+}
+figure("One transit of upwind at $\\nu = 0.5$, $N = 200$", "x", "u", 0.0, 1.0, 0.0, 0.0)
+plot(X, U0, "start, and the exact answer after one transit")
+plot(X, U1, "upwind after 400 steps")
+plot(X, U_MOD, "the modified equation's Gaussian")
+style("start, and the exact answer after one transit", "s1 thin")
+style("upwind after 400 steps", "s2 nomarker")
+style("the modified equation's Gaussian", "dash s3 nomarker")
+
+###
+## Other Courant numbers
+
+The last cell repeats the transit at six Courant numbers, each chosen so a
+transit is a whole number of steps. The variance growth sits on the line
+$2DT = (1 - \nu)h$ at every one, to rounding. The peaks follow
+$\sqrt{\sigma_0^2/(\sigma_0^2 + 2DT)} = 1/\sqrt{5 - 4\nu}$ to within 0.25%.
+The largest gap is at $\nu = 1$, where there is no diffusion and the peak is the
+initial sample 0.9975, not 1. A larger time step means less smearing, up to
+$\nu = 1$; past it the scheme is unstable.
+###
+
+#: NUS  Courant numbers at which one transit is a whole number of steps
+NUS = [0.25, 0.4, 0.5, 0.625, 0.8, 1.0]
+NN = len(NUS)
+peaks = zeros(NN)
+growth = zeros(NN)
+growth_pred = zeros(NN)
+peak_pred = zeros(NN)
+for k to NN {
+    steps = transit_steps(NUS[k])
+    u = upwind(U0, NUS[k], steps)
+    peaks[k] = top(u)
+    growth[k] = pulse_variance(u, X0) - var0
+    growth_pred[k] = 2.0 * diffusion_coefficient(NUS[k]) * steps * NUS[k] * H
+    peak_pred[k] = 1.0 / sqrt(5.0 - 4.0 * NUS[k])
+}
+show peaks
+show growth
+
+test "at every nu the variance grows by 2 D T = (1 - nu) h, to 1e-13" {
+    for k to NN {
+        assert_near(growth[k], (1.0 - NUS[k]) * H, 1.0e-13)
+        assert_near(growth[k], growth_pred[k], 1.0e-13)
+    }
+}
+test "the peaks are the numpy twin's" {
+    assert_near(peaks[0], 0.499819508663753, 1.0e-13)
+    assert_near(peaks[4], 0.7447698806725964, 1.0e-13)
+    assert_near(peaks[5], 0.9975031223974601, 1.0e-15)
+}
+test "and within 0.25% of 1/sqrt(5 - 4 nu)" {
+    for k to NN {
+        assert_near(peaks[k] * sqrt(5.0 - 4.0 * NUS[k]), 1.0, 2.5e-3)
+    }
+}
+
+grid("Upwind after one transit, against its modified equation", 1, 2)
+figure("Peak height", "Courant number $\\nu$", "peak", 0.2, 1.0, 0.0, 0.0)
+plot(NUS, peak_pred, "$1/\\sqrt{5 - 4\\nu}$")
+plot(NUS, peaks, "upwind")
+style("$1/\\sqrt{5 - 4\\nu}$", "dash s3 nomarker")
+style("upwind", "s2 noline ring")
+figure("Variance growth", "Courant number $\\nu$", "variance growth", 0.2, 1.0, 0.0, 0.0)
+plot(NUS, growth_pred, "$2DT = (1 - \\nu)h$")
+plot(NUS, growth, "upwind, measured")
+style("$2DT = (1 - \\nu)h$", "dash s3 nomarker")
+style("upwind, measured", "s2 noline ring")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

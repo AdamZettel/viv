@@ -1,0 +1,820 @@
+###
+post: The nuclear shell model in the M scheme
+agent: claude
+
+A configuration-interaction (shell-model) code. It reads a single-particle
+space (a `.sps` file) and an isospin two-body interaction (a `.int` file),
+builds every Slater determinant of Z valence protons and N valence neutrons
+with total angular-momentum projection M, and applies the Hamiltonian to a
+vector (`apply_h`); lib/eigen/lowest finds its lowest eigenstates. For each state it reports the energy, the
+angular momentum J from the expectation value of J squared, and the
+occupation of every orbit.
+
+The algorithm follows BIGSTICK (C. W. Johnson, W. E. Ormand, P. G. Krastev,
+Computer Physics Communications 184, 2761 (2013); github.com/cwjsdsu/BigstickPublick),
+which is the oracle this code is tested against:
+
+- the M-scheme basis is a product of proton and neutron Slater
+  determinants, each an integer whose bits are the occupied m-states, with
+  M_p + M_n = M;
+- the Hamiltonian is never stored. Its proton-proton and neutron-neutron
+  parts are small matrices over one species' determinants, applied to every
+  determinant of the other species; the proton-neutron part is a product of
+  one proton jump and one neutron jump, matched by their change of M;
+- the file formats are BIGSTICK's: `.sps` with "iso" orbits (n, l, j, w)
+  and `.int` with the single-particle energies on the first line, then
+  "a b c d J T V" in normalized antisymmetric form, scaled by
+  (A0 / A)^x for a mass A.
+
+Portions of the design follow BIGSTICK, which carries this notice:
+
+Copyright (c) 2017 Lawrence Livermore National Security and San Diego State
+University Research Foundation. Permission is hereby granted, free of
+charge, to any person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software,
+and to permit persons to whom the Software is furnished to do so, subject
+to the following conditions: The above copyright notice and this
+permission notice shall be included in all copies or substantial portions
+of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED.
+###
+
+#: SHELL_MAX_STATES  the most m-states one species may have: a determinant is
+#:     an Int bit pattern, and a popcount table of 2^n entries is built
+SHELL_MAX_STATES = 20
+
+#: SHELL_ZERO  a two-body matrix element below this is treated as absent
+SHELL_ZERO = 1.0e-14
+
+#: Space  the single-particle space and the interaction, scaled for one mass
+record Space {
+    norb: Int
+    orb_n: [Int]
+    orb_l: [Int]
+    orb_j2: [Int]
+    spe: Arr
+    jdim: Int
+    vjt: Arr
+    ns: Int
+    st_orb: [Int]
+    st_m2: [Int]
+    core_a: Num
+    a0: Num
+    xpow: Num
+}
+
+#: Species  the Slater determinants of one species, sorted by 2M, with the
+#:     index of each bit pattern and the groups of equal 2M
+record Species {
+    n: Int
+    nsd: Int
+    pat: [Int]
+    m2: [Int]
+    index: [Int]
+    moff: Int
+    gstart: [Int]
+    glen: [Int]
+    loc: [Int]
+    occ: [Int]
+}
+
+#: Basis  the M-scheme basis: proton determinant ip owns the block
+#:     start[ip] .. start[ip] + len[ip] of neutron determinants, or start -1
+record Basis {
+    m2: Int
+    dim: Int
+    start: [Int]
+    len: [Int]
+}
+
+#: Jumps  a list of one-body jumps a+_alpha a_gamma of one species: source and
+#:     destination determinant, operator alpha * ns + gamma, sign, change of 2m
+record Jumps {
+    count: Int
+    src: [Int]
+    dst: [Int]
+    sloc: [Int]
+    dloc: [Int]
+    op: [Int]
+    sgn: Arr
+    dm2: [Int]
+    keyoff: [Int]
+    dmax: Int
+}
+
+#: SpeciesH  one species' one- plus two-body Hamiltonian over its determinants,
+#:     row by row: entries off[i] .. off[i + 1] - 1 of row i
+record SpeciesH {
+    off: [Int]
+    dst: [Int]
+    dloc: [Int]
+    val: Arr
+}
+
+#: ShellH  H on the M-scheme basis, in the pieces apply_h reads: the basis,
+#:     the proton and neutron determinants, each species' own Hamiltonian
+#:     and one-body jumps, the proton-neutron matrix elements and the number
+#:     of m-states of one species
+record ShellH {
+    b: Basis
+    p: Species
+    n: Species
+    hp: SpeciesH
+    hn: SpeciesH
+    jp: Jumps
+    jn: Jumps
+    pn: Arr
+    ns: Int
+}
+
+# ---- reading the files ------------------------------------------------------
+
+#: data_lines  the lines of a text that carry data: comments after ! or #
+#:     removed, blank lines dropped
+def data_lines(text: Str) -> [Str] {
+    out: [Str] = []
+    for raw in split(text, "\n") {
+        line = raw
+        k = find(line, "!")
+        if k >= 0 {
+            line = line[:k]
+        }
+        k = find(line, "#")
+        if k >= 0 {
+            line = line[:k]
+        }
+        line = strip(line)
+        if len(line) > 0 {
+            out = append(out, line)
+        }
+    }
+    return out
+}
+
+#: read_space  a Space from the text of a .sps ("iso" orbits) and of an
+#:     isospin .int, before any mass scaling
+def read_space(sps: Str, tbme: Str) -> Space {
+    sl = data_lines(sps)
+    if strip(sl[0]) != "iso" {
+        stop("the .sps file must start with iso: proton-neutron spaces are not read")
+    }
+    norb: Int = int(split(sl[1])[0])
+    orb_n = int_zeros(norb)
+    orb_l = int_zeros(norb)
+    orb_j2 = int_zeros(norb)
+    for a to norb {
+        f = split(sl[2 + a])
+        orb_n[a] = int(round(float(f[0])))
+        orb_l[a] = int(round(float(f[1])))
+        orb_j2[a] = int(round(2.0 * float(f[2])))
+    }
+    ns: Int = 0
+    jmax2: Int = 0
+    for a to norb {
+        ns += orb_j2[a] + 1
+        if orb_j2[a] > jmax2 {
+            jmax2 = orb_j2[a]
+        }
+    }
+    if ns > SHELL_MAX_STATES {
+        stop("this space has more m-states per species than the code allows")
+    }
+    st_orb = int_zeros(ns)
+    st_m2 = int_zeros(ns)
+    s: Int = 0
+    for a to norb {
+        for m2 from -orb_j2[a] to orb_j2[a] + 1 by 2 {
+            st_orb[s] = a
+            st_m2[s] = m2
+            s += 1
+        }
+    }
+    jdim: Int = jmax2 + 1
+    vjt = zeros(norb * norb * norb * norb * jdim * 2)
+
+    il = data_lines(tbme)
+    head = split(il[0])
+    nme: Int = int(head[0])
+    if nme < 0 {
+        nme = -nme
+    }
+    spe = [float(head[1 + a]) for a to norb]
+    core_a = 0.0
+    a0 = 1.0
+    xpow = 0.0
+    if len(head) >= norb + 4 {
+        core_a = float(head[norb + 1])
+        a0 = float(head[norb + 2])
+        xpow = float(head[norb + 3])
+    }
+    for t to nme {
+        f = split(il[1 + t])
+        oa: Int = int(f[0]) - 1
+        ob: Int = int(f[1]) - 1
+        oc: Int = int(f[2]) - 1
+        od: Int = int(f[3]) - 1
+        tj: Int = int(f[4])
+        tt: Int = int(f[5])
+        put_vjt(vjt, norb, jdim, orb_j2, oa, ob, oc, od, tj, tt, float(f[6]))
+    }
+    return Space { norb: norb, orb_n: orb_n, orb_l: orb_l, orb_j2: orb_j2, spe: spe,
+                   jdim: jdim, vjt: vjt, ns: ns, st_orb: st_orb, st_m2: st_m2,
+                   core_a: core_a, a0: a0, xpow: xpow }
+}
+
+#: exchange_phase  the sign of |ba; JT> relative to |ab; JT>,
+#:     (-1)^(ja + jb - J + T)
+def exchange_phase(j2a: Int, j2b: Int, J: Int, T: Int) -> Num {
+    e: Int = (j2a + j2b) // 2 - J + T
+    if e % 2 == 0 {
+        return 1.0
+    }
+    return -1.0
+}
+
+#: vjt_index  where V_JT(ab, cd) sits in Space.vjt
+def vjt_index(norb: Int, jdim: Int, a: Int, b: Int, c: Int, d: Int, J: Int, T: Int) -> Int {
+    return ((((a * norb + b) * norb + c) * norb + d) * jdim + J) * 2 + T
+}
+
+#: put_vjt  store one matrix element under all eight orderings it stands for
+def put_vjt(vjt: Arr, norb: Int, jdim: Int, j2: [Int], a: Int, b: Int, c: Int, d: Int, J: Int, T: Int, v: Num) {
+    pab = exchange_phase(j2[a], j2[b], J, T)
+    pcd = exchange_phase(j2[c], j2[d], J, T)
+    vjt[vjt_index(norb, jdim, a, b, c, d, J, T)] = v
+    vjt[vjt_index(norb, jdim, b, a, c, d, J, T)] = pab * v
+    vjt[vjt_index(norb, jdim, a, b, d, c, J, T)] = pcd * v
+    vjt[vjt_index(norb, jdim, b, a, d, c, J, T)] = pab * pcd * v
+    vjt[vjt_index(norb, jdim, c, d, a, b, J, T)] = v
+    vjt[vjt_index(norb, jdim, d, c, a, b, J, T)] = pcd * v
+    vjt[vjt_index(norb, jdim, c, d, b, a, J, T)] = pab * v
+    vjt[vjt_index(norb, jdim, d, c, b, a, J, T)] = pab * pcd * v
+}
+
+# ---- Clebsch-Gordan coefficients -------------------------------------------
+
+#: factorial  n!, as a number
+def factorial(n: Int) -> Num {
+    f = 1.0
+    for k from 2 to n + 1 {
+        f = f * float(k)
+    }
+    return f
+}
+
+#: clebsch  <j1 m1 j2 m2 | J M>, every argument doubled; Racah's formula
+def clebsch(j1: Int, m1: Int, j2: Int, m2: Int, J: Int, M: Int) -> Num {
+    if m1 + m2 != M {
+        return 0.0
+    }
+    if J < abs(j1 - j2) or J > j1 + j2 or abs(M) > J {
+        return 0.0
+    }
+    if (j1 + j2 + J) % 2 != 0 or (j1 + m1) % 2 != 0 or (j2 + m2) % 2 != 0 or (J + M) % 2 != 0 {
+        return 0.0
+    }
+    a1: Int = (j1 + j2 - J) // 2
+    a2: Int = (j1 - m1) // 2
+    a3: Int = (j2 + m2) // 2
+    b1: Int = (J - j2 + m1) // 2
+    b2: Int = (J - j1 - m2) // 2
+    pre = float(J + 1) * factorial((J + j1 - j2) // 2) * factorial((J - j1 + j2) // 2) * factorial(a1) / factorial((j1 + j2 + J) // 2 + 1)
+    pre = pre * factorial((J + M) // 2) * factorial((J - M) // 2) * factorial((j1 - m1) // 2) * factorial((j1 + m1) // 2) * factorial((j2 - m2) // 2) * factorial((j2 + m2) // 2)
+    total = 0.0
+    kmin: Int = 0
+    if -b1 > kmin {
+        kmin = -b1
+    }
+    if -b2 > kmin {
+        kmin = -b2
+    }
+    kmax: Int = a1
+    if a2 < kmax {
+        kmax = a2
+    }
+    if a3 < kmax {
+        kmax = a3
+    }
+    for k from kmin to kmax + 1 {
+        den = factorial(k) * factorial(a1 - k) * factorial(a2 - k) * factorial(a3 - k) * factorial(b1 + k) * factorial(b2 + k)
+        if k % 2 == 0 {
+            total = total + 1.0 / den
+        }
+        else {
+            total = total - 1.0 / den
+        }
+    }
+    return sqrt(pre) * total
+}
+
+# ---- M-scheme two-body matrix elements -------------------------------------
+
+#: mscheme_tables  the antisymmetrized M-scheme matrix elements, scaled by
+#:     `scale`: `same[((al * ns + be) * ns + ga) * ns + de]` for two protons
+#:     or two neutrons (T = 1), and `pn[(al * ns + ga) * ns * ns + be * ns +
+#:     de]` for proton al, ga and neutron be, de (half T = 1 plus half T = 0)
+def mscheme_tables(sp: Space, scale: Num) {
+    ns = sp.ns
+    same = zeros(ns * ns * ns * ns)
+    pn = zeros(ns * ns * ns * ns)
+    for al to ns {
+        for be to ns {
+            for ga to ns {
+                for de to ns {
+                    M: Int = sp.st_m2[al] + sp.st_m2[be]
+                    if M == sp.st_m2[ga] + sp.st_m2[de] {
+                        a = sp.st_orb[al]
+                        b = sp.st_orb[be]
+                        c = sp.st_orb[ga]
+                        d = sp.st_orb[de]
+                        nab = 1.0
+                        if a == b {
+                            nab = 2.0
+                        }
+                        ncd = 1.0
+                        if c == d {
+                            ncd = 2.0
+                        }
+                        norm = sqrt(nab * ncd)
+                        v1 = 0.0
+                        v0 = 0.0
+                        for J to sp.jdim {
+                            cg = clebsch(sp.orb_j2[a], sp.st_m2[al], sp.orb_j2[b], sp.st_m2[be], 2 * J, M)
+                            if cg != 0.0 {
+                                cg = cg * clebsch(sp.orb_j2[c], sp.st_m2[ga], sp.orb_j2[d], sp.st_m2[de], 2 * J, M)
+                                v1 = v1 + cg * sp.vjt[vjt_index(sp.norb, sp.jdim, a, b, c, d, J, 1)]
+                                v0 = v0 + cg * sp.vjt[vjt_index(sp.norb, sp.jdim, a, b, c, d, J, 0)]
+                            }
+                        }
+                        same[((al * ns + be) * ns + ga) * ns + de] = scale * norm * v1
+                        pn[(al * ns + ga) * ns * ns + be * ns + de] = scale * norm * 0.5 * (v1 + v0)
+                    }
+                }
+            }
+        }
+    }
+    return same, pn
+}
+
+# ---- Slater determinants ----------------------------------------------------
+
+#: popcounts  the number of set bits of every pattern below 2^ns
+def popcounts(ns: Int) -> [Int] {
+    one: Int = 1
+    npat: Int = shl(one, ns)
+    pc = int_zeros(npat)
+    for s from 1 to npat {
+        pc[s] = pc[shr(s, 1)] + band(s, 1)
+    }
+    return pc
+}
+
+#: below  how many occupied m-states of pattern s lie below state k: the
+#:     number of transpositions that moves operator k to the front
+def below(pc: [Int], s: Int, k: Int) -> Int {
+    one: Int = 1
+    return pc[band(s, shl(one, k) - 1)]
+}
+
+#: make_species  every determinant of n particles in the space, sorted by 2M
+#:     and then by bit pattern, with the occupation of each orbit
+def make_species(sp: Space, pc: [Int], n: Int) -> Species {
+    one: Int = 1
+    ns = sp.ns
+    npat: Int = shl(one, ns)
+    moff: Int = 0
+    for s to ns {
+        if sp.st_m2[s] > 0 {
+            moff += sp.st_m2[s]
+        }
+    }
+    # 2M has the parity of n, so the offset must too for (2M + moff) / 2
+    if (moff + n) % 2 != 0 {
+        moff += 1
+    }
+    ngroups: Int = moff + 1
+    gstart = int_zeros(ngroups)
+    glen = int_zeros(ngroups)
+    index = int_zeros(npat)
+    for s to npat {
+        index[s] = -1
+    }
+    pat: [Int] = []
+    m2s: [Int] = []
+    for g to ngroups {
+        target: Int = 2 * g - moff
+        gstart[g] = len(pat)
+        for s to npat {
+            if pc[s] == n {
+                m2: Int = 0
+                for k to ns {
+                    if band(shr(s, k), 1) == 1 {
+                        m2 += sp.st_m2[k]
+                    }
+                }
+                if m2 == target {
+                    index[s] = len(pat)
+                    pat = append(pat, s)
+                    m2s = append(m2s, m2)
+                }
+            }
+        }
+        glen[g] = len(pat) - gstart[g]
+    }
+    nsd: Int = len(pat)
+    loc = int_zeros(nsd)
+    occ = int_zeros(nsd * sp.norb)
+    for i to nsd {
+        g: Int = (m2s[i] + moff) // 2
+        loc[i] = i - gstart[g]
+        for k to ns {
+            if band(shr(pat[i], k), 1) == 1 {
+                occ[i * sp.norb + sp.st_orb[k]] += 1
+            }
+        }
+    }
+    return Species { n: n, nsd: nsd, pat: pat, m2: m2s, index: index, moff: moff,
+                     gstart: gstart, glen: glen, loc: loc, occ: occ }
+}
+
+#: group_of  the group of determinants with this 2M, or -1 if there is none
+def group_of(sd: Species, m2: Int) -> Int {
+    if m2 < -sd.moff or m2 > sd.moff or (m2 + sd.moff) % 2 != 0 {
+        return -1
+    }
+    g: Int = (m2 + sd.moff) // 2
+    if sd.glen[g] == 0 {
+        return -1
+    }
+    return g
+}
+
+#: make_basis  the M-scheme basis of total 2M = m2: each proton determinant
+#:     with every neutron determinant of the 2M that completes it
+def make_basis(P: Species, N: Species, m2: Int) -> Basis {
+    start = int_zeros(P.nsd)
+    blen = int_zeros(P.nsd)
+    dim: Int = 0
+    for ip to P.nsd {
+        g = group_of(N, m2 - P.m2[ip])
+        if g < 0 {
+            start[ip] = -1
+        }
+        else {
+            start[ip] = dim
+            blen[ip] = N.glen[g]
+            dim += N.glen[g]
+        }
+    }
+    return Basis { m2: m2, dim: dim, start: start, len: blen }
+}
+
+# ---- one species' Hamiltonian ----------------------------------------------
+
+#: species_h  the one- plus two-body Hamiltonian of one species over its own
+#:     determinants: H = sum e_a n_a + sum over al < be, ga < de of
+#:     V(al be, ga de) a+_al a+_be a_de a_ga, row by row
+def species_h(sp: Space, pc: [Int], same: Arr, S: Species) -> SpeciesH {
+    one: Int = 1
+    ns = sp.ns
+    # pairs of m-states, grouped by their 2M
+    pmoff: Int = 2 * ns
+    npg: Int = 2 * pmoff + 1
+    pcount = int_zeros(npg)
+    for a to ns {
+        for b from a + 1 to ns {
+            pcount[sp.st_m2[a] + sp.st_m2[b] + pmoff] += 1
+        }
+    }
+    poff = int_zeros(npg + 1)
+    for k to npg {
+        poff[k + 1] = poff[k] + pcount[k]
+    }
+    npair: Int = poff[npg]
+    pa = int_zeros(npair)
+    pb = int_zeros(npair)
+    fill = int_zeros(npg)
+    for a to ns {
+        for b from a + 1 to ns {
+            key: Int = sp.st_m2[a] + sp.st_m2[b] + pmoff
+            w: Int = poff[key] + fill[key]
+            pa[w] = a
+            pb[w] = b
+            fill[key] += 1
+        }
+    }
+    acc = zeros(S.nsd)
+    touched = int_zeros(S.nsd)
+    seen = int_zeros(S.nsd)
+    off = int_zeros(S.nsd + 1)
+    dst: [Int] = []
+    val = []
+    for i to S.nsd {
+        s = S.pat[i]
+        nt: Int = 1
+        touched[0] = i
+        seen[i] = 1
+        e = 0.0
+        for k to ns {
+            if band(shr(s, k), 1) == 1 {
+                e = e + sp.spe[sp.st_orb[k]]
+            }
+        }
+        acc[i] = e
+        for q to npair {
+            ga = pa[q]
+            de = pb[q]
+            if band(shr(s, ga), 1) == 1 and band(shr(s, de), 1) == 1 {
+                sg: Int = below(pc, s, ga)
+                s1: Int = bxor(s, shl(one, ga))
+                sg += below(pc, s1, de)
+                s1 = bxor(s1, shl(one, de))
+                key: Int = sp.st_m2[ga] + sp.st_m2[de] + pmoff
+                for r from poff[key] to poff[key + 1] {
+                    al = pa[r]
+                    be = pb[r]
+                    if band(shr(s1, al), 1) == 0 and band(shr(s1, be), 1) == 0 {
+                        v = same[((al * ns + be) * ns + ga) * ns + de]
+                        if abs(v) > SHELL_ZERO {
+                            sg2: Int = sg + below(pc, s1, be)
+                            s2: Int = bor(s1, shl(one, be))
+                            sg2 += below(pc, s2, al)
+                            s2 = bor(s2, shl(one, al))
+                            j = S.index[s2]
+                            if seen[j] == 0 {
+                                seen[j] = 1
+                                touched[nt] = j
+                                nt += 1
+                                acc[j] = 0.0
+                            }
+                            if sg2 % 2 == 0 {
+                                acc[j] = acc[j] + v
+                            }
+                            else {
+                                acc[j] = acc[j] - v
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for t to nt {
+            j = touched[t]
+            dst = append(dst, j)
+            val = append(val, acc[j])
+            seen[j] = 0
+        }
+        off[i + 1] = len(dst)
+    }
+    dloc: [Int] = [S.loc[dst[e]] for e to len(dst)]
+    return SpeciesH { off: off, dst: dst, dloc: dloc, val: val }
+}
+
+# ---- one-body jumps ---------------------------------------------------------
+
+#: species_jumps  every one-body jump a+_al a_ga of one species (al == ga
+#:     included), sorted by the group of the source determinant and the
+#:     change of 2m: keyoff[g * nd + (dm2 + dmax) / 2] starts each bucket
+def species_jumps(sp: Space, pc: [Int], S: Species) -> Jumps {
+    one: Int = 1
+    ns = sp.ns
+    dmax: Int = 2 * int(amax([float(j2) for j2 in sp.orb_j2]))
+    nd: Int = dmax + 1
+    ngroups: Int = S.moff + 1
+    nkeys: Int = ngroups * nd
+    # count each bucket, then fill the buckets in key order
+    count = int_zeros(nkeys)
+    total: Int = 0
+    for i to S.nsd {
+        s = S.pat[i]
+        g: Int = (S.m2[i] + S.moff) // 2
+        for ga to ns {
+            if band(shr(s, ga), 1) == 1 {
+                s1: Int = bxor(s, shl(one, ga))
+                for al to ns {
+                    if band(shr(s1, al), 1) == 0 {
+                        dm: Int = sp.st_m2[al] - sp.st_m2[ga]
+                        count[g * nd + (dm + dmax) // 2] += 1
+                        total += 1
+                    }
+                }
+            }
+        }
+    }
+    keyoff = int_zeros(nkeys + 1)
+    for k to nkeys {
+        keyoff[k + 1] = keyoff[k] + count[k]
+    }
+    src = int_zeros(total)
+    dst = int_zeros(total)
+    op = int_zeros(total)
+    sgn = zeros(total)
+    dm2 = int_zeros(total)
+    fill = int_zeros(nkeys)
+    for i to S.nsd {
+        s = S.pat[i]
+        g: Int = (S.m2[i] + S.moff) // 2
+        for ga to ns {
+            if band(shr(s, ga), 1) == 1 {
+                sg: Int = below(pc, s, ga)
+                s1: Int = bxor(s, shl(one, ga))
+                for al to ns {
+                    if band(shr(s1, al), 1) == 0 {
+                        dm: Int = sp.st_m2[al] - sp.st_m2[ga]
+                        key: Int = g * nd + (dm + dmax) // 2
+                        w: Int = keyoff[key] + fill[key]
+                        fill[key] += 1
+                        src[w] = i
+                        dst[w] = S.index[bor(s1, shl(one, al))]
+                        op[w] = al * ns + ga
+                        if (sg + below(pc, s1, al)) % 2 == 0 {
+                            sgn[w] = 1.0
+                        }
+                        else {
+                            sgn[w] = -1.0
+                        }
+                        dm2[w] = dm
+                    }
+                }
+            }
+        }
+    }
+    sloc = int_zeros(total)
+    dloc = int_zeros(total)
+    for t to total {
+        sloc[t] = S.loc[src[t]]
+        dloc[t] = S.loc[dst[t]]
+    }
+    return Jumps { count: total, src: src, dst: dst, sloc: sloc, dloc: dloc, op: op, sgn: sgn,
+                   dm2: dm2, keyoff: keyoff, dmax: dmax }
+}
+
+# ---- applying H -------------------------------------------------------------
+
+#: apply_h_into  y = H x on the basis B: the proton part on each neutron
+#:     block, the neutron part inside each block, and the proton-neutron part
+#:     as a proton jump times a neutron jump with the opposite change of 2m
+def apply_h_into(B: Basis, P: Species, N: Species, HP: SpeciesH, HN: SpeciesH, JP: Jumps, JN: Jumps, pn: Arr, ns: Int, x: Arr, y: Arr) {
+    for i to B.dim {
+        y[i] = 0.0
+    }
+    nd: Int = JN.dmax + 1
+    for ip to P.nsd {
+        bi = B.start[ip]
+        if bi >= 0 {
+            n = B.len[ip]
+            for e from HP.off[ip] to HP.off[ip + 1] {
+                bj = B.start[HP.dst[e]]
+                v = HP.val[e]
+                for k to n {
+                    y[bj + k] = y[bj + k] + v * x[bi + k]
+                }
+            }
+            g = group_of(N, B.m2 - P.m2[ip])
+            first = N.gstart[g]
+            for k to n {
+                xin = x[bi + k]
+                inn = first + k
+                for e from HN.off[inn] to HN.off[inn + 1] {
+                    t = bi + HN.dloc[e]
+                    y[t] = y[t] + HN.val[e] * xin
+                }
+            }
+        }
+    }
+    nn2: Int = ns * ns
+    for t to JP.count {
+        ip = JP.src[t]
+        bi = B.start[ip]
+        bj = B.start[JP.dst[t]]
+        if bi >= 0 and bj >= 0 {
+            g = group_of(N, B.m2 - P.m2[ip])
+            key: Int = g * nd + (JN.dmax - JP.dm2[t]) // 2
+            row: Int = JP.op[t] * nn2
+            sp = JP.sgn[t]
+            for u from JN.keyoff[key] to JN.keyoff[key + 1] {
+                v = pn[row + JN.op[u]]
+                if v != 0.0 {
+                    t = bj + JN.dloc[u]
+                    y[t] = y[t] + sp * JN.sgn[u] * v * x[bi + JN.sloc[u]]
+                }
+            }
+        }
+    }
+}
+
+# ---- Lanczos ----------------------------------------------------------------
+
+
+#: apply_h  H x on the pieces H, as a new array
+def apply_h(H: ShellH, x: Arr) -> Arr {
+    B = H.b
+    dim = B.dim
+    y = zeros(dim)
+    apply_h_into(B, H.p, H.n, H.hp, H.hn, H.jp, H.jn, H.pn, H.ns, x, y)
+    return y
+}
+
+# ---- observables ------------------------------------------------------------
+
+#: j_squared  <psi| J^2 |psi> = |J+ psi|^2 + M (M + 1), with J+ psi on the
+#:     basis B2 of 2M + 2 (or no basis when 2M is the largest there is)
+def j_squared(sp: Space, B: Basis, B2: Basis, P: Species, N: Species, JP: Jumps, JN: Jumps, psi: Arr, k: Int) -> Num {
+    mm = 0.5 * float(B.m2)
+    base = mm * (mm + 1.0)
+    if B2.dim == 0 {
+        return base
+    }
+    ns = sp.ns
+    phi = zeros(B2.dim)
+    nd: Int = JN.dmax + 1
+    for t to JP.count {
+        if JP.dm2[t] == 2 {
+            al: Int = JP.op[t] // ns
+            ga: Int = JP.op[t] % ns
+            if sp.st_orb[al] == sp.st_orb[ga] {
+                bi = B.start[JP.src[t]]
+                bj = B2.start[JP.dst[t]]
+                if bi >= 0 and bj >= 0 {
+                    jj = 0.5 * sp.orb_j2[sp.st_orb[ga]]
+                    m = 0.5 * sp.st_m2[ga]
+                    c = JP.sgn[t] * sqrt(jj * (jj + 1.0) - m * (m + 1.0))
+                    for i to B.len[JP.src[t]] {
+                        phi[bj + i] = phi[bj + i] + c * psi[k, bi + i]
+                    }
+                }
+            }
+        }
+    }
+    for ip to P.nsd {
+        bi = B.start[ip]
+        bj = B2.start[ip]
+        if bi >= 0 and bj >= 0 {
+            g = group_of(N, B.m2 - P.m2[ip])
+            key: Int = g * nd + (JN.dmax + 2) // 2
+            for u from JN.keyoff[key] to JN.keyoff[key + 1] {
+                al: Int = JN.op[u] // ns
+                ga: Int = JN.op[u] % ns
+                if sp.st_orb[al] == sp.st_orb[ga] {
+                    jj = 0.5 * sp.orb_j2[sp.st_orb[ga]]
+                    m = 0.5 * sp.st_m2[ga]
+                    c = JN.sgn[u] * sqrt(jj * (jj + 1.0) - m * (m + 1.0))
+                    phi[bj + N.loc[JN.dst[u]]] = phi[bj + N.loc[JN.dst[u]]] + c * psi[k, bi + N.loc[JN.src[u]]]
+                }
+            }
+        }
+    }
+    return dot(phi, phi) + base
+}
+
+#: j_from_j2  the J whose J (J + 1) is the given expectation value
+def j_from_j2(j2: Num) -> Num {
+    return 0.5 * (sqrt(1.0 + 4.0 * j2) - 1.0)
+}
+
+#: occupations  the proton and neutron occupation of each orbit in state k
+def occupations(sp: Space, B: Basis, P: Species, N: Species, psi: Arr, k: Int) {
+    occp = zeros(sp.norb)
+    occn = zeros(sp.norb)
+    for ip to P.nsd {
+        bi = B.start[ip]
+        if bi >= 0 {
+            g = group_of(N, B.m2 - P.m2[ip])
+            first = N.gstart[g]
+            wsum = 0.0
+            for i to B.len[ip] {
+                pr = psi[k, bi + i] * psi[k, bi + i]
+                wsum = wsum + pr
+                for a to sp.norb {
+                    occn[a] = occn[a] + pr * N.occ[(first + i) * sp.norb + a]
+                }
+            }
+            for a to sp.norb {
+                occp[a] = occp[a] + wsum * P.occ[ip * sp.norb + a]
+            }
+        }
+    }
+    return occp, occn
+}
+
+# ---- the whole calculation --------------------------------------------------
+
+#: mass_scale  the factor (A0 / A)^x of the two-body matrix elements for
+#:     z + n valence nucleons on the core
+def mass_scale(sp: Space, z: Int, n: Int) -> Num {
+    if sp.xpow == 0.0 {
+        return 1.0
+    }
+    return (sp.a0 / (sp.core_a + float(z + n))) ^ sp.xpow
+}
+
+#: lowest_m2  the smallest 2M that z + n nucleons can have: 0 or 1
+def lowest_m2(z: Int, n: Int) -> Int {
+    return (z + n) % 2
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2017 Lawrence Livermore National Security and San Diego State University Research Foundation
+# SPDX-FileCopyrightText: 2026 The Viv authors

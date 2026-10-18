@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+name: gate
+
+# The same gate a local run uses (tools/gate.sh; CONTRIBUTING.md, "The gate"):
+# the quick tier on every push and pull request, the nightly tier at 03:00 UTC.
+# ci.yml predates it and runs some of the same checks as separate jobs; the
+# gate is the list that decides a merge.
+#
+# The repository has no remote yet; this file is ready for when it has one.
+# Netlify (netlify.toml) builds and deploys the site from main by itself and
+# does not wait for this workflow. To keep an ungated commit off the site,
+# protect main with "gate / quick" as a required status check, so a commit
+# reaches main (and the deploy) only through a pull request that passed.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: quick, full or nightly
+        default: full
+
+# Least privilege: the jobs read the repository and upload artifacts, and
+# write nothing back to GitHub.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 4
+  GATE_SOURCE: github
+
+jobs:
+  gate:
+    name: ${{ github.event_name == 'schedule' && 'nightly' || inputs.tier || 'quick' }} (${{ matrix.os }})
+    # Linux and macOS: the C the compiler emits and fast mode's flags differ by
+    # platform (gcc vs Apple clang, -march vs -mcpu), so both are gated.
+    # macOS minutes cost more on a private repository; drop it from the matrix
+    # there if that matters.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 360 || 60 }}
+    env:
+      TIER: ${{ github.event_name == 'schedule' && 'nightly' || inputs.tier || 'quick' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # hub-golden and merge-base need main's history
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # NumPy 1.24.4: lib/nprandom reproduces that version's draws
+      - run: pip install numpy==1.24.4 matplotlib pytest
+      # The nightly tier's port-verify runs PySCF, and bench-smoke times Julia
+      # (provisional: a failed bench-smoke warns, it does not fail the gate).
+      - if: github.event_name == 'schedule' || inputs.tier == 'nightly'
+        run: pip install pyscf==2.5.0
+      - if: github.event_name == 'schedule' || inputs.tier == 'nightly'
+        uses: julia-actions/setup-julia@v2
+      - run: npm ci --prefix www || npm install --prefix www
+      - run: git branch -f main origin/main 2>/dev/null || true
+      - name: gate
+        run: tools/gate.sh "$TIER" --keep-going
+      - run: tools/gate.sh bugs
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-${{ env.TIER }}-${{ matrix.os }}
+          path: target/gate
+          retention-days: 14
+

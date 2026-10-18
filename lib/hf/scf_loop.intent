@@ -1,0 +1,364 @@
+module lib/hf/scf_loop
+  The Hartree-Fock self-consistent field (SCF) loop, written once for RHF,
+  UHF and ROHF.
+
+  Hartree-Fock replaces the repulsion between electrons by an average: each
+  electron moves in the field of the charge cloud of all the others. That
+  field depends on the orbitals, and the orbitals depend on the field, so the
+  equations are solved by iteration. Guess a density, build the field (the
+  Fock matrix) from it, solve for new orbitals, fill the lowest ones with
+  electrons, and repeat until the density stops changing.
+
+  RHF carries one total density, UHF one density per spin, and ROHF one
+  density per spin with one shared set of orbitals. The three differ in how
+  many densities the loop carries, in the matrix it diagonalizes (ROHF builds
+  an effective Fock matrix, lib/hf/coupling) and in how orbitals are filled.
+  Every stage that has more than one way to be done (guess, orthogonalizer,
+  eigensolver, J/K builder, accelerator, ROHF coupling) is picked by a field
+  of the run's options, so one loop runs every combination the tests check.
+  The defs that pick (`gs_of`, `orth_of`, `eig_of`, `jk_of`,
+  `accel_extrapolate`) call each member by name, so the default options run
+  the production members directly.
+
+scf_iterate  @297271d8
+  how   Work in an orthonormal basis built from S, where each iteration is an
+        ordinary symmetric eigenproblem. Each pass builds J and K from D,
+        forms F, computes the energy, and measures how far F and D are from
+        commuting. When the energy has stopped changing and the commutator is
+        small, stop. Otherwise extrapolate F from the recent iterations (DIIS;
+        PySCF leaves the guess's Fock matrix out, `diis_start = 1`),
+        diagonalize it, and fill the lowest orbitals to get the next D.
+  why   The converged density is a fixed point of "build F from D, solve,
+        fill", and at that fixed point F and D commute (`F D S - S D F = 0`),
+        which is the condition for the energy to be stationary. Iterating the
+        map directly can oscillate or crawl; extrapolating with DIIS reaches the
+        same answer in fewer iterations (lib/hf/rhf times both on water).
+        Each iteration allocates what it computes; the compiled loop frees it
+        when the iteration ends, so a long run uses no
+        more memory than a short one (lib/hf/rhf runs past convergence to
+        check it). The loop computes only what the next iteration needs: the
+        energy change, the commutator norm and the DIIS history size it
+        reports, and the checks that F is symmetric and that each density
+        holds its electrons, are its debug lens (lib/hf/scf_loop.debug).
+  D      density matrices in the AO basis, `[nd, n, n]`: `D[i, j] = sum over
+         occupied orbitals of c_i c_j` (times two for a closed shell), where c
+         holds an orbital's coefficients on the basis functions. `Tr(D S)` is
+         the number of electrons in D.
+  F      Fock matrices, `[nd, n, n]`: the one-electron Hamiltonian H plus the
+         average repulsion, `F = H + J - K/2` for a closed shell. Its
+         eigenvectors are the orbitals; it is symmetric.
+  X      orthogonalizer, `[n, m]`: `X^T S X = I`. Its columns are combinations
+         of basis functions that are orthonormal; `m < n` when nearly dependent
+         combinations are dropped.
+  JK     J and K of each density, `[2 nd, n, n]`. J is the classical repulsion
+         from the charge cloud of a density; K, exchange, has no classical
+         counterpart and acts only between electrons of the same spin.
+  e      the energy of the current density, `E_nuc + (1/2) sum_d Tr D_d (H + F_d)`
+  comm   the commutator step's products: the matrix DIIS extrapolates, its
+         error, its largest element (`comm.norm`, zero exactly at
+         self-consistency), and the densities in the orthonormal basis
+  diis   the recent matrices and their errors that DIIS mixes
+  Fnext  the matrix about to be diagonalized: DIIS's mix, level shifted when a
+         shift is set
+  eigs   its eigenvalues and eigenvectors, one set per matrix
+  U      `S X`, `[n, m]`, which moves each new density into the orthonormal basis
+  incr   the incremental Fock build's full-rebuild interval, `0` when every
+         build uses the whole density (`scf_incremental`); it drops to `0`
+         when a build from a change of density first meets the convergence
+         test, because the noise those builds carry (about 1e-11 Eh on
+         (H2O)8 6-31G*, from the quartets screening drops) is the size of the
+         test itself
+  Dbuilt the densities the last J and K were built from
+  since  how many builds from a change of density since the last one from
+         the whole density
+  setup    the setup: H, S, the integrals, electron counts, options
+  D0       the starting densities
+  n        the number of basis functions
+  nd       the number of densities the loop carries: `1` for RHF, `2` otherwise
+  opts     the options as the array the registry members read
+  eprev    the energy of the previous iteration
+  conv     `1` when the loop stopped because it converged
+  it       the iteration running, from 1; after the loop, how many ran
+  r        the result record
+
+  orthonormal_basis  build the orthonormal basis X from S, its m kept columns
+  start              start the DIIS history, the incremental build's state and the loop's counters from the starting densities
+  repeat for at most max_iter iterations, leaving once the energy changed less than e_tol and the commutator is below grad_tol
+    coulomb_exchange   build J and K from the current densities: from the change since the last build, or from the whole densities every incr iterations
+    fock               form the Fock matrices
+    energy             compute the energy of the current densities
+    commutator         move F and D into the orthonormal basis and measure how far they are from commuting
+    diis               store the matrix and its error, and mix the stored ones by DIIS; in the first diis_start iterations, pass the new matrix on unmixed
+    if a level shift is set
+      level_shift        raise the empty orbitals by the shift
+    diagonalize        diagonalize each matrix
+    new_density        fill the lowest orbitals to make the next densities
+  result             the result record: energy, orbitals, densities, the convergence record
+  return it
+
+scf_energy2  @769e0dc8
+  how   `E_nuc + Tr(D H) + (1/2) Tr(D J) - (1/4) Tr(D K)` for one total
+        density; for two spin densities, `E_nuc + Tr(Dt H) + (1/2) Tr(Dt Jt)
+        - (1/2) sum_s Tr(D_s K_s)`, with `Dt` and `Jt` the totals over spins.
+  why   The two formulas share no code after J and K are built, so their
+        agreement catches a Fock matrix assembled wrongly
+        [test "a converged density is the plain step's fixed point, and the energy formulas agree"].
+  H     the core Hamiltonian, `[n, n]`
+  JK    J and K of each density, `[2 nd, n, n]`: J of density d at `2 d`,
+        K at `2 d + 1`
+  D     the densities, `[nd, n, n]`
+  enuc  the nuclear repulsion, hartree
+  Da    the (alpha or total) density, transposed, so `sum(Da * H)` is `Tr(D H)`
+  Db    the beta density, transposed
+  eh    `Tr(Dt H) + (1/2) Tr(Dt Jt)`
+
+scf_level_shift  @c33e52c2
+  why   A larger gap between occupied and empty orbitals damps the swapping of
+        orbitals between iterations, which is what makes some SCF runs
+        oscillate. It changes the path, not the converged answer (the level
+        shifted preset of lib/hf/rhf lands on PySCF's energy).
+  setup  the setup, for the method
+  Fnext  the matrices about to be diagonalized, `[k, m, m]`
+  comm   the commutator step's products; its densities say which orbitals
+         are occupied
+  m      the size of the orthonormal basis
+  shift  how far the virtual orbitals are raised, hartree
+  w      electrons per orbital, so `P'/w` is a projector
+  Fs     the shifted matrices, `[k, m, m]`
+  d      the matrix of the stack
+  Q      `I - P'/w` for matrix d, the projector on the empty orbitals
+  a      a diagonal position
+
+scf_result  @ebff9d3d
+  why   Whenever the loop converged, the last J, K and Fock matrices were
+        built from the densities it returns, so the energy, the commutator
+        and both energy formulas describe that one state. The orbitals come
+        from one more diagonalization of the last Fock matrices, so for RHF
+        and UHF `D = C occ C^T`, which lib/hf/rhf checks on water.
+  setup   the setup
+  X       the orthogonalizer, `[n, m]`
+  D       the final densities, `[nd, n, n]`
+  F       the Fock matrices built from the densities before D
+  JK      their J and K
+  e       the energy of those densities
+  conv    `1` when the loop converged
+  it      the number of iterations run
+  opts    the options array
+  method  the method the run used
+  m       the size of the orthonormal basis, X's column count
+  nd      the number of densities
+  grad    the largest element of the AO commutator `F D S - S D F`
+  d       a density
+  s2      `<S^2>`, the expectation value of the total spin squared; `0` for RHF
+  e2      the energy by the second formula (scf_energy2)
+  half    half the RHF total density: the alpha density
+  a       the alpha orbitals (RHF: the spatial orbitals)
+  b       the beta orbitals
+  total   the total density, alpha plus beta
+  favg    the average of the two spin Fock matrices
+  comm    ROHF's commutator products, for its effective matrix
+  R       ROHF's eigensolver result
+  V       its eigenvectors
+  C       ROHF's shared orbital coefficients, `[n, m]`
+  occ     ROHF's occupations: `2`, `1` or `0` per orbital
+
+  convergence      the AO commutator, <S^2> and the energy by the second formula
+  if the run is RHF
+    closed_shell     the spatial orbitals, two electrons in each occupied one
+    return the result
+  if the run is ROHF
+    shared_orbitals  the effective matrix's eigenvectors, occupied 2, 1 and 0
+    return the result
+  spin_orbitals    each spin's orbitals from its own Fock matrix
+  return the result
+
+scf_solve  @e4e5e35d
+  why   ROHF with fewer alpha than beta electrons has the same open orbitals
+        as the swapped problem; running that one and giving the spins back
+        keeps the coupling code to one spin order
+        [test "one entry point runs all three methods: the atom-free model gives 0.2 closed and 1.0 as a triplet"].
+  setup   the setup
+  start   the starting spin densities, `[2, n, n]`
+  method  the method the setup carries, decided when it was made
+
+scf  @a8014ec0
+  setup  the setup
+  n      the number of basis functions
+  start  the guess's spin densities, `[2, n, n]`
+  r      the result
+
+  guess          make a starting density for each spin from the guess the options pick
+  solve          run the loop from them with the method the setup asks for
+  return the result
+
+scf_step  @e0403a4d
+  why   At a converged state the step gives the same densities back. That
+        checks the Fock build, the eigensolver and the filling rule against
+        PySCF one step at a time, without depending on the path an iteration
+        takes [test "a converged density is the plain step's fixed point, and the energy formulas agree"].
+  setup  the setup
+  Da     the alpha density to step from, `[n, n]`
+  Db     the beta density to step from, `[n, n]`
+  plain  the options with one iteration, no accelerator, no level shift and
+         a negative energy tolerance, so the loop never stops early
+
+scf_setup  @4d2a9224
+  why   One record carries everything the loop needs, so each stage member
+        and each method takes the same argument, and the method is decided
+        here, once.
+  H     the core Hamiltonian `T + V`, `[n, n]`
+  S     the overlap matrix, `[n, n]`
+  G     the packed repulsion integrals, or the basis blob a direct J/K
+        member reads
+  na    the number of alpha (spin-up) electrons
+  nb    the number of beta (spin-down) electrons
+  enuc  the repulsion between the nuclei, hartree; a constant of the geometry
+  o     the run's options (lib/hf/opts)
+
+scf_setup_with  @c33a0125
+  why   A record update (`ScfSetup { options: o, ..setup }`) keeps the method
+        the setup was made with; a caller that changes the options' method,
+        or anything the automatic choice depends on, rebuilds the setup here
+        so the method is decided again.
+  setup  the setup whose matrices, counts and nuclear repulsion are kept
+  o      the new options
+
+scf_method  @8b2ce83c
+  why   A caller who leaves the method automatic gets the cheapest one that
+        fits: one density for a closed shell, two for an open one. It is
+        asked once, by `scf_setup`, and the setup carries the answer
+        (`setup.method`), so the helpers of the loop read a field instead of
+        deciding again; `scf_solve` asks it once more to catch a setup whose
+        options or counts a record update changed.
+  o     the run's options
+  na    the number of alpha electrons
+  nb    the number of beta electrons
+  m     the method the options ask for, as a whole number
+
+scf_opts  @435eeacb
+  why   The registry members take a plain array rather than the options
+        record, so a member of lib/hf/guess, eigen or accelerate reads its
+        settings the same way whoever calls it.
+  setup  the setup: options and electron counts
+
+scf_weight  @60a561ec
+  setup  the setup, for its method
+
+scf_nocc  @0c964866
+  setup  the setup, for its electron counts
+  d     which density: `0` for the RHF total or alpha, `1` for beta
+
+scf_incremental  @9a85d228
+  why   A direct build costs less the smaller the density it is given,
+        because its density screening skips the quartets that density does
+        not reach; an in-core build costs the same whatever the density.
+        So only the production direct member builds from the change of
+        density, as PySCF's direct SCF does, and from the whole density
+        every `fock_rebuild` iterations so the rounding of the sums cannot
+        build up.
+  setup  the setup, for its options
+
+scf_nmatrix  @442be429
+  setup  the setup, for its method
+  nd    how many densities the loop carries
+
+scf_swapped  @01d1b947
+  why   ROHF's code assumes at least as many alpha as beta electrons; the
+        other case runs as its mirror image (scf_solve).
+  setup  the setup to swap
+
+scf_commutator  @a46fa7e0
+  why   At self-consistency F and D commute (`F D S = S D F` in the AO
+        basis); the size of the commutator is the loop's convergence test
+        and the error vector DIIS minimizes.
+  setup  the setup, for S and the method
+  X     the orthogonalizer, `[n, m]`
+  U     `S X`, which the loop computes once, `[n, m]`
+  m     how many orthonormal functions X keeps: its column count
+  F     the Fock matrices in the AO basis, `[nd, n, n]`
+  D     the densities in the AO basis, `[nd, n, n]`
+  opts  the options array, for ROHF's coupling member
+  nd    the number of densities
+  Fo    the Fock matrices in the orthonormal basis, `[nd, m, m]`
+  P     the densities in the orthonormal basis (ROHF: the closed and open
+        projectors), `[nd, m, m]`
+  Fe    ROHF's effective Fock matrix, `[1, m, m]`
+  E     the error matrices: the commutators, `[nd, m, m]`
+  norm  the largest element of any error matrix
+  d     the density being handled
+  Pd    density d in the orthonormal basis
+  Ed    its commutator with its Fock matrix
+
+scf_diagonalize  @95287578
+  why   The eigensolver is picked by `opts[OPT_EIGEN]` (`eig_of`), so
+        every run can switch it or cross-check it.
+  Fnext the matrices to diagonalize, `[k, m, m]`
+  opts  the options array
+  sh    Fnext's shape
+  eigs  the results, one eigensolver record per matrix
+  d     the matrix being diagonalized
+
+scf_occupy  @eb987221
+  why   Filling the lowest orbitals (aufbau) is how each iteration turns
+        orbitals back into densities.
+  setup  the setup: method and electron counts
+  X     the orthogonalizer, `[n, m]`
+  eigs  the eigensolver results, one per matrix
+  comm  the commutator step's products; ROHF reads its spin Fock matrices to
+        choose the open orbitals
+  m     the size of the orthonormal basis, X's column count
+  V     ROHF's eigenvectors, `[m, m]`
+  n     the number of basis functions
+  nd    the number of densities
+  D     the new densities in the AO basis, `[nd, n, n]`
+  d     the density being filled
+
+scf_coefficients  @bf7650c2
+  why   The eigensolver works in the orthonormal basis; a caller wants the
+        orbitals as combinations of the original basis functions.
+  X     the orthogonalizer, `[n, m]`
+  V     eigenvectors in the orthonormal basis, `[m, m]`
+
+scf_aufbau  @f2eba142
+  m     the number of orbitals
+  nocc  how many are occupied
+  w     electrons in each occupied orbital
+  occ   the occupations, `[m]`
+
+scf_orbitals  @05421be8
+  X     the orthogonalizer, `[n, m]`
+  Fd    one Fock matrix, `[n, n]`
+  D     the density to store with the orbitals
+  nocc  how many orbitals are occupied
+  w     electrons in each
+  opts  the options array, for the eigensolver member
+  m     the size of the orthonormal basis, X's column count
+  R     the eigensolver's result: eigenvalues and eigenvectors
+
+scf_unswap  @ab829052
+  r     the result of a run with the spins swapped
+
+scf_run_from  @3b548fd3
+  why   A caller that already has densities (a converged result, another
+        method's answer) starts the loop from them instead of a guess.
+  setup  the setup
+  Da    the alpha density, `[n, n]`
+  Db    the beta density, `[n, n]`
+
+scf_densities  @1e6af102
+  r     a result
+
+scf_density_gap  @ca94d6ef
+  a     one result
+  b     the other, of the same method
+
+scf_t_model  @ce5f656d
+  why   A model small enough to solve by hand: its energies are known
+        exactly, so the tests can check the loop without integrals.
+  na      the number of alpha electrons
+  nb      the number of beta electrons
+  method  the method to ask for
+  h       the core Hamiltonian: orbital energies `0`, `1`, `2`
+  s       the overlap: the identity
+  g       the packed integrals: `(ii|ii)` on each orbital, zero elsewhere
+  i       an orbital

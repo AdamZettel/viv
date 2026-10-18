@@ -1,0 +1,446 @@
+# NN-guided symmetry discovery: the AI-Feynman outer loop, in Viv.
+#
+# The mystery is f(x, y) = exp(-(x-y)^2), sampled on a grid. In two variables
+# its shortest RPN spelling needs 8 tokens -- beyond the L <= 6 search budget,
+# so brute force drowns (phase 1). A small MLP trained on the same samples
+# (phase 2) becomes a queryable stand-in for f: shift BOTH inputs by the same
+# amount -- a point the dataset never contained -- and the prediction doesn't
+# move (phase 3). That invariance means f depends only on u = x - y, so the
+# search re-runs in one variable (phase 4), where the answer costs 5 tokens
+# and the SAME budget finds it exactly.
+#
+# Output protocol (labeled `show` lines): ph marks the phase; ch_* champion
+# records as in symbolic_regression.viv; ep/tr_loss the NN trace; pr_* the
+# probe deviations; n_valid/n_seen search stats.
+#
+# Alphabet (codes): 0 x   1 one   2 +   3 -   4 *   5 /   6 sin   7 exp
+#                   8 sqrt   9 neg   10 y (phase-1 only)
+
+MAXLEN = 6
+GRID = 15
+NPTS = 225
+
+xs1 = zeros(256)
+xs2 = zeros(256)
+ys = zeros(256)
+syy = zeros(1)
+
+def gen_data() {
+    for i to GRID {
+        for j to GRID {
+            x = 0.0 - 1.2 + 2.4 * i / (GRID - 1.0)
+            y = 0.0 - 1.2 + 2.4 * j / (GRID - 1.0)
+            k = i * GRID + j
+            xs1[k] = x
+            xs2[k] = y
+            d = x - y
+            ys[k] = exp(0.0 - d * d)
+        }
+    }
+    s = 0.0
+    for k to NPTS { s = s + ys[k] * ys[k] }
+    syy[0] = s
+}
+
+# ── the RPN machinery (two-variable variant of symbolic_regression.viv) ────
+def arity(c) {
+    if c <= 1.0 { return 0.0 }
+    if c == 10.0 { return 0.0 }
+    if c <= 5.0 { return 2.0 }
+    return 1.0
+}
+
+code = zeros(8)
+stk = zeros(8)
+bad = zeros(1)
+
+def eval_rpn(L, x, y) {
+    sp = 0.0
+    for k to L {
+        c = code[k]
+        if arity(c) == 0.0 {
+            v = 1.0
+            if c == 0.0 { v = x }
+            if c == 10.0 { v = y }
+            stk[sp] = v
+            sp = sp + 1.0
+        }
+        if arity(c) == 2.0 {
+            b = stk[sp - 1.0]
+            a = stk[sp - 2.0]
+            r = 0.0
+            if c == 2.0 { r = a + b }
+            if c == 3.0 { r = a - b }
+            if c == 4.0 { r = a * b }
+            if c == 5.0 {
+                if abs(b) < 1.0e-12 { bad[0] = 1.0 }
+                if bad[0] == 0.0 { r = a / b }
+            }
+            stk[sp - 2.0] = r
+            sp = sp - 1.0
+        }
+        if arity(c) == 1.0 {
+            a = stk[sp - 1.0]
+            r = 0.0
+            if c == 6.0 { r = sin(a) }
+            if c == 7.0 {
+                if a > 40.0 { bad[0] = 1.0 }
+                if bad[0] == 0.0 { r = exp(a) }
+            }
+            if c == 8.0 {
+                if a < 0.0 { bad[0] = 1.0 }
+                if bad[0] == 0.0 { r = sqrt(a) }
+            }
+            if c == 9.0 { r = 0.0 - a }
+            stk[sp - 1.0] = r
+        }
+    }
+    return stk[0]
+}
+
+sc = zeros(2)
+# one_var: true -> evaluate on the reduced u-grid (us); false -> on the (x, y) grid
+us = zeros(256)
+def score(L, one_var) {
+    syf = 0.0
+    sff = 0.0
+    bad[0] = 0.0
+    for p to NPTS {
+        f = 0.0
+        if one_var { f = eval_rpn(L, us[p], 0.0) }
+        if not one_var { f = eval_rpn(L, xs1[p], xs2[p]) }
+        if bad[0] == 1.0 { break }
+        if abs(f) > 1.0e14 { bad[0] = 1.0 }
+        if bad[0] == 1.0 { break }
+        syf = syf + ys[p] * f
+        sff = sff + f * f
+    }
+    sc[0] = 1.0e30
+    sc[1] = 0.0
+    if bad[0] == 1.0 { return 0.0 }
+    if sff < 1.0e-12 { return 0.0 }
+    cbest = syf / sff
+    sse = syy[0] - cbest * syf
+    if sse < 0.0 { sse = 0.0 }
+    sc[0] = sqrt(sse / NPTS)
+    sc[1] = cbest
+    return 0.0
+}
+
+d = zeros(8)
+# nsym: alphabet size (11 with y, 10 without)
+def search(nsym, one_var) {
+    ch_err = 1.0e30
+    n_seen = 0.0
+    n_valid = 0.0
+    for LL to MAXLEN {
+        L = LL + 1.0
+        for i to L { d[i] = 0.0 }
+        going = true
+        while going {
+            n_seen = n_seen + 1.0
+            depth = 0.0
+            ok = true
+            for k to L {
+                a = arity(d[k])
+                if a == 0.0 { depth = depth + 1.0 }
+                if a == 1.0 {
+                    if depth < 1.0 { ok = false }
+                }
+                if a == 2.0 {
+                    if depth < 2.0 { ok = false }
+                    depth = depth - 1.0
+                }
+                if not ok { break }
+            }
+            if depth == 1.0 {
+                if ok {
+                    n_valid = n_valid + 1.0
+                    for k to L { code[k] = d[k] }
+                    score(L, one_var)
+                    err = sc[0]
+                    if err < ch_err * (1.0 - 1.0e-6) {
+                        ch_err = err
+                        ch_len = L
+                        ch_c = sc[1]
+                        ch_code = zeros(L)
+                        for k to L { ch_code[k] = code[k] }
+                        show ch_len
+                        show ch_err
+                        show ch_c
+                        show ch_code
+                    }
+                }
+            }
+            pos = 0.0
+            carry = true
+            while carry {
+                if pos >= L {
+                    going = false
+                    carry = false
+                }
+                else {
+                    d[pos] = d[pos] + 1.0
+                    if d[pos] > nsym - 0.5 {
+                        d[pos] = 0.0
+                        pos = pos + 1.0
+                    }
+                    else {
+                        carry = false
+                    }
+                }
+            }
+        }
+    }
+    show n_valid
+    show n_seen
+    return 0.0
+}
+
+# ── a small MLP, trained by hand-written backprop + Adam ────────────────────
+# 2 -> H -> H -> 1, tanh activations. Deterministic Park-Miller LCG init
+# (16807 * s mod 2^31-1 stays under 2^53, so the arithmetic is exact in f64).
+H = 12
+rng = zeros(1)
+def rand01() {
+    s = rng[0] * 16807.0
+    m = 2147483647.0
+    s = s - floor(s / m) * m
+    rng[0] = s
+    return s / m
+}
+
+W1 = zeros(12, 2)
+b1 = zeros(12)
+W2 = zeros(12, 12)
+b2 = zeros(12)
+W3 = zeros(12)
+b3 = zeros(1)
+
+gW1 = zeros(12, 2)
+gb1 = zeros(12)
+gW2 = zeros(12, 12)
+gb2 = zeros(12)
+gW3 = zeros(12)
+gb3 = zeros(1)
+
+mW1 = zeros(12, 2)
+vW1 = zeros(12, 2)
+mb1 = zeros(12)
+vb1 = zeros(12)
+mW2 = zeros(12, 12)
+vW2 = zeros(12, 12)
+mb2 = zeros(12)
+vb2 = zeros(12)
+mW3 = zeros(12)
+vW3 = zeros(12)
+mb3 = zeros(1)
+vb3 = zeros(1)
+
+h1 = zeros(12)
+h2 = zeros(12)
+
+def tanh_act(x) {
+    z = x
+    if z > 20.0 { z = 20.0 }
+    if z < -20.0 { z = -20.0 }
+    return 1.0 - 2.0 / (exp(2.0 * z) + 1.0)
+}
+
+def nn_forward(x, y) {
+    for j to H {
+        h1[j] = tanh_act(W1[j, 0] * x + W1[j, 1] * y + b1[j])
+    }
+    for k to H {
+        s = b2[k]
+        for j to H { s = s + W2[k, j] * h1[j] }
+        h2[k] = tanh_act(s)
+    }
+    o = b3[0]
+    for k to H { o = o + W3[k] * h2[k] }
+    return o
+}
+
+def nn_init() {
+    rng[0] = 20260702.0
+    for j to H {
+        for i to 2 { W1[j, i] = (rand01() - 0.5) * 1.2 }
+        b1[j] = 0.0
+        for k to H { W2[j, k] = (rand01() - 0.5) * 0.5 }
+        b2[j] = 0.0
+        W3[j] = (rand01() - 0.5) * 0.5
+    }
+    b3[0] = 0.0
+}
+
+dh1 = zeros(12)
+dh2 = zeros(12)
+
+def adam_step(lr, b1c, b2c) {
+    # elementwise Adam over every parameter group
+    for j to H {
+        for i to 2 {
+            g = gW1[j, i]
+            mW1[j, i] = 0.9 * mW1[j, i] + 0.1 * g
+            vW1[j, i] = 0.999 * vW1[j, i] + 0.001 * g * g
+            W1[j, i] = W1[j, i] - lr * (mW1[j, i] / b1c) / (sqrt(vW1[j, i] / b2c) + 1.0e-8)
+        }
+        g = gb1[j]
+        mb1[j] = 0.9 * mb1[j] + 0.1 * g
+        vb1[j] = 0.999 * vb1[j] + 0.001 * g * g
+        b1[j] = b1[j] - lr * (mb1[j] / b1c) / (sqrt(vb1[j] / b2c) + 1.0e-8)
+        for k to H {
+            g = gW2[j, k]
+            mW2[j, k] = 0.9 * mW2[j, k] + 0.1 * g
+            vW2[j, k] = 0.999 * vW2[j, k] + 0.001 * g * g
+            W2[j, k] = W2[j, k] - lr * (mW2[j, k] / b1c) / (sqrt(vW2[j, k] / b2c) + 1.0e-8)
+        }
+        g = gb2[j]
+        mb2[j] = 0.9 * mb2[j] + 0.1 * g
+        vb2[j] = 0.999 * vb2[j] + 0.001 * g * g
+        b2[j] = b2[j] - lr * (mb2[j] / b1c) / (sqrt(vb2[j] / b2c) + 1.0e-8)
+        g = gW3[j]
+        mW3[j] = 0.9 * mW3[j] + 0.1 * g
+        vW3[j] = 0.999 * vW3[j] + 0.001 * g * g
+        W3[j] = W3[j] - lr * (mW3[j] / b1c) / (sqrt(vW3[j] / b2c) + 1.0e-8)
+    }
+    g = gb3[0]
+    mb3[0] = 0.9 * mb3[0] + 0.1 * g
+    vb3[0] = 0.999 * vb3[0] + 0.001 * g * g
+    b3[0] = b3[0] - lr * (mb3[0] / b1c) / (sqrt(vb3[0] / b2c) + 1.0e-8)
+}
+
+def nn_train(epochs) {
+    nn_init()
+    b1t = 1.0
+    b2t = 1.0
+    rms = 0.0
+    for ep to epochs {
+        for j to H {
+            gb1[j] = 0.0
+            gb2[j] = 0.0
+            gW3[j] = 0.0
+            for i to 2 { gW1[j, i] = 0.0 }
+            for k to H { gW2[j, k] = 0.0 }
+        }
+        gb3[0] = 0.0
+        sse = 0.0
+        for p to NPTS {
+            o = nn_forward(xs1[p], xs2[p])
+            r = o - ys[p]
+            sse = sse + r * r
+            dout = 2.0 * r / NPTS
+            gb3[0] = gb3[0] + dout
+            for k to H {
+                gW3[k] = gW3[k] + dout * h2[k]
+                dh2[k] = dout * W3[k] * (1.0 - h2[k] * h2[k])
+                gb2[k] = gb2[k] + dh2[k]
+            }
+            for j to H {
+                s = 0.0
+                for k to H {
+                    gW2[k, j] = gW2[k, j] + dh2[k] * h1[j]
+                    s = s + dh2[k] * W2[k, j]
+                }
+                dh1[j] = s * (1.0 - h1[j] * h1[j])
+                gb1[j] = gb1[j] + dh1[j]
+                gW1[j, 0] = gW1[j, 0] + dh1[j] * xs1[p]
+                gW1[j, 1] = gW1[j, 1] + dh1[j] * xs2[p]
+            }
+        }
+        rms = sqrt(sse / NPTS)
+        rem = ep - 250.0 * floor(ep / 250.0)
+        if rem == 0.0 {
+            tr_ep = ep
+            tr_loss = rms
+            show tr_ep
+            show tr_loss
+        }
+        b1t = b1t * 0.9
+        b2t = b2t * 0.999
+        adam_step(0.01, 1.0 - b1t, 1.0 - b2t)
+    }
+    nn_rms = rms
+    show nn_rms
+    return 0.0
+}
+
+# ── probing the trained NN at points the dataset never contained ────────────
+pv = zeros(128)
+def median_of(n) {
+    # insertion sort pv[0..n)
+    for i to n {
+        key = pv[i]
+        j = i
+        while j > 0.0 {
+            if pv[j - 1.0] > key {
+                pv[j] = pv[j - 1.0]
+                j = j - 1.0
+            }
+            else {
+                break
+            }
+        }
+        pv[j] = key
+    }
+    return pv[floor(n / 2.0)]
+}
+
+# probe kinds: 1 shift both (+a,+a) · 2 shift x only · 3 scale both · 4 shift opposite
+def probe(kind, n) {
+    a = 0.35
+    for t to n {
+        x = (rand01() - 0.5) * 1.6
+        y = (rand01() - 0.5) * 1.6
+        g0 = nn_forward(x, y)
+        g1 = 0.0
+        if kind == 1.0 { g1 = nn_forward(x + a, y + a) }
+        if kind == 2.0 { g1 = nn_forward(x + a, y) }
+        if kind == 3.0 { g1 = nn_forward(1.3 * x, 1.3 * y) }
+        if kind == 4.0 { g1 = nn_forward(x + a, y - a) }
+        pv[t] = abs(g1 - g0)
+    }
+    return median_of(n)
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+gen_data()
+
+# Phase 1: brute force in (x, y) -- 11-symbol alphabet, L <= 6. It fails.
+ph = 1.0
+show ph
+search(11.0, false)
+
+# Phase 2: train the MLP oracle on the same 225 samples.
+ph = 2.0
+show ph
+nn_train(1501)
+
+# Phase 3: interrogate the oracle with counterfactual shifts.
+ph = 3.0
+show ph
+rng[0] = 777.0
+pr_shift_both = probe(1.0, 100.0)
+pr_shift_x = probe(2.0, 100.0)
+pr_scale_both = probe(3.0, 100.0)
+pr_shift_opp = probe(4.0, 100.0)
+show pr_shift_both
+show pr_shift_x
+show pr_scale_both
+show pr_shift_opp
+
+# Phase 4: the symmetry says f = g(x - y). Substitute u and search again --
+# same budget, one variable, 10-symbol alphabet. It succeeds.
+ph = 4.0
+show ph
+for p to NPTS { us[p] = xs1[p] - xs2[p] }
+search(10.0, true)
+
+test "the mystery is what it claims to be" {
+    assert_near(ys[0], exp(0.0), 1.0e-7)
+    d0 = xs1[3] - xs2[3]
+    assert_near(ys[3], exp(0.0 - d0 * d0), 1.0e-7)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

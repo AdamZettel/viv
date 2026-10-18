@@ -1,0 +1,43 @@
+#! timing
+# PolyBench/C 4.2.1 correlation: the correlation matrix of M variables
+# observed N times.
+# Reference: upstream/polybench-c-4.2.1/datamining/correlation/correlation.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+M = 28
+N = 32
+DUMP = 1
+
+from polybench import dump
+
+# A column whose standard deviation is at most EPS is not scaled
+# (PolyBench's guard against dividing by a near-zero spread).
+EPS = 0.1
+
+def init() {
+    return [[(i * j) / M + i for j to M] for i to N]
+}
+
+def kernel(data, float_n) {
+    mean = sum(data, axis=0) / float_n
+    D = data - mean
+    stddev = sqrt(sum(D * D, axis=0) / float_n)
+    stddev = where(stddev <= EPS, 1.0, stddev)
+    Z = D / (sqrt(float_n) * stddev)
+    corr = transpose(Z) @ Z
+    for i to M {
+        corr[i, i] = 1.0
+    }
+    return corr
+}
+
+data = init()
+t0 = clock()
+corr = kernel(data, N)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("corr", corr)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

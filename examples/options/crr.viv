@@ -1,0 +1,63 @@
+#|| The Cox-Ross-Rubinstein binomial tree (J. Financial Economics 7, 1979)
+#|| for European and American calls and puts on a stock with continuous
+#|| dividend yield q.
+
+#| The CRR value with N steps: u = exp(sigma sqrt(dt)), d = 1/u, the
+#| risk-neutral up probability p = (exp((r - q) dt) - d) / (u - d), values
+#| rolled back from maturity; an American option takes the larger of
+#| continuing and exercising at every node.
+def crr_price(S: Num, K: Num, T: Num, r: Num, q: Num, sigma: Num, N: Int, is_call: Bool, american: Bool) -> Num {
+    dt = T / N
+    u = exp(sigma * sqrt(dt))
+    d = 1.0 / u
+    p = (exp((r - q) * dt) - d) / (u - d)
+    disc = exp(-r * dt)
+    pu = disc * p
+    pd = disc * (1.0 - p)
+    sgn = 1.0 if is_call else -1.0
+    # pw[k] = u^(k - N), so the price at step i, j ups is S pw[2j - i + N]
+    pw = zeros(2 * N + 1)
+    for k to 2 * N + 1 {
+        pw[k] = exp(sigma * sqrt(dt) * (k - N))
+    }
+    v = zeros(N + 1)
+    for j to N + 1 {
+        v[j] = max(sgn * (S * pw[2 * j]  - K), 0.0)
+    }
+    for i from 0 to N reversed {
+        for j to i + 1 {
+            cont = pu * v[j + 1] + pd * v[j]
+            if american {
+                v[j] = max(cont, sgn * (S * pw[2 * j - i + N] - K))
+            }
+            else {
+                v[j] = cont
+            }
+        }
+    }
+    return v[0]
+}
+
+#| crr_price over arrays of options (S, K, T, sigma, is_call of one length;
+#| is_call is 1 for a call, 0 for a put), all with N steps.
+def crr_prices(S: Arr, K: Arr, T: Arr, r: Num, q: Num, sigma: Arr, is_call: Arr, N: Int, american: Bool) -> Arr {
+    n = len(S)
+    out = zeros(n)
+    for i to n {
+        out[i] = crr_price(S[i], K[i], T[i], r, q, sigma[i], N, is_call[i] > 0.5, american)
+    }
+    return out
+}
+
+test "Hull's American put, S=K=50, r=10%, sigma=40%, T=5 months, 5 steps: 4.49" {
+    assert_near(crr_price(50.0, 50.0, 5.0 / 12.0, 0.1, 0.0, 0.4, 5, false, true), 4.49, 0.005)
+}
+
+test "an American call without dividends is the European call" {
+    a = crr_price(100.0, 95.0, 1.0, 0.05, 0.0, 0.25, 200, true, true)
+    e = crr_price(100.0, 95.0, 1.0, 0.05, 0.0, 0.25, 200, true, false)
+    assert_near(a, e, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

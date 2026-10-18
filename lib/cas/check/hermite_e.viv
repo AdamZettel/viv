@@ -1,0 +1,138 @@
+###
+post: Stage 0's acceptance, the Hermite coefficients by two recurrence orders equal mod p
+agent: claude
+
+"E(i, j, t) by recurrences (1) and (2)
+agree mod p for i + j <= 8 at five points each." The McMurchie-Davidson
+coefficients $E(i, j, t)$ (lib/hf/hermite) are polynomials in
+$X_{PA}$, $X_{PB}$, $s = 1/(2p)$ and the prefactor $K = E(0, 0, 0)$:
+
+$$E(i+1, j, t) = s\,E(i, j, t-1) + X_{PA}\,E(i, j, t) + (t+1)\,E(i, j, t+1)$$
+$$E(i, j+1, t) = s\,E(i, j, t-1) + X_{PB}\,E(i, j, t) + (t+1)\,E(i, j, t+1)$$
+
+with $E = 0$ for $t < 0$ or $t > i + j$. The program builds every
+$E(i, j, t)$ with $i + j \le 8$ two ways, raising $i$ first and raising $j$
+first, as expressions in the CAS's store; the two orders share no node above
+$E(0, 0, 0)$ except by hash-consing. Then it evaluates both mod
+$p = 67108859$ at five random points each and requires equal residues, and it
+asks `cas_certify` for each pair, which expands both sides into the canonical
+form of a polynomial and compares the nodes: a proof, not a sample.
+###
+import cas.cas
+from cas.calculus import cas_certify, cas_expand, cas_rand, Verdict
+from cas.store import C_ZERO, cas_add, cas_addv, cas_int, cas_mul, cas_sym
+from cas.eval import cas_mod
+from cas.show import cas_text
+
+# the largest i + j
+E_MAX = 8
+# random points per pair
+E_POINTS = 5
+
+XA = cas_sym("X_PA")
+XB = cas_sym("X_PB")
+S = cas_sym("s")
+K = cas_sym("K")
+# E by raising i first, and by raising j first: key (i * 16 + j) * 32 + t
+E_I = map()
+E_J = map()
+
+def ekey(i, j, t) {
+    return (i * 16 + j) * 32 + t
+}
+
+#| E(i, j, t) from table `tab`, 0 outside 0 <= t <= i + j.
+def eget(tab, i, j, t) {
+    if t < 0 or t > i + j {
+        return C_ZERO
+    }
+    return tab[ekey(i, j, t)]
+}
+
+#| One raise: E(i', j', t) from E(i, j, .) with X the raised side's X_P.
+def eraise(tab, i, j, t, x) {
+    return cas_addv([cas_mul(S, eget(tab, i, j, t - 1)), cas_mul(x, eget(tab, i, j, t)), cas_mul(cas_int(t + 1), eget(tab, i, j, t + 1))])
+}
+
+#| Fill `tab` for all i + j <= E_MAX, raising `first` (0: i, 1: j) to its end before the other.
+def efill(tab, first) {
+    tab[ekey(0, 0, 0)] = K
+    for a to E_MAX {
+        # raise the first index from a to a + 1 with the other at 0
+        for t to a + 2 {
+            if first == 0 {
+                tab[ekey(a + 1, 0, t)] = eraise(tab, a, 0, t, XA)
+            } else {
+                tab[ekey(0, a + 1, t)] = eraise(tab, 0, a, t, XB)
+            }
+        }
+    }
+    for a to E_MAX + 1 {
+        for b to E_MAX - a {
+            # raise the second index from b to b + 1
+            for t to a + b + 2 {
+                if first == 0 {
+                    tab[ekey(a, b + 1, t)] = eraise(tab, a, b, t, XB)
+                } else {
+                    tab[ekey(b + 1, a, t)] = eraise(tab, b, a, t, XA)
+                }
+            }
+        }
+    }
+}
+
+efill(E_I, 0)
+efill(E_J, 1)
+
+pairs = 0
+same_node = 0
+mod_ok = 0
+proved = 0
+for i to E_MAX + 1 {
+    for j to E_MAX + 1 - i {
+        for t to i + j + 1 {
+            e1 = eget(E_I, i, j, t)
+            e2 = eget(E_J, i, j, t)
+            pairs = pairs + 1
+            if e1 == e2 {
+                same_node = same_node + 1
+            }
+            agree = true
+            for r to E_POINTS {
+                env = map()
+                env[XA] = cas_rand()
+                env[XB] = cas_rand()
+                env[S] = cas_rand()
+                env[K] = cas_rand()
+                if cas_mod(e1, env) != cas_mod(e2, env) {
+                    agree = false
+                }
+            }
+            if agree {
+                mod_ok = mod_ok + 1
+            }
+            v, why = cas_certify(e1, e2)
+            if v == Verdict.Proved {
+                proved = proved + 1
+            }
+        }
+    }
+}
+show pairs, same_node, mod_ok, proved
+e330 = cas_expand(eget(E_I, 3, 3, 0))
+print("E(3, 3, 0) = " + cas_text(e330))
+
+test "all 285 pairs E(i, j, t), i + j <= 8, agree mod p at five points each" {
+    assert_near(pairs, 285, 0)
+    assert_near(mod_ok, pairs, 0)
+}
+test "and every pair is equal in the canonical form of a polynomial (proved)" {
+    assert_near(proved, pairs, 0)
+}
+test "E(1, 0, 0) = X_PA K and E(1, 1, 0) = (X_PA X_PB + s) K" {
+    assert_near(cas_expand(eget(E_I, 1, 0, 0)), cas_mul(XA, K), 0)
+    assert_near(cas_expand(eget(E_J, 1, 1, 0)), cas_expand(cas_mul(cas_add(cas_mul(XA, XB), S), K)), 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,375 @@
+###
+post: Rigid-body dynamics for a planar chain of links
+agent: claude
+
+A serial chain of rigid links in the plane, joined by revolute joints: a
+pendulum when it has one link, a double pendulum or an acrobot when it has two,
+a planar arm when it has more. This is the same object a robotics simulator
+works with, restricted to two dimensions so that the algebra stays readable.
+
+A chain is one `n` by 4 matrix, a row per link:
+
+    body[i, 0]  mass
+    body[i, 1]  moment of inertia about the link's own center of mass
+    body[i, 2]  length, from this joint to the next
+    body[i, 3]  distance from this joint to the center of mass
+
+`q[i]` is joint `i` measured against the link before it, and `q[0]` is measured
+against the x axis, so a single link hangs at rest at `-pi/2`. Gravity is
+`-CHAIN_G` in y.
+
+`chain_rnea` is the recursive Newton-Euler algorithm: one pass out to the tip
+carrying accelerations, one pass back to the base carrying forces, and the
+torque at each joint falls out. The mass matrix comes from `n` calls to it
+with a unit acceleration at one joint and gravity off; the bias term from one
+call with no acceleration and gravity on; and forward dynamics from solving
+`M qdd = tau - h` with those two.
+
+Used with `import chain`.
+###
+
+CHAIN_G = 9.81
+
+#| A body table has one row per link and these columns: mass, moment of inertia
+#| about the center of mass, length, and the distance from the joint to the
+#| center of mass.
+CHAIN_BODY_FIELDS = 4
+
+#| Inverse dynamics. The joint torques that produce the accelerations `qdd` at
+#| the configuration `q` moving at `qd`. Pass `gravity` as 1.0 to include weight
+#| and 0.0 to leave it out. Gravity enters as an acceleration of the base, which
+#| is d'Alembert's trick: a chain falling freely and a chain held still in an
+#| upward-accelerating frame feel the same.
+def chain_rnea(body, q, qd, qdd, gravity) {
+    n = len(q)
+    th = zeros(n)
+    w = zeros(n)
+    al = zeros(n)
+    ux = zeros(n)
+    uy = zeros(n)
+    acx = zeros(n)
+    acy = zeros(n)
+    # out to the tip: absolute angles, rates, and the acceleration of each joint
+    ajx = 0.0
+    ajy = gravity * CHAIN_G
+    for i to n {
+        if i == 0 {
+            th[i] = q[i]
+            w[i] = qd[i]
+            al[i] = qdd[i]
+        } else {
+            th[i] = th[i - 1] + q[i]
+            w[i] = w[i - 1] + qd[i]
+            al[i] = al[i - 1] + qdd[i]
+        }
+        ux[i] = cos(th[i])
+        uy[i] = sin(th[i])
+        c = body[i, 3]
+        L = body[i, 2]
+        # a point a distance d out along the link accelerates by
+        # al * perp(u) - w^2 * u relative to the joint it hangs from
+        acx[i] = ajx - c * al[i] * uy[i] - c * w[i] * w[i] * ux[i]
+        acy[i] = ajy + c * al[i] * ux[i] - c * w[i] * w[i] * uy[i]
+        ajx = ajx - L * al[i] * uy[i] - L * w[i] * w[i] * ux[i]
+        ajy = ajy + L * al[i] * ux[i] - L * w[i] * w[i] * uy[i]
+    }
+    # back to the base: the force and moment each joint has to carry
+    tau = zeros(n)
+    fx = 0.0
+    fy = 0.0
+    mo = 0.0
+    for k to n {
+        i = n - 1 - k
+        m = body[i, 0]
+        Ic = body[i, 1]
+        L = body[i, 2]
+        c = body[i, 3]
+        # the moment the next joint out is already carrying, about this center of mass
+        mo = mo + (L - c) * (ux[i] * fy - uy[i] * fx)
+        fx = fx + m * acx[i]
+        fy = fy + m * acy[i]
+        mo = mo + Ic * al[i] + c * (ux[i] * fy - uy[i] * fx)
+        tau[i] = mo
+    }
+    return tau
+}
+
+#| The mass matrix, a column at a time: column `j` is the torque a unit
+#| acceleration of joint `j` alone costs, with nothing moving and gravity off.
+#| That is what the mass matrix means, so this needs no separate derivation.
+def chain_mass(body, q) {
+    n = len(q)
+    M = zeros(n, n)
+    still = zeros(n)
+    for j to n {
+        e = zeros(n)
+        e[j] = 1.0
+        col = chain_rnea(body, q, still, e, 0.0)
+        for i to n {
+            M[i, j] = col[i]
+        }
+    }
+    return M
+}
+
+#| What the mass matrix leaves out: the Coriolis and centrifugal terms, and weight.
+def chain_bias(body, q, qd) {
+    return chain_rnea(body, q, qd, zeros(len(q)), 1.0)
+}
+
+#| Forward dynamics: the accelerations the torques `tau` produce.
+def chain_accel(body, q, qd, tau) {
+    n = len(q)
+    M = chain_mass(body, q)
+    h = chain_bias(body, q, qd)
+    rhs = tau - h
+    qdd = zeros(n)
+    lin_solve(M, rhs, qdd)
+    return qdd
+}
+
+#| The state is `[q, qd]` laid end to end. This is its time derivative.
+def chain_rate(body, z, tau) {
+    n = len(tau)
+    q = zeros(n)
+    qd = zeros(n)
+    for i to n {
+        q[i] = z[i]
+        qd[i] = z[n + i]
+    }
+    qdd = chain_accel(body, q, qd, tau)
+    out = zeros(2 * n)
+    for i to n {
+        out[i] = qd[i]
+        out[n + i] = qdd[i]
+    }
+    return out
+}
+
+#| One step of `dt` by fourth-order Runge-Kutta, the torques held for the step.
+def chain_step(body, z, tau, dt) {
+    k1 = chain_rate(body, z, tau)
+    k2 = chain_rate(body, z + 0.5 * dt * k1, tau)
+    k3 = chain_rate(body, z + 0.5 * dt * k2, tau)
+    k4 = chain_rate(body, z + dt * k3, tau)
+    return z + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+#| The joint positions, base first and tip last: `n + 1` rows of x, y. This is
+#| the chain's shape, for drawing it and for asking where the tip is.
+def chain_points(body: Arr, q: Arr) {
+    n = len(q)
+    p = zeros(n + 1, 2)
+    x = 0.0
+    y = 0.0
+    th = 0.0
+    for i to n {
+        th = th + q[i]
+        x = x + body[i, 2] * cos(th)
+        y = y + body[i, 2] * sin(th)
+        p[i + 1, 0] = x
+        p[i + 1, 1] = y
+    }
+    return p
+}
+
+#| Kinetic plus potential energy. With no torque applied this does not change,
+#| and holding it still to a part in a billion is the strongest single check on
+#| everything above.
+def chain_energy(body, q, qd) {
+    n = len(q)
+    th = 0.0
+    w = 0.0
+    x = 0.0
+    y = 0.0
+    vx = 0.0
+    vy = 0.0
+    total = 0.0
+    for i to n {
+        th = th + q[i]
+        w = w + qd[i]
+        ux = cos(th)
+        uy = sin(th)
+        c = body[i, 3]
+        L = body[i, 2]
+        m = body[i, 0]
+        cx = x + c * ux
+        cy = y + c * uy
+        cvx = vx - c * w * uy
+        cvy = vy + c * w * ux
+        total = total + 0.5 * m * (cvx * cvx + cvy * cvy) + 0.5 * body[i, 1] * w * w
+        total = total + m * CHAIN_G * cy
+        x = x + L * ux
+        y = y + L * uy
+        vx = vx - L * w * uy
+        vy = vy + L * w * ux
+    }
+    return total
+}
+
+#| A chain of `n` identical uniform rods of mass `m` and length `L`: the inertia
+#| of a rod about its middle is m L^2 / 12, and its center of mass is halfway.
+def chain_rods(n, m, L) {
+    body = zeros(n, CHAIN_BODY_FIELDS)
+    for i to n {
+        body[i, 0] = m
+        body[i, 1] = m * L * L / 12.0
+        body[i, 2] = L
+        body[i, 3] = 0.5 * L
+    }
+    return body
+}
+
+#| A chain of `n` links of length `L` with all the mass `m` at the far end: the
+#| textbook pendulum, and the one whose equations are written out by hand.
+def chain_bobs(n, m, L) {
+    body = zeros(n, CHAIN_BODY_FIELDS)
+    for i to n {
+        body[i, 0] = m
+        body[i, 1] = 0.0
+        body[i, 2] = L
+        body[i, 3] = L
+    }
+    return body
+}
+
+test "holding one link out horizontally costs m g c, and holding it straight down costs nothing" {
+    body = chain_rods(1, 2.0, 0.8)
+    still = zeros(1)
+    flat = chain_rnea(body, [0.0], still, still, 1.0)
+    assert_near(flat[0], 2.0 * 9.81 * 0.4, 1.0e-12)
+    down = chain_rnea(body, [-1.5707963267948966], still, still, 1.0)
+    assert_near(down[0], 0.0, 1.0e-12)
+}
+
+test "one link swings at the period a pendulum of that inertia should" {
+    body = chain_rods(1, 2.0, 0.8)
+    # (Ic + m c^2) thdd = -m g c cos(th), so small swings about -pi/2 go at
+    # omega^2 = m g c / (Ic + m c^2)
+    m = 2.0
+    c = 0.4
+    Ic = 2.0 * 0.8 * 0.8 / 12.0
+    expected = sqrt(m * 9.81 * c / (Ic + m * c * c))
+    z = [-1.5707963267948966 + 1.0e-4, 0.0]
+    dt = 0.0002
+    # a quarter period: from the extreme to the bottom, where the rate peaks
+    steps = round(0.25 * 6.283185307179586 / expected / dt)
+    peak = 0.0
+    for k to steps {
+        z = chain_step(body, z, [0.0], dt)
+        peak = max(peak, abs(z[1]))
+    }
+    # amplitude times omega is the peak rate of a harmonic swing
+    assert_near(peak, 1.0e-4 * expected, 1.0e-8)
+}
+
+test "the mass matrix of a two-bob chain is the one written out by hand" {
+    m1 = 1.3
+    m2 = 0.7
+    L1 = 1.1
+    L2 = 0.9
+    body = zeros(2, CHAIN_BODY_FIELDS)
+    body[0, 0] = m1
+    body[0, 2] = L1
+    body[0, 3] = L1
+    body[1, 0] = m2
+    body[1, 2] = L2
+    body[1, 3] = L2
+    q2 = 0.63
+    M = chain_mass(body, [0.41, q2])
+    assert_near(M[0, 0], (m1 + m2) * L1 * L1 + m2 * L2 * L2 + 2.0 * m2 * L1 * L2 * cos(q2), 1.0e-11)
+    assert_near(M[0, 1], m2 * L2 * L2 + m2 * L1 * L2 * cos(q2), 1.0e-11)
+    assert_near(M[1, 1], m2 * L2 * L2, 1.0e-11)
+}
+
+test "the mass matrix is symmetric, for a chain with nothing symmetric about it" {
+    n = 4
+    body = zeros(n, CHAIN_BODY_FIELDS)
+    for i to n {
+        body[i, 0] = 0.4 + 0.3 * i
+        body[i, 1] = 0.02 + 0.01 * i
+        body[i, 2] = 0.5 + 0.2 * i
+        body[i, 3] = 0.2 + 0.1 * i
+    }
+    M = chain_mass(body, [0.3, -0.8, 1.2, 0.15])
+    for i to n {
+        for j to n {
+            assert_near(M[i, j], M[j, i], 1.0e-11)
+        }
+    }
+}
+
+test "forward dynamics undoes inverse dynamics: the torques come back" {
+    q = [0.4, -1.1, 0.7]
+    body = chain_rods(len(q), 0.9, 0.6)
+    qd = [0.3, 0.9, -0.5]
+    tau = [1.7, -0.8, 0.25]
+    qdd = chain_accel(body, q, qd, tau)
+    back = chain_rnea(body, q, qd, qdd, 1.0)
+    for i to len(tau) {
+        assert_near(back[i], tau[i], 1.0e-10)
+    }
+}
+
+#| How far the total energy moves over `tend` seconds of free swinging, at a
+#| step of `dt`. Runge-Kutta is not symplectic, so this is never exactly zero;
+#| what it should be is fourth order in the step.
+def chain_energy_drift(body: Arr, z0: Arr, dt, tend) {
+    n = round(len(z0) / 2.0)
+    z = z0
+    zero = zeros(n)
+    q = zeros(n)
+    qd = zeros(n)
+    for i to n {
+        q[i] = z[i]
+        qd[i] = z[n + i]
+    }
+    start = chain_energy(body, q, qd)
+    steps = round(tend / dt)
+    for k to steps {
+        z = chain_step(body, z, zero, dt)
+    }
+    for i to n {
+        q[i] = z[i]
+        qd[i] = z[n + i]
+    }
+    return abs(chain_energy(body, q, qd) - start)
+}
+
+test "a triple pendulum left alone holds its energy to a part in a million" {
+    body = chain_rods(3, 0.9, 0.6)
+    z0 = [0.9, -0.4, 1.3, 0.0, 0.0, 0.0]
+    total = chain_energy(body, [0.9, -0.4, 1.3], [0.0, 0.0, 0.0])
+    lost = chain_energy_drift(body, z0, 0.001, 10.0)
+    assert_lt(lost / abs(total), 1.0e-6)
+}
+
+test "halving the step divides the energy drift by sixteen, which is the integrator's order" {
+    body = chain_rods(3, 0.9, 0.6)
+    z0 = [0.9, -0.4, 1.3, 0.0, 0.0, 0.0]
+    coarse = chain_energy_drift(body, z0, 0.002, 2.0)
+    fine = chain_energy_drift(body, z0, 0.001, 2.0)
+    finer = chain_energy_drift(body, z0, 0.0005, 2.0)
+    assert_lt(abs(coarse / fine - 16.0), 2.0)
+    assert_lt(abs(fine / finer - 16.0), 2.0)
+}
+
+test "a point mass on a string is the pendulum out of the textbook" {
+    body = chain_bobs(1, 1.4, 0.75)
+    M = chain_mass(body, [0.3])
+    assert_near(M[0, 0], 1.4 * 0.75 * 0.75, 1.0e-12)
+    still = zeros(1)
+    held = chain_rnea(body, [0.3], still, still, 1.0)
+    assert_near(held[0], 1.4 * 9.81 * 0.75 * cos(0.3), 1.0e-12)
+}
+
+test "the tip of a straight-out chain is as far away as the links are long" {
+    q = [0.0, 0.0, 0.0, 0.0]
+    body = chain_rods(len(q), 1.0, 0.7)
+    p = chain_points(body, q)
+    assert_near(p[4, 0], 2.8, 1.0e-12)
+    assert_near(p[4, 1], 0.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

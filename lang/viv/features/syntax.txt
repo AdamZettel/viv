@@ -1,0 +1,565 @@
+# Syntax: the forms the parser reads (lang/viv/src/lexer.rs, parser.rs, surface.rs).
+
+== list-comprehension
+title: List comprehensions
+what: `[e for x in xs if c]` builds a vector, a matrix (when every `e` is a vector of one
+  length) or a list of strings, as Python's does. More `for`s nest, the first outermost,
+  and the `for` takes any head a `for` statement takes. The parser writes it as the loop it
+  stands for, so every engine runs it.
+when: Instead of a `for` loop that fills a preallocated array or appends under an `if`.
+example: list-comprehension
+doc: lang/viv/src/surface.rs; www/src/pages/reference.astro
+see: map-comprehension, generator-argument, if-expression, growable-arrays
+keywords: comprehension for in if filter list
+usage: form:comprehension
+
+== map-comprehension
+title: Map comprehensions
+what: `{k: v for x in xs if c}` builds a map, Python's dict comprehension, with the same
+  heads and filters as a list comprehension. A key seen again keeps its first place and
+  takes the later value. A brace in an expression is only this form: a set literal
+  `{x, y}` is refused with a pointer to `unique`.
+when: To build a lookup table (a vocabulary to its positions, a label to its count) in one
+  line instead of `m = map()` and a loop.
+example: map-comprehension
+doc: lang/viv/src/surface.rs
+see: maps, list-comprehension, enumerate-start
+keywords: dict comprehension map for in braces
+usage: form:map-comprehension
+
+== generator-argument
+title: Generator arguments and short-circuit all/any
+what: A comprehension without brackets as the only argument of a call, `f(e for x in xs)`,
+  is `f([e for x in xs])`, so `sum`, `max` and `join` take one. `all(c for x in xs)` and
+  `any(...)` give a Bool and stop at the first element that decides it.
+when: Instead of an accumulator loop for a sum, a maximum or a test over every element.
+example: generator-argument
+doc: lang/viv/src/surface.rs; www/src/pages/reference.astro
+see: list-comprehension, all, any, axis-reductions
+keywords: generator all any sum max join reduction
+usage: form:generator-arg
+
+== if-expression
+title: The if-expression
+what: `a if c else b` is `a` when `c` holds and `b` otherwise; only the chosen side is
+  computed. It binds loosest of all operators, as in Python, so `a if c else b if d else e`
+  chains.
+when: Instead of an `if`/`else` statement that assigns one variable on each branch.
+example: if-expression
+doc: lang/viv/src/surface.rs; www/src/pages/reference.astro
+see: operators, list-comprehension
+keywords: if else conditional expression ternary
+usage: form:if-expr
+
+== negative-index
+title: Negative indices
+what: A negative index or slice bound counts from the end, as in Python: `a[-1]` is the
+  last element, `a[-3:]` the last three, `a[:-1]` all but the last, `A[-1, :]` the last
+  row. An index still has to land inside the axis: `a[-3]` of two elements stops the run
+  with its line.
+when: Instead of `a[len(a) - 1]` and `shape(A)[0] - 1` arithmetic.
+example: negative-index
+doc: lang/viv/src/interp/slices.rs; www/src/pages/reference.astro
+see: slices, int-type
+keywords: negative index last element end python
+usage: form:negative-index
+
+== slices
+title: Slices
+what: `a[lo:hi:s]`, `A[i, :]`, `A[:, j]` and `A[r0:r1, c0:c1]` select a block of an array
+  of rank up to 4. The result is a copy, never a view; a plain index drops its axis. Bounds
+  are not clamped: a range past the end stops the run with its line, where NumPy would
+  clamp. A negative step walks back, as Python's: `a[::-1]` is `a` back to front,
+  `a[4:1:-1]` is a[4], a[3], a[2], `A[:, ::-1]` reverses the columns.
+when: Instead of a copy loop over part of an array, and instead of `slab` for a row or a
+  plane.
+example: slices
+doc: lang/viv/src/interp/slices.rs; www/src/pages/reference.astro
+see: slice-write, negative-index, aliasing-and-copies, gathers
+keywords: slice colon row column block range step copy reverse negative
+usage: form:slice
+
+== slice-write
+title: Writing into a slice
+what: `a[lo:hi] = v` and `A[:, j] = v` write a number into every selected element, or an
+  array of exactly the slice's shape into the block, in place. The value is copied before
+  the write, so `s[1:5] = s[0:4]` shifts. `a[lo:hi] += v` and the other compound forms read
+  the slice, combine and write it back.
+when: Instead of a loop that stores element by element into part of an array.
+example: slice-write
+doc: lang/viv/src/interp/slices.rs; www/src/pages/reference.astro
+see: slices, compound-assignment, setslab
+keywords: slice assignment write block column row in place
+usage: form:slice-write
+
+== in-operator
+title: The in and not in operators
+what: `x in a` tests membership: a number in a real array of any rank (some element `==`
+  x), a key in a map, a substring in a string, a string in a list of strings. `not in` is
+  its negation. Both give a Bool.
+when: Instead of a search loop with a found flag, and instead of `has(m, k)` for maps.
+example: in-operator
+doc: www/src/pages/reference.astro
+see: maps, strings, string-lists
+keywords: in not membership contains has search
+usage: form:in-op
+
+== key-argument
+title: Sort and select by a key
+what: `max(xs, key=f)` and `min(xs, key=f)` give the first element whose key is largest
+  (smallest); `sorted(xs, key=f, reverse=r)` and `argsort(xs, key=f, reverse=r)` give the
+  elements (or their positions) in the order of their keys, stable, as Python's. `xs` is an
+  array, a list of strings, a string or `rows(M)`; the key is a def, a builtin such as
+  `len` or `abs`, or a lambda.
+when: Instead of a hand-written argmax loop or a hand-written sort with a comparison.
+example: key-argument
+doc: lang/viv/src/surface.rs; www/src/pages/reference.astro
+see: sorting, lambdas, max, sorted, argsort
+keywords: key reverse sorted argsort max min argmax order lambda
+usage: form:key-arg
+
+== for-in-loops
+title: Loops over elements: for x in, enumerate, zip, rows
+what: `for x in e` walks a vector's numbers, a string's characters or a list's strings.
+  `for i, x in enumerate(e)` gives the index too, `for a, b in zip(u, v)` walks several
+  sequences together and stops at the shortest, and `for row in rows(M)` gives the rows of
+  a matrix. `e` is evaluated once; the parser writes the loop as `for k to len(e)`.
+when: Instead of `for i to len(a)` with `x = a[i]` at the top, or parallel index
+  bookkeeping over two arrays.
+example: for-in-loops
+doc: www/src/pages/reference.astro; lang/viv/src/parser.rs
+see: enumerate-start, for-from-by, list-comprehension
+keywords: for in enumerate zip rows loop iterate each
+usage: form:for-in, form:zip-for, form:rows-for
+
+== enumerate-start
+title: enumerate with a start
+what: `enumerate(e, 1)` or `enumerate(e, start=1)` counts from 1 (or any start) instead of
+  0, in a loop head or a comprehension. In a loop head with an integer literal start the
+  index is an Int, as Python's is.
+when: Instead of writing `i + 1` wherever a 1-based label or a shifted index is needed.
+example: enumerate-start
+doc: www/src/pages/reference.astro
+see: for-in-loops
+keywords: enumerate start offset count index
+usage: form:enumerate-start
+
+== for-from-by
+title: Counted loops with from, by and reversed
+what: `for i to n` runs 0 to n - 1. `for i from a to b` starts at `a`, `by s` steps by `s`
+  (negative steps count down), and a trailing `reversed` runs the same values in the
+  opposite order. The end is left out, as in Python's `range`. A step of 0 is an error at
+  compile time when it is a literal, at run time otherwise.
+when: Instead of a `while` loop with a hand-kept counter, and instead of computing
+  `n - 1 - k` to walk backward.
+example: for-from-by
+doc: www/src/pages/reference.astro; lang/viv/src/parser.rs
+see: for-in-loops, parallel-for
+keywords: for to from by reversed range loop step backward
+usage: form:for-from, form:for-by, form:for-reversed
+
+== bare-return-and-trailing-commas
+title: A bare `return`, and trailing commas
+what: `return` with no value leaves a def early; such a def gives 0, as one that reaches
+  its end does. A list literal may end with a comma, `[a,\n b,\n]`, as a call's
+  arguments and a record literal's fields may.
+when: For an early exit from a def that prints or changes something, and for one element
+  per line in a long list.
+example: bare-return-and-trailing-commas
+see: compound-assignment, multiple-returns
+keywords: return early exit trailing comma list literal
+
+== python-math
+title: Python's math names: pi, e, inf, `import math`
+what: `pi`, `e`, `tau` and `inf` are Python's math constants wherever a program does not
+  bind the name itself. `from math import pi, sqrt` and `import math` (then `math.sqrt(x)`)
+  are accepted: the names are Viv's builtins, and an import of one Viv does not have says
+  so. `del xs[i]` removes an element, as `pop(xs, i)` does without giving it back.
+when: Instead of `PI = 3.141592653589793`, `acos(-1.0)`, `exp(1.0)` or `float("inf")`, and
+  instead of `concat(xs[:i], xs[i + 1:])`.
+example: python-math
+see: imports, slices
+keywords: pi e tau inf infinity math constant import del pop
+usage: word:pi, word:inf
+
+== python-literals
+title: Python's literals and chained comparisons
+what: `.5`, `2.e5`, `1_000_000`, `0xff`, `0o17` and `0b101` are numbers as Python writes
+  them (a base-16, 8 or 2 literal is an integer literal, an Int where one is wanted).
+  A string may be in single quotes, `'it'`, with the escapes of a double-quoted one and
+  `\xHH`. `lo <= x < hi` is `lo <= x and x < hi`, the middle computed once.
+when: When a program comes from Python, or a bound check reads better as a chain.
+example: python-literals
+doc: lang/viv/src/lexer.rs
+see: strings, operators, int-type
+keywords: hex octal binary underscore literal single quote escape chained comparison
+usage: word:0x
+
+== while-loops
+title: while, break and continue
+what: `while cond { ... }` runs its body while `cond` is true; the condition must be a
+  Bool, not a number. `break` leaves the innermost `while` or `for` loop and `continue`
+  starts its next pass.
+when: For a loop whose number of passes is not known in advance (an iteration to a
+  tolerance, a search). A loop that only counts is a `for`.
+example: while-loops
+doc: www/src/pages/reference.astro; lang/viv/src/parser.rs
+see: for-from-by, for-in-loops
+keywords: while break continue loop until condition exit early
+usage: form:while-loop
+
+== compound-assignment
+title: Compound assignment
+what: `x += e`, `-=`, `*=`, `/=` and `//=` on a variable, an array element (`a[i, j] += e`) or a
+  slice. On an element each index is evaluated once: an index that is not a number or a
+  variable is computed into a hidden variable first, so `c[floor(10 * rand())] += 1` draws
+  one random number.
+when: Instead of `a[i, j] = a[i, j] + e` with the index written twice.
+example: compound-assignment
+doc: www/src/pages/reference.astro
+see: slice-write
+keywords: += -= *= /= //= increment accumulate histogram floor
+usage: form:compound-assign, form:index-compound-assign
+
+== operators
+title: Operators: ^, %, //, @, and, or
+what: `x ^ y` is `pow(x, y)`, right-associative and tighter than a unary minus (`-2 ^ 2`
+  is -4). `a % b` is the floored remainder and `a // b` the floored quotient, Python's
+  rules. `@` is the matrix product (NumPy's matmul). `and` and `or` short-circuit in every
+  engine, so `j > 0 and a[j - 1] > v` never reads `a[-1]`. `+` of two arrays adds them
+  element by element; it does not join them as Python's lists, and `[1.0] + row` (a
+  one-element literal beside an array, or literals of different lengths) is refused with
+  a note naming `concat`.
+when: Instead of `pow` calls, `mod` (C's fmod, which takes the sign of `a`), and nested
+  `if`s that guard an index.
+example: operators
+doc: www/src/pages/reference.astro
+see: batched-matmul, broadcasting, int-type
+keywords: ^ power % mod // floor division @ matmul and or not short circuit precedence concat join plus
+usage: form:power-op, form:mod-op, form:floor-div, form:matmul
+
+== multiple-returns
+title: Several results: return a, b
+what: `return a, b` gives several values; every return of the def gives the same number,
+  each with one type. The caller unpacks them, `lo, hi = f(x)`, on a line of its own. The
+  compiler declares a record for the results, so every engine runs it.
+when: Instead of output arguments (caller-allocated arrays the def writes into) and
+  results packed into one array.
+example: multiple-returns
+doc: lang/viv/src/tuples.rs
+see: unpacking, solvers-returning-tuples, records
+keywords: return tuple several results multiple values output arguments
+usage: form:tuple-return
+
+== unpacking
+title: Unpacking and swaps
+what: `a, b = e` assigns from a def that returns as many values, from a list of values
+  (`a, b = b, a` computes the right side first, then assigns left to right), or from an
+  array with one element per name (`n, m = shape(A)`). A target may be a name, an element
+  or a slice, so `v[i], v[j] = v[j], v[i]` swaps two elements.
+when: Instead of a temporary variable for a swap, and instead of reading `shape(A)[0]` and
+  `shape(A)[1]` on separate lines.
+example: unpacking
+doc: www/src/pages/reference.astro
+see: multiple-returns, value-and-grad
+keywords: unpack destructure swap tuple assignment shape
+usage: form:unpack
+
+== steps
+title: Named steps
+what: `step name "text" { ... }` names a phase of a def or of the top level. A step is a
+  block, not a scope: its variables are the def's. The engines record entering and leaving
+  it, and the explorer, the story and the intent and debug lenses address it as
+  `def/name`.
+when: To give the explorer, the story and the intent lens a handle on a phase instead of a
+  comment that no tool reads.
+example: steps
+see: one-line-steps, intent-lens, debug-lens, story, explorer
+keywords: step phase block name structure
+usage: form:step-block
+
+== one-line-steps
+title: One-line steps
+what: `step name: statement` (or `step name "text": statement`) is a step of one statement
+  on that statement's line, the same to every engine and tool as the braced form, hashes
+  included. A statement that opens a block runs to its closing brace.
+when: To name a single line for the lenses without three lines of braces.
+example: one-line-steps
+see: steps
+keywords: step colon one line
+usage: form:one-line-step
+
+== phrases
+title: Phrases: math written as words
+what: A phrase starts with `take` and a word or number (`take the trace of M`), or with one
+  of the verbs `integrate`, `solve`, `differentiate`, `sum`. The parser matches it against
+  the phrase table and reads it as an ordinary call, so all three engines run only calls
+  they already run. Integrals, roots and derivatives take their one free variable as the
+  variable; the quadratures and root finders come from lang/viv/std. `viv phrases` lists
+  the table; `viv phrases file.viv` prints what each phrase of a program is.
+when: When the math reads better as words than as nested calls, and to state an integral or
+  a root without writing a quadrature or a root finder.
+example: phrases
+doc: lang/viv/src/phrases.rs
+see: user-phrases, std-phrases, check-phrases-certificates, using-every-method
+keywords: take integrate solve differentiate sum phrase words integral root derivative between starting using with respect
+usage: form:phrase
+verb: phrases
+
+== user-phrases
+title: A program's own phrases
+what: `phrase "<words>" -> <expr>` at the top level declares a phrase. A word of the phrase
+  that is a name the body reads is a hole; the other words are the ones a use must
+  contain. A use may come before the declaration, and a module's phrases reach the programs
+  that use it.
+when: To name a formula that a program writes several times, in the words of the field.
+example: user-phrases
+see: phrases
+keywords: phrase declare own words formula
+usage: form:user-phrase
+
+== lambdas
+title: Lambdas
+what: `fn(x) -> expr` is a function value with a single-expression body, which may read the
+  program's variables. Assign it, pass it, call it through a parameter. The body may hold
+  a comprehension, a map comprehension, a generator argument or an if-expression
+  (`encode = fn(text) -> [stoi[c] for c in text]`). Inside a def it captures the locals it
+  reads, by value (see closures).
+when: To pass a small function to a def or a builtin without declaring a def for it.
+example: lambdas
+doc: www/src/pages/reference.astro
+see: closures, function-values, key-argument
+keywords: fn lambda anonymous function closure arrow
+usage: form:lambda
+
+== closures
+title: Closures: lambdas that capture
+what: A lambda written inside a def reads the def's locals and parameters, and holds the
+  values they had when it was made: a later assignment does not reach it. Bind it to a name
+  and call it, or pass it to a def. It cannot be returned, stored in an array, record or
+  map, or assign a name it captured. The compiled engines lift it to a def whose trailing
+  parameters are the captured values, and specialize the def it is passed to, so no
+  closure is allocated and every call is direct.
+when: Instead of a one-element array that carries a value into a def passed as an
+  argument, a global written before the call, or a helper def that repeats its caller's
+  parameters.
+example: closures
+doc: lang/viv/src/defun.rs; lang/viv/src/surface.rs
+see: lambdas, function-values
+keywords: closure capture lambda local by value nonlocal
+usage: form:lambda
+
+== method-call-syntax
+title: Method-call syntax
+what: `a.f(b)` is `f(a, b)` for any call, so `line.split()`, `w.upper()` and `v.norm()`
+  read as they would in Python. A name that is a record field is a field access instead.
+when: When porting Python text code, or when a chain of calls reads better left to right.
+example: method-call-syntax
+doc: www/src/pages/reference.astro
+see: strings
+keywords: method dot call split upper python
+usage: form:method-call
+
+== f-strings
+title: f-strings
+what: `f"x = {x:.3f}"` formats each field as `fmt` does: `{x}` is `str(x)`, `{x:spec}` a
+  Python format, `{s!r}` the repr, `{x=}` the name and its repr. The result is a string
+  value usable anywhere.
+when: Instead of concatenating `str(...)` pieces or several `print` arguments.
+example: f-strings
+see: print-and-fmt, strings
+keywords: f-string format interpolation fstring spec
+usage: form:fstring
+
+== format-specs
+title: format specs: Python's flags
+what: A spec is Python's: `[[fill]align][sign][0][width][,|_][.precision][type]`, the type
+  one of `e E f F g G d %` or none (the repr). `{x:06.2f}` is `-01.50`, `{x:+.3e}` shows the
+  sign, `{x:*^9.2f}` centers with `*`, `{n:,}` groups thousands, `{p:.1%}` is a percent,
+  `{x:G}` is upper case; an Int takes the same flags. A width or precision can be a value,
+  as in Python: `{name:>{w}}`, `{x:.{p}f}`, `fmt(x, f".{p}g")`. `fmt(x, spec)` reads the
+  same specs. `#`, `z`, `n` and the integer bases are refused with a message.
+when: Instead of building a field by hand with rjust, a sign test or upper(fmt(x, "g")), or
+  a spec string per width.
+example: format-specs
+see: f-strings, print-and-fmt
+keywords: zero pad fill align sign grouping thousands comma percent upper nested width precision
+usage: form:fstring
+
+== print-and-fmt
+title: print and fmt
+what: `print(a, b, ...)` writes its arguments on one line with a space between them, as
+  Python's, or `sep=` between them. A number prints with six significant digits, and a
+  whole number below 10^16 as its digits (`1059490`), as `str` and f-strings write it;
+  `fmt(x)` is Python's repr, the shortest digits that read back as `x` (`3.0`), `fmt(x, 17)` gives 17 significant digits,
+  and `fmt(x, ".3e")` a Python format. The interpreter, C and wasm print the same bytes.
+when: To print a value at the precision a check needs instead of the default six digits.
+example: print-and-fmt
+see: f-strings, show-and-narrate
+keywords: print fmt sep format digits repr precision output
+usage: call:print, call:fmt, form:print-sep
+
+== show-and-narrate
+title: show and narrate
+what: `show a, b` prints each value labeled with what was written (`x: 0.3`), two spaces
+  apart; a variable or `fmt` of one is labeled with its name, any other expression is
+  printed bare. `narrate "text"` prints a progress line (`narrate: text`); a non-string
+  argument is commentary and compiles to nothing.
+when: Instead of `print("x =", x)` for a quick labeled value, and to announce the phases of
+  a long run.
+example: show-and-narrate
+doc: www/src/pages/reference.astro
+see: print-and-fmt
+keywords: show narrate label progress print
+usage: form:show, form:narrate
+
+== stop
+title: stop
+what: `stop("text")` ends the run with `error: text` and the line it is on, exit status 1,
+  in every engine. The argument is one string, a literal or a value such as an f-string.
+when: Instead of returning a sentinel (NaN, -1) when an input is invalid.
+example: stop
+doc: www/src/pages/reference.astro
+see: optionals, asserts
+keywords: stop error abort raise exception fail
+usage: call:stop
+
+== docstrings-and-annotations
+title: Docstrings and annotation comments
+what: A bare string as the first statement of a def documents it and compiles to nothing.
+  The comment markers `#|` (what), `#||` (how), `#|||` (why), `#~` (tags), `#:` (a
+  variable's glossary entry) and `#[`/`#]` (regions) are comments to the compiler that
+  `viv doc`, `viv whatis` and `viv lsvar` read.
+when: To give a def and its variables a description the tools can show, instead of free
+  comments.
+example: docstrings-and-annotations
+doc: www/src/pages/reference.astro section Lexical structure
+see: intent-lens, whatis, lsvar, doc
+keywords: docstring annotation comment glossary whatis doc
+usage: form:docstring, form:annotation
+
+== text-fences
+title: Fenced text blocks
+what: Everything between two lines that are exactly `###` is skipped, so prose needs no `#`
+  in front of each line. A post keeps its title and notes in one.
+when: For a page of prose at the head of a module or a post.
+example: text-fences
+doc: www/src/pages/reference.astro
+see: docstrings-and-annotations
+keywords: fence prose header post block comment
+usage: form:fence
+
+== imports
+title: Imports and module namespaces
+what: Python's three forms with Python's bindings: `import nn` (then `nn.rmsnorm(X)`),
+  `import hf.scf as scf`, and `from nn import rmsnorm, softmax_rows` (a parenthesized list
+  may run over several lines). `import a.b` binds `a`. A module `a.b` is `a/b.viv` beside
+  the importing file, then `lib/a/b.viv`, then `a/b.viv` under the repository root; two
+  different files that match are an error. A module's top-level names are its own: a
+  program sees only what its import lines bind, not the modules its imports import, and a
+  name two modules define is two names. A module's phrases and its `.intent`, `.debug`
+  and `.memory` files come with any import of it. Resolved before anything parses, so a
+  run pays nothing. `import *` and relative imports are refused; `#! use` is refused with
+  the import that replaces it.
+when: To reuse a library module (lib/nn, lib/hf, lib/cas) instead of copying its defs;
+  `from m import a, b` for the few names a file uses often, `import m` and `m.name` for a
+  module with many.
+example: imports
+doc: lang/viv/src/imports.rs
+see: private-names, lib-nn, lib-cas, std-contracts, imports-migration, expand
+keywords: import from as module library namespace qualified include use
+usage: form:import-line
+
+== private-names
+title: Private names of a module
+what: `private` before a top-level `def`, record, enum or constant keeps it in its module:
+  `private SH_L = 1`, `private def es_pair(i, j)`. An import of it, or a read of it from
+  another module, is a compile error naming the module. Names are public by default, as
+  in Python.
+when: For a module's helpers and tables that no program should call, instead of a prefix
+  convention the architecture lens checks.
+example: private-names
+doc: lang/viv/src/imports.rs
+see: imports, arch-lens
+keywords: private public module helper hide
+usage: word:private
+
+== keyword-arguments
+title: Keyword arguments and defaults
+what: `def init(rows, cols, scale = 1.0 / sqrt(rows))`: a parameter with a default comes
+  after those without, and a call passes it by name only, `init(16, 8, scale=0.5)`
+  (`init(16, 8, 0.5)` is refused). A parameter without a default may be passed by position
+  or by name. A default may read the parameters before it and the program's top-level
+  names; it is computed at each call that leaves it out, and an argument it reads is
+  computed once. The front end fills every call out, so the engines see positional calls
+  and a run pays nothing. A call through a function value passes its arguments in order.
+when: Instead of a sentinel (`a <= 0` means the default), a long positional list, or a
+  defaults record built and updated at each call.
+example: keyword-arguments
+doc: lang/viv/src/kwargs.rs
+see: builtin-options, function-values, records
+keywords: keyword argument default parameter option named
+
+== set-overrides
+title: Overriding a constant with --set
+what: `viv run --set NAME=value file.viv` (and the compile) replaces the top-level
+  assignment `NAME = ...` with the given value before parsing, in every engine: a number
+  for a number, a double-quoted string for a string (`--set 'CLASS="W"'`). A `--set`
+  that names no such assignment is an error.
+when: To run a program at another size or parameter without editing it, as the benchmarks
+  and sweeps do.
+example: set-overrides
+doc: lang/viv/src/lib.rs
+see: run
+keywords: --set override parameter constant command line size
+
+== ladders
+title: Ladders: rung blocks
+what: `rung "title" { ... }` is one step of a program that builds itself. The program at
+  rung k is everything outside the rungs plus rungs 1 to k, and a def in a later rung
+  replaces an earlier one of the same name; the earlier rungs' tests still run against it.
+  `viv run` runs the top rung; `viv ladder` runs every rung and reports, as JSON, what each
+  added, edited and broke.
+when: To teach or review a program as a series of small changes, each with its own test.
+example: ladders
+see: test-blocks
+keywords: rung ladder teach incremental build
+usage: form:rung
+verb: ladder
+
+== placeholder-defs
+title: Placeholder defs
+what: `placeholder def name(params)` declares a def that has intent but no body yet.
+  Calling it stops the run with an error that names it; `viv lsfunc --placeholders` lists
+  them.
+when: To write a program's plan (its defs and their intent) before the code, without stubs
+  that return wrong numbers.
+example: placeholder-defs
+see: intent-lens, lsfunc
+keywords: placeholder stub todo plan intent
+usage: form:placeholder-def
+
+== growable-arrays
+title: Growable arrays: append and extend
+what: `[]` is an empty vector. `a = append(a, x)` adds a number to a vector, or a vector as
+  a new last row of a matrix; `a = extend(a, b)` joins two vectors. The append is written
+  rebinding the name it grows, and each engine grows the storage in place when nothing
+  else holds the array, so n appends cost O(n). There is no pop: `a = a[:-1]`.
+when: When an output's length is found while scanning, instead of a count pass and a
+  buffer sized by hand.
+example: growable-arrays
+see: list-comprehension, arrays-of-records
+keywords: append extend push grow list dynamic empty
+usage: call:append, call:extend
+
+== recursion
+title: Recursion
+what: A def may call itself, directly or through other defs, to a depth of 2500 nested
+  calls, the same in every engine. A call past that stops the run with `recursion deeper
+  than 2500 nested calls`, located at the def.
+when: For divide and conquer and tree walks, where an explicit stack would obscure the
+  algorithm.
+example: recursion
+doc: lang/viv/src/recursion.rs
+see: enums-and-match
+keywords: recursion recursive depth call stack

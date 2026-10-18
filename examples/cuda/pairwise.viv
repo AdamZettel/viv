@@ -1,0 +1,260 @@
+#| `sum` and `dot` as GPU kernels in the canonical order (NumPy's
+#| pairwise order), so they equal `sum(x)` and `sum(u * v)` bit
+#| for bit. No atomics: the order of every addition is fixed.
+#|
+#| The run is cut into spans of 8192 entries, one GPU block each, and the
+#| span sums are added in turn from 0.0 at the end. Inside a span, NumPy
+#| splits in halves (each rounded down to a multiple of 8) down to leaves of
+#| at most 128 entries. A leaf of 8 or more is summed in 8 lanes (lane j
+#| takes entries j, j + 8, ...), one thread per lane, and the lanes are
+#| combined as ((l0 + l1) + (l2 + l3)) + ((l4 + l5) + (l6 + l7)), then the
+#| entries past the last multiple of 8 are added in turn. The tree over the
+#| leaves is combined level by level in shared memory, a barrier between
+#| levels.
+
+SPAN: Int = 8192
+LEAF: Int = 128
+LANES: Int = 8
+#| a leaf holds 64 entries at least, so a span has 128 leaves at most
+MAX_LEAVES: Int = 128
+LANE_SLOTS: Int = LANES * MAX_LEAVES
+MAX_NODES: Int = 2 * MAX_LEAVES - 1
+
+#| The shape of NumPy's pairwise tree over a run of m entries: the leaves
+#| (first entry and length of each), then the inner nodes numbered after
+#| the leaves level by level, each with its two halves, and where each
+#| level ends.
+def pairwise_plan(m: Int) {
+    starts: [Int] = [0]
+    lens: [Int] = [m]
+    lefts: [Int] = [-1]
+    rights: [Int] = [-1]
+    k: Int = 0
+    while k < len(starts) {
+        if lens[k] > LEAF {
+            half: Int = lens[k] // 2
+            half = half - half % LANES
+            lefts[k] = len(starts)
+            starts = append(starts, starts[k])
+            lens = append(lens, half)
+            lefts = append(lefts, -1)
+            rights = append(rights, -1)
+            rights[k] = len(starts)
+            starts = append(starts, starts[k] + half)
+            lens = append(lens, lens[k] - half)
+            lefts = append(lefts, -1)
+            rights = append(rights, -1)
+        }
+        k = k + 1
+    }
+    count = len(starts)
+    #| a node's height: 0 for a leaf; children come after their parent
+    height: [Int] = [0 for q to count]
+    for q to count reversed {
+        if lefts[q] >= 0 {
+            hl = height[lefts[q]]
+            hr = height[rights[q]]
+            if hl > hr {
+                height[q] = hl + 1
+            }
+            else {
+                height[q] = hr + 1
+            }
+        }
+    }
+    newid: [Int] = [0 for q to count]
+    leaves: Int = 0
+    for q to count {
+        if lefts[q] < 0 {
+            newid[q] = leaves
+            leaves = leaves + 1
+        }
+    }
+    top = height[0]
+    level_end: [Int] = [0 for q to top]
+    next: Int = leaves
+    for h to top {
+        for q to count {
+            if height[q] == h + 1 {
+                newid[q] = next
+                next = next + 1
+            }
+        }
+        level_end[h] = next
+    }
+    leaf_start: [Int] = [0 for q to leaves]
+    leaf_len: [Int] = [0 for q to leaves]
+    left: [Int] = [0 for q to count - leaves]
+    right: [Int] = [0 for q to count - leaves]
+    for q to count {
+        if lefts[q] < 0 {
+            leaf_start[newid[q]] = starts[q]
+            leaf_len[newid[q]] = lens[q]
+        }
+        else {
+            left[newid[q] - leaves] = newid[lefts[q]]
+            right[newid[q] - leaves] = newid[rights[q]]
+        }
+    }
+    return leaf_start, leaf_len, left, right, level_end
+}
+
+#| Block b sums span `first + b` of x * w into partial[first + b]. Thread t
+#| is lane t % 8 of leaf t // 8. One block per span of `spans`; eight
+#| threads per leaf of the plan.
+kernel def pairwise_blocks(x: Arr, w: Arr, partial: Arr, first: Int, spans: Int, leaf_start: [Int], leaf_len: [Int], left: [Int], right: [Int], level_end: [Int]) {
+    lanes = shared(LANE_SLOTS)
+    nodes = shared(MAX_NODES)
+    t = thread_id()
+    leaf = t // LANES
+    lane = t % LANES
+    base = (first + block_id()) * SPAN
+    leaves = len(leaf_start)
+    #: each lane of a leaf of 8 or more
+    if leaf < leaves {
+        lo = base + leaf_start[leaf]
+        n = leaf_len[leaf]
+        if n >= LANES {
+            acc = x[lo + lane] * w[lo + lane]
+            k = LANES
+            while k < n - n % LANES {
+                acc = acc + x[lo + k + lane] * w[lo + k + lane]
+                k = k + LANES
+            }
+            lanes[t] = acc
+        }
+    }
+    barrier()
+    #: each leaf: its lanes combined, then the rest in turn
+    if leaf < leaves and lane == 0 {
+        lo = base + leaf_start[leaf]
+        n = leaf_len[leaf]
+        if n < LANES {
+            s = 0.0
+            for q to n {
+                s = s + x[lo + q] * w[lo + q]
+            }
+        }
+        else {
+            s = ((lanes[t] + lanes[t + 1]) + (lanes[t + 2] + lanes[t + 3])) + ((lanes[t + 4] + lanes[t + 5]) + (lanes[t + 6] + lanes[t + 7]))
+            r = n - n % LANES
+            while r < n {
+                s = s + x[lo + r] * w[lo + r]
+                r = r + 1
+            }
+        }
+        nodes[leaf] = s
+    }
+    #: the tree, a level at a time
+    for h to len(level_end) {
+        barrier()
+        id = leaves + t
+        if h > 0 {
+            id = level_end[h - 1] + t
+        }
+        if id < level_end[h] {
+            nodes[id] = nodes[left[id - leaves]] + nodes[right[id - leaves]]
+        }
+    }
+    barrier()
+    if t == 0 {
+        partial[first + block_id()] = nodes[leaves + len(left) - 1]
+    }
+}
+
+schedule pairwise_blocks(blocks = spans, threads = LANES * len(leaf_start))
+
+#| The sum of x[i] * w[i] in the canonical order: the full spans in one
+#| launch, the last part span in another, the span sums in turn.
+def gpu_dot(x: Arr, w: Arr) -> Num {
+    n: Int = len(x)
+    full = n // SPAN
+    rest = n - full * SPAN
+    spans = full
+    if rest > 0 {
+        spans = full + 1
+    }
+    partial = zeros(spans)
+    if full > 0 {
+        ls, ll, lf, rt, le = pairwise_plan(SPAN)
+        partial = pairwise_blocks(x, w, partial, 0, full, ls, ll, lf, rt, le)
+    }
+    if rest > 0 {
+        ls, ll, lf, rt, le = pairwise_plan(rest)
+        partial = pairwise_blocks(x, w, partial, full, 1, ls, ll, lf, rt, le)
+    }
+    total = 0.0
+    for b to spans {
+        total = total + partial[b]
+    }
+    return total
+}
+
+def gpu_sum(x: Arr) -> Num {
+    return gpu_dot(x, ones(len(x)))
+}
+
+def gpu_dot_uv(u: Arr, v: Arr) -> Num {
+    return gpu_dot(u, v)
+}
+
+def array_sum(x: Arr) -> Num {
+    return sum(x)
+}
+
+def array_dot(u: Arr, v: Arr) -> Num {
+    return sum(u * v)
+}
+
+contract total(x: Arr) -> s: Num {
+    intent "the sum of x in the canonical order (NumPy's pairwise order)"
+    methods array_sum, gpu_sum
+    agree s exactly
+}
+
+contract inner(u: Arr, v: Arr) -> s: Num {
+    intent "the sum of u[i] * v[i] in the canonical order"
+    methods array_dot, gpu_dot_uv
+    agree s exactly
+}
+
+#| Values that cancel, so the order of the additions shows in the bits.
+def data(n: Int, k: Num) -> Arr {
+    v = zeros(n)
+    for i to n {
+        v[i] = sin(k * i) * exp(0.001 * (i % 97)) + 1.0e-3 * cos(3.0 * i)
+    }
+    return v
+}
+
+N: Int = 20000
+x = data(N, 0.731)
+y = data(N, 0.173)
+show gpu_sum(x)
+show gpu_dot(x, y)
+
+test "sum: the kernel equals sum(x) bit for bit" {
+    for n in [1, 5, 8, 100, 128, 129, 1000, 8192, 8200, 20000] {
+        m: Int = int(n)
+        s = total(data(m, 0.731)) using every method
+    }
+    assert_near(gpu_sum(x), sum(x), 0.0)
+}
+
+test "dot: the kernel equals sum(u * v) bit for bit" {
+    for n in [3, 64, 777, 16384, 20000] {
+        m: Int = int(n)
+        s = inner(data(m, 0.731), data(m, 0.173)) using every method
+    }
+    assert_near(gpu_dot(x, y), sum(x * y), 0.0)
+}
+
+test "the plan of a full span: 64 leaves of 128, six levels" {
+    ls, ll, lf, rt, le = pairwise_plan(SPAN)
+    assert_true(len(ls) == SPAN // LEAF)
+    assert_true(len(le) == 6)
+    assert_true(len(lf) == len(ls) - 1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

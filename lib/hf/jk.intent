@@ -1,0 +1,175 @@
+module lib/hf/jk
+  The Coulomb and exchange matrices J and K: the two-electron part of the Fock
+  matrix, built by contracting the electron repulsion integrals with a
+  density. `J_ij = sum_kl (ij|kl) D_kl` is the repulsion from the whole
+  charge cloud; `K_ik = sum_jl (ij|kl) D_jl` is exchange, the same integrals
+  with the indices crossed. A closed shell uses `F = H + J - K/2`.
+
+  Three in-core members read the integrals stored once per 8-fold symmetry
+  class (lib/hf/eri_store) and must agree
+  [test "the three members agree to 1e-12 on water 6-31G (one density) and OH (two)"]:
+  a single pass over the packed vector (production), a pair matrix, and the
+  full four-index tensor used literally. lib/hf/integrals adds a direct
+  member that computes integrals on the fly.
+
+jk_packed  @daf34e47
+  why    It reads each stored integral once and needs no search for the other
+         index orders it stands for, so it is the cheapest of the three in time
+         and memory.
+  how    The loops visit the unique quadruples $i \ge j$, $k \le i$, and $l \le k$
+         (or $l \le j$ when $k = i$) in the order eri_store packs them. Each
+         stored value stands for up to eight index orders; halving it once for
+         each coincidence ($i = j$, $k = l$, the pair $ij$ equal to $kl$)
+         leaves one unit of weight per distinct order, so adding it in all
+         eight orders counts every term once.
+  X1     the packed integrals $(ij|kl)$, one per symmetry class, in eri_store's order
+  X2     not read: the slot a direct member uses for shells
+  X3     not read: the slot a direct member uses for primitives
+  D      the densities, `[nd, n, n]`: one for a closed shell, one per spin otherwise
+  opts   the options column array (lib/hf/opts); not read
+  sh     the shape of D
+  nd     how many densities
+  n      the number of basis functions
+  R      the result, `[2 nd, n, n]`: J of density d at `2 d`, K at `2 d + 1`
+  d      the density being contracted
+  Dd     density d, `[n, n]`
+  Ds     `Dd + Dd^T`: the density on a pair in both orders, which every Coulomb term takes
+  J      the Coulomb matrix of density d, filed at `2 d` in R
+  K      the exchange matrix of density d, filed at `2 d + 1` in R
+  p      the position of the next stored integral in X1
+  lmax   the bound on l that keeps the quadruple in the packed order
+  g      the integral being added, after its weight is corrected
+  dkl    g times the density on the pair kl, both orders: its Coulomb term on ij
+  dij    g times the density on the pair ij, both orders: its Coulomb term on kl
+  i      the first index of the stored quadruple $(ij|kl)$
+  j      the second index, $j \le i$
+  k      the third index, $k \le i$
+  l      the fourth index, below `lmax`
+
+  = g      read the next stored integral; the three halvings below correct its weight
+  = dkl    the Coulomb term goes to $J_{ij}$ and $J_{ji}$, and the next line's to $J_{kl}$ and $J_{lk}$
+  = K#2    exchange: the eight index orders, each pairing one index of ij with one of kl
+
+jk_pairs  @30a8b587
+  why    The pair matrix makes J one matrix-vector product per density, which
+         is a second way to get J with different arithmetic than the packed
+         pass; the agreement test compares them.
+  X1     the packed integrals, read here as the lower triangle of the pair matrix
+  X2     not read
+  X3     not read
+  D      the densities, `[nd, n, n]`
+  opts   not read
+  sh     the shape of D
+  nd     how many densities
+  n      the number of basis functions
+  np     the number of index pairs $i \ge j$, `n (n + 1) / 2`
+  P      the pair index of each $(i, j)$, `[n, n]`, symmetric
+  G      the integrals as a symmetric pair matrix, `[np, np]`
+  a      a pair index: the row of G
+  b      a pair index: the column of G
+  v      one stored integral
+  R      the result, `[2 nd, n, n]`: J at `2 d`, K at `2 d + 1`
+  dv     the density folded onto pairs: `D_kl + D_lk` off the diagonal, `D_kk` on it
+  d      the density being contracted
+  Jv     J of density d on pairs: `G dv`
+  s      the sum being built for one entry of K
+  i      a row index of J and K
+  j      a column index of J; in K's sum, the index summed with `l`
+  k      the column index of K; in the folding, the first index of a density entry
+  l      the second index of a density entry, summed in K
+
+  = dv     fold the density onto pairs, so each pair's two orders are counted once
+  = Jv     J: G times the folded density, one entry per pair
+  = s#2    K: the crossed contraction, reading G through the pair table
+
+jk_dense  @3ad625ba
+  why    It applies the two definitions exactly as written, on the full tensor,
+         so it is the member a reader can check by eye; the others must agree
+         with it.
+  X1     the packed integrals, unpacked here to the full tensor
+  X2     not read
+  X3     not read
+  D      the densities, `[nd, n, n]`
+  opts   not read
+  sh     the shape of D
+  nd     how many densities
+  n      the number of basis functions
+  G      every integral $(ij|kl)$, `[n, n, n, n]`
+  R      the result, `[2 nd, n, n]`
+  d      the density being contracted
+  Dd     density d, `[n, n]`
+  i      a row of J and K
+  j      a column of J and K
+
+jk_methods  @ee12ecd0
+  why    The SCF picks its J/K builder by number (`OPT_JK`, through `jk_of`);
+         the registry lets a test sweep every in-core member on the same
+         input.
+
+jk_of  @c8c74154
+  why    The SCF loop calls one def whichever builder the options pick, so the
+         loop does not know which members exist. It calls each member by
+         name, the packed one when the option is left at its default, so the
+         SCF reaches J and K without a registry.
+  Gp     the integrals, passed in all three slots of the member signature
+  D      the densities, `[ndens, n, n]`
+  opts   the options column array; `opts[OPT_JK]` picks the member
+  k      the member the options name: `JK_PACKED`, `JK_PAIRS`, `JK_DENSE`,
+         `INT_JK_DIRECT` or `INT_JK_DIRECT_FULL`
+
+jk_update  @27a8e4e7
+  why    J and K are linear in the density, so the build from the change of
+         density since the last build, added to the last J and K, is the
+         whole build up to rounding and to what screening drops. The direct
+         member's density screening skips the quartets that the change does
+         not reach, so a direct SCF that builds this way does less work as it
+         converges; PySCF's direct SCF builds its potential from
+         `dm - dm_last` the same way.
+  Gp     the integrals, or the basis blob for a direct member
+  D      the densities now, `[ndens, n, n]`
+  Dlast  the densities J and K were last built from
+  JKlast the J and K built from them
+  opts   the options column array
+
+jk_rebuild  @a2aa33e4
+  why    The build from the whole density, the last one unused: what the
+         incremental build is held to, and what the SCF does every
+         `fock_rebuild` iterations and once it is close to converged.
+  Gp     the integrals, or the basis blob for a direct member
+  D      the densities, `[ndens, n, n]`
+  Dlast  not read
+  JKlast not read
+  opts   the options column array
+
+jk_build_methods  @50773dde
+  why    The two ways to build the next J and K side by side, for the test
+         that holds them together.
+
+jk_t_opts  @166a40ee
+  why    The tests pick members by number; this builds the options array for
+         each, with the other options at their defaults.
+  k      the member number
+
+jk_rhf_energy  @b16f6a3b
+  why    The members must agree with each other and also give PySCF's energy
+         from PySCF's density
+         [test "PySCF's densities give PySCF's energies through every member"].
+  Gp     the packed integrals
+  H      the one-electron Hamiltonian, kinetic energy plus nuclear attraction, `[n, n]`
+  D2     PySCF's converged total density, `[n, n]`
+  enuc   the nuclear repulsion energy
+  k      the member number
+  D      D2 as a stack of one density
+  JK     J and K of that density
+
+jk_uhf_energy  @05f40b82
+  why    The same check with two spin densities, where exchange acts within
+         each spin only.
+  Gp     the packed integrals
+  H      the one-electron Hamiltonian, `[n, n]`
+  Da     PySCF's alpha (spin-up) density
+  Db     PySCF's beta (spin-down) density
+  enuc   the nuclear repulsion energy
+  k      the member number
+  D      the two spin densities stacked
+  JK     J and K of each spin density: `J_a, K_a, J_b, K_b`

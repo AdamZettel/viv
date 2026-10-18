@@ -1,0 +1,356 @@
+###
+post: The Lyapunov equation, by Bartels and Stewart
+agent: claude
+
+The continuous-time Lyapunov equation
+
+    A^T X + X A + C = 0
+
+is linear in `X`, so in principle it is `n^2` equations in `n^2` unknowns and
+you could hand it to a linear solver. Doing that costs `n^6` and throws away
+every bit of structure the problem has. Bartels and Stewart's method, which is
+what SLICOT's SB03MD does, costs `n^3`.
+
+The trick is to put `A` into real Schur form first, `A = U T U^T`. Substituting
+`X = U Y U^T` and multiplying through by `U^T` and `U` turns the equation into
+
+    T^T Y + Y T + U^T C U = 0
+
+with `T` quasi-triangular. Now the entries of `Y` come out by back-substitution:
+the block in row `i` and column `j` depends only on blocks above it and to its
+left, so sweeping in order leaves one small equation per block, of size at most
+2 by 2 on each side, which is at most four unknowns. Then `X = U Y U^T`.
+
+What it is for: the two Gramians. `A Wc + Wc A^T + B B^T = 0` gives the states
+the input can reach, `A^T Wo + Wo A + C^T C = 0` gives the states the output can
+see, and between them they give the H2 norm of the system, its response energy
+to an impulse. Balanced truncation -- deciding which states of a large model can
+be thrown away -- is the eigenvalue problem of their product.
+
+The H2 norm has two expressions, one through each Gramian. They are computed
+separately here and the test holds them to each other, which catches an error in
+either one.
+
+Used with `import lyap`.
+###
+
+from schur import block_size, schur, schur_blocks
+from linalg import test_matrix
+
+#| Solve `A^T X + X A + C = 0` into `X`. `A` must have no two eigenvalues
+#| summing to zero, which for a stable `A` is automatic; where it fails the
+#| equation has no unique solution and the small block solve is the
+#| thing that reports it, by being singular.
+def lyap_solve(A, C, X) {
+    n = len(A)
+    #: D = U^T C U, in the Schur basis
+    T = zeros(n, n)
+    U = zeros(n, n)
+    junk = schur(A, T, U)
+    Ut = transpose(U)
+    D = Ut @ C @ U
+    #: each block solves a small Sylvester system once those above and left are known
+    Y = zeros(n, n)
+    starts = zeros(n)
+    nb = schur_blocks(T, starts)
+    for bi to nb {
+        i0 = starts[bi]
+        ni = block_size(T, i0)
+        for bj to nb {
+            j0 = starts[bj]
+            nj = block_size(T, j0)
+            # what is left after the blocks above and to the left, which are done
+            nn = ni * nj
+            M = zeros(nn, nn)
+            rhs = zeros(nn)
+            for a to ni {
+                for b to nj {
+                    acc = -D[i0 + a, j0 + b]
+                    for k to i0 {
+                        acc = acc - T[k, i0 + a] * Y[k, j0 + b]
+                    }
+                    for k to j0 {
+                        acc = acc - Y[i0 + a, k] * T[k, j0 + b]
+                    }
+                    u = a * nj + b
+                    rhs[u] = acc
+                    # T11^T Yb + Yb T22 = rhs, written out in the entries of Yb
+                    for c to ni {
+                        M[u, c * nj + b] = M[u, c * nj + b] + T[i0 + c, i0 + a]
+                    }
+                    for c to nj {
+                        M[u, a * nj + c] = M[u, a * nj + c] + T[j0 + c, j0 + b]
+                    }
+                }
+            }
+            sol = zeros(nn)
+            lin_solve(M, rhs, sol)
+            for a to ni {
+                for b to nj {
+                    Y[i0 + a, j0 + b] = sol[a * nj + b]
+                }
+            }
+        }
+    }
+    back = U @ Y @ Ut
+    for i to n {
+        for j to n {
+            X[i, j] = back[i, j]
+        }
+    }
+    return 0.0
+}
+
+#| The largest entry of `A^T X + X A + C`, measured against the size of the
+#| terms that produced it.
+def lyap_residual_rel(A: Arr, C: Arr, X: Arr) {
+    n = len(A)
+    res = transpose(A) @ X + X @ A + C
+    worst = 0.0
+    na = 0.0
+    nx = 0.0
+    nc = 0.0
+    for i to n {
+        for j to n {
+            worst = max(worst, abs(res[i, j]))
+            na = max(na, abs(A[i, j]))
+            nx = max(nx, abs(X[i, j]))
+            nc = max(nc, abs(C[i, j]))
+        }
+    }
+    scale = 2.0 * na * nx + nc
+    if scale == 0.0 {
+        return worst
+    }
+    return worst / scale
+}
+
+#| The controllability Gramian: `A Wc + Wc A^T + B B^T = 0`. It is the same
+#| equation with `A` transposed, so there is only one solver.
+def gram_controllability(A, B) {
+    n = len(A)
+    W = zeros(n, n)
+    junk = lyap_solve(transpose(A), B @ transpose(B), W)
+    return W
+}
+
+#| The observability Gramian: `A^T Wo + Wo A + C^T C = 0`.
+def gram_observability(A, C) {
+    n = len(A)
+    W = zeros(n, n)
+    junk = lyap_solve(A, transpose(C) @ C, W)
+    return W
+}
+
+#| The H2 norm of `(A, B, C)`, through the controllability Gramian:
+#| the square root of the trace of `C Wc C^T`.
+def h2_through_control(A, B, C) {
+    W = gram_controllability(A, B)
+    m = C @ W @ transpose(C)
+    total = 0.0
+    for i to len(m) {
+        total = total + m[i, i]
+    }
+    return sqrt(total)
+}
+
+#| The same number through the observability Gramian: the square root of the
+#| trace of `B^T Wo B`. Nothing in the computation is shared with the other one.
+def h2_through_observe(A, B, C) {
+    W = gram_observability(A, C)
+    m = transpose(B) @ W @ B
+    total = 0.0
+    for i to len(m) {
+        total = total + m[i, i]
+    }
+    return sqrt(total)
+}
+
+#| The same number a third way, by brute force: drive the system with an impulse
+#| on each input in turn and integrate the energy that comes out of the output.
+#| Fourth-order Runge-Kutta for the trajectory and the trapezoid rule for the
+#| energy, so it is only as good as the step. It knows nothing about Lyapunov
+#| equations, and that is the point of having it.
+def h2_by_simulation(A: Arr, B: Arr, C: Arr, dt, tend) {
+    n = len(A)
+    m = len(transpose(B))
+    steps = round(tend / dt)
+    total = 0.0
+    for j to m {
+        #: output energy of each input's impulse response, by RK4 and the trapezoid rule
+        x = zeros(n)
+        for i to n {
+            x[i] = B[i, j]
+        }
+        for s to steps + 1 {
+            y = C @ x
+            e = 0.0
+            for i to len(y) {
+                e = e + y[i] * y[i]
+            }
+            # the two ends of the interval count half, which is the trapezoid
+            if s == 0 {
+                e = 0.5 * e
+            }
+            if s == steps {
+                e = 0.5 * e
+            }
+            total = total + dt * e
+            k1 = A @ x
+            k2 = A @ (x + 0.5 * dt * k1)
+            k3 = A @ (x + 0.5 * dt * k2)
+            k4 = A @ (x + dt * k3)
+            x = x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        }
+    }
+    return sqrt(total)
+}
+
+#| A stable test system of order `n`: a random matrix shifted until every
+#| eigenvalue is safely in the left half plane.
+def lyap_test_system(n, seed) {
+    A = test_matrix(n, seed)
+    #: shift so the rightmost eigenvalue sits at -0.35
+    re = zeros(n)
+    im = zeros(n)
+    eig_general(A, re, im)
+    worst = -1.0e30
+    for i to n {
+        worst = max(worst, re[i])
+    }
+    for i to n {
+        A[i, i] = A[i, i] - worst - 0.35
+    }
+    return A
+}
+
+test "the scalar equation is one line of algebra, and it agrees" {
+    A = [[-1.0]]
+    C = [[2.0]]
+    X = zeros(1, 1)
+    junk = lyap_solve(A, C, X)
+    # -X - X + 2 = 0
+    assert_near(X[0, 0], 1.0, 1.0e-14)
+}
+
+test "a diagonal A gives the entrywise answer C[i,j] / -(a_i + a_j)" {
+    n = 4
+    A = zeros(n, n)
+    for i to n {
+        A[i, i] = -1.0 - 0.7 * i
+    }
+    C = test_matrix(n, 61.0)
+    X = zeros(n, n)
+    junk = lyap_solve(A, C, X)
+    for i to n {
+        for j to n {
+            assert_near(X[i, j], -C[i, j] / (A[i, i] + A[j, j]), 1.0e-12)
+        }
+    }
+}
+
+test "the residual stays at rounding across a spread of stable systems" {
+    worst = 0.0
+    ncases = 12
+    for si to ncases {
+        n = 2 + mod(si, 7.0)
+        A = lyap_test_system(n, 7.0 + 19.0 * si)
+        C = test_matrix(n, 101.0 + 3.0 * si)
+        S = C + transpose(C)
+        X = zeros(n, n)
+        junk = lyap_solve(A, S, X)
+        worst = max(worst, lyap_residual_rel(A, S, X))
+    }
+    assert_lt(worst, 1.0e-14)
+}
+
+test "a symmetric C gives a symmetric X" {
+    n = 6
+    A = lyap_test_system(n, 313.0)
+    C = test_matrix(n, 29.0)
+    S = C + transpose(C)
+    X = zeros(n, n)
+    junk = lyap_solve(A, S, X)
+    for i to n {
+        for j to n {
+            assert_near(X[i, j], X[j, i], 1.0e-11)
+        }
+    }
+}
+
+test "the observability Gramian of a stable system is positive definite" {
+    n = 5
+    A = lyap_test_system(n, 88.0)
+    C = zeros(n, n)
+    for i to n {
+        C[i, i] = 1.0
+    }
+    W = gram_observability(A, C)
+    vals = zeros(n)
+    vecs = zeros(n, n)
+    eig_sym(W, vals, vecs)
+    assert_lt(0.0, vals[0])
+}
+
+test "a first-order system's Gramian and H2 norm are the ones on paper" {
+    a = 1.7
+    b = 0.8
+    c = 2.3
+    A = [[-a]]
+    B = [[b]]
+    C = [[c]]
+    Wc = gram_controllability(A, B)
+    assert_near(Wc[0, 0], b * b / (2.0 * a), 1.0e-13)
+    Wo = gram_observability(A, C)
+    assert_near(Wo[0, 0], c * c / (2.0 * a), 1.0e-13)
+    expected = sqrt(c * c * b * b / (2.0 * a))
+    assert_near(h2_through_control(A, B, C), expected, 1.0e-13)
+    assert_near(h2_through_observe(A, B, C), expected, 1.0e-13)
+}
+
+test "the two Gramians give the same H2 norm, sharing none of the work" {
+    worst = 0.0
+    ncases = 8
+    for si to ncases {
+        n = 2 + mod(si, 5.0)
+        A = lyap_test_system(n, 5.0 + 23.0 * si)
+        B = zeros(n, 2)
+        for i to n {
+            B[i, 0] = 0.5 + 0.3 * mod(i, 3.0)
+            B[i, 1] = cos(1.0 * i + si)
+        }
+        C = zeros(2, n)
+        for j to n {
+            C[0, j] = 1.0 - 0.1 * j
+            C[1, j] = sin(0.7 * j)
+        }
+        one = h2_through_control(A, B, C)
+        two = h2_through_observe(A, B, C)
+        assert_lt(0.0, one)
+        worst = max(worst, abs(one - two) / one)
+    }
+    assert_lt(worst, 1.0e-12)
+}
+
+test "and simulating the impulse response gets the same number the slow way" {
+    n = 3
+    A = lyap_test_system(n, 47.0)
+    B = zeros(n, 1)
+    B[0, 0] = 1.0
+    B[2, 0] = -0.4
+    C = zeros(1, n)
+    C[0, 0] = 0.9
+    C[0, 1] = 0.3
+    exact = h2_through_control(A, B, C)
+    coarse = abs(h2_by_simulation(A, B, C, 0.002, 40.0) - exact) / exact
+    fine = abs(h2_by_simulation(A, B, C, 0.001, 40.0) - exact) / exact
+    finer = abs(h2_by_simulation(A, B, C, 0.0005, 40.0) - exact) / exact
+    assert_lt(finer, 1.0e-6)
+    # what is left over is the trapezoid rule, not a disagreement about the
+    # answer: halving the step quarters it, which is that rule's order
+    assert_lt(abs(coarse / fine - 4.0), 0.2)
+    assert_lt(abs(fine / finer - 4.0), 0.2)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

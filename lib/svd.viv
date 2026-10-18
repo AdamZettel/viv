@@ -1,0 +1,310 @@
+###
+post: The singular value decomposition, by one-sided Jacobi
+agent: claude
+
+`A = U S V^T`, with `U` and `V` orthonormal and `S` diagonal and non-negative.
+This is the decomposition that answers what a matrix does to the unit sphere,
+what its rank is when the answer is not a whole number, and which directions of
+its input it barely notices.
+
+The temptation is to get it from `eig_sym(A^T A)`: the eigenvectors are `V` and
+the eigenvalues are the squares of the singular values. That works, and it is
+wrong for the small ones, because squaring the matrix squares its condition
+number and each singular value comes back with about half the digits it should
+have. The last test measures it on a matrix built to have singular values
+1, 1e-3, 1e-6, 1e-9, 1e-12. Relative error in each, one-sided Jacobi against
+the squared route:
+
+    1       1.1e-15     1.2e-15
+    1e-3    7.4e-15     5.1e-12
+    1e-6    8.5e-12     2.0e-6
+    1e-9    3.0e-8      0.34
+    1e-12   1.8e-5      1.0
+
+The squared route has lost a third of the fourth value and the whole of the
+fifth, which it returns as zero. Some of what Jacobi loses further down that
+column is the test matrix rather than the method: writing `Q1 diag(s) Q2^T` into
+double precision already perturbs a singular value of `1e-12` relative to a
+largest of 1.
+
+One-sided Jacobi does it differently. Take pairs of columns of `A` and rotate each pair
+until the two are orthogonal, which is a 2 by 2 eigenvalue problem with a closed
+form. Sweep over all pairs, repeat, and the columns converge to mutually
+orthogonal vectors. Their lengths are the singular values and their directions
+are `U`; the accumulated rotations are `V`. Nothing is ever squared except
+inside a single 2 by 2, so the small singular values keep their digits.
+
+`A` must have at least as many rows as columns. For a wide matrix, decompose its
+transpose and swap `U` and `V`.
+
+Used with `import svd`.
+###
+
+from schur import schur
+from linalg import test_matrix
+
+SVD_SWEEPS = 60
+SVD_TOL = 1.0e-15
+
+#| Decompose `A`, which is `m` by `n` with `m >= n`. `A` is overwritten with
+#| `U S`, so its columns come back scaled by the singular values; `s` gets the
+#| singular values and `V` the right vectors, in whatever order the sweeps left
+#| them. Returns how many sweeps it took.
+def svd_jacobi(A, s, V, m, n) {
+    for i to n {
+        for j to n {
+            V[i, j] = 0.0
+        }
+        V[i, i] = 1.0
+    }
+    sweeps = 0
+    for sweep to SVD_SWEEPS {
+        sweeps = sweeps + 1
+        off = 0.0
+        for p to n - 1 {
+            for qq to n - 1 - p {
+                q = p + 1 + qq
+                alpha = 0.0
+                beta = 0.0
+                gamma = 0.0
+                for i to m {
+                    alpha = alpha + A[i, p] * A[i, p]
+                    beta = beta + A[i, q] * A[i, q]
+                    gamma = gamma + A[i, p] * A[i, q]
+                }
+                scale = sqrt(alpha * beta)
+                if scale > 0.0 {
+                    off = max(off, abs(gamma) / scale)
+                    if abs(gamma) > SVD_TOL * scale {
+                        # the rotation that makes these two columns orthogonal
+                        zeta = (beta - alpha) / (2.0 * gamma)
+                        t = 1.0 / (abs(zeta) + sqrt(1.0 + zeta * zeta))
+                        if zeta < 0.0 {
+                            t = -t
+                        }
+                        c = 1.0 / sqrt(1.0 + t * t)
+                        sn = c * t
+                        for i to m {
+                            ap = A[i, p]
+                            aq = A[i, q]
+                            A[i, p] = c * ap - sn * aq
+                            A[i, q] = sn * ap + c * aq
+                        }
+                        for i to n {
+                            vp = V[i, p]
+                            vq = V[i, q]
+                            V[i, p] = c * vp - sn * vq
+                            V[i, q] = sn * vp + c * vq
+                        }
+                    }
+                }
+            }
+        }
+        if off < SVD_TOL {
+            break
+        }
+    }
+    for j to n {
+        total = 0.0
+        for i to m {
+            total = total + A[i, j] * A[i, j]
+        }
+        s[j] = sqrt(total)
+    }
+    return 1.0 * sweeps
+}
+
+#| The full decomposition, sorted: `U` is `m` by `n`, `s` descends, and
+#| `A = U diag(s) V^T`. `A` is left alone.
+def svd(A, U, s, V, m, n) {
+    work = zeros(m, n)
+    for i to m {
+        for j to n {
+            work[i, j] = A[i, j]
+        }
+    }
+    junk = svd_jacobi(work, s, V, m, n)
+    # sort descending, carrying the columns of both factors along
+    for a to n {
+        best = a
+        for b to n - a {
+            j = a + b
+            if s[j] > s[best] {
+                best = j
+            }
+        }
+        if best != a {
+            tmp = s[a]
+            s[a] = s[best]
+            s[best] = tmp
+            for i to m {
+                tw = work[i, a]
+                work[i, a] = work[i, best]
+                work[i, best] = tw
+            }
+            for i to n {
+                tv = V[i, a]
+                V[i, a] = V[i, best]
+                V[i, best] = tv
+            }
+        }
+    }
+    # each column over its singular value; a zero one gets a unit vector
+    U[:, :] = work / s
+    for j to n {
+        if not (s[j] > 0.0) {
+            U[:, j] = 0.0
+            U[j, j] = 1.0
+        }
+    }
+    return 0.0
+}
+
+#| The largest entry of `A - U diag(s) V^T`.
+def svd_residual(A: Arr, U: Arr, s: Arr, V: Arr, m, n) {
+    return max(abs((U[0:m, 0:n] * s[0:n]) @ transpose(V[0:n, 0:n]) - A[0:m, 0:n]))
+}
+
+#| How far the `n` columns of an `m` by `n` matrix are from orthonormal.
+def svd_orthonormal(M: Arr, m, n) {
+    C = M[0:m, 0:n]
+    return max(abs(transpose(C) @ C - eye(n)))
+}
+
+#| A matrix with the singular values you ask for: `Q1 diag(want) Q2^T`, with the
+#| two orthogonal factors taken from the Schur vectors of two unrelated
+#| matrices, so nothing about the construction lines up with the axes.
+def svd_with_values(want: Arr, n, seed) {
+    T = zeros(n, n)
+    Q1 = zeros(n, n)
+    Q2 = zeros(n, n)
+    junk = schur(test_matrix(n, seed), T, Q1)
+    junk = schur(test_matrix(n, seed + 1000.0), T, Q2)
+    return (Q1 * want) @ transpose(Q2)
+}
+
+test "a diagonal matrix has its own entries as singular values" {
+    n = 4
+    A = diag([3.0, -5.0, 0.5, 2.0])
+    U = zeros(n, n)
+    s = zeros(n)
+    V = zeros(n, n)
+    junk = svd(A, U, s, V, n, n)
+    assert_near(s[0], 5.0, 1.0e-13)
+    assert_near(s[1], 3.0, 1.0e-13)
+    assert_near(s[2], 2.0, 1.0e-13)
+    assert_near(s[3], 0.5, 1.0e-13)
+    assert_lt(svd_residual(A, U, s, V, n, n), 1.0e-13)
+}
+
+test "U S V^T puts a square matrix back, with both factors orthonormal" {
+    worst_res = 0.0
+    worst_u = 0.0
+    worst_v = 0.0
+    ncases = 10
+    for si to ncases {
+        n = 2 + mod(si, 7.0)
+        A = test_matrix(n, 17.0 + 31.0 * si)
+        U = zeros(n, n)
+        s = zeros(n)
+        V = zeros(n, n)
+        junk = svd(A, U, s, V, n, n)
+        worst_res = max(worst_res, svd_residual(A, U, s, V, n, n))
+        worst_u = max(worst_u, svd_orthonormal(U, n, n))
+        worst_v = max(worst_v, svd_orthonormal(V, n, n))
+        for j to n - 1 {
+            assert_lt(-1.0e-15, s[j] - s[j + 1])
+        }
+    }
+    assert_lt(worst_res, 1.0e-13)
+    assert_lt(worst_u, 1.0e-13)
+    assert_lt(worst_v, 1.0e-13)
+}
+
+test "a tall matrix works too, and its singular values are the square roots of eig(A^T A)" {
+    m = 9
+    n = 4
+    A = zeros(m, n)
+    B = test_matrix(m, 71.0)
+    for i to m {
+        for j to n {
+            A[i, j] = B[i, j]
+        }
+    }
+    U = zeros(m, n)
+    s = zeros(n)
+    V = zeros(n, n)
+    junk = svd(A, U, s, V, m, n)
+    assert_lt(svd_residual(A, U, s, V, m, n), 1.0e-13)
+    assert_lt(svd_orthonormal(U, m, n), 1.0e-13)
+    G = transpose(A) @ A
+    vals = zeros(n)
+    vecs = zeros(n, n)
+    eig_sym(G, vals, vecs)
+    # eig_sym returns them ascending, svd descending
+    for j to n {
+        assert_near(s[j], sqrt(vals[n - 1 - j]), 1.0e-11)
+    }
+}
+
+test "the small singular values survive, where going through A^T A loses them" {
+    n = 5
+    want = zeros(n)
+    want[0] = 1.0
+    want[1] = 1.0e-3
+    want[2] = 1.0e-6
+    want[3] = 1.0e-9
+    want[4] = 1.0e-12
+    A = svd_with_values(want, n, 23.0)
+    U = zeros(n, n)
+    s = zeros(n)
+    V = zeros(n, n)
+    junk = svd(A, U, s, V, n, n)
+    # the squared route: eigenvalues of A^T A, whose condition number is squared
+    G = transpose(A) @ A
+    vals = zeros(n)
+    vecs = zeros(n, n)
+    eig_sym(G, vals, vecs)
+    jac = zeros(n)
+    sq = zeros(n)
+    for j to n {
+        jac[j] = abs(s[j] - want[j]) / want[j]
+        sq[j] = abs(sqrt(max(vals[n - 1 - j], 0.0)) - want[j]) / want[j]
+    }
+    assert_lt(jac[0], 1.0e-14)
+    assert_lt(jac[1], 1.0e-13)
+    assert_lt(jac[2], 1.0e-10)
+    assert_lt(jac[3], 1.0e-6)
+    assert_lt(jac[4], 1.0e-3)
+    # the squared route has thrown away the fourth and the fifth entirely
+    assert_lt(0.1, sq[3])
+    assert_lt(0.5, sq[4])
+    # and is worse at every level below the largest
+    for j to n - 1 {
+        assert_lt(jac[j + 1], sq[j + 1])
+    }
+}
+
+test "a rank-deficient matrix reports the rank it has" {
+    n = 6
+    want = zeros(n)
+    want[0] = 4.0
+    want[1] = 2.0
+    want[2] = 0.5
+    A = svd_with_values(want, n, 137.0)
+    U = zeros(n, n)
+    s = zeros(n)
+    V = zeros(n, n)
+    junk = svd(A, U, s, V, n, n)
+    assert_near(s[0], 4.0, 1.0e-12)
+    assert_near(s[1], 2.0, 1.0e-12)
+    assert_near(s[2], 0.5, 1.0e-12)
+    rank = 3
+    for j to n - rank {
+        assert_lt(s[rank + j], 1.0e-14)
+    }
+    assert_lt(svd_residual(A, U, s, V, n, n), 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,355 @@
+###
+post: Exact rationals and arithmetic mod p, in doubles
+agent: claude
+
+The coefficients of the computer algebra system (lib/cas) are exact
+rationals `p/q`: `q > 0`, `gcd(p, q) = 1`. They are doubles holding integers:
+this library predates Viv's `Int`, and Viv has no big integers yet
+(features 1 and 5). A double holds every integer up to
+$2^{53} = 9007199254740992$ exactly; every operation here checks that its
+result stays below that, and gives NaN when it would not. The store
+(lib/cas/store) turns a NaN coefficient into a refusal that says why, so a
+coefficient is never silently rounded. A later stage replaces these
+pairs with lib/bigint and lib/rational, and then nothing here refuses.
+
+A rational is two numbers, so every operation returns two: `p, q = rat_add(a, b, c, d)`.
+
+Arithmetic mod $p = 2^{26} - 5 = 67108859$ (a prime) is exact in doubles: a
+product of two residues is below $2^{52}$. The modular certificates of
+lib/cas/certify evaluate expressions there, and `mp_rand` draws their points
+from a seeded Park-Miller generator, so all three engines draw the same points.
+
+Used with `import cas.rational`.
+###
+
+# 2^53: every integer of smaller magnitude is exact in a double
+RAT_LIMIT = 9007199254740992
+# the prime of the modular arithmetic, 2^26 - 5
+MOD_P = 67108859
+# Park-Miller's minimal standard generator: multiplier and modulus 2^31 - 1
+PM_A = 48271
+PM_M = 2147483647
+
+#| Whether `x` is NaN, the mark of a rational that left the exact range.
+def rat_bad(x) {
+    return x != x
+}
+
+#| The greatest common divisor of two integers held in doubles, by Euclid's algorithm.
+def rat_gcd(a, b) {
+    x = abs(a)
+    y = abs(b)
+    while y > 0 {
+        t = x % y
+        x = y
+        y = t
+    }
+    return x
+}
+
+#| `a * b` when it stays inside the exact range, else NaN.
+def rat_imul(a, b) {
+    r = a * b
+    if abs(r) >= RAT_LIMIT {
+        return 0.0 / 0.0
+    }
+    return r
+}
+
+#| `a + b` when it stays inside the exact range, else NaN.
+def rat_iadd(a, b) {
+    r = a + b
+    if abs(r) >= RAT_LIMIT {
+        return 0.0 / 0.0
+    }
+    return r
+}
+
+#| `p/q` in lowest terms with a positive denominator; NaN when `q` is 0 or either part is NaN.
+def rat_norm(p, q) {
+    if rat_bad(p) or rat_bad(q) or q == 0 {
+        return 0.0 / 0.0, 1
+    }
+    if p == 0 {
+        return 0, 1
+    }
+    g = rat_gcd(p, q)
+    a = p / g
+    b = q / g
+    if b < 0 {
+        return -a, -b
+    }
+    return a, b
+}
+
+#| `p1/q1 + p2/q2`.
+def rat_add(p1, q1, p2, q2) {
+    if rat_bad(p1) or rat_bad(p2) {
+        return 0.0 / 0.0, 1
+    }
+    g = rat_gcd(q1, q2)
+    l = rat_imul(q1 / g, q2)
+    n = rat_iadd(rat_imul(p1, l / q1), rat_imul(p2, l / q2))
+    return rat_norm(n, l)
+}
+
+#| `p1/q1 - p2/q2`.
+def rat_sub(p1, q1, p2, q2) {
+    return rat_add(p1, q1, -p2, q2)
+}
+
+#| `p1/q1 * p2/q2`, cross-reduced first so the products stay small.
+def rat_mul(p1, q1, p2, q2) {
+    if rat_bad(p1) or rat_bad(p2) {
+        return 0.0 / 0.0, 1
+    }
+    if p1 == 0 or p2 == 0 {
+        return 0, 1
+    }
+    g1 = rat_gcd(p1, q2)
+    g2 = rat_gcd(p2, q1)
+    return rat_norm(rat_imul(p1 / g1, p2 / g2), rat_imul(q1 / g2, q2 / g1))
+}
+
+#| `(p1/q1) / (p2/q2)`; NaN when dividing by 0.
+def rat_div(p1, q1, p2, q2) {
+    if p2 == 0 {
+        return 0.0 / 0.0, 1
+    }
+    if p2 < 0 {
+        return rat_mul(p1, q1, -q2, -p2)
+    }
+    return rat_mul(p1, q1, q2, p2)
+}
+
+#| `(p/q)^n` for an integer `n`, by repeated squaring; NaN for `0^n` with `n < 0`.
+def rat_pow(p, q, n) {
+    if n < 0 {
+        if p == 0 {
+            return 0.0 / 0.0, 1
+        }
+        a, b = rat_pow(p, q, -n)
+        return rat_div(1, 1, a, b)
+    }
+    rp = 1
+    rq = 1
+    bp = p
+    bq = q
+    k = n
+    while k > 0 {
+        if k % 2 == 1 {
+            rp, rq = rat_mul(rp, rq, bp, bq)
+        }
+        k = floor(k / 2)
+        if k > 0 {
+            bp, bq = rat_mul(bp, bq, bp, bq)
+        }
+    }
+    return rp, rq
+}
+
+#| -1, 0 or 1 as `p1/q1` is below, equal to or above `p2/q2`. Exact when the
+#| cross products fit; otherwise by the doubles, then by the parts, so the
+#| order stays total and the same in every engine.
+def rat_cmp(p1, q1, p2, q2) {
+    l = p1 * q2
+    r = p2 * q1
+    if abs(l) < RAT_LIMIT and abs(r) < RAT_LIMIT {
+        if l < r {
+            return -1
+        }
+        if l > r {
+            return 1
+        }
+        return 0
+    }
+    a = p1 / q1
+    b = p2 / q2
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    if p1 != p2 {
+        if p1 < p2 {
+            return -1
+        }
+        return 1
+    }
+    if q1 < q2 {
+        return -1
+    }
+    if q1 > q2 {
+        return 1
+    }
+    return 0
+}
+
+#| The integer square root: the largest `r` with `r^2 <= n`, for `0 <= n < 2^53`.
+def rat_isqrt(n) {
+    r = floor(sqrt(n))
+    while r * r > n {
+        r = r - 1
+    }
+    while (r + 1) * (r + 1) <= n {
+        r = r + 1
+    }
+    return r
+}
+
+#| The integer `k`-th root of `n` when `n` is a perfect `k`-th power, else -1 (`n >= 0`, `k >= 1`).
+def rat_iroot(n, k) {
+    if k == 1 or n < 2 {
+        return n
+    }
+    r = floor(pow(n, 1.0 / k) + 0.5)
+    for c from r - 1 to r + 2 {
+        if c >= 0 {
+            v = 1
+            for i to k {
+                v = v * c
+            }
+            if v == n {
+                return c
+            }
+        }
+    }
+    return -1
+}
+
+# the largest factor trial division looks for in rat_square_part: 2^24, so
+# that its square stays below 2^53
+SQUARE_TRIAL_MAX = 16777216
+
+#| `n = s^2 k` with `k` free of squares of factors up to SQUARE_TRIAL_MAX: `s, k`.
+def rat_square_part(n) {
+    s = 1
+    k = n
+    d = 2
+    while d * d <= k and d <= SQUARE_TRIAL_MAX {
+        while k % (d * d) == 0 {
+            k = k / (d * d)
+            s = s * d
+        }
+        d = d + 1
+    }
+    return s, k
+}
+
+# ---- arithmetic mod MOD_P -----------------------------------------------------
+
+#| `a mod MOD_P` in [0, MOD_P), for any integer in a double.
+def mp_red(a) {
+    r = a % MOD_P
+    if r < 0 {
+        r = r + MOD_P
+    }
+    return r
+}
+
+def mp_add(a, b) {
+    return mp_red(a + b)
+}
+
+def mp_sub(a, b) {
+    return mp_red(a - b)
+}
+
+#| `a * b mod MOD_P` for residues: the product is below 2^52, exact.
+def mp_mul(a, b) {
+    return (a * b) % MOD_P
+}
+
+#| `a^n mod MOD_P`, `n >= 0`.
+def mp_pow(a, n) {
+    r = 1
+    b = mp_red(a)
+    k = n
+    while k > 0 {
+        if k % 2 == 1 {
+            r = mp_mul(r, b)
+        }
+        k = floor(k / 2)
+        b = mp_mul(b, b)
+    }
+    return r
+}
+
+#| The inverse of `a` mod MOD_P by Fermat's little theorem; -1 when `a` is 0 mod MOD_P.
+def mp_inv(a) {
+    r = mp_red(a)
+    if r == 0 {
+        return -1
+    }
+    return mp_pow(r, MOD_P - 2)
+}
+
+#| The residue of the rational `p/q`; -1 when `q` is 0 mod MOD_P.
+def mp_rat(p, q) {
+    iq = mp_inv(q)
+    if iq < 0 {
+        return -1
+    }
+    return mp_mul(mp_red(p), iq)
+}
+
+#| The next state of the Park-Miller generator (states in [1, PM_M)).
+def mp_next(s) {
+    return (PM_A * s) % PM_M
+}
+
+#| A point in [1, MOD_P) from a generator state.
+def mp_point(s) {
+    return 1 + s % (MOD_P - 1)
+}
+
+test "rationals reduce, add, multiply and divide exactly" {
+    p, q = rat_norm(6, -4)
+    assert_near(p, -3, 0)
+    assert_near(q, 2, 0)
+    a, b = rat_add(1, 3, 1, 6)
+    assert_near(a, 1, 0)
+    assert_near(b, 2, 0)
+    c, d = rat_mul(2, 3, 9, 4)
+    assert_near(c, 3, 0)
+    assert_near(d, 2, 0)
+    e, f = rat_div(1, 2, -3, 4)
+    assert_near(e, -2, 0)
+    assert_near(f, 3, 0)
+    g, h = rat_pow(2, 3, -3)
+    assert_near(g, 27, 0)
+    assert_near(h, 8, 0)
+}
+
+test "a result past 2^53 is NaN, not a rounded number" {
+    p, q = rat_mul(94906267, 1, 94906267, 1)
+    assert_true(rat_bad(p))
+    a, b = rat_add(RAT_LIMIT - 1, 1, 1, 1)
+    assert_true(rat_bad(a))
+    c, d = rat_div(1, 1, 0, 1)
+    assert_true(rat_bad(c))
+}
+
+test "comparison, integer roots" {
+    assert_near(rat_cmp(1, 3, 1, 2), -1, 0)
+    assert_near(rat_cmp(2, 4, 1, 2), 0, 0)
+    assert_near(rat_isqrt(99), 9, 0)
+    assert_near(rat_isqrt(100), 10, 0)
+    assert_near(rat_iroot(27, 3), 3, 0)
+    assert_near(rat_iroot(28, 3), -1, 0)
+    s, k = rat_square_part(72)
+    assert_near(s, 6, 0)
+    assert_near(k, 2, 0)
+}
+
+test "arithmetic mod p: the inverse, Fermat, and a rational" {
+    assert_near(mp_mul(mp_inv(12345), 12345), 1, 0)
+    assert_near(mp_pow(3, MOD_P - 1), 1, 0)
+    # 1/2 mod p is (p + 1) / 2
+    assert_near(mp_rat(1, 2), (MOD_P + 1) / 2, 0)
+    assert_near(mp_rat(-1, 1), MOD_P - 1, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

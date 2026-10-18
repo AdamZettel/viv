@@ -1,0 +1,474 @@
+###
+post: Speeding up the SCF fixed point by DIIS, plain iteration and damping
+agent: claude
+
+One SCF iteration maps a Fock matrix to a density (diagonalize, occupy) and
+the density back to a Fock matrix (J and K). Plain iteration applies that map
+until nothing changes. It converges when the map is a contraction near the
+solution, which is often slowly and sometimes not at all: the density can
+swing between two shapes forever.
+
+An accelerator chooses the Fock matrix the next step diagonalizes. The members:
+
+- `accel_cdiis` (member 0, production): Pulay's DIIS with the commutator
+  error. At a solution `F P - P F = 0` (in the orthonormal basis), so the
+  commutator `e_i` of each stored step measures how far that step is from
+  it. DIIS looks for the combination `F = sum c_i F_i`, `sum c_i = 1`, whose
+  combined error `sum c_i e_i` is smallest, which is a small linear system:
+
+      [ B   -1 ] [ c      ]   [  0 ]
+      [ -1   0 ] [ lambda ] = [ -1 ],      B_ij = <e_i, e_j>.
+
+  If the errors depended linearly on the Fock matrix this would be exact
+  after as many steps as the error has independent directions (it is then
+  GMRES on the linearized map); the test below checks that on a linear
+  problem.
+- `accel_none`: plain iteration, the newest Fock matrix as it is.
+- `accel_damp`: `F = (1 - a) F_new + a F_prev`, where `F_prev` is the matrix
+  the previous step used, with `a = opts[OPT_DAMP]` (`ScfOptions.damping`, 0.3).
+  Damping cannot speed up a slow contraction, but it can turn an oscillation
+  into a convergent spiral.
+
+**State.** The history is the record `Diis`, made once before the loop by
+`accel_new(k, m, opts)` for `k` matrices of `m x m` a step:
+
+    hist[2 nd + 1, k, m, m]   slots 0..nd-1   Fock matrices (ring)
+                              slots nd..2nd-1 their errors (same ring)
+                              slot 2 nd       the matrix the last step used
+    meta[ACCEL_META_LEN]      count stored, newest slot, capacity nd, steps
+    gram[nd, nd]              <e_s, e_t> for ring slots s and t
+
+with `nd = opts[OPT_DIIS_N]`. `accel_push(d, F, E)` writes the newest pair
+into the ring and adds the new error's inner products with the stored ones
+to `gram`, `k` inner products a step instead of the `k (k + 1) / 2` a
+rebuilt `B` would need (PySCF's lib/diis.py keeps its `B` the same way).
+`accel_extrapolate(d, opts)` runs the member `opts[OPT_ACCEL]`, records its
+matrix in slot `2 nd` and returns it. The ring is the accelerator's state,
+filled in place; it does not grow.
+
+Member signature: `(hist, meta, opts) -> [ndens, m, m]`. A member called
+through the registry gets no `gram`, so `accel_cdiis` recomputes it from the
+history with the same inner product (`accel_gram`) and gives the same bits;
+`accel_extrapolate` calls `accel_cdiis_gram` with the kept one. With two
+densities (UHF), DIIS uses one set of coefficients for both spins and adds
+the two spins' error products in `B`, as PySCF does.
+
+Used with `import hf.accelerate`.
+###
+
+from hf.opts import (
+    OPT_ACCEL, opt_array, OPT_DAMP, OPT_DAMP_DEFAULT, OPT_DIIS_N, OPT_DIIS_N_DEFAULT, opt_new,
+    scf_defaults, ScfOptions,
+)
+
+record Diis { hist: Arr, meta: Arr, gram: Arr }
+
+ACCEL_M_COUNT = 0
+ACCEL_M_HEAD = 1
+ACCEL_M_ND = 2
+ACCEL_M_STEPS = 3
+ACCEL_META_LEN = 4
+
+# the members of accel_methods (ScfOptions.accelerator)
+ACCEL_CDIIS = 0
+ACCEL_NONE = 1
+ACCEL_DAMP = 2
+
+#| The ring capacity: opts[OPT_DIIS_N], at least `1`.
+def accel_capacity(opts: Arr) {
+    return max(1, round(opts[OPT_DIIS_N]))
+}
+
+#| A fresh meta vector for a ring of capacity `nd`.
+def accel_meta_new(nd) {
+    meta = zeros(ACCEL_META_LEN)
+    meta[ACCEL_M_ND] = nd
+    meta[ACCEL_M_HEAD] = -1
+    return meta
+}
+
+#| An empty history for `k` matrices of `m x m` a step.
+def accel_new(k, m, opts: Arr) -> Diis {
+    nd = accel_capacity(opts)
+    return Diis { hist: zeros(2 * nd + 1, k, m, m), meta: accel_meta_new(nd), gram: zeros(nd, nd) }
+}
+
+#| The ring slot holding the step `age` steps before the newest (age `0`).
+def accel_slot(meta: Arr, age) {
+    nd = meta[ACCEL_M_ND]
+    return mod(meta[ACCEL_M_HEAD] - age + nd, nd)
+}
+
+#| Store the newest Fock matrix `Fp[k, m, m]` and its error `Ep` in the
+#| ring. Returns the number of steps stored.
+def accel_push(d: Diis, Fp: Arr, Ep: Arr) {
+    #: store in the ring, over the oldest when full
+    nd = d.meta[ACCEL_M_ND]
+    head = mod(d.meta[ACCEL_M_HEAD] + 1, nd)
+    setslab(d.hist, head, Fp)
+    setslab(d.hist, nd + head, Ep)
+    d.meta[ACCEL_M_HEAD] = head
+    d.meta[ACCEL_M_COUNT] = min(d.meta[ACCEL_M_COUNT] + 1, nd)
+    d.meta[ACCEL_M_STEPS] = d.meta[ACCEL_M_STEPS] + 1
+    #: update the Gram matrix with the new error instead of rebuilding it
+    # the ring fills slots 0, 1, ... first, so the stored slots are 0..count-1
+    for s to d.meta[ACCEL_M_COUNT] {
+        g = accel_inner(Ep, d.hist, nd + s)
+        d.gram[head, s] = g
+        d.gram[s, head] = g
+    }
+    return d.meta[ACCEL_M_COUNT]
+}
+
+#| `<E, hist[slot]>` for an error `E` of the history's shape `[k, m, m]`: the
+#| one inner product the DIIS matrix is made of, so the kept and the
+#| recomputed `gram` agree to the bit. It is the `sum` of the elementwise
+#| product, not `dot` of the flattened arrays: in wasm `ravel` and `dot` go
+#| through the runtime bridge and cost more than the product itself
+#| (study/ports/pyscf FRICTION pyscf-022).
+def accel_inner(E: Arr, hist: Arr, slot) {
+    return sum(E * slab(hist, slot))
+}
+
+#| The inner products of every stored error pair, `[nd, nd]` by ring slot,
+#| recomputed from the history: what `accel_push` keeps in `gram`.
+def accel_gram(hist: Arr, meta: Arr) {
+    nd = meta[ACCEL_M_ND]
+    G = zeros(nd, nd)
+    for s to meta[ACCEL_M_COUNT] {
+        e = slab(hist, nd + s)
+        for t to s + 1 {
+            g = accel_inner(e, hist, nd + t)
+            G[s, t] = g
+            G[t, s] = g
+        }
+    }
+    return G
+}
+
+#| The newest Fock matrix, as a fresh `[ndens, m, m]` array.
+def accel_newest(hist: Arr, meta: Arr) -> Arr {
+    return slab(hist, accel_slot(meta, 0))
+}
+
+#| Solve the k x k system A x = y in place by Gaussian elimination with
+#| partial pivoting; x overwrites y. Returns `1`, or `0` when a pivot is below
+#| `tol` times the largest entry of A (the system is then treated as
+#| singular and y is left unusable).
+def accel_solve(A: Arr, y: Arr, k, tol) {
+    big = max(abs(A[0:k, 0:k]))
+    if big == 0.0 {
+        return 0
+    }
+    #: Gaussian elimination, partial pivoting; a tiny pivot means singular
+    for c to k {
+        p = c
+        for r to k {
+            if r > c and abs(A[r, c]) > abs(A[p, c]) {
+                p = r
+            }
+        }
+        if abs(A[p, c]) <= tol * big {
+            return 0
+        }
+        if p != c {
+            for j to k {
+                t = A[c, j]
+                A[c, j] = A[p, j]
+                A[p, j] = t
+            }
+            t = y[c]
+            y[c] = y[p]
+            y[p] = t
+        }
+        for r to k {
+            if r > c {
+                f = A[r, c] / A[c, c]
+                for j to k {
+                    A[r, j] = A[r, j] - f * A[c, j]
+                }
+                y[r] = y[r] - f * y[c]
+            }
+        }
+    }
+    i = k - 1
+    while i >= 0 {
+        s = y[i]
+        for j to k {
+            if j > i {
+                s = s - A[i, j] * y[j]
+            }
+        }
+        y[i] = s / A[i, i]
+        i = i - 1
+    }
+    return 1
+}
+
+#| DIIS coefficients over the newest `k` stored steps, from the inner
+#| products `G` of the stored errors (by ring slot): `1`, or `0` when the
+#| system is singular, and the coefficients `c[0..k-1]` (`c[t]` belongs to the
+#| step of age t).
+def accel_diis_coeffs(G: Arr, meta: Arr, k) {
+    B = zeros(k + 1, k + 1)
+    for t to k {
+        st = accel_slot(meta, t)
+        for u to k {
+            B[t, u] = G[st, accel_slot(meta, u)]
+        }
+    }
+    # scale the error block to order 1 so the pivot test is relative
+    top = 0.0
+    for t to k {
+        top = max(top, B[t, t])
+    }
+    y = zeros(k + 1)
+    if top == 0.0 {
+        return 0, y
+    }
+    #: border with the constraint sum c = 1 (a Lagrange multiplier)
+    B[0:k, 0:k] = B[0:k, 0:k] / top
+    B[0:k, k] = -1.0
+    B[k, 0:k] = -1.0
+    y[k] = -1.0
+    ok = accel_solve(B, y, k + 1, 1.0e-14)
+    return ok, y[0:k]
+}
+
+#| Commutator DIIS from the history and the inner products `G` of its
+#| errors. When the full history is singular it drops the oldest steps until
+#| the system solves; with one step it is plain iteration.
+def accel_cdiis_gram(hist: Arr, meta: Arr, G: Arr) -> Arr {
+    sh = shape(hist)
+    R = zeros(sh[1], sh[2], sh[3])
+    k = meta[ACCEL_M_COUNT]
+    c = zeros(k + 1)
+    ok = 0
+    #: shrink the history until solvable; at one step, use it as is
+    while k > 1 and ok < 1 {
+        ok, c = accel_diis_coeffs(G, meta, k)
+        if ok < 1 {
+            k = k - 1
+        }
+    }
+    if ok < 1 {
+        return accel_newest(hist, meta)
+    }
+    for t to k {
+        R = R + c[t] * slab(hist, accel_slot(meta, t))
+    }
+    return R
+}
+
+#| Member `ACCEL_CDIIS`, the production one: commutator DIIS, with the inner
+#| products recomputed from the history (`accel_extrapolate` passes the ones
+#| `accel_push` kept instead).
+def accel_cdiis(hist: Arr, meta: Arr, opts: Arr) -> Arr {
+    return accel_cdiis_gram(hist, meta, accel_gram(hist, meta))
+}
+
+#| Member `ACCEL_NONE`: plain iteration.
+def accel_none(hist: Arr, meta: Arr, opts: Arr) -> Arr {
+    return accel_newest(hist, meta)
+}
+
+#| Member `ACCEL_DAMP`: damping against the matrix the previous step used.
+def accel_damp(hist: Arr, meta: Arr, opts: Arr) -> Arr {
+    R = accel_newest(hist, meta)
+    if meta[ACCEL_M_STEPS] < 2 {
+        return R
+    }
+    a = opts[OPT_DAMP]
+    if a <= 0.0 {
+        a = OPT_DAMP_DEFAULT
+    }
+    return (1.0 - a) * R + a * slab(hist, 2 * meta[ACCEL_M_ND])
+}
+
+#| The accelerator registry, production member first.
+def accel_methods() {
+    return [accel_cdiis, accel_none, accel_damp]
+}
+
+#| The matrix the accelerator `opts[OPT_ACCEL]` names makes of the history,
+#| `[k, m, m]`; it is also recorded in slot `2 nd` as the matrix this step
+#| used. Each member is called by name, `accel_cdiis` (the production one)
+#| when the option is left at its default.
+def accel_extrapolate(d: Diis, opts: Arr) -> Arr {
+    k = round(opts[OPT_ACCEL])
+    if k == ACCEL_NONE {
+        R = accel_none(d.hist, d.meta, opts)
+    }
+    else if k == ACCEL_DAMP {
+        R = accel_damp(d.hist, d.meta, opts)
+    }
+    else {
+        R = accel_cdiis_gram(d.hist, d.meta, d.gram)
+    }
+    #: kept for damping's next mix
+    setslab(d.hist, 2 * d.meta[ACCEL_M_ND], R)
+    return R
+}
+
+#| The options array with accelerator `k`, DIIS size `n` and the defaults.
+def accel_t_opts(k, n) {
+    return opt_array(ScfOptions { accelerator: k, diis_size: n, ..scf_defaults() }, 0, 0, 0.0)
+}
+
+# ---- a linear test problem ------------------------------------------------------
+# x is a 2 x 2 "Fock matrix" (4 unknowns), the map is Richardson's
+# x -> x + (y - A x), and the error is the residual y - A x. The residual is
+# affine in x, so DIIS is exact once it has seen 5 steps (4 directions plus
+# the constraint).
+
+#| The matrix of the test problem, one row and column per unknown.
+def accel_t_system() {
+    return [[1.2, 0.3, -0.1, 0.0], [0.3, 0.9, 0.2, 0.1], [-0.1, 0.2, 0.6, -0.2], [0.0, 0.1, -0.2, 1.5]]
+}
+
+#| residual y - A x of the flattened x[0, :, :] into e[0, :, :]; returns its
+#| largest entry.
+def accel_t_residual(x: Arr, e: Arr) {
+    A = accel_t_system()
+    y = [1.0, -2.0, 0.5, 3.0]
+    worst = 0.0
+    for i to len(y) {
+        s = y[i]
+        for j to len(y) {
+            s = s - A[i, j] * x[0, floor(j / 2), mod(j, 2)]
+        }
+        e[0, floor(i / 2), mod(i, 2)] = s
+        worst = max(worst, abs(s))
+    }
+    return worst
+}
+
+#| Run `steps` Richardson steps under accelerator k; returns the final
+#| residual.
+def accel_t_run(k, steps) {
+    o = accel_t_opts(k, OPT_DIIS_N_DEFAULT)
+    d = accel_new(1, 2, o)
+    x = zeros(1, 2, 2)
+    e = zeros(1, 2, 2)
+    for it to steps {
+        # the "Fock matrix" of this step is x + e, the error is e
+        accel_t_residual(x, e)
+        accel_push(d, x + e, e)
+        x = accel_extrapolate(d, o)
+    }
+    return accel_t_residual(x, e)
+}
+
+test "DIIS solves an affine problem in as many steps as it has directions" {
+    # the residual of the extrapolated point: still 0.035 after 4 steps (one
+    # per unknown), rounding level (8.9e-16) after 5
+    accel_nx = len(accel_t_system())
+    assert_gt(accel_t_run(0, accel_nx), 1.0e-2)
+    assert_lt(accel_t_run(0, accel_nx + 1), 1.0e-12)
+    # plain Richardson contracts by the spectral radius of I - A per step, so
+    # one step later still leaves it short
+    assert_gt(accel_t_run(1, accel_nx + 2), 1.0e-3)
+    assert_gt(accel_t_run(2, accel_nx + 2), 1.0e-3)
+    # all three reach the same point eventually
+    accel_long = 200
+    assert_lt(accel_t_run(1, accel_long), 1.0e-12)
+    assert_lt(accel_t_run(2, accel_long), 1.0e-12)
+}
+
+test "the inner products accel_push keeps are the ones recomputed from the history" {
+    # 5 steps of 2 densities, 3 x 3, pushed into a ring of 4, so it wraps
+    accel_ring = 4
+    accel_nden = 2
+    accel_gm = 3
+    accel_o = accel_t_opts(ACCEL_CDIIS, accel_ring)
+    accel_d = accel_new(accel_nden, accel_gm, accel_o)
+    accel_nstep = accel_ring + 1
+    for accel_i to accel_nstep {
+        accel_F = zeros(accel_nden, accel_gm, accel_gm)
+        accel_E = zeros(accel_nden, accel_gm, accel_gm)
+        for accel_ga to accel_gm {
+            for accel_gb to accel_gm {
+                accel_F[0, accel_ga, accel_gb] = sin(accel_i + accel_ga * accel_gb)
+                accel_F[1, accel_ga, accel_gb] = cos(accel_i * accel_ga + accel_gb)
+                accel_E[0, accel_ga, accel_gb] = sin(2.0 * accel_i + accel_ga - accel_gb)
+                accel_E[1, accel_ga, accel_gb] = cos(0.5 * accel_i * accel_gb + accel_ga)
+            }
+        }
+        accel_push(accel_d, accel_F, accel_E)
+    }
+    accel_G = accel_gram(accel_d.hist, accel_d.meta)
+    assert_near(max(abs(accel_G - accel_d.gram)), 0.0, 0.0)
+    # and each entry is the sum of the two errors' products, both spins
+    accel_nd = accel_d.meta[ACCEL_M_ND]
+    accel_w = 0.0
+    for accel_t to accel_d.meta[ACCEL_M_COUNT] {
+        for accel_u to accel_d.meta[ACCEL_M_COUNT] {
+            accel_s = sum(slab(accel_d.hist, accel_nd + accel_t) * slab(accel_d.hist, accel_nd + accel_u))
+            accel_w = max(accel_w, abs(accel_G[accel_t, accel_u] - accel_s))
+        }
+    }
+    assert_lt(accel_w, 1.0e-13)
+    assert_lt(1.0, max(abs(accel_G)))
+}
+
+test "zero errors and a single step fall back to the newest matrix" {
+    accel_o = opt_new()
+    accel_d = accel_new(1, 2, accel_o)
+    accel_F = zeros(1, 2, 2)
+    accel_F[0, 0, 0] = 1.0
+    accel_F[0, 0, 1] = 2.0
+    accel_F[0, 1, 0] = 2.0
+    accel_F[0, 1, 1] = 5.0
+    accel_E = zeros(1, 2, 2)
+    accel_nstep = 3
+    for accel_i to accel_nstep {
+        accel_push(accel_d, accel_F, accel_E)
+        accel_out = accel_extrapolate(accel_d, accel_o)
+        assert_near(accel_out[0, 1, 1], 5.0, 0.0)
+    }
+    assert_near(accel_d.meta[ACCEL_M_COUNT], 3, 0.0)
+}
+
+test "the ring keeps the newest nd steps and damping mixes with the last used matrix" {
+    accel_ring = 3
+    accel_o = accel_t_opts(ACCEL_DAMP, accel_ring)
+    accel_d = accel_new(1, 1, accel_o)
+    accel_F = zeros(1, 1, 1)
+    accel_E = zeros(1, 1, 1)
+    # two more steps than the ring holds, so it wraps
+    for accel_i to accel_ring + 2 {
+        accel_F[0, 0, 0] = accel_i
+        accel_E[0, 0, 0] = 10 + accel_i
+        accel_push(accel_d, accel_F, accel_E)
+    }
+    assert_near(accel_d.meta[ACCEL_M_COUNT], 3, 0.0)
+    assert_near(accel_d.hist[accel_slot(accel_d.meta, 0), 0, 0, 0], 4, 0.0)
+    assert_near(accel_d.hist[accel_slot(accel_d.meta, 2), 0, 0, 0], 2, 0.0)
+    assert_near(accel_d.hist[accel_ring + accel_slot(accel_d.meta, 1), 0, 0, 0], 13, 0.0)
+    accel_d.hist[2 * accel_ring, 0, 0, 0] = 1.0
+    accel_out = accel_extrapolate(accel_d, accel_o)
+    assert_near(accel_out[0, 0, 0], 0.7 * 4.0 + 0.3 * 1.0, 1.0e-15)
+}
+
+test "accel_extrapolate runs the member the registry holds at each option value" {
+    accel_ms = accel_methods()
+    accel_nstep = 6
+    for accel_k to len(accel_ms) {
+        accel_o = accel_t_opts(accel_k, OPT_DIIS_N_DEFAULT)
+        accel_d = accel_new(1, 2, accel_o)
+        accel_x = zeros(1, 2, 2)
+        accel_e = zeros(1, 2, 2)
+        for accel_it to accel_nstep {
+            accel_t_residual(accel_x, accel_e)
+            accel_push(accel_d, accel_x + accel_e, accel_e)
+            # the member on the history as it stands, then the selector, which
+            # also records its matrix in the history
+            accel_b = apply(accel_ms[accel_k], accel_d.hist, accel_d.meta, accel_o)
+            accel_x = accel_extrapolate(accel_d, accel_o)
+            assert_near(max(abs(accel_x - accel_b)), 0.0, 0.0)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

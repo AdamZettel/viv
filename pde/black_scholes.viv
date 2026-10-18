@@ -1,0 +1,146 @@
+#! pde The Black-Scholes equation
+#! equation V_t + \tfrac12 \sigma^2 S^2\, V_{SS} + r S\, V_S - r V = 0
+#! kind parabolic
+#! method Crank-Nicolson on a grid in the stock price, started with four implicit half-steps (Rannacher)
+#! checks a European call against the closed form: the price, the delta, and the measured order with and without the start-up steps
+#! | The price $V(S, t)$ of an option on a stock at price $S$. It is a heat equation run backward
+#! | from a known final condition -- at expiry $T$ a call is worth its payoff, $\max(S - K, 0)$ --
+#! | with diffusion $\tfrac12\sigma^2 S^2$ that grows with $S$, a drift, and a decay at the interest rate.
+#! | Counting time *to* expiry, $\tau = T - t$, turns it into an ordinary forward march.
+#! |
+#! | The coefficients vary along the grid, so the tridiagonal matrix is three arrays rather than
+#! | three numbers, and that is the only change from the heat equation. At $S = 0$ the call is
+#! | worthless; at the far edge it is worth $S - K e^{-r\tau}$, the stock less the discounted strike.
+#! |
+#! | The payoff has a kink at the strike, and Crank-Nicolson does not damp the high-frequency error a
+#! | kink excites: every mode's amplification tends to $-1$ as $\Delta\tau/h^2$ grows, so the error
+#! | flips sign each step and never decays. It shows up in the derivatives -- the delta $V_S$ -- at
+#! | the strike. Rannacher's remedy is to take the first steps with implicit Euler, which damps
+#! | those modes hard, and only then switch. Both versions are run below, and their orders measured.
+
+K = 100.0           #: K      strike
+RATE = 0.05         #: RATE   risk-free interest rate, per year
+SIGMA = 0.2         #: SIGMA  volatility, per root-year
+T = 1.0             #: T      time to expiry, years
+SMAX = 300.0        #: SMAX   where the grid stops: three strikes out
+SMOOTHED = 2.0      #: SMOOTHED  how many opening steps `smooth` replaces by two half-steps each
+
+#| The standard normal cumulative distribution.
+def normal_cdf(x) {
+    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+}
+
+#| The Black-Scholes closed form for a European call at stock price s.
+def call_exact(s) {
+    d1 = (log(s / K) + (RATE + 0.5 * SIGMA * SIGMA) * T) / (SIGMA * sqrt(T))
+    d2 = d1 - SIGMA * sqrt(T)
+    return s * normal_cdf(d1) - K * exp(-RATE * T) * normal_cdf(d2)
+}
+
+#| Its delta, dV/dS = N(d1).
+def delta_exact(s) {
+    d1 = (log(s / K) + (RATE + 0.5 * SIGMA * SIGMA) * T) / (SIGMA * sqrt(T))
+    return normal_cdf(d1)
+}
+
+#| One theta-step of length dt from time-to-expiry tau: theta = 1 is implicit Euler,
+#| theta = 1/2 Crank-Nicolson. `s` holds the n interior stock prices, spacing h.
+def theta_step(v, s, h, tau, dt, theta) {
+    n = len(v)
+    diff = 0.5 * SIGMA * SIGMA * s * s / (h * h)
+    drift = 0.5 * RATE * s / h
+    low = diff - drift
+    mid = -2.0 * diff - RATE
+    high = diff + drift
+    e = (1.0 - theta) * dt
+    rhs = v + e * (low * roll(v, 1.0) + mid * v + high * roll(v, -1.0))
+    # roll wraps around; the two edge rows see the boundary values instead
+    edge_old = SMAX - K * exp(-RATE * tau)
+    edge_new = SMAX - K * exp(-RATE * (tau + dt))
+    last = n - 1.0
+    rhs[0] = v[0] + e * (mid[0] * v[0] + high[0] * v[1])
+    rhs[last] = v[last] + e * (low[last] * v[last - 1.0] + mid[last] * v[last] + high[last] * edge_old) + theta * dt * high[last] * edge_new
+    return tridiag_solve(-theta * dt * low, 1.0 - theta * dt * mid, -theta * dt * high, rhs)
+}
+
+#| Price the call on n interior points in `steps` time steps. With `smooth`, the first two
+#| steps are each replaced by two implicit-Euler half-steps.
+def price_call(n, steps, smooth: Bool) {
+    h = SMAX / (n + 1.0)
+    s = linspace(h, SMAX - h, n)
+    v = max(s - K, 0.0)
+    dt = T / steps
+    tau = 0.0
+    first = 0.0
+    if smooth {
+        for q to 2.0 * SMOOTHED {
+            v = theta_step(v, s, h, tau, 0.5 * dt, 1.0)
+            tau = tau + 0.5 * dt
+        }
+        first = SMOOTHED
+    }
+    for m to steps - first {
+        v = theta_step(v, s, h, tau, dt, 0.5)
+        tau = tau + dt
+    }
+    return v
+}
+
+#| The worst error in the delta (a centered difference of the prices) within 20 of the strike.
+def delta_error(n, steps, smooth: Bool) {
+    h = SMAX / (n + 1.0)
+    v = price_call(n, steps, smooth)
+    worst = 0.0
+    for i to n - 2.0 {
+        s = (i + 2.0) * h
+        if abs(s - K) < 20.0 {
+            d = (v[i + 2.0] - v[i]) / (2.0 * h)
+            worst = max(worst, abs(d - delta_exact(s)))
+        }
+    }
+    return worst
+}
+
+#| The error in the at-the-money price. The strike sits on a grid point: (n + 1) / 3 is whole.
+def price_error(n, steps, smooth: Bool) {
+    v = price_call(n, steps, smooth)
+    return abs(v[(n + 1.0) / 3.0 - 1.0] - call_exact(K))
+}
+
+N = 599
+STEPS = 200
+S = linspace(SMAX / (N + 1.0), SMAX - SMAX / (N + 1.0), N)
+V = price_call(N, STEPS, true)
+exact = call_exact(K)
+computed = V[(N + 1.0) / 3.0 - 1.0]
+show exact
+show computed
+
+# few, long time steps make dt / h^2 large: that is where the kink shows
+rough = delta_error(599.0, 25.0, false)
+smoothed = delta_error(599.0, 25.0, true)
+show rough
+show smoothed
+
+order = log(price_error(149.0, 50.0, true) / price_error(299.0, 100.0, true)) / log(2.0)
+show order
+
+figure("A European call, one year from expiry", "stock price S", "value")
+plot(S, max(S - K, 0.0), "payoff at expiry")
+plot(S, V, "value today")
+
+test "the at-the-money price matches the closed form to a tenth of a cent" {
+    assert_near(computed, exact, 1.0e-3)
+}
+test "halving h and the time step together cuts the error by four: second order" {
+    assert_near(order, 2.0, 0.1)
+}
+test "with long time steps, plain Crank-Nicolson leaves the kink ringing in the delta" {
+    assert_gt(rough, 10.0 * smoothed)
+}
+test "four implicit half-steps at the start remove it" {
+    assert_lt(smoothed, 1.0e-3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

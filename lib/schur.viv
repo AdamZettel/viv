@@ -1,0 +1,817 @@
+###
+post: The real Schur decomposition, by Householder and Francis
+agent: claude
+
+Every real square matrix can be written `A = Q T Q^T` with `Q` orthogonal and
+`T` quasi-triangular: upper triangular except for 2 by 2 blocks on the diagonal,
+one for each complex conjugate pair of eigenvalues. This is the decomposition
+that control theory runs on. SLICOT's Riccati, Lyapunov and Sylvester solvers
+all begin by computing it, because it is the only way anyone knows to get at an
+invariant subspace without inverting something that may be nearly singular.
+
+It is computed in two stages, and this module does both.
+
+`hessenberg` reduces `A` to upper Hessenberg form -- zero below the subdiagonal
+-- by `n - 2` Householder reflections. This is a finite computation; it ends.
+
+`schur` then runs the implicit double-shift QR iteration, which is Francis's,
+on the Hessenberg matrix. Each sweep introduces a bulge at the top left and
+chases it off the bottom right, and the subdiagonal entries go to zero one after
+another. This does not end in a fixed number of steps -- there is no finite
+algorithm for eigenvalues of order five and above -- so it iterates until each
+subdiagonal entry is negligible against its neighbors, and deflates.
+
+Every transformation here is orthogonal, applied on both sides. That is what
+makes the whole thing backward stable, and it is why `Q` is carried along rather
+than reconstructed at the end.
+
+Each reflector is applied only to the rows and columns that can be nonzero.
+That is not for speed. Reach outside the window and the reflector writes a
+little dust back into the subdiagonal entries deflation has already set to
+zero, and the iteration never finishes: the residual stays perfect, because a
+similarity is a similarity, while the factor is quietly not quasi-triangular.
+
+Used with `import schur`.
+###
+
+from linalg import test_matrix
+
+SCHUR_EPS = 2.220446049250313e-16
+
+# A double-shift bulge is three rows tall: the first column of (H - s1)(H - s2)
+# has three nonzeros below a Hessenberg matrix's first row.
+SCHUR_BULGE = 3
+
+#| Apply the Householder reflector built from `v` to the window of `m` rows and
+#| columns starting at `p`: `H` from both sides, so its eigenvalues do not move,
+#| and `Q` from the right, so that `A = Q H Q^T` still holds afterwards.
+#|
+#| The two ranges are not an optimization. From the left it touches columns `c0`
+#| and rightwards, and from the right it touches rows `r1` and upwards, because
+#| everything outside those is already zero and must stay zero -- a reflector
+#| applied to the whole row would write dust back into a subdiagonal entry that
+#| deflation had just decided was negligible, and the factor would never finish
+#| being quasi-triangular.
+def reflect(H, Q, v, p, m, c0, r1) {
+    n = len(H)
+    w = v[0:m]
+    vn = dot(w, w)
+    if vn == 0.0 {
+        return 0.0
+    }
+    #: only columns c0 on: the rest are zero and must stay zero
+    s = 2.0 * (w @ H[p:p + m, c0:n]) / vn
+    H[p:p + m, c0:n] = H[p:p + m, c0:n] - outer(w, s)
+    s = 2.0 * (H[0:r1 + 1, p:p + m] @ w) / vn
+    H[0:r1 + 1, p:p + m] = H[0:r1 + 1, p:p + m] - outer(s, w)
+    s = 2.0 * (Q[0:n, p:p + m] @ w) / vn
+    Q[0:n, p:p + m] = Q[0:n, p:p + m] - outer(s, w)
+    return 0.0
+}
+
+#| Apply the plane rotation `[[cs, -sn], [sn, cs]]` on rows and columns `k` and
+#| `k + 1` the same way: `T` from both sides, `Q` from the right.
+#|
+#| This is only ever called on a block that has already deflated, so everything
+#| left of column `k` in those two rows, and everything below row `k + 1` in
+#| those two columns, is zero. It stays out of both. A sweep leaves dust of
+#| order 1e-17 below the subdiagonal where exact arithmetic leaves zeros, and a rotation
+#| over the full row would mix that dust straight into the subdiagonal entry
+#| deflation had just set to zero, turning a converged 2 by 2 into two blocks
+#| that no longer look converged.
+def rotate(T, Q, k, cs, sn) {
+    n = len(T)
+    for jj to n - k {
+        j = k + jj
+        t0 = T[k, j]
+        t1 = T[k + 1, j]
+        T[k, j] = cs * t0 + sn * t1
+        T[k + 1, j] = cs * t1 - sn * t0
+    }
+    for i to k + 2 {
+        t0 = T[i, k]
+        t1 = T[i, k + 1]
+        T[i, k] = cs * t0 + sn * t1
+        T[i, k + 1] = cs * t1 - sn * t0
+    }
+    for i to n {
+        t0 = Q[i, k]
+        t1 = Q[i, k + 1]
+        Q[i, k] = cs * t0 + sn * t1
+        Q[i, k + 1] = cs * t1 - sn * t0
+    }
+    return 0.0
+}
+
+#| Reduce `A` to upper Hessenberg form. Fills `H` and `Q` so that `A = Q H Q^T`,
+#| `Q^T Q = I`, and `H[i, j] = 0` whenever `i > j + 1`. One reflection per
+#| column, each one zeroing everything below the subdiagonal of that column and
+#| leaving the columns already done alone.
+def hessenberg(A, H, Q) {
+    n = len(A)
+    for i to n {
+        for j to n {
+            H[i, j] = A[i, j]
+            Q[i, j] = 0.0
+        }
+        Q[i, i] = 1.0
+    }
+    for k to n - 2 {
+        m = n - k - 1
+        v = zeros(m)
+        nrm = 0.0
+        for i to m {
+            v[i] = H[k + 1 + i, k]
+            nrm = nrm + v[i] * v[i]
+        }
+        nrm = sqrt(nrm)
+        if nrm > 0.0 {
+            if v[0] < 0.0 {
+                nrm = -nrm
+            }
+            v[0] = v[0] + nrm
+            junk = reflect(H, Q, v, k + 1, m, k, n - 1)
+        }
+    }
+    #: exact zeros below the subdiagonal, not rounding dust
+    for i to n {
+        for j to n {
+            if i > j + 1 {
+                H[i, j] = 0.0
+            }
+        }
+    }
+    return 0.0
+}
+
+#| One implicit double-shift QR sweep over the unreduced Hessenberg block from
+#| `lo` to `hi`, for a pair of shifts given by their sum `s` and product `t`.
+#| The shifts are never formed: the first reflector is built from the first
+#| column of `(H - s1)(H - s2)`, which expands to something needing only `s` and
+#| `t`, and that is what "implicit" means. The rest of the sweep chases the
+#| resulting bulge back down to Hessenberg form.
+def francis_step(H, Q, lo, hi, s, t) {
+    #: first column of (H - s1)(H - s2), from s and t alone
+    x = H[lo, lo] * H[lo, lo] + H[lo, lo + 1] * H[lo + 1, lo] - s * H[lo, lo] + t
+    y = H[lo + 1, lo] * (H[lo, lo] + H[lo + 1, lo + 1] - s)
+    z = H[lo + 2, lo + 1] * H[lo + 1, lo]
+    #: chase the bulge down
+    span = hi - lo - 1
+    for kk to span {
+        p = lo + kk
+        v = zeros(SCHUR_BULGE)
+        v[0] = x
+        v[1] = y
+        v[2] = z
+        nrm = sqrt(x * x + y * y + z * z)
+        if nrm > 0.0 {
+            if v[0] < 0.0 {
+                nrm = -nrm
+            }
+            v[0] = v[0] + nrm
+            junk = reflect(H, Q, v, p, len(v), max(p - 1, lo), min(p + len(v), hi))
+        }
+        x = H[p + 1, p]
+        y = H[p + 2, p]
+        z = 0.0
+        if kk < span - 1 {
+            z = H[p + 3, p]
+        }
+    }
+    #: a final 2-row reflector restores Hessenberg form
+    v2 = zeros(2)
+    v2[0] = x
+    v2[1] = y
+    nrm = sqrt(x * x + y * y)
+    if nrm > 0.0 {
+        if v2[0] < 0.0 {
+            nrm = -nrm
+        }
+        v2[0] = v2[0] + nrm
+        junk = reflect(H, Q, v2, hi - 1, 2, max(hi - 2, lo), hi)
+    }
+    return 0.0
+}
+
+#| Put the 2 by 2 block at `k` into standard form. If its two eigenvalues are
+#| real it is made upper triangular, which splits it into two 1 by 1 blocks and
+#| returns 1.0. If they are a complex pair the two diagonal entries are rotated
+#| until they are equal, which is the form a real Schur factor is supposed to
+#| have, and it returns 0.0.
+def split2(T, Q, k) {
+    a = T[k, k]
+    b = T[k, k + 1]
+    c = T[k + 1, k]
+    d = T[k + 1, k + 1]
+    if c == 0.0 {
+        return 1.0
+    }
+    #: real pair: rotate to upper triangular
+    p = 0.5 * (a - d)
+    disc = p * p + b * c
+    if disc >= 0.0 {
+        r = sqrt(disc)
+        # take the root on the same side as p: then lam - d never cancels
+        lam = 0.5 * (a + d) + r
+        if p < 0.0 {
+            lam = 0.5 * (a + d) - r
+        }
+        x = lam - d
+        y = c
+        h = sqrt(x * x + y * y)
+        if h > 0.0 {
+            junk = rotate(T, Q, k, x / h, y / h)
+        }
+        T[k + 1, k] = 0.0
+        return 1.0
+    }
+    #: complex pair: rotate to equal diagonal entries
+    th = 0.5 * atan2(d - a, b + c)
+    junk = rotate(T, Q, k, cos(th), sin(th))
+    return 0.0
+}
+
+#| The Frobenius norm, used as the yardstick a subdiagonal entry is called
+#| negligible against when its two diagonal neighbors are both zero.
+def schur_norm(A) {
+    n = len(A)
+    total = 0.0
+    for i to n {
+        for j to n {
+            total = total + A[i, j] * A[i, j]
+        }
+    }
+    return sqrt(total)
+}
+
+#| One step of the outer iteration on the block ending at `hi`, and the whole of
+#| what the driver does per turn: walk up from `hi` to the first negligible
+#| subdiagonal entry, then either deflate what is below it or sweep it. Returns
+#| the new `hi`, which is unchanged exactly when a sweep happened.
+#|
+#| `its` is how many sweeps have already been spent here without deflating. A
+#| sweep that keeps landing in the same place is stalling on a shift that is
+#| useless for this matrix, so every tenth one throws an arbitrary shift of the
+#| right size at it instead. The constants are the ones LAPACK settled on.
+def schur_advance(T, Q, hi, its, anorm) {
+    #: walk up to a negligible subdiagonal entry
+    lo = hi
+    while lo > 0 {
+        small = SCHUR_EPS * (abs(T[lo - 1, lo - 1]) + abs(T[lo, lo]))
+        if small == 0.0 {
+            small = SCHUR_EPS * anorm
+        }
+        if abs(T[lo, lo - 1]) <= small {
+            T[lo, lo - 1] = 0.0
+            break
+        }
+        lo = lo - 1
+    }
+    if lo == hi {
+        return hi - 1
+    }
+    if lo == hi - 1 {
+        junk = split2(T, Q, lo)
+        return lo - 1
+    }
+    #: every tenth stalled sweep: LAPACK's exceptional shift
+    m = hi - 1
+    s = T[m, m] + T[hi, hi]
+    t = T[m, m] * T[hi, hi] - T[m, hi] * T[hi, m]
+    if its > 0.0 {
+        if mod(its, 10.0) == 0.0 {
+            sc = abs(T[hi, hi - 1]) + abs(T[hi - 1, hi - 2])
+            h11 = 0.75 * sc + T[hi, hi]
+            h12 = -0.4375 * sc
+            s = h11 + h11
+            t = h11 * h11 - h12 * sc
+        }
+    }
+    junk = francis_step(T, Q, lo, hi, s, t)
+    return hi
+}
+
+#| The real Schur decomposition. Fills `T` and `Q` so that `A = Q T Q^T` with
+#| `Q` orthogonal and `T` quasi-triangular. Reduce to Hessenberg once, then
+#| sweep and deflate from the bottom right until nothing is left.
+def schur(A, T, Q) {
+    n = len(A)
+    junk = hessenberg(A, T, Q)
+    #: the budget stops a matrix that never converges
+    anorm = schur_norm(A)
+    hi = n - 1
+    its = 0.0
+    budget = 60 * n + 200
+    while hi > 0 {
+        budget = budget - 1
+        if budget <= 0 {
+            break
+        }
+        nexthi = schur_advance(T, Q, hi, its, anorm)
+        if nexthi == hi {
+            its = its + 1
+        }
+        else {
+            its = 0.0
+        }
+        hi = nexthi
+    }
+    for i to n {
+        for j to n {
+            if i > j + 1 {
+                T[i, j] = 0.0
+            }
+        }
+    }
+    return 0.0
+}
+
+#| Where each diagonal block starts, written into `starts`, and how many there
+#| are, returned. A 2 by 2 block is one entry, not two: `T[k + 1, k]` is nonzero
+#| exactly when `k` heads a 2 by 2.
+def schur_blocks(T, starts) {
+    n = len(T)
+    k = 0
+    count = 0
+    while k < n {
+        starts[count] = k
+        count = count + 1
+        if k + 1 < n {
+            if T[k + 1, k] != 0.0 {
+                k = k + 1
+            }
+        }
+        k = k + 1
+    }
+    return count
+}
+
+#| The real part of the eigenvalues of the block starting at `k`. Both of them
+#| for a 2 by 2, and both are the same number there, because `split2` made the
+#| diagonal entries equal.
+def schur_block_re(T, k) {
+    return T[k, k]
+}
+
+#| How far `A - Q T Q^T` is from zero, entry by entry: the decomposition's own
+#| certificate, and the number to look at before believing anything downstream.
+def schur_residual(A: Arr, T: Arr, Q: Arr) {
+    n = len(A)
+    back = Q @ T @ transpose(Q)
+    worst = 0.0
+    for i to n {
+        for j to n {
+            worst = max(worst, abs(back[i, j] - A[i, j]))
+        }
+    }
+    return worst
+}
+
+#| How far `Q^T Q` is from the identity.
+def orthogonality(Q: Arr) {
+    n = len(Q)
+    g = transpose(Q) @ Q
+    return max(abs(g[0:n, 0:n] - eye(n)))
+}
+
+#| Solve `T11 X - X T22 = C`, where `T11` and `T22` are the two adjacent
+#| diagonal blocks at `k`, by writing the whole thing out as one linear system
+#| in the entries of `X`. With both blocks of size 1 or 2 that system has at
+#| most four unknowns, so there is no reason to be clever about it. It is
+#| singular exactly when the two blocks share an eigenvalue, which is the one
+#| case where the two cannot be swapped.
+def sylvester_small(T, k, n1, n2, C, X) {
+    #: T11 X - X T22 = C, one equation per entry of X
+    nn = n1 * n2
+    A = zeros(nn, nn)
+    rhs = zeros(nn)
+    for i to n1 {
+        for j to n2 {
+            u = i * n2 + j
+            for a to n1 {
+                A[u, a * n2 + j] = A[u, a * n2 + j] + T[k + i, k + a]
+            }
+            for b to n2 {
+                A[u, i * n2 + b] = A[u, i * n2 + b] - T[k + n1 + b, k + n1 + j]
+            }
+            rhs[u] = C[i, j]
+        }
+    }
+    sol = zeros(nn)
+    lin_solve(A, rhs, sol)
+    for i to n1 {
+        for j to n2 {
+            X[i, j] = sol[i * n2 + j]
+        }
+    }
+    return 0.0
+}
+
+#| Householder QR of the `m` by `p` matrix `V`, throwing away the triangular
+#| factor and keeping the orthogonal one: fills `Z` with an `m` by `m`
+#| orthogonal matrix whose first `p` columns span the same space `V`'s do.
+#| `V` is overwritten.
+def orth_basis(V, Z, m, p) {
+    Z[0:m, 0:m] = eye(m)
+    for j to p {
+        mv = m - j
+        v = zeros(mv)
+        nrm = 0.0
+        for i to mv {
+            v[i] = V[j + i, j]
+            nrm = nrm + v[i] * v[i]
+        }
+        nrm = sqrt(nrm)
+        if nrm > 0.0 {
+            if v[0] < 0.0 {
+                nrm = -nrm
+            }
+            v[0] = v[0] + nrm
+            vn = dot(v, v)
+            if vn > 0.0 {
+                sm = 2.0 * (v @ V[j:j + mv, j:p]) / vn
+                V[j:j + mv, j:p] = V[j:j + mv, j:p] - outer(v, sm)
+                sm = 2.0 * (Z[0:m, j:j + mv] @ v) / vn
+                Z[0:m, j:j + mv] = Z[0:m, j:j + mv] - outer(sm, v)
+            }
+        }
+    }
+    return 0.0
+}
+
+#| Apply the small orthogonal `Z` as a similarity on the window of `m` rows and
+#| columns starting at `k`, and on `Q` from the right. Same reasoning about
+#| ranges as `reflect`: outside the window everything is already zero.
+def apply_block(T, Q, Z, k, m) {
+    n = len(T)
+    for cc to n - k {
+        c = k + cc
+        col = zeros(m)
+        for i to m {
+            sm = 0.0
+            for a to m {
+                sm = sm + Z[a, i] * T[k + a, c]
+            }
+            col[i] = sm
+        }
+        for i to m {
+            T[k + i, c] = col[i]
+        }
+    }
+    for r to k + m {
+        row = zeros(m)
+        for j to m {
+            sm = 0.0
+            for a to m {
+                sm = sm + T[r, k + a] * Z[a, j]
+            }
+            row[j] = sm
+        }
+        for j to m {
+            T[r, k + j] = row[j]
+        }
+    }
+    for r to n {
+        row = zeros(m)
+        for j to m {
+            sm = 0.0
+            for a to m {
+                sm = sm + Q[r, k + a] * Z[a, j]
+            }
+            row[j] = sm
+        }
+        for j to m {
+            Q[r, k + j] = row[j]
+        }
+    }
+    return 0.0
+}
+
+#| Exchange the two adjacent diagonal blocks at `k`, of sizes `n1` then `n2`, so
+#| that afterwards `n2` comes first. The eigenvalues do not change; only where
+#| they sit on the diagonal does, and `Q` follows.
+#|
+#| The trick is that the columns of `[X; I]` span the invariant subspace of the
+#| trailing block, where `X` solves `T11 X - X T22 = -T12`. An orthonormal basis
+#| for that span, completed to a square orthogonal matrix, is the swap.
+def swap_blocks(T, Q, k, n1, n2) {
+    #: [X; I] spans the trailing block's invariant subspace
+    m = n1 + n2
+    C = -T[k:k + n1, k + n1:k + m]
+    X = zeros(n1, n2)
+    junk = sylvester_small(T, k, n1, n2, C, X)
+    V = vcat(X, eye(n2))
+    Z = zeros(m, m)
+    junk = orth_basis(V, Z, m, n2)
+    junk = apply_block(T, Q, Z, k, m)
+    # what is below the blocks is zero by construction; say so exactly, rather
+    # than leaving rounding where the next deflation test will read it
+    for i to m {
+        for j to m {
+            if i > j + 1 {
+                T[k + i, k + j] = 0.0
+            }
+        }
+    }
+    T[k + n2, k + n2 - 1] = 0.0
+    if n2 == 2 {
+        junk = split2(T, Q, k)
+    }
+    if n1 == 2 {
+        junk = split2(T, Q, k + n2)
+    }
+    return 0.0
+}
+
+#| The size of the diagonal block starting at `k`: 2 if it heads a 2 by 2, else 1.
+def block_size(T, k) {
+    n = len(T)
+    if k + 1 < n {
+        if T[k + 1, k] != 0.0 {
+            return 2.0
+        }
+    }
+    return 1.0
+}
+
+#| Move every block whose eigenvalues have a negative real part to the top left,
+#| in the order they already appear, and return how many rows they take up. That
+#| leading corner of `Q` is then an orthonormal basis for the stable invariant
+#| subspace, which is what the Riccati solver needs.
+def reorder_stable(T, Q) {
+    n = len(T)
+    #: bubble each stable block up past the unstable ones
+    want = 0
+    k = 0
+    while k < n {
+        sz = block_size(T, k)
+        if T[k, k] < 0.0 {
+            j = k
+            while j > want {
+                top = j - 1
+                psz = 1
+                if top > 0 {
+                    if T[top, top - 1] != 0.0 {
+                        top = top - 1
+                        psz = 2
+                    }
+                }
+                junk = swap_blocks(T, Q, top, psz, sz)
+                j = top
+            }
+            want = want + sz
+        }
+        # whatever moved, the blocks past this one did not: carry on after it
+        k = k + sz
+    }
+    return want
+}
+
+test "the Hessenberg form is Hessenberg, orthogonal, and still the same matrix" {
+    n = 7
+    A = test_matrix(n, 11.0)
+    H = zeros(n, n)
+    Q = zeros(n, n)
+    junk = hessenberg(A, H, Q)
+    for i to n {
+        for j to n {
+            if i > j + 1 {
+                assert_near(H[i, j], 0.0, 1.0e-14)
+            }
+        }
+    }
+    assert_lt(orthogonality(Q), 1.0e-13)
+    assert_lt(schur_residual(A, H, Q), 1.0e-12)
+}
+
+test "the Schur factor is quasi-triangular: never two nonzero subdiagonals in a row" {
+    n = 9
+    A = test_matrix(n, 5.0)
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    junk = schur(A, T, Q)
+    for i to n {
+        for j to n {
+            if i > j + 1 {
+                assert_near(T[i, j], 0.0, 1.0e-14)
+            }
+        }
+    }
+    for k to n - 2 {
+        if T[k + 1, k] != 0.0 {
+            assert_near(T[k + 2, k + 1], 0.0, 1.0e-14)
+        }
+    }
+}
+
+test "Q T Q^T puts the matrix back, and Q is orthogonal, for a matrix with no structure" {
+    n = 9
+    A = test_matrix(n, 5.0)
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    junk = schur(A, T, Q)
+    assert_lt(orthogonality(Q), 1.0e-13)
+    assert_lt(schur_residual(A, T, Q), 1.0e-12)
+}
+
+test "a symmetric matrix comes out diagonal, with the eigenvalues it should have" {
+    n = 6
+    B = test_matrix(n, 29.0)
+    A = B + transpose(B)
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    junk = schur(A, T, Q)
+    for k to n - 1 {
+        assert_near(T[k + 1, k], 0.0, 1.0e-12)
+    }
+    assert_lt(schur_residual(A, T, Q), 1.0e-12)
+    vals = zeros(n)
+    vecs = zeros(n, n)
+    eig_sym(A, vals, vecs)
+    # the same six numbers, in whatever order each method happened to find them
+    for i to n {
+        near = 1.0e30
+        for j to n {
+            near = min(near, abs(T[i, i] - vals[j]))
+        }
+        assert_lt(near, 1.0e-10)
+    }
+}
+
+test "the diagonal blocks carry the eigenvalues, complex pairs included" {
+    # a rotation by 0.4 radians scaled by 1.3, plus two real eigenvalues
+    n = 4
+    A = zeros(n, n)
+    A[0, 0] = 1.3 * cos(0.4)
+    A[0, 1] = -1.3 * sin(0.4)
+    A[1, 0] = 1.3 * sin(0.4)
+    A[1, 1] = 1.3 * cos(0.4)
+    A[2, 2] = -2.0
+    A[3, 3] = 0.5
+    A[0, 3] = 0.7
+    A[1, 2] = -0.3
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    junk = schur(A, T, Q)
+    assert_lt(schur_residual(A, T, Q), 1.0e-13)
+    starts = zeros(n)
+    count = schur_blocks(T, starts)
+    assert_near(count, 3.0, 1.0e-12)
+    # the complex pair sits in a 2 by 2 whose two diagonal entries are equal
+    found = 0.0
+    for b to count {
+        k = starts[b]
+        if k + 1 < n {
+            if T[k + 1, k] != 0.0 {
+                found = 1.0
+                assert_near(T[k, k], T[k + 1, k + 1], 1.0e-12)
+                assert_near(T[k, k], 1.3 * cos(0.4), 1.0e-11)
+                # the imaginary part is the geometric mean of the off-diagonals
+                assert_near(sqrt(-T[k, k + 1] * T[k + 1, k]), 1.3 * sin(0.4), 1.0e-11)
+            }
+        }
+    }
+    assert_near(found, 1.0, 1.0e-12)
+}
+
+test "the eigenvalues agree with the ones the general solver reports" {
+    n = 8
+    A = test_matrix(n, 101.0)
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    junk = schur(A, T, Q)
+    re = zeros(n)
+    im = zeros(n)
+    eig_general(A, re, im)
+    starts = zeros(n)
+    count = schur_blocks(T, starts)
+    total = 0.0
+    for b to count {
+        k = starts[b]
+        wide = 0.0
+        if k + 1 < n {
+            if T[k + 1, k] != 0.0 {
+                wide = 1.0
+            }
+        }
+        total = total + 1.0 + wide
+        # every block's real part is one the other solver also found
+        near = 1.0e30
+        for j to n {
+            near = min(near, abs(T[k, k] - re[j]))
+        }
+        assert_lt(near, 1.0e-8)
+    }
+    assert_near(total, 8.0, 1.0e-12)
+}
+
+test "the trace and the determinant survive the decomposition" {
+    n = 6
+    A = test_matrix(n, 77.0)
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    junk = schur(A, T, Q)
+    ta = 0.0
+    tt = 0.0
+    for i to n {
+        ta = ta + A[i, i]
+        tt = tt + T[i, i]
+    }
+    assert_near(tt, ta, 1.0e-11)
+}
+
+test "sixty matrices of every size from 2 to 14 come back within a few epsilon" {
+    worst_res = 0.0
+    worst_orth = 0.0
+    worst_struct = 0.0
+    ncases = 60
+    for si to ncases {
+        n = 2 + mod(si, 13.0)
+        A = test_matrix(n, 3.0 + 7.0 * si)
+        T = zeros(n, n)
+        Q = zeros(n, n)
+        junk = schur(A, T, Q)
+        worst_res = max(worst_res, schur_residual(A, T, Q))
+        worst_orth = max(worst_orth, orthogonality(Q))
+        # no 2 by 2 block may touch the next one, and nothing below them at all
+        for k to n - 2 {
+            if T[k + 1, k] != 0.0 {
+                worst_struct = max(worst_struct, abs(T[k + 2, k + 1]))
+            }
+        }
+        for i to n {
+            for j to n {
+                if i > j + 1 {
+                    worst_struct = max(worst_struct, abs(T[i, j]))
+                }
+            }
+        }
+    }
+    assert_lt(worst_res, 1.0e-13)
+    assert_lt(worst_orth, 1.0e-13)
+    assert_near(worst_struct, 0.0, 1.0e-300)
+}
+
+test "reordering puts the stable eigenvalues first and leaves the matrix alone" {
+    worst_res = 0.0
+    worst_orth = 0.0
+    ncases = 30
+    for si to ncases {
+        n = 3 + mod(si, 9.0)
+        A = test_matrix(n, 13.0 + 5.0 * si)
+        T = zeros(n, n)
+        Q = zeros(n, n)
+        junk = schur(A, T, Q)
+        cut = reorder_stable(T, Q)
+        worst_res = max(worst_res, schur_residual(A, T, Q))
+        worst_orth = max(worst_orth, orthogonality(Q))
+        # everything above the cut is stable, everything below it is not
+        for i to n {
+            if i < cut {
+                assert_lt(T[i, i], 0.0)
+            }
+            else {
+                assert_lt(-T[i, i], 1.0e-14)
+            }
+        }
+        # and the blocks are still blocks
+        for k to n - 2 {
+            if T[k + 1, k] != 0.0 {
+                assert_near(T[k + 2, k + 1], 0.0, 1.0e-300)
+            }
+        }
+    }
+    assert_lt(worst_res, 1.0e-11)
+    assert_lt(worst_orth, 1.0e-12)
+}
+
+test "reordering moves the eigenvalues without changing them" {
+    n = 8
+    A = test_matrix(n, 404.0)
+    T = zeros(n, n)
+    Q = zeros(n, n)
+    junk = schur(A, T, Q)
+    before = zeros(n)
+    for i to n {
+        before[i] = T[i, i]
+    }
+    cut = reorder_stable(T, Q)
+    # the same n diagonal entries, in some other order
+    for i to n {
+        near = 1.0e30
+        for j to n {
+            near = min(near, abs(T[i, i] - before[j]))
+        }
+        assert_lt(near, 1.0e-10)
+    }
+    sum_before = 0.0
+    sum_after = 0.0
+    for i to n {
+        sum_before = sum_before + before[i]
+        sum_after = sum_after + T[i, i]
+    }
+    assert_near(sum_after, sum_before, 1.0e-11)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,109 @@
+module lib/nn_adjoints
+  The backward passes (adjoints) of lib/nn's pieces, written by hand before
+  `value_and_grad` could generate them. An adjoint takes the gradient of the
+  loss with respect to a piece's output and returns the gradients with
+  respect to its inputs and weights; running them in the reverse order of the
+  forward pass is backpropagation. Nothing in a model uses them now. They are
+  references: the tests hold each to the gradient `value_and_grad` generates
+  from the forward pass, and the study/idioms ports that write their backward
+  pass by hand call them.
+
+linear_bwd  @bb7268cb
+  what   The adjoints of a matrix product `Y = X W`, which are two more matrix
+         products: `dX = dY W^T` and `dW = X^T dY`, returned in that order.
+  why    Each entry of `Y` is a sum of products of a row of `X` with a column of
+         `W`, so moving an entry of `X` moves a whole row of `Y` in proportion to
+         a row of `W`, and the chain rule adds those contributions up as a
+         product with `W^T`.
+  X      the input, `T` by `D`
+  W      the weights, `D` by `H`
+  dY     the gradient with respect to the output, `T` by `H`
+
+rmsnorm_bwd  @be14e34b
+  what   RMSNorm's adjoint. Every entry of a row feeds the divisor, so the
+         gradient of one entry depends on all of them:
+         `dx = dy/r - x (dy . x) / (D r^3)`.
+  X      the rows the forward pass normalized
+  r      the forward pass's divisors, one per row (lib/nn's `row_rms`, raveled)
+  dY     the gradient with respect to the normalized rows
+  D      the number of columns
+  dX     the gradient with respect to `X`
+  i      a row
+  dot    the row's `dy . x`
+  r3     the cube of the row's divisor
+
+relu2_bwd  @52d346c9
+  what  ReLU squared's adjoint: the gradient times the derivative `2 max(x, 0)`,
+        entry by entry.
+  X     the forward pass's input
+  dY    the gradient with respect to the output
+
+softmax_bwd  @3cdb02b5
+  what   The row softmax's adjoint, written in terms of the output rather than the
+         input, which is why the forward's result is what it takes:
+         `dx = y (dy - dy . y)`.
+  Y      the forward pass's output
+  dY     the gradient with respect to `Y`
+  dX     the gradient with respect to the scores
+  i      a row
+
+attention_bwd  @d2667b7d
+  what    Attention's adjoint: the gradients with respect to the rows read and the
+          three projections, in that order. The mask needs no special handling
+          on the way back: a masked weight is exactly zero, and softmax's adjoint
+          multiplies by the weight, so the gradient there is zero without being
+          told.
+  how     Backwards through the forward's steps: the weighted average gives the
+          gradients of the values and of the weights, softmax's adjoint turns the
+          weights' gradient into the scores', and the scores give the queries' and
+          keys'. Each projection then passes its share back to `X` and to its
+          weight matrix.
+  X       the rows the forward pass read
+  Wq      the query projection
+  Wk      the key projection
+  Wv      the value projection
+  A       the forward pass's attention weights
+  dY      the gradient with respect to the head's output, `T` by `H`
+  Q       the queries, computed again
+  K       the keys
+  V       the values
+  scale   `1 / sqrt(H)`
+  dV      the gradient with respect to the values: `A^T dY`
+  dS      the gradient with respect to the scores
+  dQ      the gradient with respect to the queries
+  dK      the gradient with respect to the keys
+  back    the three projections' shares of `dX`, summed
+
+  = dV      the values' gradient: each value reached every position that attended to it
+  = dS      softmax's adjoint, from the weights' gradient to the scores'
+  = back    every position's row of `X` made its query, its key and its value, so its gradient has three parts
+
+cross_entropy_bwd  @1a445eed
+  what     Cross-entropy's adjoint, which is why cross-entropy and softmax are
+           written together: the gradient is the predicted distribution with one
+           taken off the true class, divided by the number of rows.
+  why      Each row of the gradient sums to zero: raising the right class's
+           probability has to lower the others'.
+  logits   the scores
+  target   the right class of each row
+  P        the softmax of the logits, then the gradient before dividing by the
+           number of rows
+  i        a row
+  want     the row's target
+
+gap  @582856f2
+  what  The largest gap between a hand-written gradient and the generated one,
+        relative to the generated one's largest entry.
+  hand       the hand-written gradient
+  generated  the one `value_and_grad` generated
+
+linear_probe  @f87cff37
+  what  A probe loss for checking the matrix product's gradient with respect to
+        `X`: the sum of `C * (X W)` entry by entry, for a fixed `W`.
+  X     the input
+  C     the fixed weights of the probe
+
+linear_probe_w  @fcd6d496
+  what  The same probe loss, as a function of `W`, for a fixed `X`.
+  W     the matrix multiplied
+  C     the fixed weights of the probe

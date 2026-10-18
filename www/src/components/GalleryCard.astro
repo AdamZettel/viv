@@ -1,0 +1,238 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One gallery entry as a card: the first figure its script drew, its title,
+// and (on the galleries) its summary. Used by /vipyr/gallery, by the topic
+// rows of the /vipyr user guide, and with `viv` by the Viv side's /gallery,
+// whose entries (src/data/vivgallery.json, scripts/gallery-build.mjs) carry
+// their own figure and links; the grid around the cards is the page's.
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
+import { renderProse } from '../lib/richText.js';
+import show from '../data/show.json';
+import { lookInsideLinks } from '../lib/atlasLink.js';
+import vivgallery from '../data/vivgallery.json';
+import LookInside from './LookInside.astro';
+
+interface Props {
+  entry: any;
+  summary?: boolean;
+  /** a /gallery entry rather than a /vipyr/gallery one */
+  viv?: boolean;
+}
+const { entry, summary = false, viv = false } = Astro.props;
+const fig = viv ? entry.fig : entry.cells.flatMap((c: any) => c.figs)[0];
+
+// a Viv entry's page is its /show/<slug> page when one is built from it;
+// its other pages: the post, its explored run, the workbench, and vipyr's twin
+const showcase = viv ? show.pages.find((p: any) => p.gallery === entry.id) : null;
+const href = showcase ? `/show/${showcase.slug}` : entry.href;
+const external = viv && /^https?:/.test(href);
+const links: [string, string][] = viv
+  ? [
+      ...(showcase ? [[entry.href, /^\/p\//.test(entry.href) ? 'Post' : 'Program']] : []),
+      ...(entry.post && entry.post !== entry.href ? [[entry.post, 'Post']] : []),
+      ...(entry.workbench && entry.workbench !== entry.href ? [[entry.workbench, 'Workbench']] : []),
+      ...(entry.source && entry.source !== entry.href ? [[entry.source, 'Source']] : []),
+      ...(entry.vipyr.length === 1 ? [[entry.vipyr[0].href, 'In vipyr']] : []),
+    ] as [string, string][]
+  : [];
+// the program's atlas and, when the build recorded a run, its explorer: on a
+// Viv entry always; on a vipyr entry when the Viv program behind it has a run
+const openOf = (e: any) => (/^\/workbench\?open=/.test(e.workbench || '') ? decodeURIComponent(e.workbench.slice('/workbench?open='.length)) : null);
+const insideOf = (e: any) => (e.explore ? lookInsideLinks({ slug: e.explore.replace(/^\/explore\//, '') }) : lookInsideLinks({ open: openOf(e) }));
+const vivTwin = viv ? null : (vivgallery as any).entries.find((v: any) => v.explore && v.vipyr.some((x: any) => x.href === `/vipyr/gallery/${entry.slug}`));
+const inside = viv ? insideOf(entry) : vivTwin ? insideOf(vivTwin) : null;
+// two vipyr examples call the same program: name each one
+const twins: any[] = viv && entry.vipyr.length > 1 ? entry.vipyr : [];
+---
+
+{
+  viv ? (
+    <div class="g-card">
+      <a class="g-main" href={href} {...(external ? { rel: 'noopener' } : {})}>
+        {fig && (
+          <div class="g-thumb vfig" aria-hidden="true">
+            <Fragment set:html={fig} />
+          </div>
+        )}
+        <h4>{entry.title}</h4>
+        {summary && entry.summaryHtml && <p set:html={entry.summaryHtml} />}
+        {summary && !entry.summaryHtml && entry.summary && <p set:html={renderProse(entry.summary, katex)} />}
+        {!fig && entry.result && (
+          <dl class="g-result">
+            <dt>Result</dt>
+            <dd>{entry.result.value}</dd>
+            <dt>Checked against</dt>
+            <dd>{entry.result.reference}</dd>
+          </dl>
+        )}
+      </a>
+      {inside && <LookInside links={inside} compact />}
+      {links.length > 0 && (
+        <p class="g-links">
+          {links.map(([href, label]) => (
+            <a href={href}>{label}</a>
+          ))}
+        </p>
+      )}
+      {twins.length > 0 && (
+        <p class="g-links g-twins">
+          <span>In vipyr</span>
+          {twins.map((v) => (
+            <a href={v.href}>{v.title}</a>
+          ))}
+        </p>
+      )}
+    </div>
+  ) : inside ? (
+    <div class="g-card">
+      <a class="g-main" href={`/vipyr/gallery/${entry.slug}`}>
+        <div class="g-thumb vfig" aria-hidden="true">
+          {fig ? <Fragment set:html={fig} /> : <span class="g-nofig">text output</span>}
+        </div>
+        <h4>{entry.title}</h4>
+        {summary && <p set:html={renderProse(entry.summary, katex)} />}
+      </a>
+      <LookInside links={inside} compact />
+    </div>
+  ) : (
+    <a class="g-card" href={`/vipyr/gallery/${entry.slug}`}>
+      <div class="g-thumb vfig" aria-hidden="true">
+        {fig ? <Fragment set:html={fig} /> : <span class="g-nofig">text output</span>}
+      </div>
+      <h4>{entry.title}</h4>
+      {summary && <p set:html={renderProse(entry.summary, katex)} />}
+    </a>
+  )
+}
+
+<style>
+  .g-card {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    text-decoration: none;
+    color: inherit;
+    overflow: hidden;
+  }
+  a.g-card:hover,
+  .g-card:has(.g-main:hover) {
+    border-color: var(--accent-fill);
+    box-shadow: var(--shadow);
+  }
+  .g-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    text-decoration: none;
+    color: inherit;
+  }
+  .g-thumb {
+    margin: 0;
+    border-bottom: 1px solid var(--border);
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    background: var(--bg-card);
+  }
+  .g-thumb :global(svg) {
+    width: 100%;
+    height: 100%;
+  }
+  .g-thumb :global(svg > svg > rect:first-child),
+  .g-thumb :global(svg > rect:first-child) {
+    stroke: none;
+  }
+  .g-card h4 {
+    margin: 12px 14px 14px;
+    font-size: 1.02rem;
+    line-height: 1.3;
+    color: var(--heading);
+    /* a title is a sentence: the site's capitalized h4 label style is for labels */
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--font-sans);
+    font-weight: 600;
+  }
+  .g-card p {
+    margin: -10px 14px 14px;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  a.g-card:hover h4,
+  .g-main:hover h4 {
+    color: var(--accent);
+  }
+  .g-result {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 10px;
+    margin: -6px 14px 14px;
+    font-size: 0.88rem;
+    line-height: 1.4;
+  }
+  .g-result dt {
+    color: var(--text-faint);
+  }
+  .g-result dd {
+    margin: 0;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .g-result dd:first-of-type {
+    color: var(--heading);
+    font-weight: 600;
+  }
+  .g-card .g-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin: auto 14px 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+  }
+  .g-card .g-twins {
+    flex-direction: column;
+    margin-top: -4px;
+    border-top: 0;
+    padding-top: 0;
+  }
+  .g-card .g-links + .g-twins {
+    margin-top: -8px;
+  }
+  .g-card .g-links:only-of-type,
+  .g-card .g-main + .g-twins {
+    margin-top: auto;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+  .g-links a {
+    color: var(--accent);
+    text-decoration: none;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .g-links a:hover {
+    text-decoration: underline;
+  }
+  .g-nofig {
+    color: var(--text-faint);
+    font-size: 0.9rem;
+  }
+</style>

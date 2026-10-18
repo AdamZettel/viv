@@ -1,0 +1,62 @@
+# Runge's function 1 / (1 + 25 x^2) interpolated at 11 equispaced points and
+# at 11 Chebyshev points, by Lagrange's formula; the error on a fine grid.
+
+PI = 3.141592653589793
+
+def runge(x) {
+    return 1.0 / (1.0 + 25.0 * x * x)
+}
+
+def lagrange(xs, ys, x) {
+    s = 0.0
+    for i to len(xs) {
+        w = 1.0
+        for j to len(xs) {
+            if j != i {
+                w = w * (x - xs[j]) / (xs[i] - xs[j])
+            }
+        }
+        s = s + w * ys[i]
+    }
+    return s
+}
+
+n = 11
+xe = linspace(-1.0, 1.0, n)
+xc = zeros(n)
+for k to n {
+    xc[k] = cos((2.0 * k + 1.0) * PI / (2.0 * n))
+}
+ye = zeros(n)
+yc = zeros(n)
+for k to n {
+    ye[k] = runge(xe[k])
+    yc[k] = runge(xc[k])
+}
+
+m = 201
+xf = linspace(-1.0, 1.0, m)
+err_e = zeros(m)
+err_c = zeros(m)
+for k to m {
+    f = runge(xf[k])
+    err_e[k] = abs(lagrange(xe, ye, xf[k]) - f)
+    err_c[k] = abs(lagrange(xc, yc, xf[k]) - f)
+}
+figure("Interpolating Runge's function with 11 points", "x", "|error|")
+plot(xf, err_e, "equispaced")
+plot(xf, err_c, "Chebyshev")
+max_e = max(err_e)
+max_c = max(err_c)
+show max_e
+show max_c
+
+test "equispaced interpolation blows up near the ends" {
+    assert_gt(max_e, 1.0)
+}
+test "Chebyshev points keep the error below 0.2" {
+    assert_lt(max_c, 0.2)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

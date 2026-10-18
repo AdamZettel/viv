@@ -1,0 +1,74 @@
+# kmesh: the symmetric k-mesh for an fcc crystal, halved by time reversal.
+#
+# Reads NKMESH from the deck and builds NKPT, KFRAC and KWT for the engine.
+#
+# The mesh is k = (i + s) / NKMESH for FOUR shifts s, in units of the primitive
+# reciprocal vectors: (1/2 1/2 1/2), (1/2 0 0), (0 1/2 0), (0 0 1/2).
+#
+# Why four. The density is built with no explicit symmetrization, so it is only
+# as symmetric as the mesh. A point-group operation is an INTEGER matrix R in
+# these coordinates, and it sends the shift s to R s -- so a single shifted mesh
+# is closed under the group only if R s = s (mod 1) for every R. For fcc that
+# fails for (1/2 1/2 1/2): some operations have an even row sum and send it to
+# one of the other three. The four shifts together are the orbit, and the union
+# is closed. (It is the mesh the Chadi-Cohen special points come from: NKMESH = 2
+# is their two points' full star.)
+#
+# Measured on silicon, whose valence-band top is a triplet (dft/ref/kmesh_symmetry.py):
+#
+#     single shift, 2x2x2     4 k-points    triplet split by 56.1 meV
+#     single shift, 4x4x4    32             2.2 meV
+#     Gamma-centred 4x4x4    36             0          E - E(128 k) = 7.2 mHa
+#     four shifts,  2x2x2    16             0          E - E(128 k) = 6.4 mHa
+#
+# k and -k give the same density (the potential is real in real space), so each
+# pair is kept once with double weight.
+
+# Wrap a fractional coordinate into (-1/2, 1/2].
+def kwrap(x) {
+    y = x - round(x)
+    if y < -0.5 + 1.0e-9 { y = 0.5 }
+    return y
+}
+
+KSHIFT = [[0.5, 0.5, 0.5],
+          [0.5, 0.0, 0.0],
+          [0.0, 0.5, 0.0],
+          [0.0, 0.0, 0.5]]
+NKFULL = len(KSHIFT) * NKMESH * NKMESH * NKMESH
+KFRAC = []
+KWT = []
+for sh to len(KSHIFT) {
+for i to NKMESH {
+    for j to NKMESH {
+        for l to NKMESH {
+            k1 = kwrap((i + KSHIFT[sh, 0]) / NKMESH)
+            k2 = kwrap((j + KSHIFT[sh, 1]) / NKMESH)
+            k3 = kwrap((l + KSHIFT[sh, 2]) / NKMESH)
+            m1 = kwrap(0.0 - k1)
+            m2 = kwrap(0.0 - k2)
+            m3 = kwrap(0.0 - k3)
+            # is the time-reversed partner already in the list?
+            found = -1.0
+            for q to len(KFRAC) {
+                if abs(KFRAC[q, 0] - m1) + abs(KFRAC[q, 1] - m2) + abs(KFRAC[q, 2] - m3) < 1.0e-8 {
+                    found = q
+                }
+            }
+            # a point that is its own time-reversed partner (k = -k mod G)
+            selfdist = abs(k1 - m1) + abs(k2 - m2) + abs(k3 - m3)
+            if found >= 0.0 and selfdist > 1.0e-8 {
+                KWT[found] = KWT[found] + 1.0
+            } else {
+                KFRAC = append(KFRAC, [k1, k2, k3])
+                KWT = append(KWT, 1.0)
+            }
+        }
+    }
+}
+}
+NKPT = len(KFRAC)
+KWT = KWT / NKFULL
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

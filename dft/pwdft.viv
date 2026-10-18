@@ -1,0 +1,301 @@
+# pwdft: the DENSE engine. H(k) is built and diagonalized at every k-point.
+#
+#     dft/run.sh si             (compile deck + engine + checks to C, and run)
+#
+# Right for a few hundred plane waves -- silicon, aluminum, diamond -- and the
+# simplest correct thing, which is why it exists: it is the check on the
+# iterative engine (dft/pwdft_it.viv), which is what copper needs.
+# Everything solver-independent is in dft/pw_common.viv.
+
+# Slots 0 .. NKPT-1 hold the SCF k-points; slot NKPT is scratch for the path.
+NSLOT = NKPT + 1.0
+SCRATCH = NKPT
+NPW = zeros(NSLOT)
+MILL = zeros(NSLOT, NPWMAX, NDIM)       #: MILL  integer triple m of each plane wave
+KG = zeros(NSLOT, NPWMAX, NDIM + 1)     #: KG  k+G in cartesian, and its norm in [.., NDIM]
+PJ = zeros(NSLOT, NPWMAX, NCH)   #: PJ  every radial projector at every plane wave
+PH = czeros(NSLOT, NPWMAX, NAT)  #: PH  structure phases exp(-i G . tau_a)
+VNL = czeros(NSLOT, NPWMAX, NPWMAX)
+
+def setup_slot(slot, k1, k2, k3) {
+    n = 0.0
+    big = 0.0
+    for i1 to NM {
+        for i2 to NM {
+            for i3 to NM {
+                m1 = i1 - MM
+                m2 = i2 - MM
+                m3 = i3 - MM
+                f1 = m1 + k1
+                f2 = m2 + k2
+                f3 = m3 + k3
+                gx = f1 * B[0, 0] + f2 * B[1, 0] + f3 * B[2, 0]
+                gy = f1 * B[0, 1] + f2 * B[1, 1] + f3 * B[2, 1]
+                gz = f1 * B[0, 2] + f2 * B[1, 2] + f3 * B[2, 2]
+                g2 = gx * gx + gy * gy + gz * gz
+                if 0.5 * g2 <= ECUT {
+                    step keep {
+                        MILL[slot, n, 0] = m1
+                        MILL[slot, n, 1] = m2
+                        MILL[slot, n, 2] = m3
+                        KG[slot, n, 0] = gx
+                        KG[slot, n, 1] = gy
+                        KG[slot, n, 2] = gz
+                        KG[slot, n, 3] = sqrt(g2)
+                        if abs(m1) > big { big = abs(m1) }
+                        if abs(m2) > big { big = abs(m2) }
+                        if abs(m3) > big { big = abs(m3) }
+                    }
+                    step projectors {
+                        for c to NCH {
+                            PJ[slot, n, c] = gth_proj(CHL[c], CHI[c], RPRJ[CHS[c], CHL[c]], sqrt(g2))
+                        }
+                    }
+                    step phases {
+                        # the phase uses G alone, not k + G: it is the structure factor
+                        px = m1 * B[0, 0] + m2 * B[1, 0] + m3 * B[2, 0]
+                        py = m1 * B[0, 1] + m2 * B[1, 1] + m3 * B[2, 1]
+                        pz = m1 * B[0, 2] + m2 * B[1, 2] + m3 * B[2, 2]
+                        for a to NAT {
+                            ph = px * TAU[a, 0] + py * TAU[a, 1] + pz * TAU[a, 2]
+                            PH[slot, n, a] = complex(cos(ph), 0.0 - sin(ph))
+                        }
+                    }
+                    n = n + 1.0
+                }
+            }
+        }
+    }
+    NPW[slot] = n
+    return big
+}
+
+def vnl_element(slot, i, j) {
+    ki = KG[slot, i, 3]
+    kj = KG[slot, j, 3]
+    c = 1.0
+    if ki > 1.0e-12 and kj > 1.0e-12 {
+        c = (KG[slot, i, 0] * KG[slot, j, 0] + KG[slot, i, 1] * KG[slot, j, 1] + KG[slot, i, 2] * KG[slot, j, 2]) / (ki * kj)
+    }
+    acc = complex(0.0, 0.0)
+    for s to NSPEC {
+        sf = complex(0.0, 0.0)
+        for a to NAT {
+            if ATSPEC[a] == s {
+                sf = sf + PH[slot, i, a] * conj(PH[slot, j, a])
+            }
+        }
+        rad = 0.0
+        for l to GTH_NL {
+            np = NPRJ[s, l]
+            if np > 0.0 {
+                c0 = CH0[s, l]
+                q = 0.0
+                for a to np {
+                    for b to np {
+                        q = q + PJ[slot, i, c0 + a] * HPRJ[s, l, a, b] * PJ[slot, j, c0 + b]
+                    }
+                }
+                rad = rad + (2.0 * l + 1.0) / (4.0 * PI) * legendre(l, c) * q
+            }
+        }
+        acc = acc + sf * rad
+    }
+    return acc
+}
+
+def build_vnl(slot) {
+    n = NPW[slot]
+    for i to n {
+        for j to i + 1.0 {
+            acc = vnl_element(slot, i, j)
+            VNL[slot, i, j] = acc
+            VNL[slot, j, i] = conj(acc)
+        }
+    }
+}
+
+narrate "building plane-wave bases and the nonlocal pseudopotential"
+step bases "build every SCF k-point's plane-wave basis and its nonlocal pseudopotential, once" {
+    for k to NKPT {
+        setup_slot(k, KFRAC[k, 0], KFRAC[k, 1], KFRAC[k, 2])
+        build_vnl(k)
+    }
+}
+
+# ============================================================ 7. the SCF loop
+
+RHO = zeros(NG, NG, NG) + NELEC / OMEGA    #: RHO  the density, starting uniform
+VTOT = czeros(NG, NG, NG)                  #: VTOT  the total local potential in G
+H = czeros(NPWMAX, NPWMAX)
+EV = zeros(NPWMAX)
+CV = czeros(NPWMAX, NPWMAX)
+BOX = czeros(NG, NG, NG)
+EIG = zeros(NKPT, NBANDS)                  #: EIG  eigenvalues at the SCF k-points
+FOCC = zeros(NKPT, NBANDS)                 #: FOCC  occupations, 0..2
+CVK = czeros(NKPT, NPWMAX, NBANDS)         #: CVK  the eigenvectors, kept per k
+
+#: rg   rho(G) * NGRID, straight out of fft3
+#: vxg  v_xc(G) * NGRID
+def build_vtot(rg, vxg) {
+    eh = 0.0
+    for i1 to NG {
+        for i2 to NG {
+            for i3 to NG {
+                g2 = G2[i1, i2, i3]
+                v = VPS[i1, i2, i3] + vxg[i1, i2, i3] / NGRID
+                if g2 > 1.0e-12 {
+                    r = rg[i1, i2, i3] / NGRID
+                    v = v + 4.0 * PI * r / g2
+                    eh = eh + 4.0 * PI * abs(r) * abs(r) / g2
+                }
+                VTOT[i1, i2, i3] = v
+            }
+        }
+    }
+    return 0.5 * OMEGA * eh
+}
+
+def build_h(slot) {
+    n = NPW[slot]
+    for i to NPWMAX {
+        for j to NPWMAX {
+            if i < n and j < n {
+                d1 = wrap(MILL[slot, i, 0] - MILL[slot, j, 0])
+                d2 = wrap(MILL[slot, i, 1] - MILL[slot, j, 1])
+                d3 = wrap(MILL[slot, i, 2] - MILL[slot, j, 2])
+                H[i, j] = VTOT[d1, d2, d3] + VNL[slot, i, j]
+            } else {
+                H[i, j] = 0.0
+            }
+        }
+        if i < n {
+            H[i, i] = H[i, i] + 0.5 * KG[slot, i, 3] * KG[slot, i, 3]
+        } else {
+            H[i, i] = 1000.0 + i
+        }
+    }
+}
+
+def add_density(slot, acc) {
+    n = NPW[slot]
+    out = acc
+    for b to NBANDS {
+        if FOCC[slot, b] > 1.0e-14 {
+            fill(BOX, 0.0)
+            for i to n {
+                BOX[wrap(MILL[slot, i, 0]), wrap(MILL[slot, i, 1]), wrap(MILL[slot, i, 2])] = CVK[slot, i, b]
+            }
+            ifft3(BOX)
+            mag = abs(BOX)
+            out = out + (KWT[slot] * FOCC[slot, b] * NGRID * NGRID / OMEGA) * mag * mag
+        }
+    }
+    return out
+}
+
+narrate "self-consistent field"
+ETOT = 0.0
+EOLD = 0.0
+EFERMI = 0.0
+DRHO = 1.0
+ITER = 0.0
+DONE = false
+NHIST = 0.0
+while not DONE and ITER < MAXIT {
+    step xc "the LDA exchange-correlation energy density and potential at every grid point" {
+        exc, vxc = lda_xc(RHO)
+    }
+
+    step potential "the local potential V_ps + V_H + V_xc in G space: density to G by FFT, Poisson for Hartree" {
+        rg = complex(RHO, ZERO3)
+        fft3(rg)
+        vxg = complex(vxc, ZERO3)
+        fft3(vxg)
+        EH = build_vtot(rg, vxg)
+    }
+
+    step diagonalize "build H(k) at every k-point and diagonalize it" {
+        # every k-point first: the Fermi level needs ALL the eigenvalues before
+        # any band can be given an occupation
+        for k to NKPT {
+            build_h(k)
+            eig_herm(H, EV, CV)
+            EIG[k, :] = EV[0:NBANDS]
+            CVK[k, 0:NPW[k], :] = CV[0:NPW[k], 0:NBANDS]
+        }
+    }
+    step occupy "fill the lowest bands (or Fermi-Dirac occupations for a metal)" {
+        if SMEAR > 0.0 { EFERMI = fermi_level() }
+        ENT = fill_occupations(EFERMI)
+    }
+
+    step density "the new density from the occupied bands, and the band energy" {
+        rhonew = ZERO3 * 0.0
+        EBAND = 0.0
+        for k to NKPT {
+            for b to NBANDS {
+                EBAND = EBAND + KWT[k] * FOCC[k, b] * EIG[k, b]
+            }
+            rhonew = add_density(k, rhonew)
+        }
+    }
+
+    step energy "the total energy, and how far the new density is from the old one" {
+        ETOT = EBAND - EH - sum(vxc * RHO) * DV + sum(exc * RHO) * DV - SMEAR * ENT
+        diff = rhonew - RHO
+        DRHO = sqrt(sum(diff * diff) * DV)
+        show ETOT
+        show DRHO
+        DONE = DRHO < SCF_TOL and abs(ETOT - EOLD) < SCF_TOL
+        EOLD = ETOT
+    }
+    step mix "if not converged, mix the old and new densities into the next input (Anderson)" {
+        if not DONE {
+            nxt = anderson_step(RHO, diff, NHIST)
+            AND_R3 = AND_R2
+            AND_R2 = AND_R1
+            AND_R1 = RHO
+            AND_F3 = AND_F2
+            AND_F2 = AND_F1
+            AND_F1 = diff
+            if NHIST < 3.0 { NHIST = NHIST + 1.0 }
+            RHO = nxt
+        }
+    }
+    ITER = ITER + 1.0
+}
+show ITER
+show DRHO
+
+# ======================================================= 8. the band structure
+
+narrate "band structure"
+BANDS = zeros(NPTS, NBANDS)
+step bands "the bands along the path: H(k) at each path point, with the converged potential" {
+    for p to NPTS {
+        setup_slot(SCRATCH, PATHK[p, 0], PATHK[p, 1], PATHK[p, 2])
+        build_vnl(SCRATCH)
+        build_h(SCRATCH)
+        eig_herm(H, EV, CV)
+        BANDS[p, :] = EV[0:NBANDS]
+    }
+}
+
+# Band energies in eV from the natural zero: the Fermi level of a metal, the
+# valence-band maximum (over the path) of an insulator.
+#: EREF  that zero, in hartree
+step zero "band energies in eV, measured from the valence-band maximum (or the Fermi level)" {
+    NVAL = NELEC / 2.0
+    EREF = EFERMI
+    if SMEAR <= 0.0 {
+        EREF = max(BANDS[:, NVAL - 1.0])
+    }
+    EVB = (BANDS - EREF) * HA_EV
+}
+show NKPT
+show NPWMAX
+show NG
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

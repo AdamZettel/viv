@@ -1,0 +1,83 @@
+# The tests of lib/hf/md_direct that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/md_direct does not load the references.
+from hf.md_direct import (
+    mdjk_dense_gap, mdjk_direct, mdjk_direct_nch, mdjk_direct_screened, mdjk_rand_dens,
+)
+from hf.opts import opt_new
+from hf.md_eri import mderi_full
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, WATER631GS_CART_NAO_CART, water631gs_cart_prims,
+    water631gs_cart_shells,
+)
+
+test "direct J and K match the dense contraction of this module's own ERIs on 4 seeded densities" {
+    mdjk_at = water631gs_cart_atoms()
+    mdjk_sh = water631gs_cart_shells()
+    mdjk_pr = water631gs_cart_prims()
+    mdjk_n = WATER631GS_CART_NAO_CART
+    mdjk_Gp = mderi_full(mdjk_at, mdjk_sh, mdjk_pr)
+    mdjk_o = opt_new()
+    mdjk_w = 0.0
+    mdjk_big = 0.0
+    # two calls with two densities each, then one with a single density
+    for mdjk_s to 2 {
+        mdjk_D = mdjk_rand_dens(2, mdjk_n, 1001 + 7919 * mdjk_s)
+        mdjk_JK = mdjk_direct(mdjk_at, mdjk_sh, mdjk_pr, mdjk_D, mdjk_o)
+        assert_near(len(mdjk_JK), 4, 0.0)
+        mdjk_w = max(mdjk_w, mdjk_dense_gap(mdjk_Gp, mdjk_JK, mdjk_D, mdjk_n))
+        mdjk_big = max(mdjk_big, abs(mdjk_JK[0, 0, 0]))
+    }
+    assert_lt(mdjk_w, 1.0e-12)
+    # the gap is not small because J and K are
+    assert_lt(1.0, mdjk_big)
+    mdjk_D1 = mdjk_rand_dens(1, mdjk_n, 424242)
+    mdjk_JK1 = mdjk_direct(mdjk_at, mdjk_sh, mdjk_pr, mdjk_D1, mdjk_o)
+    assert_near(len(mdjk_JK1), 2, 0.0)
+    assert_lt(mdjk_dense_gap(mdjk_Gp, mdjk_JK1, mdjk_D1, mdjk_n), 1.0e-12)
+}
+
+test "the chunk count changes only the order of the last sums" {
+    mdjk_at = water631gs_cart_atoms()
+    mdjk_sh = water631gs_cart_shells()
+    mdjk_pr = water631gs_cart_prims()
+    mdjk_n = WATER631GS_CART_NAO_CART
+    mdjk_D = mdjk_rand_dens(1, mdjk_n, 31337)
+    mdjk_a = mdjk_direct_nch(mdjk_at, mdjk_sh, mdjk_pr, mdjk_D, opt_new(), 1)
+    mdjk_b = mdjk_direct_nch(mdjk_at, mdjk_sh, mdjk_pr, mdjk_D, opt_new(), 7)
+    assert_lt(max(abs(mdjk_a - mdjk_b)), 1.0e-12)
+}
+
+test "J and K of a symmetric density are symmetric, and Tr(D J) is positive" {
+    mdjk_at = water631gs_cart_atoms()
+    mdjk_sh = water631gs_cart_shells()
+    mdjk_pr = water631gs_cart_prims()
+    mdjk_n = WATER631GS_CART_NAO_CART
+    mdjk_D = mdjk_rand_dens(1, mdjk_n, 2718)
+    mdjk_JK = mdjk_direct(mdjk_at, mdjk_sh, mdjk_pr, mdjk_D, opt_new())
+    mdjk_J = slab(mdjk_JK, 0)
+    mdjk_K = slab(mdjk_JK, 1)
+    assert_lt(max(max(abs(mdjk_J - transpose(mdjk_J))), max(abs(mdjk_K - transpose(mdjk_K)))), 1.0e-12)
+    # (D|D) is a Coulomb self-energy, positive for any nonzero D
+    assert_lt(0.0, sum(slab(mdjk_D, 0) * mdjk_J))
+}
+
+test "the density-screened build matches the dense contraction on seeded densities" {
+    mdjk_at = water631gs_cart_atoms()
+    mdjk_sh = water631gs_cart_shells()
+    mdjk_pr = water631gs_cart_prims()
+    mdjk_n = WATER631GS_CART_NAO_CART
+    mdjk_Gp = mderi_full(mdjk_at, mdjk_sh, mdjk_pr)
+    mdjk_D = mdjk_rand_dens(2, mdjk_n, 4243)
+    mdjk_JK = mdjk_direct_screened(mdjk_at, mdjk_sh, mdjk_pr, mdjk_D, opt_new())
+    assert_lt(mdjk_dense_gap(mdjk_Gp, mdjk_JK, mdjk_D, mdjk_n), 1.0e-12)
+    # a density a millionth the size, as an SCF's change of density is late
+    # on: the screening threshold is absolute, so it may drop more quartets,
+    # and what it drops stays below 1e-13 a quartet
+    mdjk_s = 1.0e-6
+    mdjk_jk = mdjk_direct_screened(mdjk_at, mdjk_sh, mdjk_pr, mdjk_s * mdjk_D, opt_new())
+    assert_lt(mdjk_dense_gap(mdjk_Gp, mdjk_jk, mdjk_s * mdjk_D, mdjk_n), 1.0e-12 * mdjk_s)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

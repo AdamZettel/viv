@@ -1,0 +1,734 @@
+###
+post: Interval arithmetic with outward rounding, and how to check it exactly
+agent: claude
+
+An interval `[lo, hi]` is a pair of doubles with `lo <= hi` that is known to
+contain a real number. Every operation here returns an interval that contains
+every result the exact operation can give on members of its inputs. The
+integral enclosures of lib/hf/iv_ints are built from these operations, so
+their soundness rests on this module.
+
+**Representation.** An interval is a 2-entry array `[lo, hi]`. A table of
+intervals is an array whose last axis has length 2, so flattening it puts
+entry `k`'s ends at `2k` and `2k + 1`.
+
+**Outward rounding without a rounding mode.** Viv has no control over the
+rounding mode, and both engines round to nearest. So each operation computes
+the rounded result `r` and then finds out on which side of `r` the exact
+result lies, from its error term:
+
+- `a + b`: Knuth's TwoSum gives `e` with `a + b = s + e` exactly.
+- `a * b`: Dekker's TwoProduct (Veltkamp split by `2^27 + 1`) gives `e` with
+  `a * b = p + e` exactly.
+- `a / b`: with `q = fl(a / b)`, the residual `r = a - b q` has the sign of
+  `(a / b - q) b`. `b q = P + E` by TwoProduct, `a - P` is exact because `P`
+  is within a few ulps of `a` (Sterbenz), and a rounded `(a - P) - E` has the
+  sign of the exact one.
+- `sqrt(a)`: with `s = fl(sqrt(a))`, `a - s^2` has the sign of `sqrt(a) - s`,
+  computed the same way.
+
+When the error is zero the result is exact and both ends are `r`. Otherwise
+one end is `r` and the other is `r` moved one step outward. The step is
+Rump, Zimmermann, Boldo and Melquiond's successor in round-to-nearest,
+`c + (phi |c| + eta)` with `phi = 2^-53 (1 + 2^-52)` and `eta = 2^-1074`,
+which gives the next double or the one after it, never `c` itself. A result
+whose inputs are exact doubles is therefore at most one or two ulps wide.
+
+Dekker's product and the residuals are exact only when nothing underflows,
+so below `IV_TINY = 1e-290` an operation skips the error term and moves both
+ends out. Overflow and NaN are not handled; nothing in lib/hf comes near them.
+
+**Why the error terms are exact in both engines.** The generated C starts
+with `#pragma STDC FP_CONTRACT OFF`, and a probe where a fused multiply-add
+would have given `-2^-60` printed 0 in both engines. Without that, the C
+compiler could fuse `ah * bh - p` and the product error would be wrong.
+
+**The libm assumption.** `exp` is the one operation whose rounding is not
+under our control. `iv_exp` assumes the library `exp` is within 2 ulps of the
+exact value and widens the result by 4 units of `2^-53` relative on each
+side, plus one outward step. Every Viv engine takes `exp` from the same code,
+fdlibm's `e_exp` (lang/viv/src/vmath), whose error analysis gives under
+1 ulp. This is an assumption, not a proof: that bound is fdlibm's own
+analysis, not something this library has checked.
+
+**How the tests check containment exactly.** An interval can be checked
+against the exact result without trusting interval code. The exact result of
+`a + b` or `a * b` is the unevaluated sum `s + e` of two doubles, and
+`lo <= s + e` is decided by the sign of the three-term sum `s + e - lo`. That
+sign is found exactly by Shewchuk's expansion growth (`iv_esign`): TwoSum
+turns any list of doubles into a nonoverlapping expansion with the same
+exact sum, and the sign of a nonoverlapping expansion is the sign of its
+largest component. For `/` and `sqrt` the tests check the residual at each
+end: `a - b lo` and `a - b hi` must have the signs that put `a / b` between
+them, and `a - lo^2 >= 0 >= a - hi^2`.
+
+Used with `import hf.interval`.
+###
+
+IV_U = 1.1102230246251565e-16
+IV_PHI = 1.1102230246251568e-16
+IV_ETA = 5e-324
+IV_SPLIT = 134217729.0
+IV_TINY = 1.0e-290
+IV_EXP_ULPS = 2.0
+IV_PI_LO = 3.141592653589793
+IV_PI_HI = 3.1415926535897936
+
+# the tests: random operations per fuzz run (the test names say 1000)
+IV_T_NFUZZ = 1000
+
+# ---- one step outward -----------------------------------------------------------
+
+#| A double above `c`: the next one or the one after it.
+def iv_succ(c) {
+    return c + (IV_PHI * abs(c) + IV_ETA)
+}
+
+#| A double below `c`: the previous one or the one before it.
+def iv_pred(c) {
+    return c - (IV_PHI * abs(c) + IV_ETA)
+}
+
+# ---- error-free transforms --------------------------------------------------------
+
+#| Knuth's TwoSum: `[s, e]` with `s = fl(a + b)` and `a + b = s + e` exactly.
+def iv_two_sum(a, b) {
+    s = a + b
+    bb = s - a
+    return [s, (a - (s - bb)) + (b - bb)]
+}
+
+#| The rounding error of `p = fl(a * b)`: Dekker's product with Veltkamp's
+#| split. Exact when `abs(p) >= IV_TINY` and nothing overflows.
+def iv_prod_err(a, b, p) {
+    ta = IV_SPLIT * a
+    ah = ta - (ta - a)
+    al = a - ah
+    tb = IV_SPLIT * b
+    bh = tb - (tb - b)
+    bl = b - bh
+    return ((ah * bh - p) + ah * bl + al * bh) + al * bl
+}
+
+#| Dekker's TwoProduct: `[p, e]` with `a * b = p + e` exactly.
+def iv_two_prod(a, b) {
+    p = a * b
+    return [p, iv_prod_err(a, b, p)]
+}
+
+# ---- directed rounding on doubles -------------------------------------------------
+
+#| The largest double at or below `a + b` (or one step further down).
+def iv_add_dn(a, b) {
+    s = a + b
+    bb = s - a
+    if (a - (s - bb)) + (b - bb) < 0.0 {
+        return iv_pred(s)
+    }
+    return s
+}
+
+#| A double at or above `a + b`.
+def iv_add_up(a, b) {
+    s = a + b
+    bb = s - a
+    if (a - (s - bb)) + (b - bb) > 0.0 {
+        return iv_succ(s)
+    }
+    return s
+}
+
+#| A double at or below `a * b`.
+def iv_mul_dn(a, b) {
+    p = a * b
+    if abs(p) < IV_TINY {
+        if a == 0.0 or b == 0.0 {
+            return 0.0
+        }
+        return iv_pred(p)
+    }
+    if iv_prod_err(a, b, p) < 0.0 {
+        return iv_pred(p)
+    }
+    return p
+}
+
+#| A double at or above `a * b`.
+def iv_mul_up(a, b) {
+    p = a * b
+    if abs(p) < IV_TINY {
+        if a == 0.0 or b == 0.0 {
+            return 0.0
+        }
+        return iv_succ(p)
+    }
+    if iv_prod_err(a, b, p) > 0.0 {
+        return iv_succ(p)
+    }
+    return p
+}
+
+#| The sign of `a / b - fl(a / b)`: -1, 0 or 1, or 2 when underflow makes
+#| the residual unreliable.
+def iv_div_side(a, b, q) {
+    if abs(a) < IV_TINY or abs(q) < IV_TINY {
+        if a == 0.0 {
+            return 0
+        }
+        return 2
+    }
+    P = b * q
+    r = (a - P) - iv_prod_err(b, q, P)
+    if r == 0.0 {
+        return 0
+    }
+    if (r > 0.0) == (b > 0.0) {
+        return 1
+    }
+    return -1
+}
+
+#| A double at or below `a / b`, for `b != 0`.
+def iv_div_dn(a, b) {
+    q = a / b
+    side = iv_div_side(a, b, q)
+    if side < 0 or side > 1 {
+        return iv_pred(q)
+    }
+    return q
+}
+
+#| A double at or above `a / b`, for `b != 0`.
+def iv_div_up(a, b) {
+    q = a / b
+    side = iv_div_side(a, b, q)
+    if side > 0 {
+        return iv_succ(q)
+    }
+    return q
+}
+
+#| The sign of `sqrt(a) - fl(sqrt(a))`, or 2 when underflow makes it
+#| unreliable.
+def iv_sqrt_side(a, s) {
+    if a == 0.0 {
+        return 0
+    }
+    if a < IV_TINY {
+        return 2
+    }
+    P = s * s
+    r = (a - P) - iv_prod_err(s, s, P)
+    if r > 0.0 {
+        return 1
+    }
+    if r < 0.0 {
+        return -1
+    }
+    return 0
+}
+
+#| A double at or below `sqrt(a)`, for `a >= 0`.
+def iv_sqrt_dn(a) {
+    s = sqrt(a)
+    side = iv_sqrt_side(a, s)
+    if side < 0 or side > 1 {
+        return max(0.0, iv_pred(s))
+    }
+    return s
+}
+
+#| A double at or above `sqrt(a)`, for `a >= 0`.
+def iv_sqrt_up(a) {
+    s = sqrt(a)
+    if iv_sqrt_side(a, s) > 0 {
+        return iv_succ(s)
+    }
+    return s
+}
+
+#| A double at or below `exp(x)`, under the 2-ulp libm assumption.
+def iv_exp_dn(x) {
+    y = exp(x)
+    return max(0.0, iv_pred(y - 2.0 * IV_EXP_ULPS * IV_U * y - 4.0 * IV_ETA))
+}
+
+#| A double at or above `exp(x)`, under the 2-ulp libm assumption.
+def iv_exp_up(x) {
+    y = exp(x)
+    return iv_succ(y + 2.0 * IV_EXP_ULPS * IV_U * y + 4.0 * IV_ETA)
+}
+
+# ---- intervals ----------------------------------------------------------------------
+
+#| The interval `[lo, hi]`; the ends must be ordered.
+def iv_new(lo, hi) {
+    assert_true(lo <= hi)
+    return [lo, hi]
+}
+
+#| The point interval `[x, x]`, for an `x` that is exact as a double.
+def iv_pt(x) {
+    return [x, x]
+}
+
+#| An interval that contains pi.
+def iv_pi() {
+    return [IV_PI_LO, IV_PI_HI]
+}
+
+def iv_add(A: Arr, B: Arr) {
+    return [iv_add_dn(A[0], B[0]), iv_add_up(A[1], B[1])]
+}
+
+def iv_sub(A: Arr, B: Arr) {
+    return [iv_add_dn(A[0], -B[1]), iv_add_up(A[1], -B[0])]
+}
+
+def iv_neg(A: Arr) {
+    return [-A[1], -A[0]]
+}
+
+#| `A` plus an exact double.
+def iv_addc(A: Arr, c) {
+    return [iv_add_dn(A[0], c), iv_add_up(A[1], c)]
+}
+
+#| `A` times an exact double.
+def iv_scale(A: Arr, c) {
+    if c >= 0.0 {
+        return [iv_mul_dn(A[0], c), iv_mul_up(A[1], c)]
+    }
+    return [iv_mul_dn(A[1], c), iv_mul_up(A[0], c)]
+}
+
+#| The product: the extremes of the four corner products, since `x y` is
+#| bilinear and so takes its extremes at corners.
+def iv_mul(A: Arr, B: Arr) {
+    if A[0] >= 0.0 and B[0] >= 0.0 {
+        return [iv_mul_dn(A[0], B[0]), iv_mul_up(A[1], B[1])]
+    }
+    lo = min(min(iv_mul_dn(A[0], B[0]), iv_mul_dn(A[0], B[1])), min(iv_mul_dn(A[1], B[0]), iv_mul_dn(A[1], B[1])))
+    hi = max(max(iv_mul_up(A[0], B[0]), iv_mul_up(A[0], B[1])), max(iv_mul_up(A[1], B[0]), iv_mul_up(A[1], B[1])))
+    return [lo, hi]
+}
+
+#| The square, which is never negative even when `A` straddles 0.
+def iv_sqr(A: Arr) {
+    if A[0] >= 0.0 {
+        return [iv_mul_dn(A[0], A[0]), iv_mul_up(A[1], A[1])]
+    }
+    if A[1] <= 0.0 {
+        return [iv_mul_dn(A[1], A[1]), iv_mul_up(A[0], A[0])]
+    }
+    return [0.0, max(iv_mul_up(A[0], A[0]), iv_mul_up(A[1], A[1]))]
+}
+
+#| The quotient, for a `B` that excludes 0.
+def iv_div(A: Arr, B: Arr) {
+    assert_true(B[0] > 0.0 or B[1] < 0.0)
+    lo = min(min(iv_div_dn(A[0], B[0]), iv_div_dn(A[0], B[1])), min(iv_div_dn(A[1], B[0]), iv_div_dn(A[1], B[1])))
+    hi = max(max(iv_div_up(A[0], B[0]), iv_div_up(A[0], B[1])), max(iv_div_up(A[1], B[0]), iv_div_up(A[1], B[1])))
+    return [lo, hi]
+}
+
+#| `A` divided by an exact nonzero double.
+def iv_divc(A: Arr, c) {
+    if c > 0.0 {
+        return [iv_div_dn(A[0], c), iv_div_up(A[1], c)]
+    }
+    return [iv_div_dn(A[1], c), iv_div_up(A[0], c)]
+}
+
+#| The square root, for `A` with `lo >= 0`.
+def iv_sqrt(A: Arr) {
+    assert_true(0.0 <= A[0])
+    return [iv_sqrt_dn(A[0]), iv_sqrt_up(A[1])]
+}
+
+#| `exp`, which is increasing, under the 2-ulp libm assumption.
+def iv_exp(A: Arr) {
+    return [iv_exp_dn(A[0]), iv_exp_up(A[1])]
+}
+
+#| `A^k` for a whole `k >= 0` and `A` with `lo >= 0`.
+def iv_powi(A: Arr, k) {
+    r = [1.0, 1.0]
+    for i to k {
+        r = iv_mul(r, A)
+    }
+    return r
+}
+
+#| The smallest interval holding both.
+def iv_hull(A: Arr, B: Arr) {
+    return [min(A[0], B[0]), max(A[1], B[1])]
+}
+
+#| 1 when the intervals share a point, else 0.
+def iv_overlaps(A: Arr, B: Arr) {
+    if A[0] <= B[1] and B[0] <= A[1] {
+        return 1
+    }
+    return 0
+}
+
+#| The common part of two overlapping intervals.
+def iv_meet(A: Arr, B: Arr) {
+    assert_true(iv_overlaps(A, B) > 0)
+    return [max(A[0], B[0]), min(A[1], B[1])]
+}
+
+#| 1 when `x` is in `A`, else 0.
+def iv_contains(A: Arr, x) {
+    if A[0] <= x and x <= A[1] {
+        return 1
+    }
+    return 0
+}
+
+def iv_width(A: Arr) {
+    return A[1] - A[0]
+}
+
+def iv_mid(A: Arr) {
+    return 0.5 * A[0] + 0.5 * A[1]
+}
+
+#| Width relative to the larger end: `(hi - lo) / max(|lo|, |hi|)`, and 0
+#| for the point interval `[0, 0]`.
+def iv_relw(A: Arr) {
+    big = max(abs(A[0]), abs(A[1]))
+    if big == 0.0 {
+        return 0.0
+    }
+    return (A[1] - A[0]) / big
+}
+
+#| How far `x` lies outside `A`, 0 when inside.
+def iv_outside(A: Arr, x) {
+    if x < A[0] {
+        return A[0] - x
+    }
+    if x > A[1] {
+        return x - A[1]
+    }
+    return 0.0
+}
+
+#| Entry `k` of an interval table flattened to `[2 N]`.
+def iv_get(T: Arr, k) {
+    return [T[2 * k], T[2 * k + 1]]
+}
+
+#| Store interval `A` as entry `k` of a flattened interval table.
+def iv_put(T: Arr, k, A: Arr) {
+    T[2 * k] = A[0]
+    T[2 * k + 1] = A[1]
+    return 0
+}
+
+# ---- exact signs, for checking ------------------------------------------------------
+
+#| The exact sign (-1, 0, 1) of `T[0] + ... + T[n-1]`. Shewchuk's
+#| grow-expansion with zero elimination keeps a nonoverlapping expansion in
+#| increasing magnitude whose exact sum is the sum so far; the sign of such an
+#| expansion is the sign of its largest component.
+def iv_esign(T: Arr, n) {
+    E = zeros(n + 1)
+    m = 0
+    for i to n {
+        q = T[i]
+        k = 0
+        for j to m {
+            s = q + E[j]
+            bb = s - q
+            h = (q - (s - bb)) + (E[j] - bb)
+            q = s
+            if h != 0.0 {
+                E[k] = h
+                k = k + 1
+            }
+        }
+        if q != 0.0 {
+            E[k] = q
+            k = k + 1
+        }
+        m = k
+    }
+    if m == 0 {
+        return 0
+    }
+    if E[m - 1] > 0.0 {
+        return 1
+    }
+    return -1
+}
+
+#| The exact sign of `x + y - z` (for `x + y` an exact sum or product held
+#| as two doubles, against an interval end `z`).
+def iv_sign3(x, y, z) {
+    T = [x, y, -z]
+    return iv_esign(T, len(T))
+}
+
+#| The exact sign of `a - b q`.
+def iv_resid_sign(a, b, q) {
+    P = b * q
+    T = [a, -P, -iv_prod_err(b, q, P)]
+    return iv_esign(T, len(T))
+}
+
+# ---- tests --------------------------------------------------------------------------
+
+#| Test helper: next Park-Miller weight in (0, 1) from the state in `st[0]`.
+def iv_rng(st: Arr) {
+    st[0] = mod(16807.0 * st[0], 2147483647.0)
+    return st[0] / 2147483647.0
+}
+
+#| Test helper: a random double with a random sign, a random 30-bit mantissa
+#| and an exponent between -40 and 40, so products and sums mix scales.
+def iv_t_rand(st: Arr) {
+    m = 1.0 + floor(iv_rng(st) * 1073741824.0) / 1073741824.0
+    m = m + floor(iv_rng(st) * 8388608.0) / 9007199254740992.0
+    e = floor(iv_rng(st) * 81.0) - 40.0
+    v = m * pow(2.0, e)
+    if iv_rng(st) < 0.5 {
+        return -v
+    }
+    return v
+}
+
+#| Test helper: a random interval. A third are points, a third are one ulp
+#| wide, and the rest are up to a relative 1e-3 wide.
+def iv_t_rand_iv(st: Arr) {
+    x = iv_t_rand(st)
+    kind = iv_rng(st)
+    if kind < 0.34 {
+        return [x, x]
+    }
+    if kind < 0.67 {
+        return [x, iv_succ(x)]
+    }
+    return [x, x + abs(x) * 1.0e-3 * iv_rng(st)]
+}
+
+#| Test helper: for corners `a` of `A` and `b` of `B`, the number of exact
+#| results `a op b` (op 0 is +, 1 is -, 2 is *) that fall outside `R`.
+def iv_t_corner_misses(A: Arr, B: Arr, R: Arr, op) {
+    miss = 0
+    for i to 2 {
+        for j to 2 {
+            a = A[i]
+            b = B[j]
+            if op == 1 {
+                b = -b
+            }
+            x = iv_two_sum(a, b)
+            if op == 2 {
+                x = iv_two_prod(a, b)
+            }
+            if iv_sign3(x[0], x[1], R[0]) < 0 {
+                miss = miss + 1
+            }
+            if iv_sign3(-x[0], -x[1], -R[1]) < 0 {
+                miss = miss + 1
+            }
+        }
+    }
+    return miss
+}
+
+#| Test helper: `nops` random +, -, * on random intervals from `seed`;
+#| returns `[misses, worst relative width of a result on point operands]`.
+def iv_t_fuzz_arith(seed, nops) {
+    st = zeros(1)
+    st[0] = seed
+    miss = 0
+    wpt = 0.0
+    for k to nops {
+        A = iv_t_rand_iv(st)
+        B = iv_t_rand_iv(st)
+        # every eighth operation cancels: B is -A nudged by a few ulps
+        if mod(k, 8) == 3 {
+            nb = -A[0] * (1.0 + floor(iv_rng(st) * 8.0) * 2.0 * IV_U)
+            B = [nb, nb]
+        }
+        op = mod(k, 3)
+        R = iv_add(A, B)
+        if op == 1 {
+            R = iv_sub(A, B)
+        }
+        if op == 2 {
+            R = iv_mul(A, B)
+        }
+        miss = miss + iv_t_corner_misses(A, B, R, op)
+        if A[0] == A[1] and B[0] == B[1] {
+            wpt = max(wpt, iv_relw(R))
+        }
+    }
+    return [miss, wpt]
+}
+
+#| Test helper: `nops` random divisions and square roots, checked by the
+#| sign of the exact residual at each end of every result.
+def iv_t_fuzz_divsqrt(seed, nops) {
+    st = zeros(1)
+    st[0] = seed
+    miss = 0
+    wpt = 0.0
+    for k to nops {
+        A = iv_t_rand_iv(st)
+        if mod(k, 2) == 0 {
+            B = iv_t_rand_iv(st)
+            R = iv_div(A, B)
+            for i to 2 {
+                for j to 2 {
+                    sb = 1
+                    if B[j] < 0.0 {
+                        sb = -1
+                    }
+                    # a/b >= lo  <=>  (a - b lo) sign(b) >= 0, and the same at hi
+                    if iv_resid_sign(A[i], B[j], R[0]) * sb < 0 {
+                        miss = miss + 1
+                    }
+                    if iv_resid_sign(A[i], B[j], R[1]) * sb > 0 {
+                        miss = miss + 1
+                    }
+                }
+            }
+            if A[0] == A[1] and B[0] == B[1] {
+                wpt = max(wpt, iv_relw(R))
+            }
+        }
+        else {
+            P = [abs(A[0]), abs(A[1])]
+            if P[0] > P[1] {
+                P = [P[1], P[0]]
+            }
+            R = iv_sqrt(P)
+            # lo^2 <= a at the lower end and a <= hi^2 at the upper end
+            if iv_resid_sign(P[0], R[0], R[0]) < 0 {
+                miss = miss + 1
+            }
+            if iv_resid_sign(P[1], R[1], R[1]) > 0 {
+                miss = miss + 1
+            }
+            if P[0] == P[1] {
+                wpt = max(wpt, iv_relw(R))
+            }
+        }
+    }
+    return [miss, wpt]
+}
+
+test "the outward step moves one or two ulps and never stays put" {
+    iv_sst = zeros(1)
+    iv_sst[0] = 97
+    iv_sbad = 0
+    iv_sn = 2000
+    for iv_sk to iv_sn {
+        iv_sc = iv_t_rand(iv_sst)
+        iv_sup = iv_succ(iv_sc)
+        iv_sdn = iv_pred(iv_sc)
+        if iv_sup <= iv_sc or iv_sdn >= iv_sc {
+            iv_sbad = iv_sbad + 1
+        }
+        # two ulps are at most 2^-51 |c|
+        if iv_sup - iv_sc > 4.0 * IV_U * abs(iv_sc) or iv_sc - iv_sdn > 4.0 * IV_U * abs(iv_sc) {
+            iv_sbad = iv_sbad + 1
+        }
+    }
+    assert_near(iv_sbad, 0, 0)
+    assert_lt(0.0, iv_succ(0.0))
+    assert_lt(iv_pred(0.0), 0.0)
+    assert_lt(1.0, iv_succ(1.0))
+    assert_near(iv_succ(1.0) - 1.0, 2.0 * IV_U, 0.0)
+}
+
+test "the exact sign of a sum sees what rounding hides" {
+    # 1 + 2^-60 - 1 rounds to 0 in doubles; the exact sum is 2^-60
+    iv_et = [1.0, pow(2.0, -60.0), -1.0]
+    assert_near(iv_esign(iv_et, len(iv_et)), 1, 0)
+    iv_et = [1.0, -pow(2.0, -60.0), -1.0]
+    assert_near(iv_esign(iv_et, len(iv_et)), -1, 0)
+    iv_et = [1.0e300, 1.0, -1.0e300, -1.0]
+    assert_near(iv_esign(iv_et, len(iv_et)), 0, 0)
+    iv_et = [0.0, 0.0]
+    assert_near(iv_esign(iv_et, len(iv_et)), 0, 0)
+    # (1 + 2^-30)^2 = 1 + 2^-29 + 2^-60: TwoProduct keeps the 2^-60
+    iv_ep = iv_two_prod(1.0 + pow(2.0, -30.0), 1.0 + pow(2.0, -30.0))
+    assert_near(iv_ep[1], pow(2.0, -60.0), 0.0)
+    assert_near(iv_sign3(iv_ep[0], iv_ep[1], iv_ep[0]), 1, 0)
+}
+
+test "1000 random +, -, * contain the exact TwoSum/TwoProduct result at every corner" {
+    iv_ar = iv_t_fuzz_arith(20260923, IV_T_NFUZZ)
+    assert_near(iv_ar[0], 0, 0)
+    # on point operands the result is the rounded value and one step out
+    assert_lt(iv_ar[1], 4.5e-16)
+    iv_ar2 = iv_t_fuzz_arith(7, IV_T_NFUZZ)
+    assert_near(iv_ar2[0], 0, 0)
+}
+
+test "1000 random / and sqrt have exact residuals of the right sign at both ends" {
+    iv_dr = iv_t_fuzz_divsqrt(20260923, IV_T_NFUZZ)
+    assert_near(iv_dr[0], 0, 0)
+    assert_lt(iv_dr[1], 4.5e-16)
+    iv_dr2 = iv_t_fuzz_divsqrt(11, IV_T_NFUZZ)
+    assert_near(iv_dr2[0], 0, 0)
+}
+
+test "a rounded-to-nearest result that would miss is caught" {
+    # 0.1 + 0.2 rounds up past the exact sum of the two doubles; the lower end
+    # must then be one step below the rounded value
+    iv_nr = iv_add(iv_pt(0.1), iv_pt(0.2))
+    assert_lt(iv_nr[0], 0.1 + 0.2)
+    assert_near(iv_nr[1], 0.1 + 0.2, 0.0)
+    iv_nx = iv_two_sum(0.1, 0.2)
+    assert_lt(iv_nx[1], 0.0)
+    # 1/3 rounds down, so the upper end moves
+    iv_nq = iv_div(iv_pt(1.0), iv_pt(3.0))
+    assert_near(iv_nq[0], 1.0 / 3.0, 0.0)
+    assert_lt(1.0 / 3.0, iv_nq[1])
+    # exact operations stay points
+    iv_ne = iv_mul(iv_pt(1.5), iv_pt(-2.25))
+    assert_near(iv_width(iv_ne), 0.0, 0.0)
+    iv_ns = iv_sqrt(iv_pt(2.25))
+    assert_near(iv_width(iv_ns), 0.0, 0.0)
+}
+
+test "exp and pi enclose e and pi" {
+    # the doubles either side of e: 2.718281828459045 < e < 2.7182818284590455
+    iv_xe = iv_exp(iv_pt(1.0))
+    assert_true(iv_xe[0] <= 2.718281828459045)
+    assert_true(2.7182818284590455 <= iv_xe[1])
+    assert_lt(iv_relw(iv_xe), 3.0e-15)
+    iv_xp = iv_pi()
+    assert_lt(iv_xp[0], iv_xp[1])
+    assert_near(iv_xp[1], iv_succ(iv_xp[0]), 0.0)
+    # exp(0) is 1 in every libm; the enclosure must hold it
+    assert_near(iv_contains(iv_exp(iv_pt(0.0)), 1.0), 1, 0)
+    # exp of an interval is increasing
+    iv_xr = iv_exp([-1.0, 2.0])
+    assert_true(iv_xr[0] <= exp(-1.0))
+    assert_true(exp(2.0) <= iv_xr[1])
+}
+
+test "mixed-sign products and squares take the right corners" {
+    iv_mm = iv_mul([-2.0, 3.0], [-5.0, 4.0])
+    assert_near(iv_mm[0], -15.0, 0.0)
+    assert_near(iv_mm[1], 12.0, 0.0)
+    iv_mq = iv_sqr([-3.0, 2.0])
+    assert_near(iv_mq[0], 0.0, 0.0)
+    assert_near(iv_mq[1], 9.0, 0.0)
+    iv_md = iv_div([1.0, 2.0], [-4.0, -2.0])
+    assert_near(iv_md[0], -1.0, 0.0)
+    assert_near(iv_md[1], -0.25, 0.0)
+    assert_near(iv_overlaps([0.0, 1.0], [1.0, 2.0]), 1, 0)
+    assert_near(iv_overlaps([0.0, 1.0], [1.5, 2.0]), 0, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

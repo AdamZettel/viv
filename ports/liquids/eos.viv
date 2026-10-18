@@ -1,0 +1,207 @@
+###
+The equation of state of the Lennard-Jones fluid fitted by Thol, Rutkai,
+Span, Vrabec and Lustig to simulation data: the residual Helmholtz free
+energy a_res(tau, delta), with tau = T_c / T and delta = rho / rho_c, as a
+sum of 6 power terms, 6 exponential terms and 9 or 11 Gaussian bell terms.
+Every thermodynamic property is a derivative of it, so the fit gives the
+pressure, energy, heat capacities and chemical potential at any liquid or
+gas state point, which is what Allen and Tildesley test their simulations
+against.
+
+Two fits: the full potential (Thol et al., Journal of Physical and
+Chemical Reference Data 45, 023101 (2016)) and the potential cut and
+shifted at 2.5 sigma (Thol et al., International Journal of Thermophysics
+36, 25 (2015)). a_res(i, j) here is
+tau^i delta^j d^(i+j) a_res / d tau^i d delta^j, for i + j <= 2.
+###
+# Derived from eos_lj_module.f90 and eos_lj.f90 of
+# https://github.com/Allen-Tildesley/examples (commit 4818bc82), by Michael P.
+# Allen and Dominic J. Tildesley, CC0-1.0; see ports/liquids/LICENSE.
+# Upstream's note: the fitted forms and coefficients are Thol et al.'s; those
+# authors supply their own C++ and are not responsible for this code.
+
+from lj import potential_lrc, pressure_lrc, pressure_delta
+
+#| The cutoff of the cut-and-shifted fit, and of the cut (not shifted)
+#| model the full fit is corrected to.
+EOS_R_CUT = 2.5
+#| The 3 x 3 table of derivatives, of which the entries with i + j <= 2 are
+#| used.
+NDERIV: Int = 3
+
+#| One term's 3 x 3 contributions after the derivative factors for tau
+#| (rows) and delta (columns): f(i, j) = base * ftau(i) * fdelta(j), applied
+#| first by rows and then by columns, in upstream's order.
+def term_table(base: Num, ft1: Num, ft2a: Num, ft2b: Num, fd1: Num, fd2a: Num, fd2b: Num, two_factor_tau: Bool,
+               two_factor_delta: Bool) -> Arr {
+    f = zeros(NDERIV, NDERIV)
+    for i to NDERIV {
+        for j to NDERIV {
+            f[i, j] = base
+        }
+    }
+    for j to NDERIV {
+        f[1, j] = f[1, j] * ft1
+        if two_factor_tau {
+            f[2, j] = f[2, j] * ft2a * ft2b
+        }
+        else {
+            f[2, j] = f[2, j] * ft2a
+        }
+    }
+    for i to NDERIV {
+        f[i, 1] = f[i, 1] * fd1
+        if two_factor_delta {
+            f[i, 2] = f[i, 2] * fd2a * fd2b
+        }
+        else {
+            f[i, 2] = f[i, 2] * fd2a
+        }
+    }
+    return f
+}
+
+#| n tau^t delta^d (upstream's power).
+def power_term(tau: Num, delta: Num, n: Num, t: Num, d: Num) -> Arr {
+    base = n * (tau ^ t) * (delta ^ d)
+    return term_table(base, t, t, t - 1.0, d, d, d - 1.0, true, true)
+}
+
+#| n tau^t delta^d exp(-delta^l) (upstream's expon).
+def expon_term(tau: Num, delta: Num, n: Num, t: Num, d: Num, l: Num) -> Arr {
+    base = n * (tau ^ t) * (delta ^ d) * exp(-(delta ^ l))
+    fd1 = d - l * (delta ^ l)
+    fd2 = (d - l * (delta ^ l)) * (d - 1.0 - l * (delta ^ l)) - (l * l) * (delta ^ l)
+    return term_table(base, t, t, t - 1.0, fd1, fd2, 1.0, true, false)
+}
+
+#| n tau^t exp(-beta (tau - gamma)^2) delta^d exp(-eta (delta - epsilon)^2)
+#| (upstream's gauss).
+def gauss_term(tau: Num, delta: Num, n: Num, t: Num, d: Num, eta: Num, beta: Num, gam: Num, eps: Num) -> Arr {
+    tg = tau - gam
+    de = delta - eps
+    base = n * (tau ^ t) * exp(-(beta * (tg * tg))) * (delta ^ d) * exp(-(eta * (de * de)))
+    ft1 = t - 2.0 * beta * tau * tg
+    ft2 = ft1 * ft1 - t - 2.0 * beta * (tau * tau)
+    fd1 = d - 2.0 * eta * delta * de
+    fd2 = fd1 * fd1 - d - 2.0 * eta * (delta * delta)
+    return term_table(base, ft1, ft2, 1.0, fd1, fd2, 1.0, false, false)
+}
+
+#| The residual free energy table of a fit with these coefficients.
+def a_res_fit(temp: Num, rho: Num, temp_crit: Num, rho_crit: Num, pn: Arr, pt: Arr, pd: Arr, en: Arr, et: Arr,
+              ed: Arr, el: Arr, gn: Arr, gt: Arr, gd: Arr, geta: Arr, gbeta: Arr, ggamma: Arr, geps: Arr) -> Arr {
+    tau = temp_crit / temp
+    delta = rho / rho_crit
+    a = zeros(NDERIV, NDERIV)
+    for k to len(pn) {
+        a = a + power_term(tau, delta, pn[k], pt[k], pd[k])
+    }
+    for k to len(en) {
+        a = a + expon_term(tau, delta, en[k], et[k], ed[k], el[k])
+    }
+    for k to len(gn) {
+        a = a + gauss_term(tau, delta, gn[k], gt[k], gd[k], geta[k], gbeta[k], ggamma[k], geps[k])
+    }
+    return a
+}
+
+#| The full Lennard-Jones potential (Thol et al. 2016): T_c = 1.32, rho_c =
+#| 0.31.
+def a_res_full(temp: Num, rho: Num) -> Arr {
+    return a_res_fit(temp, rho, 1.32, 0.31,
+                     [0.005208073, 2.186252, -2.161016, 1.452700, -2.041792, 0.18695286],
+                     [1.000, 0.320, 0.505, 0.672, 0.843, 0.898],
+                     [4.0, 1.0, 1.0, 2.0, 2.0, 3.0],
+                     [-0.090988445, -0.49745610, 0.10901431, -0.80055922, -0.56883900, -0.62086250],
+                     [1.294, 2.590, 1.786, 2.770, 1.786, 1.205],
+                     [5.0, 2.0, 2.0, 3.0, 1.0, 1.0],
+                     [1.0, 2.0, 1.0, 2.0, 2.0, 1.0],
+                     [-1.4667177, 1.8914690, -0.13837010, -0.38696450, 0.12657020, 0.6057810, 1.1791890, -0.47732679,
+                      -9.9218575, -0.57479320, 0.0037729230],
+                     [2.830, 2.548, 4.650, 1.385, 1.460, 1.351, 0.660, 1.496, 1.830, 1.616, 4.970],
+                     [1.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0, 2.0, 3.0, 1.0, 1.0],
+                     [2.067, 1.522, 8.82, 1.722, 0.679, 1.883, 3.925, 2.461, 28.2, 0.753, 0.82],
+                     [0.625, 0.638, 3.91, 0.156, 0.157, 0.153, 1.16, 1.73, 383.0, 0.112, 0.119],
+                     [0.71, 0.86, 1.94, 1.48, 1.49, 1.945, 3.02, 1.11, 1.17, 1.33, 0.24],
+                     [0.2053, 0.409, 0.6, 1.203, 1.829, 1.397, 1.39, 0.539, 0.934, 2.369, 2.43])
+}
+
+#| The potential cut and shifted at 2.5 sigma (Thol et al. 2015): T_c =
+#| 1.086, rho_c = 0.319.
+def a_res_cutshift(temp: Num, rho: Num) -> Arr {
+    return a_res_fit(temp, rho, 1.086, 0.319,
+                     [0.015606084, 1.7917527, -1.9613228, 1.3045604, -1.8117673, 0.15483997],
+                     [1.000, 0.304, 0.583, 0.662, 0.870, 0.870],
+                     [4.0, 1.0, 1.0, 2.0, 2.0, 3.0],
+                     [-0.094885204, -0.20092412, 0.11639644, -0.50607364, -0.58422807, -0.47510982],
+                     [1.250, 3.000, 1.700, 2.400, 1.960, 1.286],
+                     [5.0, 2.0, 2.0, 3.0, 1.0, 1.0],
+                     [1.0, 2.0, 1.0, 2.0, 2.0, 1.0],
+                     [0.0094333106, 0.30444628, -0.0010820946, -0.099693391, 0.0091193522, 0.12970543, 0.023036030,
+                      -0.082671073, -2.2497821],
+                     [3.600, 2.080, 5.240, 0.960, 1.360, 1.655, 0.900, 0.860, 3.950],
+                     [1.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0, 2.0, 3.0],
+                     [4.70, 1.92, 2.70, 1.49, 0.65, 1.73, 3.70, 1.90, 13.2],
+                     [20.0, 0.77, 0.5, 0.8, 0.4, 0.43, 8.0, 3.3, 114.0],
+                     [1.0, 0.5, 0.8, 1.5, 0.7, 1.6, 1.3, 0.6, 1.3],
+                     [0.55, 0.7, 2.0, 1.14, 1.2, 1.31, 1.14, 0.53, 0.96])
+}
+
+#| The properties at one state point from a table: pressure, energy per
+#| atom, C_v and C_p per atom (units of k_B), chemical potential and
+#| activity, all with the ideal-gas parts (upstream's eos_lj).
+record StatePoint {
+    p: Num
+    e: Num
+    cv: Num
+    cp: Num
+    mu: Num
+    z: Num
+}
+
+def state_point(a: Arr, temperature: Num, density: Num) -> StatePoint {
+    x = 1.0 + a[0, 1] - a[1, 1]
+    cp = 2.5 - a[2, 0] + x * x / (1.0 + 2.0 * a[0, 1] + a[0, 2]) - 1.0
+    return StatePoint { p: density * temperature * (1.0 + a[0, 1]), e: temperature * (1.5 + a[1, 0]),
+                        cv: 1.5 - a[2, 0], cp: cp, mu: temperature * (log(density) + a[0, 0] + a[0, 1]),
+                        z: density * exp(a[0, 0] + a[0, 1]) }
+}
+
+#| The full potential's properties moved to the potential cut (not shifted)
+#| at 2.5 sigma, by the same long-range and delta corrections the Monte
+#| Carlo programs apply in reverse. C_v and C_p are unchanged.
+def cut_from_full(s: StatePoint, temperature: Num, density: Num) -> StatePoint {
+    ulrc = potential_lrc(density, EOS_R_CUT)
+    return StatePoint { p: s.p - pressure_lrc(density, EOS_R_CUT) + pressure_delta(density, EOS_R_CUT),
+                        e: s.e - ulrc, cv: s.cv, cp: s.cp, mu: s.mu - 2.0 * ulrc,
+                        z: s.z * exp(-2.0 * ulrc / temperature) }
+}
+
+#| GUIDE.md's values at rho = 0.75, T = 1, printed to four decimals; the
+#| bits of every entry against upstream's eos_lj are in
+#| ports/liquids/test_liquids.py.
+test "the full fit at rho = 0.75, T = 1.0 against GUIDE.md's table" {
+    a = a_res_full(1.0, 0.75)
+    s = state_point(a, 1.0, 0.75)
+    assert_near(s.e, -3.7212, 5.0e-5)
+    assert_near(s.p, 0.3996, 5.0e-5)
+    assert_near(s.cv, 2.2630, 5.0e-5)
+    c = cut_from_full(s, 1.0, 0.75)
+    assert_near(c.e, -3.3197, 5.0e-5)
+    assert_near(c.p, 0.7008, 5.0e-5)
+}
+
+#| GUIDE.md prints this fit's E as -2.9286; upstream's eos_lj gives
+#| -2.928651, so the table cut the digits off rather than rounding them, and
+#| the check allows one unit of the last digit.
+test "the cut-and-shifted fit at rho = 0.75, T = 1.0 against GUIDE.md's table" {
+    s = state_point(a_res_cutshift(1.0, 0.75), 1.0, 0.75)
+    assert_near(s.e, -2.9286, 1.0e-4)
+    assert_near(s.p, 0.9897, 5.0e-5)
+    assert_near(s.cv, 2.2787, 5.0e-5)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,21 @@
+# std/contracts: integrate and find_root run their default method (Gauss, the
+# safeguarded secant); `using every method` runs all three and stops the run
+# when one disagrees with their median.
+from lang.viv.std.contracts import find_root, integrate
+
+area = integrate(fn(x) -> exp(-x * x), 0.0, 1.0)
+root = find_root(fn(x) -> cos(x) - x, 0.0, 1.0)
+print(fmt(area, ".12f"), fmt(root, ".12f"))
+test "three quadratures agree on the integral" {
+    all_area = integrate(fn(x) -> exp(-x * x), 0.0, 1.0) using every method
+    assert_near(area, 0.746824132812427, 1.0e-12)
+    assert_near(all_area, area, 1.0e-12)
+}
+test "three root finders agree on the root" {
+    all_root = find_root(fn(x) -> cos(x) - x, 0.0, 1.0) using every method
+    assert_near(cos(root), root, 1.0e-14)
+    assert_near(all_root, root, 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

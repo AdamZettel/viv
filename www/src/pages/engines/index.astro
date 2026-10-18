@@ -1,0 +1,59 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /engines: every engine in engines/, from the `#!` header each declares
+// (scripts/engine-build.mjs parses it). Nothing on this page is typed twice.
+import Base from '../../layouts/Base.astro';
+import data from '../../data/engines.json';
+import '../../styles/engines.css';
+
+const engines = data.engines;
+---
+
+<Base
+  title="Engines · Viv"
+  description="Viv programs you feed an input file: a crystal in POSCAR, CIF, pw.x or extended XYZ to an LDA band structure, and a molecule in XYZ to its Hartree-Fock energy, each run in the browser tab and, for inputs with a known answer, compared with the reference value."
+  eyebrow="Engines"
+  heading="Programs you feed an input file">
+  <p class="lede">
+    An engine is a Viv program that declares which file formats it reads, what it produces, and how
+    large an input a browser tab can handle. Drop a file on its page and, before anything runs, the
+    page shows what it read, an estimate of the run time, and anything in the input it cannot
+    handle. Then the program runs in your browser. If your input is one of the cases the engine was
+    validated on, it also prints how far its result is from the reference value.
+  </p>
+  <div class="eng-list">
+    {
+      engines.map((e) => (
+        <a class="eng-item" href={`/engines/${e.name}`}>
+          <h2>{e.title}</h2>
+          <code>#! engine {e.name}</code>
+          <p>
+            Reads {e.inputs.map((i) => `${i.what} (${i.how})`).join('; ')}. Produces {e.outputs.join(', ')}.
+          </p>
+          <p>
+            Checked on {e.validated.map((v) => v.what).join(' and ')}. {e.compiled ? 'Runs compiled to WebAssembly or interpreted.' : 'Runs in the Viv interpreter (viv.wasm).'}
+          </p>
+        </a>
+      ))
+    }
+  </div>
+  <h2>The header</h2>
+  <p>
+    An engine declares itself in <code>#!</code> lines at the top of its program, like the ones a post
+    carries. The site builds these pages from them and refuses an engine whose
+    <code>validated</code> line names a file that does not exist:
+  </p>
+  <pre class="eng-header"><code>{engines[0].source.split('\n').filter((l) => l.startsWith('#!') && !l.startsWith('#! use')).join('\n')}</code></pre>
+  <p>
+    The input block, the lines between <code># ---- input:</code> and <code># ---- end of input</code>,
+    is the part the page replaces with your file's contents. Everything after it is the program that runs.
+  </p>
+  <h2>Credits</h2>
+  <p>
+    The Hartree–Fock engine's basis sets come from the Basis Set Exchange, and its energies are compared with
+    PySCF 2.5.0 (Apache-2.0); no PySCF code is copied. The DFT engine's GTH pseudopotential parameters are CP2K's
+    GTH_POTENTIALS table as PySCF ships it (Goedecker, Teter and Hutter 1996; Hartwigsen, Goedecker and Hutter
+    1998); only the numbers are used.
+  </p>
+</Base>

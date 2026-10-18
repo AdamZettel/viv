@@ -1,0 +1,79 @@
+# The excitation energies of water in 6-31G, as a story: the RHF ground
+# state, its orbitals and integrals in the MO basis, then the Casida
+# matrices A and B and their TDA and TDHF spectra, for singlets and
+# triplets (lib/hf/casida).
+#
+#     viv story scf/story_casida.viv
+#
+# It is the computation of posts/2026-09-25-casida-tdhf-and-tda-for-water.viv
+# at the post's size (13 basis functions, 40 occupied-virtual pairs), from
+# the same default guess, so the tests below hold the post's PySCF numbers.
+# The holds in scf/story_casida.debug and lib/hf/casida.debug check the RHF
+# energy against PySCF's, that A and B are symmetric, that A - B is
+# positive definite, and that TDHF's lowest root is not above TDA's.
+import basis.pople631g
+from hf.mole import molecule
+from hf.scf import integrals
+from hf.scf_loop import scf, ScfResult, ScfSetup
+from hf.opts import scf_defaults
+from hf.casida import casida_mo, CASIDA_SINGLET, casida_solve, CASIDA_TRIPLET
+
+# PySCF 2.5.0's RHF energy of this water in 6-31G (posts/refs/casida-tdhf-and-tda-for-water.py)
+CW_PYSCF_E = -75.98394849810573
+
+#| The RHF ground state of setup `p`, from the default guess.
+def cw_ground(p: ScfSetup) -> ScfResult {
+    step scf {
+        r = scf(p)
+        e = r.energy
+    }
+    return r
+}
+
+cw_mol = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")
+cw_setup = integrals(cw_mol, scf_defaults())
+cw_rhf = cw_ground(cw_setup)
+cw_mo = casida_mo(cw_setup, cw_rhf)
+cw_singlet = casida_solve(cw_mo, CASIDA_SINGLET)
+cw_triplet = casida_solve(cw_mo, CASIDA_TRIPLET)
+# the lowest excitation of each kind, both ways, in hartree and the singlet's in eV
+CW_HARTREE_EV = 27.211386245988
+cw_e_rhf = cw_rhf.energy
+cw_singlet_tdhf = cw_singlet.tdhf[0]
+cw_singlet_tda = cw_singlet.tda[0]
+cw_triplet_tdhf = cw_triplet.tdhf[0]
+cw_triplet_tda = cw_triplet.tda[0]
+cw_singlet_ev = cw_singlet_tdhf * CW_HARTREE_EV
+show cw_e_rhf
+show cw_singlet_tdhf
+show cw_singlet_tda
+show cw_triplet_tdhf
+show cw_triplet_tda
+show cw_singlet_ev
+
+test "the RHF energy is PySCF's -75.98394849810573 to 1e-9" {
+    assert_near(cw_e_rhf, CW_PYSCF_E, 1.0e-9)
+}
+
+test "the lowest singlet is PySCF's 0.344073896628 Ha in TDHF and 0.346160646268 in TDA, to 1e-8" {
+    assert_near(cw_singlet_tdhf, 0.344073896628, 1.0e-8)
+    assert_near(cw_singlet_tda, 0.346160646268, 1.0e-8)
+}
+
+test "the lowest triplet is PySCF's 0.306491899467 Ha in TDHF and 0.310920466443 in TDA, to 1e-8" {
+    assert_near(cw_triplet_tdhf, 0.306491899467, 1.0e-8)
+    assert_near(cw_triplet_tda, 0.310920466443, 1.0e-8)
+}
+
+test "the lowest singlet is at 9.363 eV" {
+    assert_near(cw_singlet_ev, 9.363, 5.0e-4)
+}
+
+test "40 occupied-virtual pairs: 5 occupied and 8 virtual orbitals" {
+    assert_near(cw_mo.nocc, 5, 0.0)
+    assert_near(cw_mo.nvir, 8, 0.0)
+    assert_near(len(cw_singlet.tda), 40, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

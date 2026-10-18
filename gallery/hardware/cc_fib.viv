@@ -1,0 +1,41 @@
+# Recursive Fibonacci in C, compiled by lib/cc to RV32IM, assembled by
+# lib/rv32/asm.viv and run on lib/rv32/sim.viv, for
+# gallery/hardware/plot_fib_on_rv32.py.
+
+from cc.driver import compile
+from rv32.asm import assemble
+from rv32.sim import machine
+from rv32.system import entry, STEP_LIMIT
+from rv32.trace import mix, CLASSES
+
+#| The C program: main returns fib(n).
+def fib_source(n: Int) -> Str {
+    return f"int fib(int x) {{ if (x <= 1) return x; return fib(x - 1) + fib(x - 2); }} int main() {{ return fib({n}); }}"
+}
+
+#| Compile and run fib(n): the exit code, the instructions executed, then
+#| the count of each instruction class (rv32.trace's CLASSES order:
+#| alu, muldiv, load, store, branch, jump, system).
+def fib_on_rv32(n: Int) -> [Int] {
+    p = assemble(compile(fib_source(n)))
+    m, counts = mix(machine(p.image, entry(p, "_start")), STEP_LIMIT)
+    out: [Int] = [m.exit_code, m.steps]
+    for c in counts {
+        out = append(out, c)
+    }
+    return out
+}
+
+#| The number of assembly lines the compiler writes for the program.
+def asm_lines(n: Int) -> Int {
+    return len(split(compile(fib_source(n)), "\n"))
+}
+
+test "fib(10) on the simulator" {
+    r = fib_on_rv32(10)
+    assert_true(r[0] == 55)
+    assert_true(len(r) == 2 + len(CLASSES))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

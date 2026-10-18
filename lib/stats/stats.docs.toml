@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference prose of vp.stats.describe, quantile, ols and glm (python -m
+# vipyr.docs reads it into vipyr/spec.json and the /vipyr pages). The
+# parameters and results are listed in vipyr/_registry.py; the code is
+# lib/stats/*.viv, called through python/vipyr/_stats.py.
+
+[describe]
+summary = "The mean, variance, skewness and kurtosis of a sample, with sums that keep their digits."
+description = """
+`vp.stats.describe(x)` returns what `scipy.stats.describe` returns: the
+count, the smallest and largest value, the mean, the variance (divided by
+n - 1 unless `ddof` says otherwise), and the biased skewness g1 and excess
+kurtosis g2.
+
+`ddof` is NumPy's "delta degrees of freedom": the variance divides by
+$n - \\text{ddof}$, so 1 gives the sample variance and 0 the population
+variance.
+
+`method` picks how the variance is computed. `method="two_pass"` (the
+default) is the corrected two-pass algorithm of Chan, Golub and LeVeque:
+
+$$ s^2 = \\frac{\\sum_i d_i^2 - \\frac{1}{n}\\left(\\sum_i d_i\\right)^2}{n - \\text{ddof}}, \\qquad d_i = x_i - \\bar x, $$
+
+with every sum in NumPy's pairwise order. With exact arithmetic the
+deviations sum to zero and the second term vanishes; with a rounded mean
+they do not, and subtracting the term removes the error the rounding left.
+`method="welford"` updates the mean and the sum of squared deviations one
+value at a time (Welford 1962), for data seen once. Neither computes
+$\\sum x_i^2 - n\\bar x^2$, which loses every digit of a sample like
+$10^9 + (4, 7, 13, 16)$.
+"""
+
+[quantile]
+summary = "Sample quantiles of Hyndman and Fan's nine types, as R's quantile() computes them."
+description = """
+`vp.stats.quantile(x, q, type=7)` is R's `quantile(x, q, type = type)`:
+types 1-3 are the discontinuous definitions (the inverse of the empirical
+distribution function, its average at the jumps, the nearest even order
+statistic), types 4-9 interpolate between order statistics at
+a + q (n + 1 - a - b) with Hyndman and Fan's (a, b). Type 7 is R's and
+NumPy's default; type 8 is the one Hyndman and Fan recommend. R's
+4-epsilon fuzz in the index is kept, so a q that lands on an order
+statistic up to rounding takes that order statistic, as in R.
+"""
+
+[ols]
+summary = "Least squares with statsmodels' inference table, by pivoted QR, checked against NIST's certified results."
+description = """
+`vp.stats.ols(y, X)` fits y = X b + e by least squares and returns what
+statsmodels' `OLS(y, X).fit()` reports: coefficients, standard errors, t
+and p-values, 95% intervals, R^2 and adjusted R^2, the F test, the
+residual standard deviation, the log-likelihood, AIC and BIC.
+`result.summary()` prints the table. `weights=` gives weighted least
+squares (statsmodels' WLS).
+
+The solver is a named slot (`solver=`): `"qr"`, the default, is Householder
+QR with column pivoting on X with its columns scaled to unit norm, followed
+by one step of iterative refinement in which the residual y - X b is summed
+exactly (each product split by fma, the terms added by `fsum`); a column
+whose pivot falls below `tol` times the first is dropped, its coefficient
+NaN, as R's lm reports NA. `"cholesky"` solves the normal equations and
+`"svd"` takes the pseudo-inverse (statsmodels' default). They are there to
+compare: on NIST's Filip and Wampler problems the normal equations lose
+the digits the QR keeps (lib/stats/nist_lls.json).
+
+A constant column is the intercept; add one yourself (no formula
+interface). R^2 is centered when there is one, as in statsmodels and R.
+AIC and BIC follow statsmodels (R's AIC counts the residual variance as a
+parameter and is larger by 2).
+"""
+
+[glm]
+summary = "Generalized linear models by R's IRLS: binomial, Poisson, Gamma and Gaussian, with R's warnings."
+description = """
+`vp.stats.glm(y, X, family=..., link=...)` is R's `glm.fit` step for step
+(lib/stats/glm.viv): R's starting means, the working response and weights,
+each weighted least-squares step by the pivoted QR of `vp.stats.ols`, R's
+clamps in the link functions, and R's stopping rule
+|dev - dev_old| / (|dev| + 0.1) < epsilon. The result carries R's
+`summary.glm` numbers: dispersion 1 and z tests for binomial and Poisson,
+the Pearson estimate and t tests for Gamma and Gaussian, the deviance, the
+null deviance and R's AIC. When the fitted probabilities reach 0 or 1 (a
+separated binomial fit) or the iterations run out, the result's `warnings`
+hold R's text and a `GLMWarning` is raised as a Python warning.
+
+Two named slots. `fit="irls"` (the default) is Fisher scoring;
+`fit="newton"` takes Newton steps with the observed information. `cov=`
+chooses the information the covariance inverts: `"expected"` is R's
+(X^T W X)^-1; `"observed"` is the negative Hessian of the log-likelihood,
+whose per-observation second derivative is taken by `deriv` (forward-mode,
+exact) of the score. For the canonical links the two are the same; for
+probit and the Gamma log link they differ, and the observed information is
+what a likelihood-based standard error uses.
+"""
+

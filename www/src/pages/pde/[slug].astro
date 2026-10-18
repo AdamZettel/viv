@@ -1,0 +1,95 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One PDE solver. Everything here is scripts/pde-build.mjs's output: the prose
+// is the program's `#!` header, the numbers and the figure are its build-time
+// run, and the cell at the bottom is its source.
+import Base from '../../layouts/Base.astro';
+import VivCell from '../../components/VivCell.jsx';
+import RunFigure from '../../components/RunFigure.jsx';
+import data from '../../data/pde.json';
+import { atlasHref } from '../../lib/atlasLink.js';
+import '../../styles/pde.css';
+import '../../styles/run.css';
+import 'katex/dist/katex.min.css';
+
+export function getStaticPaths() {
+  return data.solvers.map((s, i) => ({
+    params: { slug: s.slug },
+    props: { s, prev: data.solvers[i - 1] || null, next: data.solvers[i + 1] || null },
+  }));
+}
+const { s, prev, next } = Astro.props;
+const group = data.groups.find((g) => g.kind === s.kind);
+const plain = (html: string) => html.replace(/<[^>]+>/g, '');
+---
+
+<Base
+  title={`${s.title} · PDE solvers · Viv`}
+  description={`${s.title}, solved in Viv: ${plain(s.methodHtml)}. Checked: ${plain(s.checksHtml)}.`}>
+  <p class="eyebrow"><a href="/pde">PDE solvers</a> · <a href={`/pde#${s.kind.replace(/\s+/g, '-')}`}>{group ? group.title.split(':')[0] : s.kind}</a></p>
+  <h1>{s.title}</h1>
+  <div class="pde-hero" set:html={s.equationHtml} />
+
+  <dl class="pde-facts">
+    <dt>Method</dt>
+    <dd set:html={s.methodHtml} />
+    <dt>Checked</dt>
+    <dd set:html={s.checksHtml} />
+  </dl>
+
+  {s.notes.map((html) => <p class="pde-note" set:html={html} />)}
+
+  <h2 id="run">What the run shows</h2>
+  <div class="run-result">
+    <div class="run-main">
+      <div class="run-fig">
+        <RunFigure client:load text={s.figure} />
+      </div>
+      <ul class="run-tests">
+        {s.tests.map((t) => <li><span aria-hidden="true">✓</span>{t}</li>)}
+      </ul>
+    </div>
+    {s.shown.length > 0 && (
+      <dl class="run-shown">
+        {s.shown.map((v) => (
+          <>
+            <dt>{v.name}</dt>
+            <dd>{v.value}</dd>
+          </>
+        ))}
+      </dl>
+    )}
+  </div>
+  <p class="run-prov">
+    Computed when this page was built, by the same interpreter that runs it in your browser: {s.tests.length} of {s.tests.length} tests,
+    {s.seconds < 0.1 ? 'under 0.1' : s.seconds} s. The numbers above are the program's <code>show</code> lines.
+  </p>
+
+  <h2 id="program">The program</h2>
+  <p>
+    {s.lines} lines, {s.functions.length === 1 ? 'one function' : `${s.functions.length} functions`}. It is editable: change it and press Run (or
+    ⌘/Ctrl + Enter). The tests at the bottom run too, so if your change breaks the solver, a test fails.
+  </p>
+  {s.functions.length > 0 && (
+    <dl class="pde-fns">
+      {s.functions.map((f) => (
+        <>
+          <dt><code>{f.name}</code></dt>
+          <dd>{f.what}</dd>
+        </>
+      ))}
+    </dl>
+  )}
+  <div class="cellhost"><VivCell client:load idx={0} src={s.source} standalone={true} /></div>
+  <p class="run-actions">
+    <a href={`/workbench?open=pde/${s.file}`}>Open in the workbench</a>
+    <a href={atlasHref(`pde/${s.file}`)}>The atlas</a>
+    <a href={`/programs/pde/${s.file}`} download>Download {s.file}</a>
+  </p>
+
+  <nav class="run-pager" aria-label="Other solvers">
+    {prev ? <a href={`/pde/${prev.slug}`} rel="prev"><span>Previous</span>{prev.title}</a> : <span />}
+    {next ? <a href={`/pde/${next.slug}`} rel="next"><span>Next</span>{next.title}</a> : <span />}
+  </nav>
+</Base>

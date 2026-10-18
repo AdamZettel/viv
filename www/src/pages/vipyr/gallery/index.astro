@@ -1,0 +1,75 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/gallery: the worked examples, grouped by topic. Each card is an entry
+// of src/data/gallery.json, which `python -m vipyr.docs` writes by running the
+// scripts listed in gallery/index.txt (python/vipyr/_gallery.py).
+import DocPage from '../../../layouts/DocPage.astro';
+import gallery from '../../../data/gallery.json';
+import GalleryCard from '../../../components/GalleryCard.astro';
+import { vipyrTree, TOPICS } from '../../../lib/site';
+
+const entries = (gallery as any).entries as any[];
+const groups = TOPICS.map((t) => {
+  const mine = entries.filter((e) => e.topic === t.id);
+  const sections = t.sections
+    .map((s) => ({ ...s, entries: mine.filter((e) => e.section === s.id) }))
+    .filter((s) => s.entries.length);
+  return { ...t, count: mine.length, sections };
+});
+---
+
+<DocPage
+  title="Gallery · vipyr"
+  icon="/brand/vipyr/vipyr-icon.svg"
+  description="Worked examples of vipyr, by topic: each page is a Python script run when the docs are built, with its printed output and its figures."
+  tree={vipyrTree(Astro.url.pathname)}
+  toc={groups.map((g) => [g.id, g.title] as [string, string])}>
+  <h1>Gallery</h1>
+  <p class="lede">
+    Worked examples, each a Python script that calls vipyr. Every page shows the code, what it printed and what it
+    drew, from a run made when these docs were built.
+  </p>
+  {
+    groups.map((g) => (
+      <section class="g-topic">
+        <h2 id={g.id}>{g.title}</h2>
+        <p class="g-pitch">{g.pitch}</p>
+        {g.count ? (
+          g.sections.map((s) => (
+            <>
+              <h3 class="g-sec" id={`${g.id}-${s.id}`}>{s.title}</h3>
+              <div class="g-grid">
+                {s.entries.map((e) => (
+                  <GalleryCard entry={e} summary />
+                ))}
+              </div>
+            </>
+          ))
+        ) : (
+          <p class="g-empty">No examples yet.</p>
+        )}
+      </section>
+    ))
+  }
+</DocPage>
+
+<style>
+  .g-pitch {
+    color: var(--text-muted);
+    margin-top: -0.3rem;
+  }
+  .g-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 16px;
+    margin: 1rem 0 0.6rem;
+  }
+  .g-sec {
+    margin: 1.4rem 0 0.2rem;
+    font-size: 1.05rem;
+  }
+  .g-empty {
+    color: var(--text-muted);
+  }
+</style>

@@ -1,0 +1,92 @@
+#! pde The advection equation
+#! equation u_t + c\,u_x = 0
+#! kind hyperbolic
+#! method upwind (first order) and Lax-Wendroff (second order), on a periodic grid
+#! checks that one trip around the ring returns the pulse to where it started; and both measured orders
+#! | The simplest wave equation: whatever shape you start with slides along at speed $c$,
+#! | unchanged. On a ring of length 1 it is back where it began after a time $1/c$, which makes
+#! | the exact answer the initial condition itself.
+#! |
+#! | It is also the equation that teaches humility about finite differences. **Upwind** takes
+#! | the difference from the side the wave is coming from; it is stable for $\nu = c\,\Delta t/\Delta x \le 1$
+#! | and first order, and what it does to the error is diffuse it: the pulse spreads and sinks.
+#! | **Lax-Wendroff** adds the second-order term of the Taylor series in time,
+#! | $\tfrac12\nu^2 (u_{i+1} - 2u_i + u_{i-1})$, and is second order: the pulse keeps its height
+#! | and grows a small oscillating wake instead.
+#! |
+#! | Periodic boundaries are where `roll` earns its place: a neighbor is a circular shift, and
+#! | each scheme is one line.
+
+pi = 3.141592653589793
+C = 1.0
+NU = 0.5        #: NU  the Courant number c dt / dx
+
+#| A smooth pulse on the ring.
+def pulse(x) {
+    return exp(-100.0 * (x - 0.5) * (x - 0.5))
+}
+
+#| Carry the pulse once around the ring with the upwind scheme; return what comes back.
+def upwind_lap(n) {
+    x = linspace(0.0, 1.0 - 1.0 / n, n)
+    u = pulse(x)
+    steps = n / (C * NU)
+    for s to steps {
+        u = u - NU * (u - roll(u, 1.0))
+    }
+    return u
+}
+
+#| The same trip with Lax-Wendroff.
+def lax_wendroff_lap(n) {
+    x = linspace(0.0, 1.0 - 1.0 / n, n)
+    u = pulse(x)
+    steps = n / (C * NU)
+    for s to steps {
+        right = roll(u, -1.0)
+        left = roll(u, 1.0)
+        u = u - 0.5 * NU * (right - left) + 0.5 * NU * NU * (right - 2.0 * u + left)
+    }
+    return u
+}
+
+#| L2 distance between what came back and what set out.
+def lap_error(u, n) {
+    x = linspace(0.0, 1.0 - 1.0 / n, n)
+    d = u - pulse(x)
+    return sqrt(sum(d * d) / n)
+}
+
+# upwind reaches its asymptotic order slowly, so it is measured on finer grids than it is drawn on
+up1 = lap_error(upwind_lap(1600.0), 1600.0)
+up2 = lap_error(upwind_lap(3200.0), 3200.0)
+up_coarse = lap_error(upwind_lap(400.0), 400.0)
+lw1 = lap_error(lax_wendroff_lap(200.0), 200.0)
+lw2 = lap_error(lax_wendroff_lap(400.0), 400.0)
+order_upwind = log(up1 / up2) / log(2.0)
+order_lw = log(lw1 / lw2) / log(2.0)
+show order_upwind
+show order_lw
+show up_coarse
+show lw2
+
+N = 200
+X = linspace(0.0, 1.0 - 1.0 / N, N)
+figure("One trip around the ring", "x", "u")
+plot(X, pulse(X), "exact (the starting pulse)")
+plot(X, upwind_lap(N), "upwind: it diffuses")
+plot(X, lax_wendroff_lap(N), "Lax-Wendroff: it keeps its height")
+style("exact (the starting pulse)", "dash")
+
+test "upwind is first order (measured between n = 1600 and 3200: it gets there slowly)" {
+    assert_near(order_upwind, 1.0, 0.05)
+}
+test "Lax-Wendroff is second order" {
+    assert_near(order_lw, 2.0, 0.15)
+}
+test "at the same resolution Lax-Wendroff is more than ten times closer" {
+    assert_lt(lw2 * 10.0, up_coarse)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

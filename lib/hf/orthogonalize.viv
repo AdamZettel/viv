@@ -1,0 +1,339 @@
+###
+post: Four ways to make the AO basis orthonormal
+agent: claude
+
+Atomic orbitals on neighboring atoms overlap, so the Roothaan equations
+`F C = S C e` carry the overlap matrix `S`. Any `X` with `X^T S X = I` turns
+them into an ordinary symmetric eigenproblem: with `C = X C'`,
+
+    (X^T F X) C' = C' e
+
+so the SCF diagonalizes `F' = X^T F X` and maps the vectors back. Many `X`
+satisfy `X^T S X = I` (if `X` does, so does `X Q` for any orthogonal `Q`), and
+the SCF energy and density do not depend on the choice. This module holds four:
+
+- `orth_canon` (member 0, production): canonical orthogonalization.
+  Diagonalize `S = U s U^T` and keep `X = U_k s_k^(-1/2)` for the eigenvalues
+  `s_k` above a threshold. A near-zero eigenvalue of `S` means some
+  combination of AOs is almost the zero function; its column would carry
+  `1/sqrt(s_k)`, amplifying rounding error, and it describes nothing the
+  other functions cannot. Dropping it shrinks the orbital space from `n` to
+  `m`. This is what PySCF's `remove_linear_dep_` does, with the same default
+  threshold, 1e-8. One Newton-Schulz step (`orth_polish`) then removes the
+  eigensolver's rounding from the small-eigenvalue columns, measured with
+  compensated sums, so `X^T S X = I` holds to 1e-12 even on the diffuse H4
+  chain.
+- `orth_symm`: Lowdin's symmetric `X = S^(-1/2) = U s^(-1/2) U^T`. It is the
+  orthonormal basis closest to the AOs, and it drops nothing.
+- `orth_chol`: `S = L L^T` (Cholesky), `X = L^(-T)`, which is upper
+  triangular. No eigenproblem at all.
+- `orth_gs`: Gram-Schmidt on the unit vectors in the `S` inner product,
+  with each vector orthogonalized twice ("twice is enough"). In exact
+  arithmetic this gives the same upper-triangular `X` as `orth_chol`, by a
+  different sequence of operations, so the two can be compared entry by entry.
+
+Each member has the signature `(S, B, opts) -> X[n, n]`; `B` is not read. The
+kept columns come first and a dropped column is all zeros, so `orth_rank(X)`
+counts `m`. When nothing is dropped, `X X^T = S^(-1)` for every member, which
+gives a comparison that does not depend on which `X` a member picked.
+
+The canonical threshold is `ScfOptions.lindep` (column `OPT_LINDEP`),
+1e-8 by default; 0 in the column also means 1e-8.
+
+`orth_of(S, opts)` runs member `opts[OPT_ORTH]` and returns its `X`;
+`orth_rank(X)` is the number of columns kept.
+
+Used with `import hf.orthogonalize`.
+###
+
+from hf.opts import (
+    opt_array, OPT_LINDEP, OPT_LINDEP_DEFAULT, opt_new, OPT_ORTH, scf_defaults, ScfOptions,
+)
+from hf.eigen import eig_ql, eig_random_sym
+
+# the members of orth_methods (ScfOptions.orthogonalizer)
+ORTH_CANON = 0
+ORTH_SYMM = 1
+ORTH_CHOL = 2
+ORTH_GS = 3
+
+#| The threshold `orth_canon` uses: `opts[OPT_LINDEP]`, or `OPT_LINDEP_DEFAULT` when unset.
+def orth_threshold(opts: Arr) {
+    if opts[OPT_LINDEP] > 0.0 {
+        return opts[OPT_LINDEP]
+    }
+    return OPT_LINDEP_DEFAULT
+}
+
+#| Member `ORTH_CANON`, the production one: canonical orthogonalization, columns with eigenvalue at or
+#| below the threshold dropped (kept columns first, in ascending order of
+#| their eigenvalue).
+def orth_canon(S: Arr, B: Arr, opts: Arr) -> Arr {
+    n = len(S)
+    #: drop near-dependent directions (eigenvalue below the threshold)
+    R = eig_ql(S, S, opts)
+    thr = orth_threshold(opts)
+    X = zeros(n, n)
+    c = 0
+    for k to n {
+        if R[0, k] > thr {
+            X[:, c] = R[1:n + 1, k] * (1.0 / sqrt(R[0, k]))
+            c = c + 1
+        }
+    }
+    #: one correction makes X^T S X = I to rounding
+    orth_polish(S, X, c)
+    return X
+}
+
+#| One Newton-Schulz step on the first m columns of X: X <- X (I - E/2) with
+#| E = X^T S X - I, so the new defect is of order E^2. The columns span the
+#| same space, so the SCF energy and density do not change. It matters when
+#| a kept eigenvalue of S is small, as on the diffuse H4 chain: the
+#| eigensolver's vectors are accurate only to about eps, and dividing by the
+#| square root of a small eigenvalue magnifies that error in X^T S X. E has
+#| to be formed with compensated sums (orth_gram_err) for the step to remove
+#| it [test "orth_canon drops exactly one vector on the diffuse H4 chain"].
+def orth_polish(S: Arr, X: Arr, m) {
+    E = orth_gram_err(S, X, m)
+    X[:, 0:m] = X[:, 0:m] - 0.5 * (X[:, 0:m] @ E)
+}
+
+# Veltkamp's splitting constant for doubles, 2^27 + 1
+ORTH_SPLIT = 134217729.0
+
+#| The rounding error of p = fl(a b), so that a b = p + orth_prod_err(a, b, p)
+#| exactly (Dekker). The halves have at most half a double's significant bits, so every
+#| product of halves is exact and fusing one into an FMA changes nothing,
+#| which keeps the two engines in agreement.
+def orth_prod_err(a, b, p) {
+    ca = ORTH_SPLIT * a
+    ah = ca - (ca - a)
+    al = a - ah
+    cb = ORTH_SPLIT * b
+    bh = cb - (cb - b)
+    bl = b - bh
+    return al * bl - (((p - ah * bh) - al * bh) - ah * bl)
+}
+
+#| E = X^T S X - I over the first m columns, as [m, m], each entry as accurate
+#| as a sum done in twice the working precision and then rounded. Every
+#| product carries its Dekker error and every addition its Knuth two-sum
+#| error. S x_b is kept as a hi + lo pair so the second product loses
+#| nothing either. Cost n^2 m + n m^2.
+def orth_gram_err(S: Arr, X: Arr, m) -> Arr {
+    n = len(S)
+    E = zeros(m, m)
+    th = zeros(n)
+    tl = zeros(n)
+    #: compensated sums: S X[:, b] as a high part th plus a low part tl
+    for b to m {
+        for i to n {
+            s = 0.0
+            c = 0.0
+            for j to n {
+                p = S[i, j] * X[j, b]
+                e = orth_prod_err(S[i, j], X[j, b], p)
+                t = s + p
+                z = t - s
+                c = c + ((s - (t - z)) + (p - z)) + e
+                s = t
+            }
+            h = s + c
+            th[i] = h
+            tl[i] = c - (h - s)
+        }
+        for a to m {
+            s = 0.0
+            c = 0.0
+            for i to n {
+                p = X[i, a] * th[i]
+                e = orth_prod_err(X[i, a], th[i], p)
+                t = s + p
+                z = t - s
+                c = c + ((s - (t - z)) + (p - z)) + e + X[i, a] * tl[i]
+                s = t
+            }
+            if a == b {
+                # s is within 1e-9 of 1 here, so s - 1 is exact (Sterbenz)
+                s = s - 1.0
+            }
+            E[a, b] = s + c
+        }
+    }
+    return E
+}
+
+#| Member `ORTH_SYMM`: Lowdin's S^(-1/2).
+def orth_symm(S: Arr, B: Arr, opts: Arr) -> Arr {
+    n = len(S)
+    R = eig_ql(S, S, opts)
+    #: S^(-1/2) = U diag(1/sqrt(s)) U^T
+    X = zeros(n, n)
+    for i to n {
+        for j to n {
+            s = 0.0
+            for k to n {
+                s = s + R[1 + i, k] * R[1 + j, k] / sqrt(R[0, k])
+            }
+            X[i, j] = s
+        }
+    }
+    return X
+}
+
+#| The lower Cholesky factor L of S = L L^T.
+def orth_cholesky(S: Arr) {
+    n = len(S)
+    L = zeros(n, n)
+    for j to n {
+        s = S[j, j]
+        for k to j {
+            s = s - L[j, k] * L[j, k]
+        }
+        L[j, j] = sqrt(s)
+        for i to n {
+            if i > j {
+                t = S[i, j]
+                for k to j {
+                    t = t - L[i, k] * L[j, k]
+                }
+                L[i, j] = t / L[j, j]
+            }
+        }
+    }
+    return L
+}
+
+#| Member `ORTH_CHOL`: X = L^(-T), by back substitution on L^T X = I.
+def orth_chol(S: Arr, B: Arr, opts: Arr) -> Arr {
+    n = len(S)
+    L = orth_cholesky(S)
+    X = zeros(n, n)
+    # column c of X solves L^T x = e_c; L^T is upper triangular
+    for c to n {
+        i = n - 1
+        while i >= 0 {
+            t = 0.0
+            if i == c {
+                t = 1.0
+            }
+            k = i + 1
+            while k < n {
+                t = t - L[k, i] * X[k, c]
+                k = k + 1
+            }
+            X[i, c] = t / L[i, i]
+            i = i - 1
+        }
+    }
+    return X
+}
+
+#| u^T S v for columns a of U and b of V.
+def orth_sdot(S: Arr, U: Arr, a, V: Arr, b) {
+    return sum(U[:, a] * (S @ V[:, b]))
+}
+
+#| Member `ORTH_GS`: Gram-Schmidt in the S inner product, two passes per vector.
+def orth_gs(S: Arr, B: Arr, opts: Arr) -> Arr {
+    n = len(S)
+    X = zeros(n, n)
+    #: orthogonalize twice: one pass leaves rounding
+    for c to n {
+        X[c, c] = 1.0
+        for pass to 2 {
+            for p to c {
+                X[:, c] = X[:, c] - orth_sdot(S, X, p, X, c) * X[:, p]
+            }
+        }
+        X[:, c] = X[:, c] / sqrt(orth_sdot(S, X, c, X, c))
+    }
+    return X
+}
+
+#| The orthogonalizer registry, production member first.
+def orth_methods() {
+    return [orth_canon, orth_symm, orth_chol, orth_gs]
+}
+
+#| Columns of X that are not all zero: the size m of the orthonormal space.
+def orth_rank(X: Arr) {
+    m = 0
+    for c to len(X) {
+        if max(abs(X[:, c])) > 0.0 {
+            m = m + 1
+        }
+    }
+    return m
+}
+
+#| The orthogonalizer `opts[OPT_ORTH]` names on S: `X[n, n]` with
+#| `X^T S X = I` over its first `orth_rank(X)` columns, the dropped columns
+#| zero. Each member is called by name, `orth_canon` (the production one)
+#| when the option is left at its default.
+def orth_of(S: Arr, opts: Arr) -> Arr {
+    k = round(opts[OPT_ORTH])
+    if k == ORTH_SYMM {
+        return orth_symm(S, S, opts)
+    }
+    if k == ORTH_CHOL {
+        return orth_chol(S, S, opts)
+    }
+    if k == ORTH_GS {
+        return orth_gs(S, S, opts)
+    }
+    return orth_canon(S, S, opts)
+}
+
+#| max |X^T S X - I| over the first m columns, formed with compensated sums
+#| so the measurement is not limited by its own rounding when X is large.
+def orth_defect(S: Arr, X: Arr, m) {
+    return max(abs(orth_gram_err(S, X, m)))
+}
+
+#| max |X X^T S - I|: X X^T is S^(-1) exactly when X has full rank.
+def orth_inverse_defect(S: Arr, X: Arr) {
+    E = X @ transpose(X) @ S
+    for i to len(E) {
+        E[i, i] = E[i, i] - 1.0
+    }
+    return max(abs(E))
+}
+
+#| The worst X^T S X defect over the registry, and how many members did not
+#| keep exactly `mwant` columns, for one overlap matrix.
+def orth_check_all(S: Arr, mwant) {
+    ms = orth_methods()
+    o = opt_new()
+    worst = 0.0
+    nbad = 0
+    for k to len(ms) {
+        X = apply(ms[k], S, S, o)
+        m = orth_rank(X)
+        if m != mwant {
+            nbad = nbad + 1
+        }
+        worst = max(worst, orth_defect(S, X, m))
+    }
+    return worst, nbad
+}
+
+test "orth_of runs the member the registry holds at each option value" {
+    # a symmetric positive definite S: B B^T plus the identity
+    orth_B = eig_random_sym(6, 7)
+    orth_S = orth_B @ transpose(orth_B)
+    for orth_i to len(orth_S) {
+        orth_S[orth_i, orth_i] = orth_S[orth_i, orth_i] + 1.0
+    }
+    orth_ms = orth_methods()
+    for orth_k to len(orth_ms) {
+        orth_o = opt_array(ScfOptions { orthogonalizer: orth_k, ..scf_defaults() }, 0, 0, 0.0)
+        orth_a = orth_of(orth_S, orth_o)
+        orth_b = apply(orth_ms[orth_k], orth_S, orth_S, orth_o)
+        assert_near(max(abs(orth_a - orth_b)), 0.0, 0.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

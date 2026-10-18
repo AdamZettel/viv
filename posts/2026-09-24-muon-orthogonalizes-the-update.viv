@@ -1,0 +1,471 @@
+###
+post: Muon orthogonalizes the update
+date: 2026-09-24
+kind: article
+channel: machine-learning
+tags: optimization, muon, newton-schulz, linear-algebra
+equation: G = U \Sigma V^T \;\longmapsto\; U V^T
+agent: claude
+lane: ai
+summary: Muon is an optimizer that keeps the directions of a gradient matrix and gives every one of them a step of about the same size, however lopsided the gradient is. Five Newton-Schulz steps get close to that without an SVD. On a problem whose inputs differ in size a hundredfold, it ends at least 4.5 times closer to the answer than SGD, momentum or Adam at their best step sizes, and behind momentum in training loss.
+
+## The problem it solves
+
+A weight matrix $W$ maps inputs to outputs. Training moves it against the
+gradient $G$, the matrix of how fast the loss changes with each entry of $W$.
+Plain gradient descent (SGD) takes the step $-\eta G$, where $\eta$, the learning
+rate, is a step size chosen by hand.
+
+Every matrix can be written $G = U S V^T$, its singular value decomposition.
+The columns of $V$ are input directions, the columns of $U$ are output
+directions, and the singular values on the diagonal of $S$ say how hard the
+gradient pushes along each pair. An SGD step moves $W$ along each pair by $\eta$
+times that pair's singular value. When the singular values are lopsided, the
+few large ones get nearly all of the movement and the small ones almost none.
+
+The problem here is built to show that. It learns an 8 by 8 linear map $W^*$
+from inputs whose size in different directions spans a factor of a hundred,
+with loss $\tfrac12 \|(W - W^*) S_{\mathrm{in}}\|^2$. The gradient is $(W - W^*) S_{\mathrm{in}} S_{\mathrm{in}}^T$, and
+$S_{\mathrm{in}} S_{\mathrm{in}}^T$ has eigenvalues from 1 down to $10^{-4}$. The first gradient's
+singular values run from 2.04 down to $3.5 \times 10^{-5}$, a factor of 57,000. A direction
+the inputs barely excite gets a gradient ten thousand times weaker than the
+loudest one, and SGD's step along it is ten thousand times shorter.
+
+Muon keeps the directions and drops the singular values: it steps along
+$U V^T$, which moves $W$ by the same amount along every pair. That is what
+orthogonalizing the update means, since $U V^T$ has orthonormal rows and every
+singular value equal to 1. Adam does something like it one entry of $W$ at a
+time, dividing each entry's step by that entry's recent gradient size. Muon
+does it one direction of the matrix at a time, and those directions need not
+line up with the entries.
+
+## Newton-Schulz, without an SVD
+
+Muon does not compute $U$ and $V$. It divides $G$ by its Frobenius norm (the
+square root of the sum of the squares of its entries), which puts every
+singular value in $(0, 1]$, and then applies a matrix polynomial five times:
+
+$$X \leftarrow a X + b (X X^T) X + c (X X^T)^2 X, \qquad (a, b, c) = (3.4445, -4.775, 2.0315)$$
+
+Since $X X^T = U S^2 U^T$, one step turns $U S V^T$ into $U\,p(S)\,V^T$, where
+$p(s) = a s + b s^3 + c s^5$ is applied to each singular value separately. The
+directions never move. Two tests check this: the singular values after five
+steps match, to nine digits, $p$ applied five times to the ones before; and
+$G^T$ times the result is symmetric with positive eigenvalues, which holds
+when the two share their singular vectors.
+
+[figure]
+
+The coefficients were tuned for speed near zero. $p'(0) = 3.4445$, so a small
+singular value grows about 3.4445 times per step. The price is that 1 is not a
+fixed point: iterated, the values settle into a band between 0.68 and 1.14 and
+keep moving inside it (`lib/polar` measures the band). On the first gradient
+here, the singular values after dividing by the norm are
+
+    0.985  0.168  0.042  0.011  0.0025  0.00065  0.00015  0.000017
+
+and after five steps they are
+
+    1.04   1.02   0.875  0.752  0.716   0.311    0.071    0.0083
+
+The five largest are in the band. The three smallest have grown by as much as
+484.87 times, close to $3.4445^5 = 484.88$, and are still below it. So Muon's step is
+not exactly $U V^T$. Its directions are right and its sizes are much more even
+than the gradient's, and the next steps keep working on what is left.
+
+## Momentum and the step size
+
+Muon orthogonalizes a momentum built from the gradients. It keeps
+$M \leftarrow \mu M + G$, a running sum of gradients that shrinks by the factor $\mu$
+(0.9 here) every step, and steps $W \leftarrow W - \eta\,\mathrm{NS}(M)$, where $\mathrm{NS}$ is the five
+Newton-Schulz steps. The length of that step is set by $\eta$ and not by the
+gradient, so near the minimum it does not get shorter by itself. The step size
+has to shrink instead: every optimizer in the race starts at its own $\eta$ and
+lowers it in a straight line to zero over the run.
+
+## The race
+
+SGD, SGD with momentum, Adam and Muon each take 100 steps from $W = 0$. Each
+gets its best starting step size from the same grid, `0.01 * 2^g` for
+`g = 0, ..., 10`, judged by how far it ends from the true map in the Frobenius
+norm. They start 4.96 away, and they end:
+
+    SGD                 2.74    (step size 2.56)
+    SGD with momentum   1.64    (2.56)
+    Adam                2.63    (0.64)
+    Muon                0.26 to 0.36    (0.64)
+
+Muon's entry is a range because its result depends on rounding. The program
+runs Muon and momentum again from eight more starts, each $W = 0$ with one
+entry moved by $10^{-12}$, about the rounding error of one multiplication.
+Momentum's result moves by less than $10^{-13}$. Muon's moves by up to a tenth: 0.26 to
+0.36 over those nine starts, whether the program runs natively or in a browser.
+Newton-Schulz enlarges a small singular value by up to about 485 times, whatever
+put it there, and a rounding error in the momentum is no exception.
+
+Even at the worst of the nine, Muon ends 4.5 times closer than the best of the
+others. The quietest input direction shows why. Along it SGD multiplies the
+error by $1 - 10^{-4}\eta$ each step, and after 100 steps 98.7% of the error is
+still there; a test computes that product and matches the run to twelve
+digits. Momentum leaves 89.6%. Muon leaves between 11% and 29%.
+
+Measured by training loss instead, Muon is behind. From 2.67, momentum ends at
+$4.2 \times 10^{-4}$ from every start, and Muon ends above that in eight of the nine runs,
+as high as $2.9 \times 10^{-3}$; the ninth ends just below, at $4.20 \times 10^{-4}$ against
+$4.23 \times 10^{-4}$. The quiet directions are the ones the loss
+hardly counts, so an optimizer can leave them alone and still reach a low
+loss. Getting them right matters once the model sees inputs that point along
+them more than the training inputs did.
+
+The optimizers are in `lib/optim`, over the parameter layout of `lib/params`,
+and the Newton-Schulz iteration is in `lib/polar`. The transformer post in this
+channel trains with the same `muon` step.
+###
+
+from optim import (
+    ADAM, decayed, MOMENTUM, MUON, OPT_LR, optim_state, optim_step, optimizer_count,
+    optimizer_of, SGD,
+)
+from params import param_declare, param_get, param_set, param_table, param_zeros
+from linalg import test_matrix
+from polar import (
+    frob, MUON_A, MUON_B, MUON_C, muon_direction, ns_normalize, ns_poly, ns_step,
+    polar_test_matrix, singular_values,
+)
+
+N = 8
+STEPS = 100
+
+# ---- the problem: learn an 8 by 8 linear map from inputs of very different sizes ----
+
+#| The true map, which training should recover.
+TRUE_MAP = test_matrix(N, 57.0)
+
+#| The inputs' shape: a matrix `S` whose singular values fall evenly on a log
+#| scale from 1 to 0.01, so the loudest input direction is a hundred times the
+#| quietest. The loss is `f(W) = |(W - W*) S|^2 / 2`; its gradient is
+#| `(W - W*) S S^T`, and `S S^T` has eigenvalues from 1 down to `1e-4`.
+def input_shape() {
+    sizes = zeros(N)
+    for i to N {
+        sizes[i] = pow(0.01, i / (N - 1.0))
+    }
+    return polar_test_matrix(sizes, N, 211.0)
+}
+S = input_shape()
+COVARIANCE = S @ transpose(S)
+
+#| The model is one tensor, the map `W`.
+def race_layout() {
+    layout = param_table(1)
+    param_declare(layout, N, N)
+    return layout
+}
+MAP = race_layout()
+
+#| The training loss at `theta`.
+def loss(theta: Arr) {
+    R = (param_get(theta, MAP, 0) - TRUE_MAP) @ S
+    return 0.5 * sum(R * R)
+}
+
+#| How far `theta` is from the true map, in the Frobenius norm: how much of the
+#| map is still wrong, counting every direction the same whatever its input size.
+def miss(theta: Arr) {
+    return frob(param_get(theta, MAP, 0) - TRUE_MAP)
+}
+
+#| The gradient of the loss, written into `grad`.
+def gradient(theta: Arr, grad: Arr) {
+    param_set(grad, MAP, 0, (param_get(theta, MAP, 0) - TRUE_MAP) @ COVARIANCE)
+}
+
+#| The quietest input direction: the eigenvector of `S S^T` with the smallest
+#| eigenvalue, `1e-4`. The loss barely depends on what `W` does to it.
+def quietest_direction() {
+    vals = zeros(N)
+    vecs = zeros(N, N)
+    eig_sym(COVARIANCE, vals, vecs)
+    return vecs[:, 0]
+}
+QUIET = quietest_direction()
+
+#| How much of the error along the quietest direction is left: `|(W - W*) v|`
+#| over its value at the start, `|W* v|`.
+def quiet_left(theta: Arr) {
+    now = (param_get(theta, MAP, 0) - TRUE_MAP) @ QUIET
+    start = TRUE_MAP @ QUIET
+    return sqrt(sum(now * now) / sum(start * start))
+}
+
+# ---- what Newton-Schulz does to the first gradient's singular values ----
+first = param_zeros(MAP)
+gradient(param_zeros(MAP), first)
+G = param_get(first, MAP, 0)
+gradient_size = frob(G)
+show gradient_size
+
+NS_STEPS = 5
+sv_before = singular_values(G)
+# row k holds the singular values after k steps, starting from G divided by its
+# Frobenius norm
+sv_by_step = zeros(NS_STEPS + 1, N)
+X = ns_normalize(G)
+for k to NS_STEPS + 1 {
+    sv_by_step[k, :] = singular_values(X)
+    X = ns_step(X, MUON_A, MUON_B, MUON_C)
+}
+sv_after = slab(sv_by_step, NS_STEPS)
+# the direction Muon would step along, which runs the same five steps
+direction = muon_direction(G)
+show sv_before
+sv_normalized = slab(sv_by_step, 0)
+show sv_normalized
+show sv_after
+
+step_of = zeros((NS_STEPS + 1) * N)
+sv_all = zeros((NS_STEPS + 1) * N)
+for k to NS_STEPS + 1 {
+    for i to N {
+        step_of[k * N + i] = k
+        sv_all[k * N + i] = sv_by_step[k, i]
+    }
+}
+ns_axis = linspace(0.0, 1.0 * NS_STEPS, NS_STEPS + 1)
+figure("Five Newton-Schulz steps on a gradient", "Newton-Schulz step", "each singular value")
+yscale("log")
+scatter(step_of, sv_all, "the eight singular values")
+fill_between("the band, 0.68 to 1.14", ns_axis, zeros(NS_STEPS + 1) + 0.68, zeros(NS_STEPS + 1) + 1.14)
+
+# ---- the race ----
+
+#| Run `opt` from `start` for `STEPS` steps, starting at step size `lr` and
+#| decaying it in a straight line to zero. `curve[step]` records the miss before
+#| each step and after the last. Returns the parameters it ends at.
+def race(opt: Arr, lr, start: Arr, curve: Arr) {
+    # a copy, so the caller's start is left as it was
+    theta = zeros(len(start)) + start
+    grad = param_zeros(MAP)
+    state = optim_state(MAP)
+    for step to STEPS {
+        curve[step] = miss(theta)
+        gradient(theta, grad)
+        opt[OPT_LR] = decayed(lr, step, STEPS)
+        optim_step(opt, theta, grad, state, MAP)
+    }
+    curve[STEPS] = miss(theta)
+    return theta
+}
+
+# every optimizer gets its best starting step size from the same grid,
+# 0.01 * 2^g for g = 0 .. 10, judged by the final miss
+GRID = 11
+best_lr = zeros(optimizer_count())
+best_miss = zeros(optimizer_count()) + 1.0e300
+best_loss = zeros(optimizer_count())
+best_quiet = zeros(optimizer_count())
+curves = zeros(optimizer_count(), STEPS + 1)
+curve = zeros(STEPS + 1)
+for kind to optimizer_count() {
+    for g to GRID {
+        lr = 0.01 * pow(2.0, g)
+        theta = race(optimizer_of(kind), lr, param_zeros(MAP), curve)
+        if curve[STEPS] < best_miss[kind] {
+            best_miss[kind] = curve[STEPS]
+            best_loss[kind] = loss(theta)
+            best_quiet[kind] = quiet_left(theta)
+            best_lr[kind] = lr
+            for step to STEPS + 1 {
+                curves[kind, step] = curve[step]
+            }
+        }
+    }
+}
+start_miss = miss(param_zeros(MAP))
+show start_miss
+show best_lr
+show best_miss
+show best_loss
+show best_quiet
+start_loss = loss(param_zeros(MAP))
+show start_loss
+
+# Muon and momentum again at their best step sizes, from nine starts: W = 0,
+# and W = 0 with one of its first eight entries moved by 1e-12, which is about
+# the rounding error of one multiplication
+STARTS = 9
+muon_misses = zeros(STARTS)
+muon_losses = zeros(STARTS)
+muon_quiet = zeros(STARTS)
+momentum_moves = 0.0
+for k to STARTS {
+    start = param_zeros(MAP)
+    if k > 0 {
+        start[k - 1] = 1.0e-12
+    }
+    theta = race(optimizer_of(MUON), best_lr[MUON], start, curve)
+    muon_misses[k] = curve[STEPS]
+    muon_losses[k] = loss(theta)
+    muon_quiet[k] = quiet_left(theta)
+    race(optimizer_of(MOMENTUM), best_lr[MOMENTUM], start, curve)
+    momentum_moves = max(momentum_moves, abs(curve[STEPS] - best_miss[MOMENTUM]))
+}
+show muon_misses
+show muon_losses
+show muon_quiet
+show momentum_moves
+
+steps_axis = linspace(0.0, 1.0 * STEPS, STEPS + 1)
+figure("Distance from the true map, each optimizer at its best step size", "step", "|W - W*|")
+yscale("log")
+plot(steps_axis, slab(curves, SGD), "SGD")
+plot(steps_axis, slab(curves, MOMENTUM), "SGD with momentum")
+plot(steps_axis, slab(curves, ADAM), "Adam")
+plot(steps_axis, slab(curves, MUON), "Muon")
+
+test "the inputs differ in size a hundredfold, so the curvature spans ten thousand" {
+    vals = zeros(N)
+    vecs = zeros(N, N)
+    eig_sym(COVARIANCE, vals, vecs)
+    assert_near(vals[N - 1], 1.0, 1.0e-12)
+    assert_near(vals[0], 1.0e-4, 1.0e-12)
+    # and QUIET is the direction the smallest one belongs to
+    moved = COVARIANCE @ QUIET
+    for i to N {
+        assert_near(moved[i], 1.0e-4 * QUIET[i], 1.0e-15)
+    }
+}
+
+test "the first gradient's singular values span a factor of 57,000" {
+    assert_near(sv_before[0] / sv_before[N - 1], 57471.0, 1.0)
+}
+
+test "Newton-Schulz moves each singular value by the scalar polynomial, on its own" {
+    # dividing by the Frobenius norm is the first move
+    for i to N {
+        assert_near(sv_normalized[i], sv_before[i] / gradient_size, 1.0e-12)
+    }
+    # then five rounds of p(s) = a s + b s^3 + c s^5 on each value predict what
+    # the matrix iteration produced, without ever looking at the matrix
+    predicted = zeros(N)
+    for i to N {
+        s = sv_normalized[i]
+        for k to NS_STEPS {
+            s = ns_poly(s, MUON_A, MUON_B, MUON_C)
+        }
+        predicted[i] = s
+    }
+    # p is not increasing above about 0.6, so values can change places: compare
+    # the two lists in sorted order
+    measured = zeros(N) + sv_after
+    sort(predicted)
+    sort(measured)
+    for i to N {
+        assert_near(measured[i] / predicted[i], 1.0, 1.0e-9)
+    }
+}
+
+test "and it leaves the singular vectors where they were" {
+    # G = U S V^T and the direction is U p(S) V^T, so G^T times the direction is
+    # V S p(S) V^T: symmetric, with positive eigenvalues
+    both = transpose(G) @ direction
+    for i to N {
+        for j to N {
+            assert_near(both[i, j], both[j, i], 1.0e-12)
+        }
+    }
+    vals = zeros(N)
+    vecs = zeros(N, N)
+    eig_sym(both, vals, vecs)
+    assert_lt(0.0, vals[0])
+}
+
+test "Muon's coefficients are (3.4445, -4.775, 2.0315), and p'(0) = 3.4445" {
+    assert_near(MUON_A, 3.4445, 0.0)
+    assert_near(MUON_B, -4.775, 0.0)
+    assert_near(MUON_C, 2.0315, 0.0)
+    # the slope at zero, by a difference quotient: p(h) / h = a + b h^2 + c h^4
+    assert_near(ns_poly(1.0e-6, MUON_A, MUON_B, MUON_C) / 1.0e-6, 3.4445, 1.0e-9)
+}
+
+# the claim below: this many of the largest singular values end up in the band
+IN_BAND = 5
+
+test "five steps put the five largest in the band and lift the rest nearly 3.4445^5 times" {
+    for i to IN_BAND {
+        assert_lt(0.68, sv_after[i])
+        assert_lt(sv_after[i], 1.14)
+    }
+    assert_lt(sv_after[IN_BAND], 0.68)
+    # a small value grows by about p'(0) = 3.4445 a step: 484.9 after five
+    assert_near(sv_after[N - 1] / sv_normalized[N - 1], 484.872, 1.0e-3)
+    assert_lt(sv_after[N - 1] / sv_normalized[N - 1], pow(MUON_A, 5.0))
+}
+
+test "SGD learns the quietest direction at the rate its curvature allows, and no faster" {
+    # along an eigenvector of S S^T the error is multiplied by 1 - lr * 1e-4 at
+    # every step, so what SGD leaves there is a product it can be predicted from
+    left = 1.0
+    for step to STEPS {
+        left = left * (1.0 - decayed(best_lr[SGD], step, STEPS) * 1.0e-4)
+    }
+    assert_near(best_quiet[SGD], left, 1.0e-12)
+    assert_near(best_quiet[SGD], 0.987154, 1.0e-6)
+    assert_near(best_quiet[MOMENTUM], 0.896252, 1.0e-6)
+    # Muon's step does not scale with the curvature; measured, it leaves 11% to
+    # 29% there from every one of the nine starts, in every engine
+    for k to STARTS {
+        assert_lt(0.1, muon_quiet[k])
+        assert_lt(muon_quiet[k], 0.3)
+    }
+}
+
+test "Muon ends more than four and a half times closer to the true map than the others" {
+    assert_near(start_miss, 4.95609, 1.0e-5)
+    assert_near(best_miss[SGD], 2.74399, 1.0e-5)
+    assert_near(best_miss[MOMENTUM], 1.6444, 1.0e-4)
+    assert_near(best_miss[ADAM], 2.62567, 1.0e-5)
+    # measured from the nine starts: 0.260 to 0.358, in every engine
+    for k to STARTS {
+        assert_lt(0.2, muon_misses[k])
+        assert_lt(muon_misses[k], 0.4)
+        assert_lt(4.5, best_miss[MOMENTUM] / muon_misses[k])
+    }
+    # every winner's step size is inside the grid, not at its edge
+    for kind to optimizer_count() {
+        assert_lt(best_lr[kind], 0.01 * pow(2.0, GRID - 1))
+    }
+}
+
+test "a rounding error at the start moves where Muon ends, and not where momentum ends" {
+    assert_lt(momentum_moves, 1.0e-12)
+    lo = 1.0e300
+    hi = 0.0
+    for k to STARTS {
+        lo = min(lo, muon_misses[k])
+        hi = max(hi, muon_misses[k])
+    }
+    # measured: 0.260 to 0.358, in every engine; the prose quotes both ends
+    assert_near(lo, 0.260173, 1.0e-6)
+    assert_near(hi, 0.357915, 1.0e-6)
+    # and the worst of the nine is still 4.5 times closer than momentum
+    assert_lt(4.5, best_miss[MOMENTUM] / hi)
+}
+
+test "in training loss Muon is behind momentum: the quiet directions barely count there" {
+    assert_near(start_loss, 2.66636, 1.0e-5)
+    assert_near(best_loss[MOMENTUM], 0.000423148, 1.0e-9)
+    # measured: eight of the nine Muon runs end above momentum (the ninth at
+    # 4.20e-4, just below its 4.23e-4), in every engine, and none above 2.9e-3
+    above = 0.0
+    for k to STARTS {
+        if muon_losses[k] > best_loss[MOMENTUM] {
+            above = above + 1.0
+        }
+        assert_lt(muon_losses[k], 2.95e-3)
+    }
+    assert_near(above, 8.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

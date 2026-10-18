@@ -1,0 +1,194 @@
+# @@ imports
+# lib/gpt/gpt and lib/gpt/story_gpt in one file. The layers (lib/nn), the
+# optimizers (lib/optim) and the random draws (lib/random) are imported, as
+# lib/gpt imports them and the PyTorch program imports torch.
+from nn import attention, cross_entropy, embedding, relu2, rmsnorm, softmax_rows
+from optim import adam_update, AdamSettings, muon_update, MuonSettings
+from random import choice, randn_matrix
+
+# @@ config
+record GptConfig {
+    vocab: Num,
+    context: Num = 8,
+    width: Num = 16,
+    heads: Num = 2,
+    layers: Num = 2,
+    hidden: Num = 64,
+    batch: Num = 4,
+}
+
+MUON_OPT = MuonSettings { lr: 0.05, momentum: 0.95 }
+ADAM_OPT = AdamSettings { lr: 0.05, beta1: 0.9, beta2: 0.99, eps: 1.0e-8 }
+# the step size falls in a straight line to this fraction of its start
+LR_FLOOR = 0.1
+TEXT, PROMPT = "hello world! " * 5, "hello"
+STEPS, SAMPLES = 30, 24
+INIT_SEED, SAMPLE_SEED = 7, 11
+
+# @@ random draws
+# randn_matrix and choice: lib/random
+
+# @@ parameters and init
+record Head { Wq: Arr, Wk: Arr, Wv: Arr }
+record Attention { heads: [Head], Wo: Arr }
+record Mlp { up: Arr, down: Arr }
+record Block { attn: Attention, mlp: Mlp }
+record Gpt { tok: Arr, pos: Arr, blocks: [Block], unembed: Arr }
+
+def init(rows, cols) {
+    return (1.0 / sqrt(rows)) * randn_matrix(rows, cols)
+}
+
+def Head(c: GptConfig) -> Head {
+    hd = c.width / c.heads
+    return Head { Wq: init(c.width, hd), Wk: init(c.width, hd), Wv: init(c.width, hd) }
+}
+
+def Block(c: GptConfig) -> Block {
+    attn = Attention { heads: [Head(c) for h to c.heads], Wo: init(c.width, c.width) }
+    mlp = Mlp { up: init(c.width, c.hidden), down: init(c.hidden, c.width) }
+    return Block { attn: attn, mlp: mlp }
+}
+
+def Gpt(c: GptConfig) -> Gpt {
+    tok, pos = randn_matrix(c.vocab, c.width), randn_matrix(c.context, c.width)
+    blocks = [Block(c) for l to c.layers]
+    return Gpt { tok: tok, pos: pos, blocks: blocks, unembed: zeros(c.width, c.vocab) }
+}
+
+def count_into(w: Arr, n: Arr) {
+    n[0] += numel(w)
+}
+
+# @@ embedding
+# embedding: lib/nn, in gpt_forward below
+
+# @@ attention
+# attention (one causal head) and softmax_rows: lib/nn
+
+def self_attention(a: Attention, N: Arr) {
+    hd = shape(N)[-1] / len(a.heads)
+    Z = zeros_like(N)
+    for i, h in enumerate(a.heads) {
+        step head: Z[:, :, i * hd:(i + 1) * hd] = attention(N, h.Wq, h.Wk, h.Wv)
+    }
+    step project: Y = Z @ a.Wo
+    return Y
+}
+
+# @@ block
+# rmsnorm and relu2: lib/nn
+
+def block(b: Block, X: Arr) {
+    step attention: X = X + self_attention(b.attn, rmsnorm(X))
+    step mlp: X = X + relu2(rmsnorm(X) @ b.mlp.up) @ b.mlp.down
+    return X
+}
+
+# @@ forward
+def gpt_forward(m: Gpt, tokens: Arr) {
+    step embed: X = embedding(m.tok, tokens) + m.pos[0:shape(tokens)[-1], :]
+    for b in m.blocks {
+        step block: X = block(b, X)
+    }
+    step logits: logits = rmsnorm(X) @ m.unembed
+    return logits
+}
+
+# @@ loss
+# cross_entropy: lib/nn
+
+def sequence_loss(m: Gpt, x: Arr, y: Arr) {
+    return cross_entropy(gpt_forward(m, x), y)
+}
+
+# @@ backward
+# nothing: `train` calls `value_and_grad(sequence_loss, model, ...)`, and the
+# compiler writes the backward pass from the forward pass above
+
+# @@ optimizer
+# adam_update and muon_update: lib/optim
+
+def optimizer_step(model: Gpt, g: Gpt, m: Gpt, v: Gpt, taken, lr_scale) {
+    step muon: for_leaves(muon_update, model.blocks, g.blocks, m.blocks, lr_scale, MUON_OPT)
+    step adam {
+        adam_update(model.tok, g.tok, m.tok, v.tok, taken, lr_scale, ADAM_OPT)
+        adam_update(model.pos, g.pos, m.pos, v.pos, taken, lr_scale, ADAM_OPT)
+        adam_update(model.unembed, g.unembed, m.unembed, v.unembed, taken, lr_scale, ADAM_OPT)
+    }
+}
+
+# @@ training loop
+def batch(tokens: Arr, c: GptConfig, t, shift) {
+    starts = [mod(t * c.batch + b, len(tokens) - c.context) + shift for b to c.batch]
+    return [tokens[s:s + c.context] for s in starts]
+}
+
+def train(model: Gpt, c: GptConfig, tokens: Arr, steps) {
+    losses = zeros(steps)
+    m, v = zeros_like(model), zeros_like(model)
+    for t to steps {
+        step batch: xs, ys = batch(tokens, c, t, 0), batch(tokens, c, t, 1)
+        step forward_backward {
+            loss, grad = value_and_grad(sequence_loss, model, xs, ys)
+            losses[t] = loss
+        }
+        step measure: gnorm = sqrt(sum(grad * grad))
+        step update: optimizer_step(model, grad, m, v, t + 1, 1.0 - (1.0 - LR_FLOOR) * t / steps)
+    }
+    return losses
+}
+
+# @@ sampling
+def sample(m: Gpt, prompt: Arr, count, seed) {
+    srand(seed)
+    out = prompt
+    for k to count {
+        step context: ctx = take the last len(m.pos) elements of out
+        step probs: p = softmax_rows(gpt_forward(m, reshape(ctx, 1, len(ctx)))[0, len(ctx) - 1, :])
+        step draw: out = append(out, choice(p))
+    }
+    return out
+}
+
+# @@ text as tokens
+vocab = unique(TEXT)
+stoi = {c: i for i, c in enumerate(vocab)}
+encode = fn(text) -> [stoi[c] for c in text]
+decode = fn(ids) -> join("", [vocab[i] for i in ids])
+
+# @@ run
+cfg = GptConfig { vocab: len(vocab) }
+srand(INIT_SEED)
+model = Gpt(cfg)
+count = [0.0]
+for_leaves(count_into, model, count)
+# story_gpt prints the four numbers bare; here every loss is printed, to six
+# decimals, so the Python run can be compared with it line by line
+print(f"{count[0]:d} parameters, {len(vocab):d} characters")
+step train: losses = train(model, cfg, encode(TEXT), STEPS)
+for t to STEPS {
+    print(f"step {t + 1:d}: loss {losses[t]:.6f}")
+}
+step generate: written = decode(sample(model, encode(PROMPT), SAMPLES, SAMPLE_SEED))
+print(written)
+
+# @@ checks
+test "the model has 6,560 parameters, and 9 characters make its vocabulary" {
+    assert_true(count[0] == 6560 and len(vocab) == 9)
+}
+
+test "the first loss is log 9 exactly, because the output map starts at zero" {
+    assert_near(losses[0], log(9.0), 1.0e-15)
+}
+
+test "thirty steps take the loss from 2.197 to 0.1991" {
+    assert_near(losses[STEPS - 1], 0.199118, 1.0e-6)
+}
+
+test "from the prompt hello, the model writes the line on" {
+    assert_true(written == "hello world! hello world! hel")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

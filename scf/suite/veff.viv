@@ -1,0 +1,60 @@
+# PySCF's get_veff rows on a stack of random densities (test_rhf.py:469 and
+# test_uhf.py:359): water in 6-31G, `dm = numpy.random.random((2, 3, n, n))
+# - 0.5 + 0j` after `numpy.random.seed(1)`, and `get_veff(mol, dm,
+# hermi=0)` with direct J/K, folded into one number by `lib.fp`.
+#
+# The `+ 0j` makes the densities complex in type only: every imaginary part
+# is zero, so J, K and the potentials are real and the tests' numbers are
+# the real computation below. The densities are drawn from numpy's own
+# generator (scf/suite/ref/sts) and are not symmetric; `hermi=0` tells
+# PySCF so, and K comes from the dense J/K member, which applies its
+# definition as written.
+#
+#     tools/both-engines.sh scf/suite veff
+from hf.hf import hf_eri
+from hf.molecule import molecule_packs
+from hf.opts import opt_new, scf_checked
+from hf.jk import jk_dense
+from hfref.water_631g import water631g_atoms, water631g_prims, water631g_shells
+from hfref.pyscf_tests import (
+    PST_FILE_RHF, PST_FILE_UHF, PST_RHF_469, PST_RHF_469_P, PST_UHF_359, PST_UHF_359_P,
+)
+from scf.suite.ref.sts import sts_fp, sts_mt_new, sts_random_matrix, sts_row
+
+sve_n = 13
+sve_G = hf_eri(molecule_packs(water631g_atoms(), water631g_shells(), water631g_prims()), scf_checked())
+
+#| `dm[a, b]` of `numpy.random.random((2, 3, n, n)) - 0.5` as `[6, n, n]`,
+#| slab `3 a + b`, and J and K of each slab from the dense member,
+#| `[12, n, n]` (J of slab k at 2k, K at 2k + 1).
+def sve_jk(G: Arr, n) {
+    st = sts_mt_new(1)
+    D = zeros(6, n, n)
+    for k to 6 {
+        setslab(D, k, sts_random_matrix(st, n) - 0.5)
+    }
+    return jk_dense(G, G, G, D, opt_new())
+}
+
+test "RHF: V = J - K/2 for each of the six densities; fp = 4.9026999849223287 (test_rhf.py:469)" {
+    sve_R = sve_jk(sve_G, sve_n)
+    sve_V = zeros(6, sve_n, sve_n)
+    for sve_k to 6 {
+        setslab(sve_V, sve_k, slab(sve_R, 2 * sve_k) - 0.5 * slab(sve_R, 2 * sve_k + 1))
+    }
+    assert_near(sts_row(PST_FILE_RHF, 469, sts_fp(sve_V), PST_RHF_469, PST_RHF_469_P), 1.0, 0.0)
+}
+
+test "UHF: dm[0, b] and dm[1, b] are the alpha and beta densities of set b; V[s, b] = J_a + J_b - K_s; fp = -9.9614575705134953 (test_uhf.py:359)" {
+    sve_R = sve_jk(sve_G, sve_n)
+    sve_V = zeros(6, sve_n, sve_n)
+    for sve_s to 2 {
+        for sve_b to 3 {
+            setslab(sve_V, 3 * sve_s + sve_b, slab(sve_R, 2 * sve_b) + slab(sve_R, 2 * (3 + sve_b)) - slab(sve_R, 2 * (3 * sve_s + sve_b) + 1))
+        }
+    }
+    assert_near(sts_row(PST_FILE_UHF, 359, sts_fp(sve_V), PST_UHF_359, PST_UHF_359_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

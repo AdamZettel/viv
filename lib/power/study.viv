@@ -1,0 +1,242 @@
+###
+post: Violations, distribution factors and the transfer limit in a generator-interconnection study
+agent: claude
+
+A transmission owner asked to connect a new generator at a point of
+interconnection (POI) runs a system impact study: the network is solved
+with and without the project, in the base case and under every single
+contingency, and the project is charged with the limits it breaks that
+were not broken before. `study` does the steady-state part:
+
+  - the project is a generator at the POI bus of `mw` megawatts. With a
+    reactive range (qmin < qmax) it holds the POI at its pre-project
+    voltage as a PV bus; with qmin = qmax it injects that fixed Q;
+  - its power is absorbed by the reference bus (sink 1) or by every other
+    generator in proportion to its output (sink 2), the usual stand-ins
+    for the generation the project displaces;
+  - `n1_ac` (power.contingency) runs the base case and the contingencies
+    before and after; a violation (contingency, kind, element) present
+    after and not before is new; one present in both whose loading rose
+    by more than `worse_pct` percentage points is worsened;
+  - the distribution factors are the DC model's flow change on every
+    branch per MW of the project's output, injected at the POI and taken
+    out at the sink;
+  - the transfer limit is the largest output with no new violation,
+    found by bisection on the full AC N-1 between 0 and `mw_max` to
+    within `tol_mw`.
+
+The contingency numbering is the same before and after: the project's
+generator is appended after the case's own generators, so every branch
+and generator keeps its row.
+###
+
+from power.case import BUS_I, BUS_TYPE, Case, GEN_STATUS, PG, PQ, PV, VM, read_case
+from power.contingency import (
+    Limits, N1, V_CONT, V_ELEM, V_KIND, V_PCT, all_n1, dc_factors, default_limits,
+    n1_ac,
+)
+from power.pf import internal, runpf, NR
+
+#: where the project's power goes
+SINK_SLACK: Int = 1
+SINK_GENS: Int = 2
+#: MATPOWER's generator matrix width and the columns written here
+GEN_W: Int = 21
+G_QMAX: Int = 3
+G_QMIN: Int = 4
+G_VG: Int = 5
+G_MBASE: Int = 6
+G_PMAX: Int = 8
+G_QG: Int = 2
+
+record Study {
+    pre: N1
+    post: N1
+    #: per violation row of post: 1 new, 2 worsened, 0 neither
+    status: [Int]
+    df: Arr
+    limit_mw: Num
+    limit_found: Bool
+    #: the bisection: rows (MW, new violations)
+    steps: Arr
+}
+
+#| The case with the project added: a generator of `mw` MW at bus row
+#| `poi` (PV at `vset` within [qmin, qmax], or a fixed Q = qmin when
+#| qmin == qmax), its power taken from the sink.
+def with_injection(c: Case, poi: Int, mw: Num, vset: Num, qmin: Num, qmax: Num, sink: Int) -> Case {
+    ng: Int = int(shape(c.gen)[0])
+    nc: Int = int(shape(c.gen)[1])
+    gen = zeros(ng + 1, max(nc, GEN_W))
+    for g to ng {
+        for j to nc {
+            gen[g, j] = c.gen[g, j]
+        }
+    }
+    bus = copy(c.bus)
+    fixed_q = qmin == qmax
+    gen[ng, 0] = bus[poi, BUS_I]
+    gen[ng, PG] = mw
+    gen[ng, G_QG] = qmin if fixed_q else 0.0
+    gen[ng, G_QMAX] = qmax
+    gen[ng, G_QMIN] = qmin
+    gen[ng, G_VG] = vset
+    gen[ng, G_MBASE] = c.base_mva
+    gen[ng, GEN_STATUS] = 1.0
+    gen[ng, G_PMAX] = mw
+    if not fixed_q and int(bus[poi, BUS_TYPE]) == PQ {
+        bus[poi, BUS_TYPE] = 1.0 * PV
+    }
+    if fixed_q and int(bus[poi, BUS_TYPE]) == PQ {
+        #: a PQ bus keeps its type; the generator's fixed Q is part of its injection
+        gen[ng, G_VG] = bus[poi, VM]
+    }
+    if sink == SINK_GENS {
+        total = 0.0
+        for g to ng {
+            if gen[g, GEN_STATUS] > 0.0 and gen[g, PG] > 0.0 {
+                total += gen[g, PG]
+            }
+        }
+        for g to ng {
+            if gen[g, GEN_STATUS] > 0.0 and gen[g, PG] > 0.0 {
+                gen[g, PG] -= mw * gen[g, PG] / total
+            }
+        }
+    }
+    return Case { base_mva: c.base_mva, bus: bus, gen: gen, branch: c.branch }
+}
+
+#| The DC flow change on every branch per MW of the project (injected at
+#| bus row poi, taken out at the sink).
+def distribution_factors(c: Case, poi: Int, sink: Int) -> Arr {
+    d = dc_factors(c)
+    nl: Int = int(shape(d.ptdf)[0])
+    df = zeros(nl)
+    for l to nl {
+        df[l] = d.ptdf[l, poi]
+    }
+    if sink == SINK_GENS {
+        net = internal(c)
+        total = 0.0
+        for g to len(net.gbus) {
+            if net.gen[g, GEN_STATUS] > 0.0 and net.gen[g, PG] > 0.0 {
+                total += net.gen[g, PG]
+            }
+        }
+        for g to len(net.gbus) {
+            if net.gen[g, GEN_STATUS] > 0.0 and net.gen[g, PG] > 0.0 {
+                w = net.gen[g, PG] / total
+                for l to nl {
+                    df[l] -= w * d.ptdf[l, net.gbus[g]]
+                }
+            }
+        }
+    }
+    return df
+}
+
+#| For each violation row of `post`: 1 when (contingency, kind, element)
+#| is not among `pre`'s, 2 when it is but its percentage rose by more
+#| than worse_pct, else 0.
+def classify(pre: Arr, post: Arr, worse_pct: Num) -> [Int] {
+    known = map()
+    npre: Int = int(shape(pre)[0])
+    for i to npre {
+        known[_key(pre, i)] = pre[i, V_PCT]
+    }
+    n: Int = int(shape(post)[0])
+    out = int_zeros(n)
+    for i to n {
+        k = _key(post, i)
+        if not has(known, k) {
+            out[i] = 1
+        }
+        else if post[i, V_PCT] > known[k] + worse_pct {
+            out[i] = 2
+        }
+    }
+    return out
+}
+
+def _key(v: Arr, i: Int) -> Str {
+    return f"{int(v[i, V_CONT])}:{int(v[i, V_KIND])}:{int(v[i, V_ELEM])}"
+}
+
+def _count_new(pre: Arr, post: Arr) -> Int {
+    s = classify(pre, post, inf)
+    n: Int = 0
+    for k to len(s) {
+        if s[k] == 1 {
+            n += 1
+        }
+    }
+    return n
+}
+
+#| The study of a project of `mw` MW at bus row `poi`, and its transfer
+#| limit up to `mw_max`.
+def study(c: Case, poi: Int, mw: Num, qmin: Num, qmax: Num, sink: Int, kinds: [Int], elems: [Int], lim: Limits,
+          mw_max: Num, tol_mw: Num, worse_pct: Num) -> Study {
+    base = runpf(c, NR, false, 1e-8, 10)
+    vset = base.bus[poi, VM]
+    pre = n1_ac(c, kinds, elems, lim, 1e-8, 10)
+    post = n1_ac(with_injection(c, poi, mw, vset, qmin, qmax, sink), kinds, elems, lim, 1e-8, 10)
+    status = classify(pre.viol, post.viol, worse_pct)
+    df = distribution_factors(c, poi, sink)
+
+    #: bisection on the output: lo has no new violation, hi has one
+    steps = []
+    hi_r = n1_ac(with_injection(c, poi, mw_max, vset, qmin, qmax, sink), kinds, elems, lim, 1e-8, 10)
+    n_hi: Int = _count_new(pre.viol, hi_r.viol)
+    steps = append(steps, [mw_max, 1.0 * n_hi])
+    found = n_hi > 0
+    lo = 0.0
+    hi = mw_max
+    if found {
+        while hi - lo > tol_mw {
+            mid = 0.5 * (lo + hi)
+            r = n1_ac(with_injection(c, poi, mid, vset, qmin, qmax, sink), kinds, elems, lim, 1e-8, 10)
+            n: Int = _count_new(pre.viol, r.viol)
+            steps = append(steps, [mid, 1.0 * n])
+            if n > 0 {
+                hi = mid
+            }
+            else {
+                lo = mid
+            }
+        }
+    }
+    limit = lo if found else mw_max
+    return Study { pre: pre, post: post, status: status, df: df, limit_mw: limit, limit_found: found,
+                   steps: steps }
+}
+
+test "case30, 60 MW at bus 30 sunk at the reference: the DC factors sum to one over the cut into bus 30" {
+    c = read_case("lib/power/cases/case30.m")
+    df = distribution_factors(c, 29, SINK_SLACK)
+    #: bus 30 is fed by branches 27-30 and 29-30 (rows 37 and 38): together they carry the whole MW back
+    assert_near(df[37] + df[38], -1.0, 1e-12)
+}
+
+test "case30, a project at bus 30: no new violation at the limit, one within tol_mw above it" {
+    c = read_case("lib/power/cases/case30.m")
+    kinds, elems = all_n1(c)
+    s = study(c, 29, 30.0, -20.0, 20.0, SINK_SLACK, kinds, elems, default_limits(), 200.0, 8.0, 1.0)
+    assert_true(s.limit_found)
+    #: the bisection's last bracket: the smallest output tried that broke a limit is within tol_mw of the limit
+    hi = 200.0
+    for k to int(shape(s.steps)[0]) {
+        if s.steps[k, 1] > 0.0 and s.steps[k, 0] > s.limit_mw {
+            hi = min(hi, s.steps[k, 0])
+        }
+    }
+    assert_true(hi - s.limit_mw <= 8.0)
+    base = runpf(c, NR, false, 1e-8, 10)
+    at = n1_ac(with_injection(c, 29, s.limit_mw, base.bus[29, VM], -20.0, 20.0, SINK_SLACK), kinds, elems,
+               default_limits(), 1e-8, 10)
+    assert_true(_count_new(s.pre.viol, at.viol) == 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

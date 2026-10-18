@@ -1,0 +1,46 @@
+# Every little-endian reader at every offset of cases.bin; the lines must be
+# cases.txt, which tools/bytes/gen_cases.py computes with Python's struct.
+b = read_bytes("cases.bin")
+n: Int = len(b)
+u64_max: Int = 9223372036854775807
+for o to n {
+    print(f"le_u8 {o:d} {le_u8(b, o)}")
+    print(f"le_i8 {o:d} {le_i8(b, o)}")
+    if o + 2 <= n {
+        print(f"le_u16 {o:d} {le_u16(b, o)}")
+        print(f"le_i16 {o:d} {le_i16(b, o)}")
+    }
+    if o + 4 <= n {
+        print(f"le_u32 {o:d} {le_u32(b, o)}")
+        print(f"le_i32 {o:d} {le_i32(b, o)}")
+    }
+    if o + 8 <= n {
+        # le_u64 stops above the largest Int; le_i64 reads those bits as negative
+        if le_i64(b, o) < 0 {
+            print(f"le_u64 {o:d} over")
+        }
+        else {
+            print(f"le_u64 {o:d} {le_u64(b, o)}")
+        }
+        print(f"le_i64 {o:d} {le_i64(b, o)}")
+    }
+    if o + 2 <= n {
+        print(f"le_f16 {o:d} {le_f16(b, o):.17g}")
+        print(f"le_bf16 {o:d} {le_bf16(b, o):.17g}")
+    }
+    if o + 4 <= n {
+        print(f"le_f32 {o:d} {le_f32(b, o):.17g}")
+    }
+    if o + 8 <= n {
+        print(f"le_f64 {o:d} {le_f64(b, o):.17g}")
+        # a double with more bits than a binary32 holds, rounded to one
+        x = le_f32(b, o) * (1.0 + float(le_u32(b, o + 4)) / 4294967296.0)
+        print(f"fround {o:d} {fround(x):.17g}")
+    }
+}
+# halfway cases: ties go to the even neighbor
+ulp = 1.0 / 16777216.0
+print(f"fround tie {fround(1.0 + ulp):.17g} {fround(1.0 + 3.0 * ulp):.17g} {fround(-1.0 - ulp):.17g}")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,162 @@
+###
+post: lib/ode on non-stiff problems, events, dense output and batches
+agent: claude
+
+The checks with an exact answer:
+
+  - the Kepler orbit (eccentricity 0.5, ten periods): the energy is
+    conserved and the orbit closes, so after ten periods the state is the
+    initial one (SciPy's RK45 at the same tolerances takes the same 2247
+    steps and drifts the same 1.4e-9 in energy);
+  - Lotka-Volterra: V = d x - c ln x + b y - a ln y is conserved;
+  - dense output: y' = -y + sin t has a closed form, checked between the
+    steps (`t_eval`) for each method;
+  - events: a ball dropped from 10 m lands at sqrt(2 h / g), a terminal
+    event located on the dense output; the prey of Lotka-Volterra crosses
+    x = 5 upward once per cycle, a non-terminal event with a direction;
+  - a batch: 40 one-compartment pharmacokinetic models against Bateman's
+    closed form;
+  - AUTO: Dormand-Prince on Van der Pol with eps = 1e-6 detects stiffness
+    and hands over to Radau IIA, and the answer is Radau's own.
+###
+
+from ode.solve import ode_batch, ode_cfg, ode_solve, no_events, no_jac
+from ode.core import AUTO, BDF, DONE, DOPRI5, JAC_FD, JAC_GIVEN, RADAU, TERMINAL_EVENT
+from ode.problems import ball, ball_hits, kepler, kepler_energy, lotka, pk, vdpol, vdpol_jac
+
+MAX_STEPS: Int = 1000000
+NO_PARAMS = zeros(0)
+NONE = zeros(0)
+
+#: the Kepler orbit, eccentricity 0.5, a = 1: period 2 pi
+ECC = 0.5
+PERIODS = 10.0
+k0 = [1.0 - ECC, 0.0, 0.0, sqrt((1.0 + ECC) / (1.0 - ECC))]
+k_end = 2.0 * pi * PERIODS
+ck = ode_cfg(DOPRI5, k_end, 1.0e-10, 1.0e-12 * ones(4), 0.0, inf, MAX_STEPS, JAC_FD)
+rk = ode_solve(kepler, no_jac, no_events, 0.0, k_end, k0, NO_PARAMS, ck, [k_end], NONE, NONE)
+yk = rk.y[0, :]
+drift = abs(kepler_energy(yk) - kepler_energy(k0)) / abs(kepler_energy(k0))
+closure = amax(abs(yk - k0))
+print(f"Kepler, 10 periods: {rk.nsteps} steps, {rk.nfev} evaluations, energy drift {drift:.1e}, return error {closure:.1e}")
+
+#: Lotka-Volterra and its invariant
+LV_P = [1.5, 1.0, 3.0, 1.0]
+def lv_invariant(y: Arr, p: Arr) -> Num {
+    return p[3] * y[0] - p[2] * log(y[0]) + p[1] * y[1] - p[0] * log(y[1])
+}
+def prey_at_five(t: Num, y: Arr, p: Arr) -> Arr {
+    return [y[0] - 5.0]
+}
+lv0 = [10.0, 5.0]
+LV_END = 15.0
+cl = ode_cfg(DOPRI5, LV_END, 1.0e-10, 1.0e-12 * ones(2), 0.0, inf, MAX_STEPS, JAC_FD)
+rl = ode_solve(lotka, no_jac, prey_at_five, 0.0, LV_END, lv0, LV_P, cl, NONE, [1.0], [0.0])
+nl = len(rl.t)
+lv_drift = abs(lv_invariant(rl.y[nl - 1, :], LV_P) - lv_invariant(lv0, LV_P))
+print(f"Lotka-Volterra: {rl.nsteps} steps, invariant drift {lv_drift:.1e}, prey rose through 5 at {rl.t_events}")
+# the event's state has the prey at 5, and its time is between two output steps
+ev_miss = amax(abs(rl.y_events[:, 0] - 5.0))
+
+#: dense output: y' = -y + sin t, y(0) = 1: y = 1.5 e^-t + (sin t - cos t) / 2
+def forced(t: Num, y: Arr, p: Arr) -> Arr {
+    return [-y[0] + sin(t)]
+}
+def forced_row(y: Arr, t: Num, p: Arr, i) -> Num {
+    return forced(t, y, p)[i]
+}
+def forced_jac(t: Num, y: Arr, p: Arr) -> Arr {
+    J = zeros(1, 1)
+    J[0, :] = grad(forced_row, y, t, p, 0)
+    return J
+}
+FORCED_END = 10.0
+# output every 0.1 time units
+FORCED_POINTS: Int = 101
+tq = linspace(0.0, FORCED_END, FORCED_POINTS)
+exact = 1.5 * exp(-tq) + 0.5 * (sin(tq) - cos(tq))
+dense_methods = [DOPRI5, RADAU, BDF]
+dense_err = zeros(len(dense_methods))
+mi = 0
+for mm in dense_methods {
+    m: Int = int(mm)
+    cf = ode_cfg(m, FORCED_END, 1.0e-9, 1.0e-12 * ones(1), 0.0, inf, MAX_STEPS, JAC_GIVEN)
+    rf = ode_solve(forced, forced_jac, no_events, 0.0, FORCED_END, [1.0], NO_PARAMS, cf, tq, NONE, NONE)
+    dense_err[mi] = amax(abs(rf.y[:, 0] - exact))
+    mi += 1
+}
+print(f"dense output on 101 points, max error: dopri5 {dense_err[0]:.1e}, radau {dense_err[1]:.1e}, bdf {dense_err[2]:.1e}")
+
+#: the bouncing ball: dropped from 10 m, it lands at sqrt(2 h / g)
+G = 9.81
+DROP = 10.0
+cb = ode_cfg(DOPRI5, 10.0, 1.0e-6, 1.0e-9 * ones(2), 0.0, inf, MAX_STEPS, JAC_FD)
+rb = ode_solve(ball, no_jac, ball_hits, 0.0, 10.0, [DROP, 0.0], [G], cb, NONE, [-1.0], [1.0])
+landing = sqrt(2.0 * DROP / G)
+print(f"ball: lands at {rb.t_events[0]:.15f} (exact {landing:.15f}), at {rb.y_events[0, 1]:.6f} m/s; status {rb.status}")
+
+#: a batch: 40 oral doses of 100 mg, absorption and elimination rates varied
+NB: Int = 40
+DOSE = 100.0
+Y0 = zeros(NB, 2)
+# the parameters: absorption rate ka, elimination rate ke, volume V
+PK_PARAMS: Int = 3
+P = zeros(NB, PK_PARAMS)
+for b to NB {
+    Y0[b, 0] = DOSE
+    P[b, :] = [0.5 + 0.05 * b, 0.1 + 0.004 * b, 20.0]
+}
+PK_END = 24.0
+# output every half hour
+PK_POINTS: Int = 49
+tpk = linspace(0.0, PK_END, PK_POINTS)
+cp = ode_cfg(RADAU, PK_END, 1.0e-9, 1.0e-12 * ones(2), 0.0, inf, MAX_STEPS, JAC_FD)
+Ypk, spk, fpk = ode_batch(pk, no_jac, no_events, 0.0, PK_END, Y0, P, cp, tpk, NONE, NONE)
+#| Bateman's concentration at every output time, for one row's parameters.
+def bateman_curve(t: Arr, dose: Num, p: Arr) -> Arr {
+    return dose * p[0] / (p[2] * (p[0] - p[1])) * (exp(-p[1] * t) - exp(-p[0] * t))
+}
+pk_dev = zeros(NB)
+for b to NB {
+    conc = reshape(Ypk[b, :], len(tpk), 2)[:, 1]
+    pk_dev[b] = amax(abs(conc - bateman_curve(tpk, DOSE, P[b, :])))
+}
+pk_err = amax(pk_dev)
+print(f"batch of {NB} PK models: max |C - Bateman| = {pk_err:.1e} mg/L, {sum(spk[:, 4])} steps in all")
+
+#: AUTO on Van der Pol, eps = 1e-6: Dormand-Prince until the stiffness test fires
+VDP_EPS = [1.0e-6]
+ca = ode_cfg(AUTO, 2.0, 1.0e-6, 1.0e-6 * ones(2), 0.0, inf, MAX_STEPS, JAC_GIVEN)
+ra = ode_solve(vdpol, vdpol_jac, no_events, 0.0, 2.0, [2.0, 0.0], VDP_EPS, ca, [2.0], NONE, NONE)
+cr = ode_cfg(RADAU, 2.0, 1.0e-10, 1.0e-10 * ones(2), 0.0, inf, MAX_STEPS, JAC_GIVEN)
+rr = ode_solve(vdpol, vdpol_jac, no_events, 0.0, 2.0, [2.0, 0.0], VDP_EPS, cr, [2.0], NONE, NONE)
+auto_diff = amax(abs(ra.y[0, :] - rr.y[0, :]))
+print(f"auto: stiff at t = {ra.stiff_at:.4f}, {ra.nsteps} steps, differs from Radau at rtol 1e-10 by {auto_diff:.1e}")
+
+test "the Kepler orbit keeps its energy and closes after ten periods" {
+    assert_lt(drift, 2.0e-9)
+    assert_lt(closure, 5.0e-7)
+}
+test "Lotka-Volterra keeps its invariant, and the prey crosses 5 upward once per cycle" {
+    assert_lt(lv_drift, 1.0e-8)
+    assert_near(len(rl.t_events), 3.0, 0.0)
+    assert_lt(ev_miss, 1.0e-9)
+}
+test "the dense output of every method is accurate between steps" {
+    assert_lt(amax(dense_err), 1.0e-7)
+}
+test "the ball's landing is a terminal event at sqrt(2 h / g)" {
+    assert_near(rb.t_events[0], landing, 1.0e-12)
+    assert_near(rb.status, TERMINAL_EVENT, 0.0)
+    assert_near(rb.t[len(rb.t) - 1], landing, 0.0)
+}
+test "a batch of PK models matches the Bateman solution" {
+    assert_lt(pk_err, 1.0e-6)
+}
+test "AUTO detects stiffness and its answer is Radau's" {
+    assert_gt(ra.stiff_at, 0.0)
+    assert_lt(auto_diff, 1.0e-4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

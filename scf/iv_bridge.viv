@@ -1,0 +1,363 @@
+###
+post: Water STO-3G integrals, enclosed and swept
+agent: claude
+
+Every integral stage of lib/hf has several point strategies that must agree
+with each other. This program adds the enclosures of lib/hf/iv_ints, which
+contain the exact integral by construction, and runs the point strategies
+against them with `sweep_iv3` (lib/hf/iv_sweep). The system is water in
+STO-3G (lib/hfref/water_sto3g): 7 unit-Cartesian AOs, the 49 entries of
+each of S, T and V, and 100 distinct packed-8 ERIs drawn from seed
+`IV_ERI_SEED`.
+
+Point strategies:
+
+| Stage | Members |
+|---|---|
+| S | `md1_s`, `os_overlap`, `gh_overlap` |
+| T | `md1_t`, `os_kinetic`, `gh_kinetic` |
+| V | `md1_v`, `os_nuclear` |
+| ERI | `mderi_full`, `hgp_eri`, `rys_eri`, each at the sampled indices |
+
+Interval strategies: `iv_md_*` (McMurchie-Davidson) and `iv_os_*`
+(Obara-Saika).
+
+What the tests below establish, each measured:
+
+- MD and OS enclosures overlap at every entry.
+- Every value of every point strategy lies inside both enclosures.
+- Every enclosure is at most 1e-10 wide relative to its larger end, except
+  those around integrals that are 0 by symmetry, which are measured
+  absolutely. The widest MD enclosure is 5.0e-12 (T, O 1s with H 1s), and
+  the widest common part of MD and OS is 2.33e-13 (in T).
+- A 40-digit mpmath value of every entry (McMurchie-Davidson in Python at 40
+  digits, from the same basis data; the script was scratch and is not
+  committed) lies inside both enclosures.
+- PySCF's values (lib/hfref) lie inside both enclosures except at 8 entries
+  of V (4 symmetric pairs) and 2 sampled ERIs. At each of those PySCF is
+  within 2.6e-14 of the 40-digit value, and the 40-digit value is inside. So
+  those are PySCF 2.5.0's rounding, not ours. A second method agrees: the
+  closed-form s-s nuclear attraction at 50 digits (Boys F0 from erf, with
+  the double-valued exponents, coefficients and coordinates of lib/hfref)
+  gives V(H1, H2) = -1.6156328893155406564, which PySCF's int1e_nuc
+  (-1.6156328893155159) misses by 2.48e-14 while the enclosures hold it. The tests hold the enclosures
+  to PySCF's values with exactly those 10 entries replaced by the 40-digit
+  ones, the way lib/hf/md_eri and lib/hf/hgp_eri treat lib/hfref/prims.
+- A point strategy that adds 1e-9 to one entry is blamed by strategy and
+  flat index, by `iv_check3` and by `sw_check3_arr`, and by `iv_check3`
+  alone when there are only two point members.
+
+Run with `tools/both-engines.sh scf iv_bridge`.
+###
+
+from hf.iv_ints import (
+    iv_eri_sample_idx, iv_flat, iv_md_eri_sample, iv_md_s, iv_md_t, iv_md_v, iv_os_eri_sample,
+    iv_os_s, iv_os_t, iv_os_v,
+)
+from hf.interval import iv_contains, iv_get, iv_meet, iv_overlaps, iv_relw, iv_width
+from hfref.water_sto3g import (
+    watersto3g_atoms, watersto3g_eri8_cart, watersto3g_prims, watersto3g_s_unit,
+    watersto3g_shells, watersto3g_t_unit, watersto3g_v_unit,
+)
+from hf.iv_sweep import iv_check3, sweep_iv3
+from hf.sweep import (
+    sw_check3_arr, SW_REP_HI, SW_REP_INDEX, SW_REP_LO, sw_rep_new, SW_REP_NSTRAT, SW_REP_STRAT,
+)
+from hf.md_onebody import md1_s, md1_t, md1_v
+from hf.os_onebody import os_kinetic, os_nuclear, os_overlap
+from hf.gh_onebody import gh_kinetic, gh_overlap
+from hf.md_eri import mderi_full
+from hf.hgp_eri import hgp_eri
+from hf.rys_eri import rys_eri
+
+#| ERI point members at the sampled packed-8 indices.
+def ivb_mderi_sample(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return take(mderi_full(atoms, shells, prims), iv_eri_sample_idx(shells))
+}
+def ivb_hgp_sample(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return take(hgp_eri(atoms, shells, prims), iv_eri_sample_idx(shells))
+}
+def ivb_rys_sample(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return take(rys_eri(atoms, shells, prims), iv_eri_sample_idx(shells))
+}
+
+#| `md1_s` with 1e-9 added to S(1, 5), flat index 12: O 2s with H 1s.
+def ivb_bad_s(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    S = md1_s(atoms, shells, prims)
+    S[1, 5] = S[1, 5] + 1.0e-9
+    return S
+}
+
+#| 40-digit values rounded once to doubles: S, T, V flat over 7 x 7, the
+#| sampled ERIs, and the sample (which must equal `iv_eri_sample_idx`).
+def ivb_mp_s() -> Arr {
+    return [1.0, 0.23670393651084762, 0.0, 0.0,
+        0.0, 0.053884992130368355, 0.053884992130368355, 0.23670393651084762,
+        1.0, 0.0, 0.0, 0.0,
+        0.47433176700934565, 0.47433176700934565, 0.0, 0.0,
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        1.0, 0.0, -0.3107266889305849, 0.3107266889305849,
+        0.0, 0.0, 0.0, 0.0,
+        1.0, 0.2409465870571378, 0.2409465870571378, 0.053884992130368355,
+        0.47433176700934565, 0.0, -0.3107266889305849, 0.2409465870571378,
+        1.0, 0.2516808424829575, 0.053884992130368355, 0.47433176700934565,
+        0.0, 0.3107266889305849, 0.2409465870571378, 0.2516808424829575,
+        1.0]
+}
+
+def ivb_mp_t() -> Arr {
+    return [29.00319994553957, -0.16801093931649216, 0.0, 0.0,
+        0.0, -0.002562243686384664, -0.002562243686384664, -0.16801093931649216,
+        0.8081279549303475, 0.0, 0.0, 0.0,
+        0.1282628356360955, 0.1282628356360955, 0.0, 0.0,
+        2.5287311981947633, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        2.5287311981947633, 0.0, -0.22420987735782347, 0.22420987735782347,
+        0.0, 0.0, 0.0, 0.0,
+        2.5287311981947633, 0.17385891414668742, 0.17385891414668742, -0.002562243686384664,
+        0.1282628356360955, 0.0, -0.22420987735782347, 0.17385891414668742,
+        0.760031883566609, 0.008476840173892176, -0.002562243686384664, 0.1282628356360955,
+        0.0, 0.22420987735782347, 0.17385891414668742, 0.008476840173892176,
+        0.760031883566609]
+}
+
+def ivb_mp_v() -> Arr {
+    return [-61.72329688309335, -7.444599890028587, 0.0, 0.0,
+        -0.018996438617907622, -1.7439691717269683, -1.7439691717269683, -7.444599890028587,
+        -10.142196980858593, 0.0, 0.0, -0.22350452244208668,
+        -3.8650803747486373, -3.8650803747486373, 0.0, 0.0,
+        -9.98577456465459, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        -10.141625718175138, 0.0, 2.251261971681051, -2.251261971681051,
+        -0.018996438617907622, -0.22350452244208668, 0.0, 0.0,
+        -10.079486404510208, -1.818676173346864, -1.818676173346864, -1.7439691717269683,
+        -3.8650803747486373, 0.0, 2.251261971681051, -1.818676173346864,
+        -5.833953772754748, -1.6156328893155407, -1.7439691717269683, -3.8650803747486373,
+        0.0, -2.251261971681051, -1.818676173346864, -1.6156328893155407,
+        -5.833953772754748]
+}
+
+def ivb_mp_eri() -> Arr {
+    return [0.17149760215075183, 0.1344110360511028, 0.0, 0.1368733853543883,
+        0.0, 0.0, 0.0, 0.01270466589522263,
+        0.0, 0.11796239052900365, 0.0, 0.0,
+        0.024242314322332415, 0.03760313180408551, 0.0, 0.0,
+        0.2560115070259671, 0.33277792036489606, -0.09134914223130478, -0.1979049331483193,
+        0.0, 0.8170226053209141, 0.0, 0.0,
+        0.0, 0.057352550822733946, 0.05281917251202051, 0.5030171281972838,
+        0.04163336715672416, 0.012894396033370037, 0.0, 0.0,
+        0.009958383481875355, 0.0, -0.0011404458740247986, 0.0,
+        0.0, 0.02184121808335334, 0.009691905057181196, 0.0,
+        0.0, 0.19851883041511584, 0.0, 1.1189468663424702,
+        0.005528234084780539, 0.0, 0.20712426341320897, 0.009998692829046514,
+        0.1510340592865424, 0.0016506963333003488, 0.0, 0.7746059439198979,
+        0.0, 0.008689101144829254, 0.093558402576837, 0.33277792036489606,
+        0.125387132074999, 0.0, 0.09147149701522475, 0.0662503036186428,
+        0.0, -0.0077747731251370305, 0.0, 0.007287667504468778,
+        0.1464452298576176, 0.0, 0.07171777140518777, 0.0,
+        0.0, 0.023384406798298583, 0.0, 0.047444445118384165,
+        0.0, -0.035749386434473826, 0.7852702031382772, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.03780860741636099, 0.04410270131771878, 0.0787293857862046, 0.06625682657974023,
+        0.0, 0.2122250269491669, 0.0, 0.07475683509967682,
+        0.0008843351757629548, 0.19241527884474738, 0.13929869378787904, 0.028284618344378887,
+        0.0, 0.0042867548319236145, 0.031380262524547245, 0.05830033803863521,
+        0.0, 0.5030171281972838, 0.0, 0.18885696593222576]
+}
+
+def ivb_mp_idx() -> Arr {
+    return [231, 404, 102, 2, 395, 87, 140, 306, 70, 322, 25, 48, 362, 352, 28, 337, 402, 145, 396, 173, 73, 17, 166, 71, 86, 157, 301, 380, 260, 321, 363, 348, 156, 154, 126, 248, 64, 274, 340, 281, 298, 229, 31, 3, 259, 359, 273, 205, 199, 131, 33, 230, 95, 366, 137, 262, 211, 292, 347, 349, 234, 149, 79, 135, 195, 8, 336, 62, 39, 299, 6, 90, 111, 343, 114, 290, 261, 51, 81, 193, 13, 370, 389, 316, 101, 309, 109, 209, 130, 314, 356, 251, 42, 263, 232, 125, 317, 212, 153, 305]
+}
+
+#| The entries where PySCF's value lies outside the enclosures, as flat
+#| indices: 8 of V, then 2 positions in the ERI sample.
+def ivb_pyscf_off_v() -> Arr {
+    return [11, 12, 13, 29, 36, 41, 43, 47]
+}
+def ivb_pyscf_off_eri() -> Arr {
+    return [12, 82]
+}
+
+#| PySCF's values with the listed entries replaced by the 40-digit ones.
+def ivb_fixed(ref: Arr, mpv: Arr, off: Arr) {
+    R = copy(ref)
+    for k to len(off) {
+        R[off[k]] = mpv[off[k]]
+    }
+    return R
+}
+
+#| What ivb_stage finds for one stage's two enclosures: the entries where
+#| they miss each other; the point values, 40-digit values and fixed-PySCF
+#| values outside either; the listed entries where PySCF's value is inside
+#| the common part (each listed entry must be one PySCF misses); the widest
+#| relative width among enclosures that exclude 0 and the widest absolute
+#| width of those that contain 0; the widest relative width of the common
+#| part of MD and OS where it excludes 0.
+record IvbStage {
+    miss: Num
+    point: Num
+    mp: Num
+    fixed: Num
+    listed: Num
+    relw: Num
+    absw: Num
+    common: Num
+}
+
+#| Checks one stage's two enclosures (flat, `N` entries each) against point
+#| values and references.
+def ivb_stage(A: Arr, B: Arr, P: Arr, np, N, mpv: Arr, ref: Arr, off: Arr) -> IvbStage {
+    miss = 0
+    point = 0
+    mp = 0
+    nfixed = 0
+    listed = 0
+    relw = 0.0
+    absw = 0.0
+    common = 0.0
+    fixed = ivb_fixed(ref, mpv, off)
+    for k to N {
+        IA = iv_get(A, k)
+        IB = iv_get(B, k)
+        miss = miss + 1 - iv_overlaps(IA, IB)
+        for m to np {
+            point = point + 2 - iv_contains(IA, P[m, k]) - iv_contains(IB, P[m, k])
+        }
+        MAB = iv_meet(IA, IB)
+        if MAB[0] > 0.0 or MAB[1] < 0.0 {
+            common = max(common, iv_relw(MAB))
+        }
+        mp = mp + 2 - iv_contains(IA, mpv[k]) - iv_contains(IB, mpv[k])
+        nfixed = nfixed + 2 - iv_contains(IA, fixed[k]) - iv_contains(IB, fixed[k])
+        for j to 2 {
+            I = IA
+            if j == 1 {
+                I = IB
+            }
+            if I[0] > 0.0 or I[1] < 0.0 {
+                relw = max(relw, iv_relw(I))
+            }
+            else {
+                absw = max(absw, iv_width(I))
+            }
+        }
+    }
+    for k to len(off) {
+        # PySCF is outside the common part at every listed entry
+        M = iv_meet(iv_get(A, off[k]), iv_get(B, off[k]))
+        listed = listed + iv_contains(M, ref[off[k]])
+        assert_lt(abs(ref[off[k]] - mpv[off[k]]), 3.0e-14)
+    }
+    return IvbStage { miss: miss, point: point, mp: mp, fixed: nfixed, listed: listed, relw: relw, absw: absw, common: common }
+}
+
+#| The point members' results stacked `[np, N]`.
+def ivb_points(ms, N) {
+    at = watersto3g_atoms()
+    sh = watersto3g_shells()
+    pr = watersto3g_prims()
+    P = zeros(len(ms), N)
+    for m to len(ms) {
+        setslab(P, m, iv_flat(apply(ms[m], at, sh, pr), N))
+    }
+    return P
+}
+
+#| One stage end to end: the two enclosures, the checks of `ivb_stage`, and
+#| the asserting `sweep_iv3` with its report. Returns the `ivb_stage` record.
+def ivb_run(ms, ivs, N, mpv: Arr, ref: Arr, off: Arr) -> IvbStage {
+    at = watersto3g_atoms()
+    sh = watersto3g_shells()
+    pr = watersto3g_prims()
+    A = iv_flat(apply(ivs[0], at, sh, pr), 2 * N)
+    B = iv_flat(apply(ivs[1], at, sh, pr), 2 * N)
+    r = ivb_stage(A, B, ivb_points(ms, N), len(ms), N, mpv, ref, off)
+    rep = sw_rep_new()
+    C = iv_flat(sweep_iv3(ms, ivs, at, sh, pr, N, N, 1.0e-12, rep), N)
+    k = round(rep[SW_REP_INDEX])
+    assert_true(rep[SW_REP_LO] <= C[k] and C[k] <= rep[SW_REP_HI])
+    assert_near(rep[SW_REP_NSTRAT], len(ms), 0)
+    return r
+}
+
+#| The assertions every stage shares.
+def ivb_assert(r: IvbStage, noff) {
+    assert_near(r.miss, 0, 0)
+    assert_near(r.point, 0, 0)
+    assert_near(r.mp, 0, 0)
+    assert_near(r.fixed, 0, 0)
+    assert_near(r.listed, 0, 0)
+    assert_lt(r.relw, 1.0e-10)
+    assert_lt(r.absw, 1.0e-14)
+    return noff
+}
+
+test "the ERI sample is the one the 40-digit values were computed for" {
+    ivb_si = iv_eri_sample_idx(watersto3g_shells())
+    ivb_sm = ivb_mp_idx()
+    assert_near(len(ivb_si), 100, 0)
+    assert_true(all(ivb_si == ivb_sm))
+}
+
+test "S: md1, os and gh inside the MD and OS enclosures, which hold PySCF and mpmath" {
+    ivb_rs = ivb_run([md1_s, os_overlap, gh_overlap], [iv_md_s, iv_os_s], 49, ivb_mp_s(), iv_flat(watersto3g_s_unit(), 49), zeros(0))
+    ivb_assert(ivb_rs, 0)
+    # common part of MD and OS: measured 1.9e-14
+    assert_lt(ivb_rs.common, 1.0e-13)
+    # measured 1.9e-14 at the widest
+    assert_lt(ivb_rs.relw, 1.0e-13)
+}
+
+test "T: md1, os and gh inside the MD and OS enclosures, which hold PySCF and mpmath" {
+    ivb_rt = ivb_run([md1_t, os_kinetic, gh_kinetic], [iv_md_t, iv_os_t], 49, ivb_mp_t(), iv_flat(watersto3g_t_unit(), 49), zeros(0))
+    ivb_assert(ivb_rt, 0)
+    # common part of MD and OS: measured 2.33e-13
+    assert_lt(ivb_rt.common, 2.4e-13)
+    # measured 5.0e-12, MD's enclosure of T(O 1s, H 1s) = -0.00256
+    assert_lt(ivb_rt.relw, 1.0e-11)
+}
+
+test "V: md1 and os inside; PySCF inside except 8 entries it rounds off by up to 2.6e-14" {
+    ivb_rv = ivb_run([md1_v, os_nuclear], [iv_md_v, iv_os_v], 49, ivb_mp_v(), iv_flat(watersto3g_v_unit(), 49), ivb_pyscf_off_v())
+    ivb_assert(ivb_rv, 8)
+    # common part of MD and OS: measured 2.5e-14
+    assert_lt(ivb_rv.common, 1.0e-13)
+    assert_lt(ivb_rv.relw, 1.0e-13)
+}
+
+test "100 ERIs: mderi, hgp and rys inside; PySCF inside except 2 it rounds off" {
+    ivb_re = ivb_run([ivb_mderi_sample, ivb_hgp_sample, ivb_rys_sample], [iv_md_eri_sample, iv_os_eri_sample], 100, ivb_mp_eri(), take(watersto3g_eri8_cart(), ivb_mp_idx()), ivb_pyscf_off_eri())
+    ivb_assert(ivb_re, 2)
+    # common part of MD and OS: measured 6.1e-14
+    assert_lt(ivb_re.common, 1.0e-13)
+    assert_lt(ivb_re.relw, 1.0e-12)
+}
+
+test "a point strategy corrupted by 1e-9 is reported by strategy and flat index" {
+    ivb_cat = watersto3g_atoms()
+    ivb_csh = watersto3g_shells()
+    ivb_cpr = watersto3g_prims()
+    ivb_crep = sw_rep_new()
+    ivb_cout = zeros(49)
+    # against the enclosure, with a tolerance the median check would pass
+    ivb_cv = iv_check3([md1_s, os_overlap, ivb_bad_s], [iv_md_s, iv_os_s], ivb_cat, ivb_csh, ivb_cpr, 49, 49, 1.0e-6, ivb_crep, ivb_cout)
+    assert_near(ivb_cv, 0, 0)
+    assert_near(ivb_crep[SW_REP_STRAT], 2, 0)
+    assert_near(ivb_crep[SW_REP_INDEX], 12, 0)
+    assert_true(ivb_crep[SW_REP_LO] <= ivb_cout[12] and ivb_cout[12] <= ivb_crep[SW_REP_HI])
+    # with two point members the median cannot choose; the enclosure can
+    ivb_cv2 = iv_check3([ivb_bad_s, os_overlap], [iv_md_s, iv_os_s], ivb_cat, ivb_csh, ivb_cpr, 49, 49, 1.0e-6, ivb_crep, ivb_cout)
+    assert_near(ivb_cv2, 0, 0)
+    assert_near(ivb_crep[SW_REP_STRAT], 0, 0)
+    assert_near(ivb_crep[SW_REP_INDEX], 12, 0)
+    # the median check of lib/hf/sweep also names it, at the contract tolerance
+    ivb_cv3 = sw_check3_arr([md1_s, os_overlap, ivb_bad_s], ivb_cat, ivb_csh, ivb_cpr, 49, 49, 1.0e-12, ivb_crep, ivb_cout)
+    assert_near(ivb_cv3, 0, 0)
+    assert_near(ivb_crep[SW_REP_STRAT], 2, 0)
+    assert_near(ivb_crep[SW_REP_INDEX], 12, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

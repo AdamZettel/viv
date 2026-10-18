@@ -1,0 +1,188 @@
+# The tests of lib/hf/stab that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/stab does not load the references.
+from hf.stab import (
+    stab_curvature, stab_density, stab_follow, stab_gradient, STAB_HESS_JK, stab_hess_jk,
+    stab_hess_methods, stab_hess_mo, stab_lowest_of, stab_nparam, stab_orbitals, stab_quad,
+    stab_rotate, stab_slope, STAB_STABLE,
+)
+from hf.scf_loop import scf_setup, ScfSetup
+from hf.opts import scf_defaults, ScfOptions
+from hf.eri_store import es_rng
+from hf.density import den_idempotency, den_stack1, den_trace
+from hf.sweep import (
+    sw_check3_arr, SW_REP_INDEX, sw_rep_new, SW_REP_NSTRAT, SW_REP_STRAT, sweep3_arr,
+)
+from hfref.oh_631g import (
+    OH_631G_E_NUC, oh_631g_eri8_cart, OH_631G_NAO_CART, oh_631g_s_unit, oh_631g_t_unit,
+    OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA, oh_631g_v_unit,
+)
+from hfref.water_631g import (
+    WATER631G_E_NUC, WATER631G_E_RHF, water631g_eri8_cart, water631g_rhf_d,
+    WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, water631g_s_unit, water631g_t_unit,
+    water631g_v_unit,
+)
+
+#| Water 6-31G, closed shell, on the reference integrals.
+#@ 14b241ca
+def stab_t_water() -> ScfSetup {
+    H = water631g_t_unit() + water631g_v_unit()
+    return scf_setup(H, water631g_s_unit(), water631g_eri8_cart(), WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, WATER631G_E_NUC, scf_defaults())
+}
+
+#| OH 6-31G, UHF, on the reference integrals.
+#@ e18860ad
+def stab_t_oh() -> ScfSetup {
+    H = oh_631g_t_unit() + oh_631g_v_unit()
+    return scf_setup(H, oh_631g_s_unit(), oh_631g_eri8_cart(), OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA, OH_631G_E_NUC, scf_defaults())
+}
+
+#| Orbitals of water 6-31G: from PySCF's converged density (`core = 0`) or
+#| from the core Hamiltonian (`core = 1`), which is far from stationary.
+#@ add80a8e
+def stab_t_water_orb(core) -> Arr {
+    D = den_stack1(water631g_rhf_d())
+    if core > 0 {
+        D = D * 0.0
+    }
+    return stab_orbitals(stab_t_water(), D)
+}
+
+#| OH 6-31G UHF orbitals from the core Hamiltonian.
+#@ 6aac393b
+def stab_t_oh_core_orb() -> Arr {
+    n = OH_631G_NAO_CART
+    return stab_orbitals(stab_t_oh(), zeros(2, n, n))
+}
+
+#| max |A - A^T|.
+#@ a9ced54b
+def stab_t_asym(A: Arr) {
+    return max(abs(A - transpose(A)))
+}
+
+#| `|slope - g.v| / |g.v|` and `|curvature - v^T Hess v| / |v^T Hess v|`
+#| along a seeded direction for an orbital pack.
+#@ 456e6204
+def stab_t_fd(orb: Arr, p: ScfSetup, seed) {
+    Hs = stab_hess_mo(orb, p.h, p.eri)
+    g = stab_gradient(orb, p.h, p.eri)
+    v = stab_t_direction(len(g), seed)
+    gv = sum(g * v)
+    q = stab_quad(Hs, v)
+    slope = abs(stab_slope(orb, p, v, 1.0e-3) - gv) / abs(gv)
+    return slope, abs(stab_curvature(orb, p, v, 1.0e-3) - q) / abs(q)
+}
+
+#| A unit vector of length n with Park-Miller entries from `seed`.
+#@ 7cce2d35
+def stab_t_direction(n, seed) -> Arr {
+    st = zeros(1)
+    st[0] = seed
+    v = zeros(n)
+    for i to n {
+        v[i] = 2.0 * es_rng(st) - 1.0
+    }
+    return v / sqrt(sum(v * v))
+}
+
+#| Test member with a planted bug: member `0` with one entry off by `1e-9`.
+#@ 40e4c830
+def stab_t_bad(orb: Arr, H: Arr, Gp: Arr) -> Arr {
+    Hs = stab_hess_mo(orb, H, Gp)
+    Hs[3, 5] = Hs[3, 5] + 1.0e-9
+    return Hs
+}
+
+test "the MO-integral and J/K-response Hessians agree, RHF and UHF, at and away from convergence" {
+    stab_rep = sw_rep_new()
+    stab_H = water631g_t_unit() + water631g_v_unit()
+    stab_G = water631g_eri8_cart()
+    stab_orb = stab_t_water_orb(0)
+    # 5 occupied, 8 virtual: 40 parameters
+    assert_near(stab_nparam(stab_orb), 40, 0.0)
+    # the sweep compares every entry of the np x np Hessian
+    stab_np = stab_nparam(stab_orb)
+    stab_A = sweep3_arr(stab_hess_methods(), stab_orb, stab_H, stab_G, stab_np * stab_np, stab_np * stab_np, 1.0e-12, stab_rep)
+    assert_near(stab_rep[SW_REP_NSTRAT], 2, 0.0)
+    assert_lt(stab_t_asym(stab_A), 1.0e-12)
+    stab_A = sweep3_arr(stab_hess_methods(), stab_t_water_orb(1), stab_H, stab_G, stab_np * stab_np, stab_np * stab_np, 1.0e-12, stab_rep)
+    stab_orb = stab_t_oh_core_orb()
+    # alpha 5 x 6, beta 4 x 7
+    assert_near(stab_nparam(stab_orb), 58, 0.0)
+    stab_np = stab_nparam(stab_orb)
+    stab_A = sweep3_arr(stab_hess_methods(), stab_orb, oh_631g_t_unit() + oh_631g_v_unit(), oh_631g_eri8_cart(), stab_np * stab_np, stab_np * stab_np, 1.0e-12, stab_rep)
+    assert_lt(stab_t_asym(stab_A), 1.0e-12)
+}
+
+test "a closed shell's RHF Hessian is the sum of its four UHF spin blocks" {
+    # E_UHF(kappa, kappa) = E_RHF(kappa) when both spins carry the RHF orbitals
+    stab_orb = stab_t_water_orb(0)
+    stab_u = zeros(2, shape(stab_orb)[1], shape(stab_orb)[2])
+    setslab(stab_u, 0, slab(stab_orb, 0))
+    setslab(stab_u, 1, slab(stab_orb, 0))
+    stab_H = water631g_t_unit() + water631g_v_unit()
+    stab_R = stab_hess_mo(stab_orb, stab_H, water631g_eri8_cart())
+    stab_U = stab_hess_mo(stab_u, stab_H, water631g_eri8_cart())
+    # the alpha block comes first, then beta, each np parameters long
+    stab_np = stab_nparam(stab_orb)
+    stab_a = stab_U[0:stab_np, 0:stab_np] + stab_U[0:stab_np, stab_np:2 * stab_np]
+    stab_b = stab_U[stab_np:2 * stab_np, 0:stab_np] + stab_U[stab_np:2 * stab_np, stab_np:2 * stab_np]
+    assert_lt(max(abs(stab_a + stab_b - stab_R)), 1.0e-12)
+}
+
+test "finite differences of E(C exp(tK)) match the gradient and the Hessian away from convergence" {
+    # at the core-Hamiltonian orbitals the gradient is large, so this checks
+    # that the Fock terms carry the second-order part of exp(K) exactly;
+    # measured: slope 1.2e-11 and 7.6e-12 relative, curvature 2.7e-9 and 1.8e-9
+    stab_fs, stab_fc = stab_t_fd(stab_t_water_orb(1), stab_t_water(), 777)
+    assert_lt(stab_fs, 1.0e-9)
+    assert_lt(stab_fc, 1.0e-7)
+    stab_fs, stab_fc = stab_t_fd(stab_t_oh_core_orb(), stab_t_oh(), 778)
+    assert_lt(stab_fs, 1.0e-9)
+    assert_lt(stab_fc, 1.0e-7)
+}
+
+test "a rotation by t then by -t returns the orbitals, and keeps them orthonormal" {
+    stab_orb = stab_t_water_orb(0)
+    stab_v = stab_t_direction(stab_nparam(stab_orb), 99)
+    stab_b = stab_rotate(stab_rotate(stab_orb, stab_v, 0.7), stab_v, -0.7)
+    assert_lt(max(abs(slab(stab_b, 0) - slab(stab_orb, 0))), 1.0e-13)
+    # the rotated density still holds 10 electrons and D S D = 2 D
+    stab_D = stab_density(stab_rotate(stab_orb, stab_v, 0.7))
+    assert_lt(abs(den_trace(stab_D, 0, water631g_s_unit()) - 10.0), 1.0e-12)
+    assert_lt(den_idempotency(stab_D, 0, water631g_s_unit(), 2.0), 1.0e-12)
+}
+
+test "water 6-31G is stable and follow-down leaves it alone, with either Hessian member" {
+    stab_pw = stab_t_water()
+    stab_D = den_stack1(water631g_rhf_d())
+    stab_r = stab_follow(stab_pw, stab_D)
+    assert_near(stab_r.label, STAB_STABLE, 0.0)
+    assert_near(stab_r.label_end, STAB_STABLE, 0.0)
+    assert_near(stab_r.steps, 0, 0.0)
+    assert_gt(stab_r.lowest, 0.1)
+    assert_near(stab_r.energy, stab_r.energy0, 0.0)
+    assert_lt(abs(stab_r.energy - WATER631G_E_RHF), 1.0e-10)
+    # the lowest eigenvalue on its own, from the same densities, is the one
+    # the analysis started from
+    stab_lo, stab_v = stab_lowest_of(stab_pw, stab_D)
+    assert_near(stab_lo, stab_r.lowest, 0.0)
+    stab_q = stab_follow(ScfSetup { options: ScfOptions { stab_hessian: STAB_HESS_JK, ..stab_pw.options }, ..stab_pw }, stab_D)
+    assert_lt(abs(stab_q.lowest - stab_r.lowest), 1.0e-12)
+}
+
+test "a Hessian member one entry off by 1e-9 is caught and blamed" {
+    stab_rep = sw_rep_new()
+    stab_orb = stab_t_water_orb(0)
+    stab_np = stab_nparam(stab_orb)
+    stab_out = zeros(stab_np, stab_np)
+    stab_ms = [stab_hess_mo, stab_hess_jk, stab_t_bad]
+    stab_ok = sw_check3_arr(stab_ms, stab_orb, water631g_t_unit() + water631g_v_unit(), water631g_eri8_cart(), stab_np * stab_np, stab_np * stab_np, 1.0e-12, stab_rep, stab_out)
+    assert_near(stab_ok, 0, 0.0)
+    assert_near(stab_rep[SW_REP_STRAT], 2, 0.0)
+    assert_near(stab_rep[SW_REP_INDEX], 3 * 40 + 5, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

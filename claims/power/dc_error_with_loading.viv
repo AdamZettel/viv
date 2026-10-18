@@ -1,0 +1,83 @@
+###
+title: DC power flow gets worse as the grid loads up
+line: On case118 the DC branch-flow error is 8% at half load, 13% at base load and 52% at three times base load.
+claim: On MATPOWER's case118 with every load and generator scaled from 0.5 to 3 times its base value, the DC power flow's largest branch-flow error, relative to the largest AC flow, grows at every step (between 10% and 17% at base load, above 40% at three times it). It is about 8% at half load, 13% at base load and 52% at three times base load, and the AC Newton flow converges at all six loadings.
+topic: power
+section: power flow
+reference: The AC Newton solution of the same case (lib/power, equal to MATPOWER's and PYPOWER's to $10^{-9}$ per unit, lib/power/COMPARISON.md) is the reference for the DC flows; the DC model's assumptions ($V_m = 1$, no resistance, $\sin \Delta\theta = \Delta\theta$, no reactive power) as in the MATPOWER manual, section 4.1.
+scope: MATPOWER's case118 with every load and every generator's real output scaled by the same factor (reactive loads too), the reference bus absorbing the mismatch; the error is the largest $|P_f^{\mathrm{DC}} - P_f^{\mathrm{AC}}|$ over branches, divided by the largest $|P_f^{\mathrm{AC}}|$. Only scalings at which the AC Newton flow converges are used.
+lane: ai
+by: claude
+cost: fast
+###
+
+from power.case import Case, PD, PF, PG, QD, read_case
+from power.pf import DC, NR, runpf
+
+LOADINGS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+TOL = 1.0e-8
+MAX_IT: Int = 30
+
+base = read_case("lib/power/cases/case118.m")
+n_load: Int = len(LOADINGS)
+dc_error = zeros(n_load)
+converged: Int = 0
+nbus: Int = int(shape(base.bus)[0])
+ngen: Int = int(shape(base.gen)[0])
+for li to n_load {
+    bus = copy(base.bus)
+    gen = copy(base.gen)
+    for bi to nbus {
+        bus[bi, PD] = LOADINGS[li] * base.bus[bi, PD]
+        bus[bi, QD] = LOADINGS[li] * base.bus[bi, QD]
+    }
+    for gi to ngen {
+        gen[gi, PG] = LOADINGS[li] * base.gen[gi, PG]
+    }
+    scaled = Case { base_mva: base.base_mva, bus: bus, gen: gen, branch: base.branch }
+    ac = runpf(scaled, NR, false, TOL, MAX_IT)
+    dc = runpf(scaled, DC, false, TOL, MAX_IT)
+    if ac.success {
+        converged = converged + 1
+    }
+    nbr: Int = int(shape(base.branch)[0])
+    worst = 0.0
+    biggest = 0.0
+    for k to nbr {
+        worst = max(worst, abs(dc.branch[k, PF] - ac.branch[k, PF]))
+        biggest = max(biggest, abs(ac.branch[k, PF]))
+    }
+    dc_error[li] = worst / biggest
+}
+show dc_error
+show converged
+dc_error_half = dc_error[0]
+dc_error_base = dc_error[1]
+dc_error_triple = dc_error[n_load - 1]
+show dc_error_half
+show dc_error_base
+show dc_error_triple
+
+#: the figure: the DC error against loading, in percent
+PERCENT = 100.0
+figure("DC power flow error on case118", "loading (times base)", "largest branch-flow error, % of largest AC flow")
+plot(LOADINGS, dc_error * PERCENT, "DC against AC Newton")
+style("DC against AC Newton", "s1 circle")
+
+test "the AC flow converges at all six loadings" {
+    assert_true(converged == n_load)
+    assert_true(n_load == 6)
+}
+test "the DC error grows at every step of loading" {
+    for li from 1 to n_load {
+        assert_gt(dc_error[li], dc_error[li - 1])
+    }
+}
+test "it is between 10% and 17% at base load and above 40% at three times base load" {
+    assert_gt(dc_error_base, 0.10)
+    assert_lt(dc_error_base, 0.17)
+    assert_gt(dc_error_triple, 0.40)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

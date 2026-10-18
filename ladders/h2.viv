@@ -1,0 +1,438 @@
+#! ladder Hartree-Fock for H₂
+#! | This page builds a Hartree-Fock program for the hydrogen molecule, H₂, in six steps,
+#! | starting from a single Gaussian function. Each step is a complete program that runs.
+#! | The last one prints the ground-state energy, −1.1167 hartree at a bond length of
+#! | 1.4 bohr, the value Szabo and Ostlund work out by hand in Modern Quantum Chemistry.
+
+rung "One Gaussian, and the overlap of two" {
+    #| Every integral in the calculation is built from pairs of these; get one pair right first
+    #|
+    #| Quantum chemistry expands each orbital in Gaussians, $\phi(\mathbf r) = N e^{-\alpha |\mathbf r - \mathbf A|^2}$,
+    #| for one reason: the product of two Gaussians on different centers is a third Gaussian
+    #| on a point between them. Every integral below leans on that.
+    #|
+    #| The overlap of two normalized s-Gaussians is closed-form:
+    #| $S = N_a N_b\,(\pi/p)^{3/2}\,e^{-(ab/p)\,|\mathbf A - \mathbf B|^2}$ with $p = a + b$ and
+    #| $N_a = (2a/\pi)^{3/4}$. Two checks pin it down: a function overlaps itself exactly once,
+    #| and the overlap falls as the centers separate.
+
+    pi = 3.141592653589793
+    def dist_sq(A, B) {
+        "Squared euclidean distance between two 3-vectors."
+        d0 = A[0] - B[0]
+        d1 = A[1] - B[1]
+        d2 = A[2] - B[2]
+        return d0 * d0 + d1 * d1 + d2 * d2
+    }
+    def prim_overlap(a, A, b, B) {
+        "Overlap (a A | b B) for two normalized primitive s-Gaussians."
+        p = a + b
+        r2 = dist_sq(A, B)
+        K = exp(-a * b / p * r2)
+        Na = pow(2.0 * a / pi, 0.75)
+        Nb = pow(2.0 * b / pi, 0.75)
+        return Na * Nb * pow(pi / p, 1.5) * K
+    }
+    origin = [0.0, 0.0, 0.0]
+    bond = [0.0, 0.0, 1.4]
+    self_overlap = prim_overlap(0.5, origin, 0.5, origin)
+    apart = prim_overlap(0.5, origin, 0.5, bond)
+    show self_overlap
+    show apart
+    test "a normalized Gaussian overlaps itself exactly once" {
+        assert_near(self_overlap, 1.0, 1.0e-14)
+    }
+    test "two Gaussians a bond length apart overlap less, by exp(-(ab/p) R^2)" {
+        assert_near(apart, exp(-0.25 * 1.4 * 1.4), 1.0e-14)
+    }
+}
+
+rung "The overlap matrix of H₂" {
+    #| A single Gaussian is a poor hydrogen 1s (wrong cusp, wrong tail); STO-3G fixes it with three
+    #|
+    #| STO-3G writes each hydrogen 1s as a fixed sum of three normalized primitives,
+    #| $\chi = \sum_p d_p\,\phi_p$. An integral over contracted functions is then a double sum
+    #| over primitive integrals, weighted by $d_p d_q$ -- nine terms for a pair of hydrogens.
+    #|
+    #| Put one such function on each proton, 1.4 bohr apart, and the overlap matrix comes out
+    #| with $S_{11} = 1$ (the contraction is normalized) and $S_{12} = 0.6593$, the first number in
+    #| Szabo and Ostlund's worked example (Modern Quantum Chemistry, section 3.5.2).
+    #|
+    #| `contracted_one_elec` takes a `kind` so that one loop can serve every one-electron
+    #| operator. It knows only kind 0, the overlap, for now. The next two rungs each teach it
+    #| one more kind.
+
+    # STO-3G for hydrogen: three primitives, contraction coefficients on NORMALIZED primitives.
+    alpha_h = [3.42525091, 0.62391373, 0.16885540]
+    d_h     = [0.15432897, 0.53532814, 0.44463454]
+    n_prim = 3
+
+    # H2 at R = 1.4 bohr along z. One contracted s function on each proton.
+    R_HH = 1.4
+    centers = [[0.0, 0.0, 0.0],
+               [0.0, 0.0, R_HH]]
+    Z = [1.0, 1.0]
+    n_atoms = 2
+    n_basis = 2
+    basis_atom = [0, 1]
+
+    def center_of(atom_idx) {
+        "Pluck the 3-vec center of atom atom_idx out of the 2x3 centers mat."
+        R = zeros(3)
+        R[0] = centers[atom_idx, 0]
+        R[1] = centers[atom_idx, 1]
+        R[2] = centers[atom_idx, 2]
+        return R
+    }
+    def contracted_one_elec(mu, nu, kind, C, Zc) {
+        "kind = 0 overlap. C and Zc are unused so far."
+        A = center_of(basis_atom[mu])
+        B = center_of(basis_atom[nu])
+        total = 0.0
+        for p to n_prim {
+            for q to n_prim {
+                a = alpha_h[p]
+                b = alpha_h[q]
+                dp = d_h[p]
+                dq = d_h[q]
+                v = 0.0
+                if kind == 0 { v = prim_overlap(a, A, b, B) }
+                total += dp * dq * v
+            }
+        }
+        return total
+    }
+    z3 = zeros(3)
+    S = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            S[mu, nu] = contracted_one_elec(mu, nu, 0, z3, 0.0)
+        }
+    }
+    show S
+    test "the STO-3G contraction is normalized: S11 = 1" {
+        assert_near(S[0, 0], 1.0, 1.0e-6)
+    }
+    test "S12 = 0.6593 at R = 1.4 bohr (Szabo and Ostlund 3.5.2)" {
+        assert_near(S[0, 1], 0.6593, 5.0e-5)
+    }
+}
+
+rung "Kinetic energy" {
+    #| The first operator: it needs nothing new but one formula, which makes it the right first edit
+    #|
+    #| For s-Gaussians the kinetic integral is the overlap times a polynomial:
+    #| $T = \frac{ab}{p}\left(3 - \frac{2ab}{p}|\mathbf A - \mathbf B|^2\right) S$.
+    #| So `prim_kinetic` calls `prim_overlap` rather than repeating it.
+    #|
+    #| One function changes: `contracted_one_elec` learns kind 1, the kinetic energy.
+    #|
+    #| Szabo and Ostlund: $T_{11} = 0.7600$, $T_{12} = 0.2365$.
+
+    def prim_kinetic(a, A, b, B) {
+        "Kinetic energy (a A | -1/2 nabla^2 | b B)."
+        p = a + b
+        r2 = dist_sq(A, B)
+        S = prim_overlap(a, A, b, B)
+        return a * b / p * (3.0 - 2.0 * a * b / p * r2) * S
+    }
+    def contracted_one_elec(mu, nu, kind, C, Zc) {
+        "kind = 0 overlap, 1 kinetic. C and Zc are unused so far."
+        A = center_of(basis_atom[mu])
+        B = center_of(basis_atom[nu])
+        total = 0.0
+        for p to n_prim {
+            for q to n_prim {
+                a = alpha_h[p]
+                b = alpha_h[q]
+                dp = d_h[p]
+                dq = d_h[q]
+                v = 0.0
+                if kind == 0 { v = prim_overlap(a, A, b, B) }
+                if kind == 1 { v = prim_kinetic(a, A, b, B) }
+                total += dp * dq * v
+            }
+        }
+        return total
+    }
+    T = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            T[mu, nu] = contracted_one_elec(mu, nu, 1, z3, 0.0)
+        }
+    }
+    show T
+    test "kinetic energy: T11 = 0.7600, T12 = 0.2365 (Szabo and Ostlund)" {
+        assert_near(T[0, 0], 0.7600, 5.0e-5)
+        assert_near(T[0, 1], 0.2365, 5.0e-5)
+    }
+}
+
+rung "Nuclear attraction" {
+    #| The electron-nucleus term is the first integral that is not elementary: it needs F0
+    #|
+    #| The Coulomb operator $1/|\mathbf r - \mathbf C|$ is not a Gaussian, but it is an integral
+    #| over Gaussians, and that turns the attraction into
+    #| $V = -\frac{2\pi}{p} Z_C N_a N_b\,e^{-(ab/p)|\mathbf A-\mathbf B|^2}\,F_0\!\left(p\,|\mathbf P - \mathbf C|^2\right)$,
+    #| where $\mathbf P$ is the product center and $F_0(T) = \int_0^1 e^{-T t^2}\,dt$ is the Boys function.
+    #|
+    #| $F_0$ is computed here by Simpson's rule -- slow, and it reads like the definition. It also
+    #| has a closed form, $F_0(T) = \tfrac12\sqrt{\pi/T}\,\mathrm{erf}\sqrt T$, which the test uses as an
+    #| independent check: two routes to one number.
+    #|
+    #| Szabo and Ostlund: $V^{1}_{11} = -1.2266$, and the core Hamiltonian
+    #| $H_{11} = -1.1204$, $H_{12} = -0.9584$.
+
+    def boys_F0(T) {
+        "F0(T) = integral_0^1 exp(-T t^2) dt, by Simpson's rule; the series near T = 0."
+        if T < 1.0e-8 {
+            return 1.0 - T / 3.0 + T * T / 10.0
+        }
+        return simpson(fn(t) -> exp(-T * t * t), 0.0, 1.0, 60)
+    }
+    def gauss_product_center(a, A, b, B) {
+        "Gaussian product theorem: center of the product of two s-Gaussians."
+        p = a + b
+        P = zeros(3)
+        P[0] = (a * A[0] + b * B[0]) / p
+        P[1] = (a * A[1] + b * B[1]) / p
+        P[2] = (a * A[2] + b * B[2]) / p
+        return P
+    }
+    def prim_nuclear(a, A, b, B, C, Zc) {
+        "Nuclear attraction (a A | -Zc/|r-C| | b B)."
+        p = a + b
+        Na = pow(2.0 * a / pi, 0.75)
+        Nb = pow(2.0 * b / pi, 0.75)
+        P = gauss_product_center(a, A, b, B)
+        rAB = dist_sq(A, B)
+        rPC = dist_sq(P, C)
+        K = exp(-a * b / p * rAB)
+        return -2.0 * pi / p * Zc * Na * Nb * K * boys_F0(p * rPC)
+    }
+
+    def contracted_one_elec(mu, nu, kind, C, Zc) {
+        "kind = 0 overlap, 1 kinetic, 2 nuclear attraction to (C, Zc).
+         For overlap/kinetic, C and Zc are ignored."
+        A = center_of(basis_atom[mu])
+        B = center_of(basis_atom[nu])
+        total = 0.0
+        for p to n_prim {
+            for q to n_prim {
+                a = alpha_h[p]
+                b = alpha_h[q]
+                dp = d_h[p]
+                dq = d_h[q]
+                v = 0.0
+                if kind == 0 { v = prim_overlap(a, A, b, B) }
+                if kind == 1 { v = prim_kinetic(a, A, b, B) }
+                if kind == 2 { v = prim_nuclear(a, A, b, B, C, Zc) }
+                total += dp * dq * v
+            }
+        }
+        return total
+    }
+    V1 = zeros(n_basis, n_basis)
+    V = zeros(n_basis, n_basis)
+    H_core = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            V1[mu, nu] = contracted_one_elec(mu, nu, 2, center_of(0), Z[0])
+            v_total = 0.0
+            for atom to n_atoms {
+                v_total += contracted_one_elec(mu, nu, 2, center_of(atom), Z[atom])
+            }
+            V[mu, nu] = v_total
+            H_core[mu, nu] = T[mu, nu] + V[mu, nu]
+        }
+    }
+    show V1
+    show H_core
+    test "the Boys function by quadrature agrees with its closed form, sqrt(pi/T) erf(sqrt T) / 2" {
+        assert_near(boys_F0(0.0), 1.0, 1.0e-14)
+        assert_near(boys_F0(0.7), 0.5 * sqrt(pi / 0.7) * erf(sqrt(0.7)), 1.0e-9)
+        assert_near(boys_F0(9.0), 0.5 * sqrt(pi / 9.0) * erf(3.0), 1.0e-7)
+    }
+    test "attraction to the first proton: V11 = -1.2266 (Szabo and Ostlund)" {
+        assert_near(V1[0, 0], -1.2266, 5.0e-5)
+    }
+    test "the core Hamiltonian: H11 = -1.1204, H12 = -0.9584 (Szabo and Ostlund)" {
+        assert_near(H_core[0, 0], -1.1204, 5.0e-5)
+        assert_near(H_core[0, 1], -0.9584, 5.0e-5)
+    }
+}
+
+rung "Electron repulsion" {
+    #| Everything so far is one electron in a fixed field; repulsion is what makes it a many-body problem
+    #|
+    #| $(\mu\nu|\lambda\sigma)$ is the repulsion between the charge clouds $\chi_\mu\chi_\nu$ and
+    #| $\chi_\lambda\chi_\sigma$. Each cloud collapses to one Gaussian at its product center, and the
+    #| two interact through the same Boys function as before, now at $\frac{pq}{p+q}|\mathbf P - \mathbf Q|^2$.
+    #|
+    #| This rung adds two functions and changes none. The contracted integral is a four-fold sum -- 81 primitive integrals
+    #| for each of the 16 elements, of which symmetry leaves only four distinct values.
+    #|
+    #| Szabo and Ostlund: $(11|11) = 0.7746$, $(11|22) = 0.5697$, $(21|11) = 0.4441$, $(21|21) = 0.2970$.
+
+    def prim_eri(a, A, b, B, c, C, d, D) {
+        "Two-electron repulsion (a A b B | c C d D) over four s primitives."
+        p = a + b
+        q = c + d
+        Na = pow(2.0 * a / pi, 0.75)
+        Nb = pow(2.0 * b / pi, 0.75)
+        Nc = pow(2.0 * c / pi, 0.75)
+        Nd = pow(2.0 * d / pi, 0.75)
+        rAB = dist_sq(A, B)
+        rCD = dist_sq(C, D)
+        P = gauss_product_center(a, A, b, B)
+        Q = gauss_product_center(c, C, d, D)
+        rPQ = dist_sq(P, Q)
+        K1 = exp(-a * b / p * rAB)
+        K2 = exp(-c * d / q * rCD)
+        pref = 2.0 * pow(pi, 2.5) / (p * q * sqrt(p + q))
+        return Na * Nb * Nc * Nd * pref * K1 * K2 * boys_F0(p * q / (p + q) * rPQ)
+    }
+    def contracted_eri(mu, nu, lam, sig) {
+        "Two-electron (mu nu | lam sig) over contracted basis functions."
+        A = center_of(basis_atom[mu])
+        B = center_of(basis_atom[nu])
+        C = center_of(basis_atom[lam])
+        D = center_of(basis_atom[sig])
+        total = 0.0
+        for p to n_prim {
+            for q to n_prim {
+                for r to n_prim {
+                    for s to n_prim {
+                        a = alpha_h[p]
+                        b = alpha_h[q]
+                        c = alpha_h[r]
+                        dd = alpha_h[s]
+                        coef4 = d_h[p] * d_h[q] * d_h[r] * d_h[s]
+                        total += coef4 * prim_eri(a, A, b, B, c, C, dd, D)
+                    }
+                }
+            }
+        }
+        return total
+    }
+    eri = zeros(n_basis, n_basis, n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            for lam to n_basis {
+                for sig to n_basis {
+                    eri[mu, nu, lam, sig] = contracted_eri(mu, nu, lam, sig)
+                }
+            }
+        }
+    }
+    show eri
+    test "two-electron integrals: (11|11), (11|22), (21|11), (21|21) (Szabo and Ostlund)" {
+        assert_near(eri[0, 0, 0, 0], 0.7746, 5.0e-5)
+        assert_near(eri[0, 0, 1, 1], 0.5697, 5.0e-5)
+        assert_near(eri[1, 0, 0, 0], 0.4441, 5.0e-5)
+        assert_near(eri[1, 0, 1, 0], 0.2970, 5.0e-5)
+    }
+    test "the integrals have their eightfold symmetry" {
+        assert_near(eri[1, 0, 0, 0], eri[0, 1, 0, 0], 1.0e-14)
+        assert_near(eri[1, 0, 0, 0], eri[0, 0, 1, 0], 1.0e-14)
+        assert_near(eri[0, 0, 1, 1], eri[1, 1, 0, 0], 1.0e-14)
+    }
+}
+
+rung "The self-consistent field" {
+    #| The Fock operator depends on the orbitals it determines, so the equations are solved by iteration
+    #|
+    #| With every integral in hand, Hartree-Fock is linear algebra in a loop: build
+    #| $F = H^{\rm core} + G(P)$ from the density, diagonalize it in an orthonormalized basis
+    #| ($X = S^{-1/2}$), occupy the lowest orbital, form the new density, repeat.
+    #|
+    #| For H2 in a minimal basis symmetry fixes the orbitals, so the loop converges at once --
+    #| which makes it a clean test of the machinery rather than of convergence.
+    #|
+    #| Szabo and Ostlund: $E = -1.1167$ hartree at $R = 1.4$ bohr, with orbital energies
+    #| $\varepsilon_1 = -0.578$ and $\varepsilon_2 = +0.670$.
+
+    # Symmetric orthogonalization: X = S^(-1/2) = U diag(1/sqrt(s)) U^T.
+    s_vals = zeros(n_basis)
+    s_vecs = zeros(n_basis, n_basis)
+    eig_sym(S, s_vals, s_vecs)
+    D_inv_sqrt = zeros(n_basis, n_basis)
+    for i to n_basis {
+        D_inv_sqrt[i, i] = 1.0 / sqrt(s_vals[i])
+    }
+    X = s_vecs @ D_inv_sqrt @ transpose(s_vecs)
+    ortho = transpose(X) @ S @ X
+    n_occ = 1
+    E_nuc = Z[0] * Z[1] / sqrt(dist_sq(center_of(0), center_of(1)))
+    P = zeros(n_basis, n_basis)
+    eps_vals = zeros(n_basis)
+    E_total = 0.0
+    converged = false
+    n_iter = 0.0
+    for iter to 50 {
+        # G = sum P [(mu nu | lam sig) - 1/2 (mu lam | nu sig)]
+        G = zeros(n_basis, n_basis)
+        for mu to n_basis {
+            for nu to n_basis {
+                g = 0.0
+                for lam to n_basis {
+                    for sig to n_basis {
+                        g += P[lam, sig] * (eri[mu, nu, lam, sig] - 0.5 * eri[mu, lam, nu, sig])
+                    }
+                }
+                G[mu, nu] = g
+            }
+        }
+        F = H_core + G
+        Cp = zeros(n_basis, n_basis)
+        eig_sym(transpose(X) @ F @ X, eps_vals, Cp)
+        C = X @ Cp
+        P_new = zeros(n_basis, n_basis)
+        E_elec = 0.0
+        for mu to n_basis {
+            for nu to n_basis {
+                s = 0.0
+                for a to n_occ {
+                    s += C[mu, a] * C[nu, a]
+                }
+                P_new[mu, nu] = 2.0 * s
+            }
+        }
+        for mu to n_basis {
+            for nu to n_basis {
+                E_elec += 0.5 * P_new[mu, nu] * (H_core[mu, nu] + F[mu, nu])
+            }
+        }
+        E_total = E_elec + E_nuc
+        delta = 0.0
+        for mu to n_basis {
+            for nu to n_basis {
+                delta = max(delta, abs(P_new[mu, nu] - P[mu, nu]))
+            }
+        }
+        P = P_new
+        n_iter = iter + 1.0
+        if delta < 1.0e-8 {
+            converged = true
+            break
+        }
+    }
+    show n_iter
+    show eps_vals
+    show E_total
+    test "X orthonormalizes the basis: X^T S X = 1" {
+        assert_near(ortho[0, 0], 1.0, 1.0e-12)
+        assert_near(ortho[0, 1], 0.0, 1.0e-12)
+    }
+    test "H2/STO-3G: E = -1.1167 hartree at R = 1.4 bohr (Szabo and Ostlund)" {
+        assert_true(converged)
+        assert_near(E_total, -1.1167, 5.0e-5)
+    }
+    test "orbital energies: -0.578 and +0.670 hartree (Szabo and Ostlund)" {
+        assert_near(eps_vals[0], -0.578, 5.0e-4)
+        assert_near(eps_vals[1], 0.670, 5.0e-4)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

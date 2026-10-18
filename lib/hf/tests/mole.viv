@@ -1,0 +1,26 @@
+# The tests of lib/hf/mole that need basis tables: the text form against the
+# array form, in 6-31G and STO-3G. They live here so that lib/hf/mole loads
+# no table of its own; lib/basis/all gives every set by name.
+from hf.mole import mol_coverage, mol_is_bohr, molecule, molecule_in
+from hf.molecule import molecule_from
+from hf.basis import AT_Z
+import basis.all
+from basis.sto3g import basis_sto3g
+from basis.pople631g import basis_631g
+
+test "water from text is water from atomic numbers, in angstrom and in bohr" {
+    mol_t = molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31G")
+    mol_a = molecule_from([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]], basis_631g())
+    assert_true(all(mol_t.atoms == mol_a.atoms) and all(mol_t.shells == mol_a.shells) and all(mol_t.prims == mol_a.prims))
+    mol_x = molecule("3\nwater\nO 0 0 0\nH 0 -0.757 0.587\nH 0 0.757 0.587\n", "631g")
+    assert_true(all(mol_x.atoms == mol_a.atoms))
+    mol_b = molecule_in("H 0 0 0\nH 0 0 1.4", "sto-3g", "Bohr")
+    assert_near(mol_b.atoms[1, AT_Z], 1.4, 0.0)
+    assert_near(mol_b.charge + mol_b.spin + mol_b.cart, 0, 0.0)
+    assert_near(mol_is_bohr("AU") + mol_is_bohr("b"), 2, 0.0)
+    assert_near(mol_is_bohr("Angstrom") + mol_is_bohr("A"), 0, 0.0)
+    assert_true(mol_coverage(basis_sto3g()) == "H to Ar")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

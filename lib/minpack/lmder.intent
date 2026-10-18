@@ -1,0 +1,318 @@
+module lib/minpack/lmder  documents every variable
+  Nonlinear least squares: find the parameters $x$ (n numbers) that make m
+  residuals $f_1(x), \ldots, f_m(x)$ as small as possible, in the sense of the
+  sum of their squares $\lVert f(x) \rVert^2 = \sum_i f_i(x)^2$. Fitting a model
+  to data is the usual case: $x$ holds the model's parameters, and $f_i$ is the
+  model's prediction at the i-th data point minus the measured value. Squaring
+  makes every residual count whatever its sign, and makes the sum smooth, so
+  derivatives can guide the search.
+
+  This is a port of MINPACK's lmder (Moré, Garbow and Hillstrom, Argonne,
+  1980), the routine behind scipy.optimize.leastsq and many other fitting
+  codes. It needs the Jacobian $J$, the m x n matrix of derivatives
+  $J_{ij} = \partial f_i / \partial x_j$: row i says how residual i changes when
+  each parameter moves. Near $x$, $f$ is close to its linear model
+  $f(x + p) \approx f(x) + J p$, and minimizing $\lVert f + J p \rVert^2$ over the
+  step $p$ is a linear least-squares problem, whose answer is the Gauss-Newton
+  step. The model is only good near $x$, so lmder limits the step to a trust
+  region $\lVert D p \rVert \le \Delta$: a ball of radius $\Delta$ (an
+  ellipsoid, with the scaling $D$) inside which the model is trusted.
+
+  Limiting the step's length is the same as adding a penalty
+  $\lambda \lVert D p \rVert^2$ to the model's sum of squares; the $\lambda$ that
+  makes the step exactly as long as $\Delta$ is the Levenberg-Marquardt
+  parameter, and lmpar finds it. After each trial step lmder compares the
+  reduction of the sum of squares it got with the reduction the linear model
+  predicted, and grows or shrinks $\Delta$ by how well they agree.
+
+  Two loops. The outer one computes one Jacobian per pass and factors it. The
+  inner one proposes trial steps from that factorization until one of them
+  lowers the sum of squares, shrinking $\Delta$ after each failure; most passes
+  need one trial.
+
+  The Fortran is one routine of about 150 statements held together by go-to
+  statements; the steps below name its blocks, in their original order.
+  lib/minpack/README.md maps each step to the Fortran's labels.
+
+lmder  @b769c32b
+  what             Minimize $\lVert f(x) \rVert^2$ over $x$, starting from the $x$ passed
+                   in, with the Jacobian supplied by fcn. Returns info, the reason it
+                   stopped; x and fvec hold the answer and its residuals, the top n x n
+                   of fjac holds R of the last QR factorization, ipvt its column order,
+                   and qtf the first n entries of $Q^\top f$.
+  how              Outer loop: evaluate $J$, factor it as $J P = Q R$ (qrfac), measure
+                   how nearly $f$ is orthogonal to the columns of $J$ (gnorm), and
+                   update the scaling $D$. Inner loop: ask lmpar for the $\lambda$ and
+                   step $p$ with $\lVert D p \rVert$ close to $\Delta$, evaluate $f$ at
+                   $x + p$, and compare the actual reduction of $\lVert f \rVert^2$
+                   with the model's prediction. Their ratio $\rho$ decides everything
+                   that follows: at most $\tfrac14$ (`LM_RATIO_SHRINK`) the radius
+                   shrinks, at least $\tfrac34$ (`LM_RATIO_EXPAND`) it doubles, and the
+                   step is taken if $\rho$ is at least $10^{-4}$ (`LM_RATIO_ACCEPT`).
+                   The loops end when one of the tolerance tests passes.
+  why              A plain Gauss-Newton step can be far too long where $f$ is strongly
+                   curved. On Rosenbrock's function from the standard start, the first
+                   trial is the Gauss-Newton step, 71.7 long in a radius of 3051; the
+                   sum of squares goes up instead of down (the norm from 4.92 to 48.4),
+                   the ratio is -95.8, and the radius drops to 7.17. The next trial,
+                   with $\lambda = 0.0078$, is accepted
+                   [test "Rosenbrock's first trial is the Gauss-Newton step, 71.7 long in a radius of 3051; f grows from 4.92 to 48.4, ratio -95.8, and the radius drops to 7.17"].
+                   On that problem 5 of the 20 trial steps are rejected and the norm
+                   never rises [test "5 of the 20 trial steps on Rosenbrock are rejected, and fnorm never rises"],
+                   and every recorded number of every trial step equals the Fortran's
+                   [test "all 20 trial steps on Rosenbrock equal the Fortran's, every recorded number to the last bit"].
+  fcn              the user's def: residuals into fvec for iflag 1, the Jacobian into
+                   fjac for iflag 2; returns iflag, or a negative number to stop
+  x                $x$  the parameters: the starting point on entry, the answer on
+                   return; a trial point is formed apart from it, in wa2
+  fvec             $f$  the m residuals at the current $x$
+  fjac             $J$  the m x n Jacobian at the current $x$; after the qr step its
+                   upper triangle holds $R$ and the part below holds the Householder
+                   vectors that define $Q$
+  fnorm            $\lVert f \rVert$  the Euclidean norm of the residuals at the
+                   current $x$
+  fnorm1           $\lVert f_{+} \rVert$  the norm of the residuals at the trial point
+                   $x + p$
+  delta            $\Delta$  the trust radius: steps must satisfy
+                   $\lVert D p \rVert \le \Delta$ (lmpar aims for $\lVert D p \rVert$
+                   within a tenth of $\Delta$ when the Gauss-Newton step is longer)
+  delta_in         $\Delta_{\mathrm{in}}$  the radius lmpar was given for this trial,
+                   kept for hist
+  diag             $D$  the scaling, one positive number per variable. By default it is
+                   the norm of each column of the first Jacobian, and never decreases
+                   after. It measures each variable by how much it moves $f$, so
+                   rescaling a variable does not change the iterates.
+  par              $\lambda$  the Levenberg-Marquardt parameter: the step solves
+                   $(J^\top J + \lambda D^\top D)\, p = -J^\top f$. Zero gives the
+                   Gauss-Newton step; a large $\lambda$ gives a short step close to
+                   steepest descent. lmder carries it from one call of lmpar to the
+                   next as a starting guess.
+  par_lm           $\lambda_{\mathrm{lm}}$  the $\lambda$ lmpar returned for this trial,
+                   before the radius update changes par
+  pnorm            $\lVert D p \rVert$  the scaled length of the trial step
+  actred           $\mathrm{ared}$  the actual relative reduction of the sum of
+                   squares, $1 - \lVert f_{+} \rVert^2 / \lVert f \rVert^2$
+  prered           $\mathrm{pred}$  the reduction the linear model predicts, in the
+                   same units
+  ratio            $\rho$  $\mathrm{ared} / \mathrm{pred}$: 1 means the model was exact, a
+                   negative value means the sum of squares went up
+  temp1            $t_1$  $\lVert J p \rVert / \lVert f \rVert$
+  temp2            $t_2$  $\sqrt{\lambda}\, \lVert D p \rVert / \lVert f \rVert$
+  gnorm            $\gamma$  the largest cosine of the angle between $f$ and a column
+                   of $J$; zero at a stationary point, where $J^\top f = 0$
+  xnorm            $\lVert D x \rVert$  the scaled size of $x$, which the xtol test
+                   measures $\Delta$ against
+  qtf              $Q^\top f$  the first n entries of the residuals rotated by $Q^\top$
+  iter             $k$  the outer iteration: 1 plus the number of steps taken so far
+  epsmch           $\varepsilon$  the machine precision, as MINPACK's dpmpar gives it
+  LM_RATIO_SHRINK  $\tfrac14$  at most this $\rho$ and the radius shrinks
+  LM_RATIO_EXPAND  $\tfrac34$  at least this $\rho$ and the radius doubles
+  LM_RATIO_ACCEPT  $10^{-4}$  at least this $\rho$ and the step is taken
+  LM_SHRINK_MIN    $0.1$  the smallest factor a shrink multiplies the radius by
+  LM_RISE_LIMIT    $0.1$  a trial norm at least ten times the current one counts as
+                   $\mathrm{ared} = -1$
+  hist             one row per trial step, in the columns H_ITER ... H_X; see the
+                   header of lmder.viv
+  data             the array lmder hands to fcn unchanged: whatever the problem needs
+                   (here its number in MINPACK's test set and its sizes)
+  ftol             stop (info 1) when both the actual and the predicted relative
+                   reduction of the sum of squares are at most this
+  xtol             stop (info 2) when the trust radius is at most this fraction of
+                   $\lVert D x \rVert$: $x$ is then known to about this relative accuracy
+  gtol             stop (info 4) when gnorm is at most this; lmder1 passes 0, so the
+                   test fires only at an exact stationary point
+  maxfev           the most evaluations of f allowed; reaching it stops lmder (info 5)
+  mode             how the scaling $D$ is chosen: 1, from the Jacobian's column norms
+                   (lmder1's choice); 2, the caller's diag, used as given
+  factor           the first radius as a multiple of $\lVert D x_0 \rVert$
+  nprint           call fcn with iflag 0 every nprint passes so it can print
+                   progress; 0 or less never does
+  ipvt             $\pi$  the column order of the last QR factorization: column j of
+                   $J P$ is column $\pi_j$ of $J$
+  counts           on return, the number of evaluations of f and of J
+  m                $m$  the number of residuals
+  n                $n$  the number of parameters
+  wa1              a work vector of n numbers, allocated once; the Fortran reuses it
+                   for different things, and the lines below say what it holds where
+  wa1@qr           the diagonal of $R$, which qrfac returns here (fjac's own
+                   diagonal holds the Householder vectors); the qtf step puts it back
+                   into fjac
+  wa1@lm_parameter $u$  the step lmpar returns, with its sign flipped: $u = -p$
+  wa1@trial        $p$  the trial step, after the sign flip
+  wa2              a work vector of n numbers, reused like wa1
+  wa2@qr           $\lVert J_{:,j} \rVert$  the norm of each column of $J$, which
+                   qrfac returns here; the scale, gradient and rescale steps read it
+  wa2@lm_parameter scratch space for lmpar: the diagonal of the damped triangle it
+                   builds (its sdiag)
+  wa2@trial        $x + p$  the trial point
+  wa2@accept#1     $D x$  the new point, scaled, for its norm xnorm
+  wa3              a work vector of n numbers, reused like wa1
+  wa3@qr           scratch space for qrfac (the column norms it last computed from
+                   scratch)
+  wa3@first_radius $D x_0$  the starting point, scaled, for its norm
+  wa3@lm_parameter scratch space for lmpar
+  wa3@trial        $D p$  the trial step, scaled, for its norm pnorm
+  wa3@predicted    $R P^\top p$  the step pushed through the triangle: its norm is
+                   $\lVert J p \rVert$, because $Q$ changes no lengths
+  wa4              a work vector of m numbers, reused like wa1
+  wa4@qtf          $Q^\top f$  being built: f with the Householder reflections
+                   applied one at a time
+  wa4@lm_parameter scratch space for lmpar
+  wa4@evaluate     $f(x + p)$  the residuals at the trial point; accept copies them
+                   into fvec
+  info             why lmder stopped: 0 bad input, 1 to 3 converged, 4 the gradient
+                   test, 5 out of evaluations, 6 to 8 a tolerance too small for
+                   double precision, negative when fcn asked to stop
+  iflag            what fcn returned last: the iflag it was given, or a negative
+                   number when the user's function asks lmder to stop
+  nfev             how many times f has been evaluated
+  njev             how many times $J$ has been evaluated: one per pass
+  nrow             the row of hist the next trial step goes into
+  ok               whether the input passed every check
+  quit             true once a test has set info or fcn asked to stop; it ends the
+                   outer loop
+  j                a column index, 0 to n - 1: one variable, or one column of $J$
+                   or $R$
+  i                a row index: one residual, or one row of $R$
+  ii               how far down column j a loop has gone, from row j
+  l                $\pi_j$  the column of $J$ in position j after pivoting (ipvt[j])
+  sum              a dot product being added up
+  sum@qtf          $u_j^\top w$  Householder vector j dotted with the residuals
+                   rotated so far (wa4)
+  sum@gradient     $(J^\top f)_{\pi_j} / \lVert f \rVert$  computed as row j of
+                   $R^\top Q^\top f$, over $\lVert f \rVert$
+  temp             a number held for the next line or two
+  temp@qtf         $-u_j^\top w / u_{jj}$  how much of Householder vector j to add to
+                   w: that is the reflection $w \gets w - u_j (u_j^\top w) / u_{jj}$
+  temp@predicted   $p_{\pi_j}$  the step's component for the variable in position j
+  temp@shrink      $t$  the factor the radius shrinks by: $\tfrac12$, or, when the sum
+                   of squares went up, where the parabola through what was seen has
+                   its minimum; never below $\tfrac1{10}$
+  q                $\lVert f_{+} \rVert / \lVert f \rVert$  the trial norm over the
+                   current one
+  dirder           half the slope of $\lVert f(x + t p) \rVert^2 / \lVert f \rVert^2$ at
+                   $t = 0$, from the model: $-(t_1^2 + t_2^2)$. The shrink step fits a
+                   parabola to it
+
+  setup          allocate the work vectors and start every counter at zero
+  check_input    refuse n = 0, fewer residuals than variables, a negative tolerance, a nonpositive maxfev or factor, and (mode 2) a nonpositive scale
+    why          MINPACK does not guess what a caller meant: bad input returns info 0 before anything is evaluated.
+  if the input is valid
+    start          evaluate f at the starting point and its norm fnorm
+      why          Everything after compares the norm of the residuals with this one: a step is only worth taking if it lowers it.
+      run          The program starts from $x$ = {x}, where $\lVert f \rVert$ = {fnorm}.
+  repeat once per Jacobian, until a test sets info or fcn asks to stop
+    jacobian       evaluate J at x (fcn with iflag 2)
+      why          The Jacobian is what makes the linear model $f(x + p) \approx f + J p$: every step of this pass is computed from it, so it is evaluated once per pass, after a step was accepted.
+      $$ J_{ij} = \frac{\partial f_i}{\partial x_j} $$
+      run          On the first pass, at $x$ = {x}, the Jacobian is $J$ = {fjac}.
+    qr             factor J P = Q R with column pivoting; the column norms of J come back in wa2
+      why          Everything the rest of the pass needs is in $R$ and $Q^\top f$. Solving the step's least-squares problem from $R$ is also more accurate than forming $J^\top J$, which squares the condition number of $J$.
+      how          $Q$ is orthogonal ($Q^\top Q = I$, so it changes no lengths), $R$ is upper triangular, and $P$ reorders the columns of $J$ so that at each stage the column with the most norm left comes first (column pivoting). qrfac, the next section, does the work.
+      $$ J P = Q R $$
+    if this is the first pass
+      scale          mode 1: D = the column norms of J (a zero column gets 1), so each variable is measured by how much it moves f
+        why          Without scaling, a variable measured in millimeters and one in kilometers would share one trust radius. With $D_j = \lVert J_{:,j} \rVert$, the length $\lVert D p \rVert$ counts each variable's change by its effect on $f$.
+        $$ D_j = \lVert J_{:,j} \rVert $$
+        run          On this problem $D$ = {diag}: the first variable moves $f$ more than twice as much as the second.
+      first_radius   start the trust radius at factor * |D x| (factor * 1 if x = 0): generous, so the first trial is usually the Gauss-Newton step
+        why          The first radius is a guess. lmder1 passes factor 100, so the first trial is almost always the Gauss-Newton step, and the radius update corrects the guess from what that step does.
+        $$ \Delta_0 = \mathrm{factor} \cdot \lVert D x_0 \rVert $$
+        predict      With $\Delta$ a hundred times the scaled size of $x$, will the first trial need $\lambda > 0$ to stay inside the region?
+        run          $\lVert D x \rVert$ = {xnorm}, so $\Delta$ = {delta}. The Gauss-Newton step is far shorter than that, and lmpar returns $\lambda = 0$ on the first trial.
+    qtf            apply the Householder reflections to f to get Q^T f, keep its first n entries in qtf, and put R's diagonal back on fjac's
+      why          Because $Q$ changes no lengths, the model's sum of squares splits into a part the step can change and a part it cannot. Only the first n entries of $Q^\top f$ matter for the step.
+      $$ \lVert f + J p \rVert^2 = \lVert (Q^\top f)_{1:n} + R P^\top p \rVert^2 + \lVert (Q^\top f)_{n+1:m} \rVert^2 $$
+    gradient       gnorm = the largest |cos| of the angle between f and a column of J, from R^T (Q^T f) / |f| / column norm; info 4 if gnorm <= gtol
+      why          At a minimum of $\lVert f \rVert^2$ its gradient $2 J^\top f$ is zero: $f$ is orthogonal to every column of $J$, and no small step can lower the sum. gnorm measures how close to that the current $x$ is, as a cosine, so it does not depend on the size of $f$.
+      $$ \gamma = \max_j \frac{\left| (J^\top f)_j \right|}{\lVert J_{:,j} \rVert\, \lVert f \rVert} $$
+      run          On the first pass $\gamma$ = {gnorm}: far from a stationary point.
+    if D is chosen internally (mode 1)
+      rescale        D = max(D, current column norms): scales only grow, so the region never widens behind the algorithm's back
+    repeat with trial steps from this factorization, until one is accepted or a test stops it
+      lm_parameter   lmpar: find par with |D p| within 10% of delta (par = 0 when the Gauss-Newton step already fits) and the step p
+        why          This is the subproblem the trust region poses: the best step for the linear model among the steps no longer than $\Delta$. lmpar, the next section, solves it.
+        $$ \min_p \lVert f + J p \rVert \quad \text{subject to} \quad \lVert D p \rVert \le \Delta $$  [hold "the step is at most 10% longer than the trust radius"]
+        how          If the Gauss-Newton step is inside the region it is the answer. Otherwise the answer is on the boundary, and solves the damped normal equations below for the one $\lambda > 0$ that makes $\lVert D p \rVert = \Delta$.
+        $$ (J^\top J + \lambda D^\top D)\, p = -J^\top f $$  [test "with pivoting and scaling, the step lmpar returns solves (J^T J + par D^T D) x = J^T f to rounding for every radius tried"]
+        run          On the first trial $\Delta$ = {delta_in} and lmpar returns $\lambda$ = {par_lm}; on the second, $\Delta$ = {delta_in#2} and $\lambda$ = {par_lm#2}.
+      trial          flip the sign (lmpar solves for -p), form x + p and pnorm = |D p|; on the first pass, shrink delta to pnorm
+        why          On the first pass $\Delta$ was only a guess; setting it to the length of the step lmpar proposed makes the radius update after it meaningful.
+        run          The first trial step has $\lVert D p \rVert$ = {pnorm}, so $\Delta$ becomes {delta}.
+      evaluate       evaluate f at x + p (fcn with iflag 1) and count it in nfev
+        why          This is the only way to know whether the linear model was right: evaluate the real function at the trial point.
+      reductions     compare what the step did with what the linear model said it would do
+        actual         ared = 1 - (fnorm1/fnorm)^2, or -1 if the norm grew tenfold or more (1 / LM_RISE_LIMIT; so the square cannot overflow)
+          $$ \mathrm{ared} = 1 - \left( \frac{\lVert f(x + p) \rVert}{\lVert f(x) \rVert} \right)^2 $$
+          predict        The first trial is the full Gauss-Newton step, the best step there is for the linear model. Will the real sum of squares go down?
+          run            No: $\lVert f(x + p) \rVert$ = {fnorm1} against $\lVert f \rVert$ = {fnorm}. The norm grew almost tenfold, so $\mathrm{ared}$ = {actred}.
+        predicted      prered = (|J p|^2 + 2 par |D p|^2) / |f|^2, from R, since J^T(f + J p) = -par D^T D p; dirder = the slope of the sum of squares along p, relative
+          why            The model's prediction costs no evaluation of $f$: $\lVert J p \rVert = \lVert R P^\top p \rVert$ comes from the factorization.
+          $$ \mathrm{pred} = 1 - \frac{\lVert f + J p \rVert^2}{\lVert f \rVert^2} = \frac{\lVert J p \rVert^2 + 2 \lambda \lVert D p \rVert^2}{\lVert f \rVert^2} = t_1^2 + 2 t_2^2 $$  [hold "the predicted reduction is a sum of squares"]
+          how            The second form follows from the damped normal equations, $J^\top (f + J p) = -\lambda D^\top D p$. It is a sum of squares, so it is never negative; that is what the hold checks, on every trial.
+          run            The linear model predicted $\mathrm{pred}$ = {prered}: with $\lambda = 0$ it promises to remove the whole sum of squares.
+        quotient       ratio = ared / prered, or 0 if the model predicts no reduction at all
+          $$ \rho = \frac{\mathrm{ared}}{\mathrm{pred}} $$  [hold "a step the test will accept lowers the residual norm"]
+          why            $\rho$ is the one number the rest of the pass uses. Near 1, the model can be trusted farther; small or negative, it cannot be trusted this far.
+          predict        The model promised to remove the whole sum of squares, and the sum grew almost a hundredfold. What sign will $\rho$ have, and will lmder keep this step?
+          run            On the first trial $\rho$ = {ratio}: negative, far below the $10^{-4}$ a step needs to be kept, so $x$ stays where it is. On the second, $\rho$ = {ratio#2}.
+      radius         adjust delta (and par with it) by how good the model was
+        predict        After a first trial with $\rho$ below zero, will the radius shrink or grow, and by how much?
+        run            It shrinks by the most the rule allows: $t$ = {temp}, and $\Delta$ goes from {pnorm} to {delta}.
+        $$ \Delta_{\mathrm{new}} = \begin{cases} t \min(\Delta, 10 \lVert D p \rVert),\ t \in [\tfrac{1}{10}, \tfrac12] & \rho \le \tfrac14 \\ 2 \lVert D p \rVert & \rho \ge \tfrac34 \text{ or } \lambda = 0 \\ \Delta & \text{otherwise} \end{cases} $$
+        why            A trust region is a claim about how far the model can be trusted, and each trial tests the claim. The rule shrinks the region quickly when the model was badly wrong and grows it when the model was right, so the radius follows the distance over which $f$ is close to linear.
+        if the model was poor (ratio <= LM_RATIO_SHRINK, 1/4)
+          shrink         new delta = t * min(delta, 10 pnorm), t = 1/2, or where the parabola through the observed values bottoms out if f grew, kept in [LM_SHRINK_MIN, 1/2] = [0.1, 1/2]; par grows by 1/t
+            $$ \Delta \le \tfrac12 \Delta_{\mathrm{in}}, \qquad \Delta \le 5 \lVert D p \rVert $$  [hold "a poor step at least halves the radius, and leaves it at most 5 times the step's length"]
+            how            When the sum of squares went up, $t$ is where the parabola through $\lVert f \rVert^2$ at $x$, its slope along $p$, and $\lVert f(x + p) \rVert^2$ has its minimum, as a fraction of the step, kept between $\tfrac1{10}$ and $\tfrac12$. $\lambda$ grows by $1/t$, so lmpar starts the next trial near the right $\lambda$.
+            run            After the first trial $t$ = {temp}, and $\Delta$ drops from {pnorm} to {delta}.
+        else if the model was good (ratio >= LM_RATIO_EXPAND, 3/4), or the step was Gauss-Newton (par = 0)
+          expand         delta = 2 pnorm and par halves: the next step may be twice as long as this one
+            $$ \Delta = 2 \lVert D p \rVert, \qquad \lambda = \tfrac12 \lambda_{\mathrm{lm}} $$  [hold "a good step, or a Gauss-Newton step, sets the radius to twice the step's length and halves par"]
+            run            The first expansion comes on the second trial: $\rho$ = {ratio}, the step was {pnorm} long, and $\Delta$ becomes {delta}.
+      if the step reduced the sum of squares by at least LM_RATIO_ACCEPT = 1e-4 of the prediction
+        accept         move to x + p: take its residuals, fnorm and |D x|, and count the iteration
+          why            Even a step the model predicted poorly is kept if it lowered the sum of squares at all; the poor prediction shows only in the smaller radius.
+          predict        The second trial, with $\lambda > 0$ and a region a tenth as wide as the first step, has $\rho$ = {ratio}. Will lmder keep it?
+          run            Yes: $\rho$ is far above $10^{-4}$, so the step is taken. The first accepted step moves $x$ to {x}, with $\lVert f \rVert$ = {fnorm}.
+      history        write this trial's numbers into a row of hist
+      converged      info 1: actual and predicted relative reductions both <= ftol; info 2: delta <= xtol |D x|; info 3: both
+        $$ \text{info 1: } |\mathrm{ared}| \le \mathrm{ftol},\ \mathrm{pred} \le \mathrm{ftol},\ \rho \le 2 \qquad \text{info 2: } \Delta \le \mathrm{xtol}\, \lVert D x \rVert $$
+        why            Info 1 says no step can lower the sum of squares by more than a relative ftol; info 2 says the region is so small that $x$ is known to a relative xtol.
+      stringent      info 5: maxfev evaluations used; 6, 7, 8: ftol, xtol or gtol below what double precision can resolve
+  finish         a negative iflag becomes info; with nprint > 0, one last call of fcn with iflag 0; nfev and njev go into counts
+    run            The run evaluated $f$ {nfev} times and $J$ {njev} times, and stops at $x$ = {x}.
+  return info
+
+lmder1_maxfev  @d17f81f9
+  what  The number of evaluations of f lmder1 allows for n variables,
+        `100 (n + 1)` as lmder1.f sets maxfev. Every trial step is one
+        evaluation after the first, so a hist with this many rows holds
+        every trial step lmder1 can take.
+  n     $n$  the number of variables
+
+lmder1  @05b73759
+  what  The easy-to-use driver: lmder with MINPACK's default settings for a
+        single tolerance tol. Returns info, with `info = 8` reported as `4`.
+  how   ftol = xtol = tol, gtol = `0`, maxfev = `lmder1_maxfev(n)` =
+        `LMDER1_MAXFEV_PER (n + 1)` = `100 (n + 1)`, scaling by the
+        Jacobian's column norms (`mode = 1`), factor `LMDER1_FACTOR` =
+        `100`, no printing. MINPACK's test driver uses tol =
+        $\sqrt{\varepsilon}$, about `1.5e-8`.
+  why   The netlib test driver calls this routine, so it is what the Fortran
+        oracle runs and what lib/minpack/mgh_check.viv compares.
+  n       $n$  the number of parameters
+  m       $m$  the number of residuals
+  x       $x$  the starting point on entry, the answer on return
+  fvec    $f$  the residuals at the answer, on return
+  fcn     the user's def, passed on to lmder
+  data    the array passed on to fcn
+  fjac    $J$  space for the Jacobian; on return its top holds $R$
+  tol     the one tolerance lmder1 uses as both ftol and xtol
+  ipvt    $\pi$  the column order of the last QR factorization, on return
+  counts  on return, the number of evaluations of f and of J
+  hist    one row per trial step, passed on to lmder
+  info    why lmder stopped, with 8 reported as 4
+  diag    $D$  the scaling lmder chooses (mode 1), on return its final value
+  qtf     $Q^\top f$  space for lmder's qtf
+  maxfev  the most evaluations of f allowed, from lmder1_maxfev

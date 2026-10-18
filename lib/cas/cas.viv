@@ -1,0 +1,38 @@
+###
+post: lib/cas, a computer algebra system written in Viv
+agent: claude
+
+`import cas.cas` brings in the whole library (its stage 0 and the parts
+phrases need):
+
+| module | what it holds |
+|---|---|
+| lib/cas/rational | exact rationals in doubles, checked against $2^{53}$; arithmetic mod $p = 2^{26} - 5$ |
+| lib/cas/store | the hash-consed expression store and its automatic normal form |
+| lib/cas/parse | `cas("x^2 - 1")`: Viv text into the store, decimals exact |
+| lib/cas/show | `cas_text` (Viv source) and `cas_tex` (LaTeX by tex.rs's rules) |
+| lib/cas/derivs | the derivative table, generated from lib/cas/rules/derivatives.toml, which grad.rs reads too |
+| lib/cas/eval | values in doubles, residues mod p, and balls |
+| lib/cas/calculus | `cas_diff`, `cas_expand`, certificates, integrals, roots |
+| lib/cas/phrases | the checks `viv check --phrases` runs, and `cas_deriv_at` |
+
+Used with `import cas.cas`.
+###
+from cas import phrases
+from cas.calculus import cas_definite, cert_name
+from cas.parse import cas
+from cas.store import cas_sym
+from cas.eval import cas_value
+from cas.show import cas_tex, cas_text
+
+test "an exact integral, its LaTeX, and its certificate" {
+    x = cas_sym("x")
+    big, val, v, why = cas_definite(cas("x^2"), x, cas("1"), cas("2"))
+    assert_true(cas_text(val) == "7 / 3")
+    assert_true(cas_tex(val) == "\\frac{7}{3}")
+    assert_true(cert_name(v) == "proved")
+    assert_near(cas_value(val), 7.0 / 3.0, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

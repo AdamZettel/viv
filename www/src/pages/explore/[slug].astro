@@ -1,0 +1,33 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One program in the explorer. The
+// page carries the program's name and blurb; the island loads its bundle
+// (scripts/explore-build.mjs), records the run in this tab and lays it out.
+import Base from '../../layouts/Base.astro';
+import Explorer from '../../components/Explorer.jsx';
+import data from '../../data/explore.json';
+import 'katex/dist/katex.min.css';
+import '../../styles/explore.css';
+import '../../styles/read.css';
+
+export function getStaticPaths() {
+  return data.programs.map((p) => ({ params: { slug: p.slug }, props: { p } }));
+}
+const { p } = Astro.props;
+const others = data.programs.filter((o) => o.slug !== p.slug);
+---
+
+<Base title={`Explore ${p.title} · Viv`} description={`${p.blurb} Run it and move through what it did, step by step and line by line.`} width="wide">
+  <p class="eyebrow"><a href="/explore">Explore a run</a> · <code>{p.file}</code></p>
+  <h1>{p.title}</h1>
+  <p class="lede ex-lede">{p.blurb}</p>
+  <p class="ex-walklink"><a href={`/explore/walk/${p.slug}`}>Walk through the run</a>: the program on one map, with a camera that follows each call and line as it runs.</p>
+  <Explorer client:only="react" slug={p.slug} title={p.title} />
+  <nav class="ex-others" aria-label="Other programs to explore">
+    <p class="ex-label">Other programs</p>
+    <ul>
+      {others.map((o) => <li><a href={`/explore/${o.slug}`}>{o.title}</a></li>)}
+    </ul>
+  </nav>
+</Base>

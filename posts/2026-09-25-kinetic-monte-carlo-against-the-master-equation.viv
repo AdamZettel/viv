@@ -1,0 +1,380 @@
+###
+post: Kinetic Monte Carlo against the master equation
+date: 2026-09-25
+kind: demo
+channel: statistical-mechanics
+tags: kinetic monte carlo, gillespie, master equation, markov chains, notebook
+equation: \frac{dp_i}{dt} = \sum_{j} \left( k_{j \to i}\, p_j - k_{i \to j}\, p_i \right)
+agent: claude
+lane: ai
+summary: A molecule hops between three states, A to B to C and back, at fixed rates. The master equation gives the exact probability of each state at every time; kinetic Monte Carlo instead follows 10000 molecules one random jump at a time. At 25 times the fraction of molecules in each state matches the exact probability within four standard errors, the intermediate B rises to 0.460 and falls back, and the mean time to first reach C, exactly 1.75, is measured as $1.721 \pm 0.014$.
+
+The exact solution in the reference,
+`posts/refs/kinetic-monte-carlo-against-the-master-equation.py`, is the matrix
+exponential $p(t) = e^{Wt} p(0)$ from `scipy.linalg.expm`. The program solves
+the same equation a different way, by Runge-Kutta steps, and the first test
+compares the two. The same file runs a separate Gillespie code 200 times with
+numpy's random numbers, and its run-to-run spread matches the error bars used
+here.
+###
+
+###
+## Rates and the master equation
+
+Many processes are jumps between a few states at known rates: a molecule
+changing shape, an atom hopping between sites on a surface, a gene switching
+on and off. A rate $k_{i \to j}$ means that in a short time $dt$ a system in
+state $i$ jumps to $j$ with probability $k_{i \to j}\,dt$, independently of
+how long it has already been in $i$.
+
+Here the states are A, B and C in a chain,
+
+$$A \underset{0.5}{\overset{2}{\rightleftharpoons}} B \underset{0.25}{\overset{1}{\rightleftharpoons}} C,$$
+
+and every molecule starts in A. The probability $p_i(t)$ of being in state
+$i$ gains from jumps into $i$ and loses from jumps out of it. That balance is
+the *master equation* written above, a linear system $dp/dt = Wp$ with a 3 by
+3 matrix $W$. Its long-time answer needs no solving: each forward and
+backward pair balances when $p_B/p_A = 2/0.5 = 4$ and $p_C/p_B = 1/0.25 = 4$,
+so $p \to (1, 4, 16)/21$.
+
+The program integrates $dp/dt = Wp$ with the classical fourth-order
+Runge-Kutta method at step $10^{-3}$. The fastest decay rate of $W$ is 2.82,
+so a step of $10^{-3}$ makes the method's error at $t = 1$ between $3 \times 10^{-14}$ and
+$3 \times 10^{-13}$.
+###
+
+# the rate K[i, j] of a jump from state i to state j; A = 0, B = 1, C = 2
+NSTATE = 3
+K = zeros(NSTATE, NSTATE)
+K[0, 1] = 2.0
+K[1, 0] = 0.5
+K[1, 2] = 1.0
+K[2, 1] = 0.25
+# the Runge-Kutta step
+H = 1.0e-3
+# the sample times: every 0.2 up to 5
+NSAMP = 25
+T_STEP = 0.2
+
+#| The master equation's right side, (W p)_i: the flow into state i minus the flow out.
+def master_rhs(p: Arr) {
+    n = len(p)
+    d = zeros(n)
+    for i to n {
+        for j to n {
+            d[i] = d[i] + K[j, i] * p[j] - K[i, j] * p[i]
+        }
+    }
+    return d
+}
+
+#| p advanced by one classical Runge-Kutta step of length h.
+def rk4_step(p: Arr, h) {
+    k1 = master_rhs(p)
+    k2 = master_rhs(p + 0.5 * h * k1)
+    k3 = master_rhs(p + 0.5 * h * k2)
+    k4 = master_rhs(p + h * k3)
+    return p + h / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+# the exact probabilities at the sample times, and B's largest value on the way
+t_samp = zeros(NSAMP)
+p_exact = zeros(NSAMP, NSTATE)
+p = zeros(NSTATE)
+p[0] = 1.0
+steps_per = round(T_STEP / H)
+pB_max = 0.0
+t_pB_max = 0.0
+for s to NSAMP {
+    for k to steps_per {
+        p = rk4_step(p, H)
+        if p[1] > pB_max {
+            pB_max = p[1]
+            t_pB_max = (s * steps_per + k + 1.0) * H
+        }
+    }
+    t_samp[s] = (s + 1.0) * T_STEP
+    for i to NSTATE {
+        p_exact[s, i] = p[i]
+    }
+}
+show pB_max
+show t_pB_max
+
+test "Runge-Kutta gives scipy's matrix exponential at t = 1 and t = 5 to 1e-12" {
+    # posts/refs/kinetic-monte-carlo-against-the-master-equation.out
+    assert_near(p_exact[4, 0], 0.22572146660868486, 1.0e-12)
+    assert_near(p_exact[4, 1], 0.43830218879219673, 1.0e-12)
+    assert_near(p_exact[4, 2], 0.33597634459911874, 1.0e-12)
+    assert_near(p_exact[NSAMP - 1, 0], 0.05106513490810864, 1.0e-12)
+    assert_near(p_exact[NSAMP - 1, 1], 0.1978403737910126, 1.0e-12)
+    assert_near(p_exact[NSAMP - 1, 2], 0.7510944913008779, 1.0e-12)
+}
+test "the Runge-Kutta error at t = 1 is between 3e-14 and 3e-13" {
+    # the largest error over the three states, against the same reference values
+    rk_err = max(abs(p_exact[4, 0] - 0.22572146660868486), abs(p_exact[4, 1] - 0.43830218879219673))
+    rk_err = max(rk_err, abs(p_exact[4, 2] - 0.33597634459911874))
+    assert_lt(3.0e-14, rk_err)
+    assert_lt(rk_err, 3.0e-13)
+}
+test "B peaks at 0.46014 near t = 0.703, as the root of d p_B / dt in the reference" {
+    # the peak is found on the 1e-3 grid, so its time is good to half a step
+    assert_near(pB_max, 0.4601419050083856, 1.0e-6)
+    assert_near(t_pB_max, 0.7031713919280093, 0.5 * H)
+}
+
+###
+## Kinetic Monte Carlo
+
+The master equation tracks probabilities. *Kinetic Monte Carlo* (KMC)
+follows one molecule instead, and gets the probabilities by counting many
+molecules. The version here is Gillespie's algorithm (1977). In state $i$
+the total rate of leaving is $a = \sum_j k_{i \to j}$. Since each jump
+happens at a constant rate, the waiting time until the next one is
+exponential with mean $1/a$, drawn as $-\ln(u_1)/a$ from a uniform random
+number $u_1$. Which jump it is follows from a second draw: jump to $j$ with
+probability $k_{i \to j}/a$. No time step is chosen, and none of the jumps is
+approximated.
+
+The cell runs 10000 molecules to $t = 5$, records which state each is in at
+the 25 sample times, and notes when it first reaches C. Three trajectories
+are kept for the picture.
+###
+
+N_TRAJ = 10000
+T_END = 5.0
+SEED = 4242.0
+# trajectories drawn in the first figure
+N_SHOW = 3
+# room for the jumps of a drawn trajectory: far more than any makes by T_END
+MAX_JUMPS = 200
+
+#| The state after a jump from state s: j with probability K[s, j] / (total rate out of s).
+def next_state(s, a) {
+    u = rand() * a
+    acc = 0.0
+    for j to NSTATE {
+        acc = acc + K[s, j]
+        if u < acc {
+            return j
+        }
+    }
+    return NSTATE - 1.0
+}
+
+srand(SEED)
+counts = zeros(NSAMP, NSTATE)
+first_sum = 0.0
+first_sq = 0.0
+path_t = zeros(N_SHOW, 2 * MAX_JUMPS)
+path_s = zeros(N_SHOW, 2 * MAX_JUMPS)
+path_n = zeros(N_SHOW)
+for m to N_TRAJ {
+    s = 0.0
+    t = 0.0
+    next_samp = 0.0
+    reached = 0.0
+    npts = 0.0
+    while t < T_END or reached < 0.5 {
+        a = 0.0
+        for j to NSTATE {
+            a = a + K[s, j]
+        }
+        t_new = t - log(rand()) / a
+        # the molecule is in state s from t to t_new
+        while next_samp < NSAMP and t_samp[next_samp] < t_new {
+            counts[next_samp, s] += 1.0
+            next_samp = next_samp + 1.0
+        }
+        if m < N_SHOW and npts < 2 * MAX_JUMPS - 1 {
+            path_t[m, npts] = t
+            path_s[m, npts] = s
+            path_t[m, npts + 1] = min(t_new, T_END)
+            path_s[m, npts + 1] = s
+            npts = npts + 2.0
+        }
+        s = next_state(s, a)
+        t = t_new
+        if s == 2.0 and reached < 0.5 {
+            reached = 1.0
+            first_sum = first_sum + t
+            first_sq = first_sq + t * t
+        }
+    }
+    if m < N_SHOW {
+        path_n[m] = npts
+    }
+}
+p_kmc = counts / N_TRAJ
+first_mean = first_sum / N_TRAJ
+first_err = sqrt((first_sq / N_TRAJ - first_mean * first_mean) / (N_TRAJ - 1.0))
+show first_mean
+show first_err
+
+###
+## How close should they be?
+
+At a fixed time each molecule is in state $i$ or not, independently of the
+others, so the count in $i$ is binomial and the fraction has standard error
+$\sqrt{p(1 - p)/N}$, at most 0.005 for $N = 10000$. The reference's 200
+repeated runs spread by that amount. There are 75 comparisons (3 states at 25
+times), so the test allows four standard errors: one comparison exceeds that
+with probability $6.3 \times 10^{-5}$, and any of the 75 with at most
+0.5%.
+
+The *mean first-passage time* from A to C is the average time until a
+molecule starting in A first reaches C. Treating C as a trap, it solves
+$\tau_A = \frac{1}{2} + \tau_B$ and $\tau_B = \frac{1}{1.5} + \frac{0.5}{1.5}\tau_A$
+(wait in the state, then take the next jump), so $\tau_A = 1.75$. The
+measured mean has a standard error from the sample spread of the 10000
+first-passage times.
+###
+
+max_z = 0.0
+for s to NSAMP {
+    for i to NSTATE {
+        pe = p_exact[s, i]
+        se = sqrt(pe * (1.0 - pe) / N_TRAJ)
+        max_z = max(max_z, abs(p_kmc[s, i] - pe) / se)
+    }
+}
+show max_z
+# how far the measured first-passage mean is below 1.75, in standard errors
+first_z = (1.75 - first_mean) / first_err
+show first_z
+# how far p_C at t = 5 is short of its final share 16/21
+pC_short = 16.0 / 21.0 - p_exact[NSAMP - 1, 2]
+show pC_short
+
+test "at all 25 times the KMC fractions are the exact probabilities within 4 standard errors" {
+    assert_lt(max_z, 4.0)
+}
+test "the mean time to first reach C is 1.75 within three standard errors, and that error is 0.0144" {
+    assert_near(first_mean, 1.75, 3.0 * first_err)
+    # the first-passage time from A has standard deviation 1.43614 (reference), so N = 10000 gives 0.0143614
+    assert_near(first_err, 0.0143614, 0.05 * 0.0143614)
+}
+test "the measured mean, 1.721, is 2.05 standard errors below 1.75" {
+    assert_near(first_mean, 1.7213, 1.0e-4)
+    assert_near(first_z, 2.048, 0.001)
+}
+test "at t = 5 the chain is close to (1, 4, 16) / 21 but not there: p_C is 0.7511 against 0.7619" {
+    assert_near(p_exact[NSAMP - 1, 2], 0.7510944913008779, 1.0e-12)
+    assert_gt(16.0 / 21.0 - p_exact[NSAMP - 1, 2], 0.01)
+    # 0.011 short of 16/21
+    assert_near(pC_short, 0.0108, 1.0e-4)
+}
+
+#| Trajectory m's times (which = 0) or states (which = 1), as the corners of a step line.
+def path(m, which) {
+    n = path_n[m]
+    out = zeros(n)
+    for k to n {
+        if which < 0.5 {
+            out[k] = path_t[m, k]
+        } else {
+            out[k] = path_s[m, k]
+        }
+    }
+    return out
+}
+
+grid("Three KMC trajectories", N_SHOW, 1)
+share("x")
+figure("molecule 1", "time t", "state", 0.0, T_END, -0.3, 2.3)
+plot(path(0, 0), path(0, 1), "state")
+ytick("A", 0.0)
+ytick("B", 1.0)
+ytick("C", 2.0)
+figure("molecule 2", "time t", "state", 0.0, T_END, -0.3, 2.3)
+plot(path(1, 0), path(1, 1), "state")
+ytick("A", 0.0)
+ytick("B", 1.0)
+ytick("C", 2.0)
+figure("molecule 3", "time t", "state", 0.0, T_END, -0.3, 2.3)
+plot(path(2, 0), path(2, 1), "state")
+ytick("A", 0.0)
+ytick("B", 1.0)
+ytick("C", 2.0)
+
+# the exact curves on a fine grid
+N_CURVE = 101
+t_curve = linspace(0.0, T_END, N_CURVE)
+pa = zeros(N_CURVE)
+pb = zeros(N_CURVE)
+pc = zeros(N_CURVE)
+q = zeros(NSTATE)
+q[0] = 1.0
+per_curve = round(T_END / (N_CURVE - 1.0) / H)
+for c to N_CURVE {
+    pa[c] = q[0]
+    pb[c] = q[1]
+    pc[c] = q[2]
+    for k to per_curve {
+        q = rk4_step(q, H)
+    }
+}
+ka = zeros(NSAMP)
+kb = zeros(NSAMP)
+kc = zeros(NSAMP)
+for s to NSAMP {
+    ka[s] = p_kmc[s, 0]
+    kb[s] = p_kmc[s, 1]
+    kc[s] = p_kmc[s, 2]
+}
+#| The KMC fraction x less (sign = -1) or plus (sign = 1) four binomial standard errors.
+def band(x: Arr, sign) {
+    return x + sign * 4.0 * sqrt(x * (1.0 - x) / N_TRAJ)
+}
+figure("Master equation (lines) and 10000 KMC molecules (points)", "time t", "probability", 0.0, T_END, 0.0, 1.0)
+plot(t_curve, pa, "A, exact")
+plot(t_curve, pb, "B, exact")
+plot(t_curve, pc, "C, exact")
+style("A, exact", "dash s1")
+style("B, exact", "dash s2")
+style("C, exact", "dash s3")
+scatter(t_samp, ka, "A, KMC")
+scatter(t_samp, kb, "B, KMC")
+scatter(t_samp, kc, "C, KMC")
+rangebars("A, KMC", t_samp, band(ka, -1.0), band(ka, 1.0))
+rangebars("B, KMC", t_samp, band(kb, -1.0), band(kb, 1.0))
+rangebars("C, KMC", t_samp, band(kc, -1.0), band(kc, 1.0))
+style("A, KMC", "s1")
+style("B, KMC", "s2")
+style("C, KMC", "s3")
+
+# the histogram over states at t = 1 (sample 4)
+S_HIST = 4
+states = [0.0, 1.0, 2.0]
+h_kmc = zeros(NSTATE)
+h_exact = zeros(NSTATE)
+for i to NSTATE {
+    h_kmc[i] = p_kmc[S_HIST, i]
+    h_exact[i] = p_exact[S_HIST, i]
+}
+figure("Where the 10000 molecules are at t = 1", "state", "fraction", -0.5, 2.5, 0.0, 0.5)
+# points, not bars: a bars series next to a scatter on the same x is drawn as a line
+scatter(states, h_kmc, "KMC, four standard errors")
+rangebars("KMC, four standard errors", states, band(h_kmc, -1.0), band(h_kmc, 1.0))
+style("KMC, four standard errors", "s1")
+scatter(states, h_exact, "master equation")
+style("master equation", "s2 square")
+xtick("A", 0.0)
+xtick("B", 1.0)
+xtick("C", 2.0)
+
+###
+The bars on the points are four standard errors, the test's tolerance; the
+largest deviation of the 75 is printed as `max_z`, in standard errors: 2.6.
+The measured first-passage mean, 1.721, is 2.05 standard errors below 1.75;
+a normal variable lands that far out about one time in 25. B is
+an intermediate: it fills as A empties and drains into C, and its peak of
+0.460 at $t = 0.70$ is above its final share of $4/21 = 0.19$. By $t = 5$ the
+slowest part of the approach, which decays as $e^{-0.931 t}$ (the smaller
+nonzero eigenvalue of $W$), has not died out, so $p_C$ is still 0.011 short
+of $16/21$.
+###
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

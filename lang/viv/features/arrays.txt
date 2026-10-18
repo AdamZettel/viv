@@ -1,0 +1,245 @@
+# Arrays: the NumPy vocabulary, broadcasting, `@`, masks, solvers and FFTs
+# (lang/viv/src/interp/arrays.rs, interp/matmul.rs; the builtins' own rows are
+# in builtins.txt).
+
+== numpy-vocabulary
+title: The NumPy array vocabulary
+what: The array builtins take NumPy's names and give NumPy's results: `reshape`, `ravel`,
+  `flatten`, `transpose` of any rank and with axes, `swapaxes`, `eye`, `diag` both ways,
+  `ones`, `zeros_like`, `ones_like`, `arange`, `linspace(..., endpoint)`, `outer`, `dot`,
+  `norm`, `trace`, `triu`, `tril`. Every result is a new array, in every engine. An axis may
+  be negative, as in NumPy.
+when: Before writing a loop that builds, reshapes or permutes an array element by element.
+example: numpy-vocabulary
+doc: www/src/pages/reference.astro
+see: broadcasting, axis-reductions, gathers, numpy-agreement, reshape, transpose
+keywords: numpy np reshape ravel flatten transpose swapaxes eye identity diag ones arange linspace outer trace triu tril zeros_like ones_like
+usage: call:reshape, call:ravel, call:flatten, call:swapaxes, call:eye, call:diag, call:arange, call:outer, call:trace, call:triu, call:tril, call:zeros_like, call:ones_like
+
+== elementwise-math
+title: Math functions over whole arrays
+what: Every one-argument math builtin (`sin`, `exp`, `sqrt`, `abs`, `tanh`, ...) maps over a
+  real array, and `+ - * /` and `^` work element by element between an array and a number
+  (either side) or two arrays. `pow(a, s)`, `max(a, s)` and `min(a, s)` do the same with a
+  scalar. `y = sin(x) * exp(-x)` needs no loop.
+when: Instead of `for i to len(x) { y[i] = f(x[i]) }`. `viv features --usage` reports such
+  loops as hand-written element loops.
+example: elementwise-math
+doc: www/src/pages/reference.astro section Builtins
+see: broadcasting, numpy-vocabulary, list-comprehension
+keywords: elementwise vectorized ufunc map sin exp sqrt abs pow power broadcast scalar
+
+== broadcasting
+title: Broadcasting between arrays of different shapes
+what: Arithmetic, the comparisons, `where` and two-array `max` and `min` between two arrays of
+  numbers (not complex ones) line up their last axes; each pair of lengths is equal, or one is 1 and repeats.
+  `A - mean(A, 0)` subtracts the column means, and `reshape(v, n, 1)` makes a column that
+  repeats across. Shapes that do not fit stop the run with both shapes named. `grad` sums a
+  broadcast operand's gradient back to its shape. Complex arrays do not broadcast.
+when: Instead of a double loop that combines a matrix with a row or column vector.
+example: broadcasting
+doc: www/src/pages/reference.astro section arrays
+see: axis-reductions, elementwise-math, batched-matmul, reduction-adjoints
+keywords: broadcast broadcasting shape rank row column keepdims numpy
+
+== builtin-options
+title: A builtin's options by name
+what: A builtin's array operands are positional and its options are named, with NumPy's
+  names: `axis=` and `keepdims=` (the reductions, `argmax`, `cumsum`, `diff`, `take`),
+  `n=` (`diff`), `k=` (`triu`, `tril`, `diag`), `offset=` (`trace`), `endpoint=`
+  (`linspace`) and `axes=` (`transpose`). An option written by position is refused with
+  its name; `viv fix --keywords` rewrites a file. The front end writes the options into
+  the positional call the engines read.
+when: Always: `amax(X, axis=-1, keepdims=true)` says what `amax(X, -1, true)` did not.
+example: builtin-options
+doc: lang/viv/src/kwargs.rs
+see: axis-reductions, keyword-arguments, fix-keywords
+keywords: axis keepdims endpoint offset axes option keyword numpy
+
+== axis-reductions
+title: Reductions along an axis, with keepdims
+what: `sum`, `mean`, `var`, `std`, `prod`, `amax`, `amin`, `any` and `all` take `axis=`,
+  and `argmax`/`argmin` take one or reduce the flat array. `keepdims=true` keeps the
+  reduced axis with length 1 (NumPy's keepdims), so `A - mean(A, axis=1, keepdims=true)`
+  subtracts each row's mean. A reduction along the only axis of a vector is refused with
+  the whole-array form to write instead.
+when: Instead of a loop over rows or columns that accumulates a total, a maximum or its
+  position.
+example: axis-reductions
+doc: www/src/pages/reference.astro section arrays
+see: broadcasting, reduction-adjoints, numpy-agreement, amax, argmax
+keywords: sum mean var std prod amax amin argmax argmin axis keepdims reduce reduction row column count_nonzero
+usage: call:amax, call:amin, call:argmax, call:argmin, call:count_nonzero, call:prod, call:var, call:std
+
+== batched-matmul
+title: `@` as NumPy's matmul, on stacks of matrices
+what: `A @ B` multiplies two matrices; a vector on the left is a row and on the right a
+  column. An operand of rank 3 or 4 is a stack of matrices in its last two axes, and the
+  axes before them broadcast, so `X @ W` with `X` of shape (B, T, d) and `W` (d, k)
+  multiplies every matrix of the stack. Two vectors are refused (`dot(u, v)` is their
+  product). `grad` differentiates it, summing over the axes an operand was broadcast along.
+when: Instead of a loop over a batch that multiplies one matrix at a time, or a triple loop
+  for a product.
+example: batched-matmul
+doc: lang/viv/src/interp/matmul.rs
+see: blocked-matmul, broadcasting, einsum, dot
+keywords: matmul @ matrix product batch stack bmm numpy dot gemm
+usage: form:matmul
+
+== masks-and-where
+title: Masks, `where`, `extract` and `putmask`
+what: A comparison with an array on either side gives a mask of 1.0 and 0.0. `where(m, a, b)`
+  picks from `a` or `b` and broadcasts all three; `extract(m, a)` is NumPy's `a[mask]`,
+  `putmask(a, m, v)` is `a[mask] = v` in place, `flatnonzero(m)` gives the positions, and
+  `count_nonzero`, `any` and `all` read a mask. `if a == b` on arrays is refused with a note
+  to write `all(a == b)`.
+when: Instead of a loop with an `if` per element, a count-then-fill pass, or a clamp written
+  by hand.
+example: masks-and-where
+doc: www/src/pages/reference.astro section arrays
+see: gathers, list-comprehension, where, extract
+keywords: mask boolean where extract putmask flatnonzero nonzero count_nonzero any all filter relu clamp
+usage: call:where, call:extract, call:putmask, call:flatnonzero, call:any, call:all
+
+== gathers
+title: Gathers and scatters with `take` and `put`
+what: `take(A, idx, axis)` is NumPy's `A[idx]` along an axis (a row gather is
+  `take(X, rows, 0)`); `take(A, idx)` reads the flat array, row-major, and the result has the
+  shape of `idx`. `put(A, idx, V)` is the scatter back, in place. The indices are not
+  negative: `take(a, [-1.0], 0)` stops the run.
+when: Instead of a loop that copies selected rows or elements into a new array.
+example: gathers
+doc: www/src/pages/reference.astro section arrays
+see: slices, masks-and-where, sorting, take, put
+keywords: take put gather scatter index fancy indexing rows embedding lookup
+usage: call:take, call:put
+
+== sorting
+title: Sorting: `sort`, `argsort` and `sorted`
+what: `sort(a)` sorts an array of numbers in place, ascending and stable, with NaN last.
+  `argsort(a)` gives the positions in sorted order. `sorted(xs, key=f, reverse=r)` and
+  `argsort(xs, key=f, reverse=r)` order by a key, stably, as Python's do, and take arrays,
+  lists of strings and `rows(M)`. `sorted` of an array of numbers needs a `key=` or a
+  `reverse=` (`sorted(v)` alone is the string form and refuses an array): copy and `sort`
+  for a plain ascending copy.
+when: Instead of a hand-written insertion, selection or bubble sort, or an argmin loop
+  repeated n times.
+example: sorting
+doc: www/src/pages/reference.astro section comprehensions
+see: key-argument, gathers, sort, argsort, sorted
+keywords: sort sorted argsort order rank key reverse stable descending ascending
+usage: call:sort, call:argsort, call:sorted
+
+== scans
+title: Running sums and differences: `cumsum`, `cumprod`, `diff`, `clip`
+what: `cumsum` and `cumprod` give the running sum and product, left to right as NumPy does;
+  `diff` the differences of neighbors; `clip(a, lo, hi)` bounds every entry, keeping a NaN
+  entry and reading a NaN bound as no bound.
+when: Instead of a loop that carries a running total or compares each element with the one
+  before it.
+example: scans
+doc: www/src/pages/reference.astro section arrays
+see: axis-reductions, numpy-vocabulary, cumsum
+keywords: cumsum cumprod cumulative running total prefix sum diff difference clip clamp
+usage: call:cumsum, call:cumprod, call:diff, call:clip
+
+== einsum
+title: `einsum` for contractions written by index
+what: `einsum("ij,jk->ik", A, B)` contracts one to three operands by their index letters, as
+  NumPy's does; with no `->` the output indices are the ones that appear once, in
+  alphabetical order. It loops over the output entries in row-major order and over the
+  summed indices in order of first appearance, so it agrees with NumPy to rounding.
+when: Instead of nested loops for a trace, a batched product, a bilinear form or a
+  transposed contraction that `@` does not write directly.
+example: einsum
+doc: www/src/pages/reference.astro section arrays
+see: batched-matmul, numpy-agreement, einsum
+keywords: einsum einstein summation contraction tensor index trace
+usage: call:einsum
+
+== solvers-returning-tuples
+title: Linear solves and eigensolvers that return their results
+what: `x = lin_solve(A, b)` (a matrix `b` solves for every column), `inv(A)`,
+  `L = cholesky(A)`, `vals, vecs = eig_sym(A)`, `w, V = eig_herm(A)` and
+  `U, s, Vt = svd(A)` return what they compute. The older forms that fill arrays passed in
+  still work and give the same bits. `svd` is one-sided Jacobi, so its vectors may differ
+  in sign from LAPACK's.
+when: Instead of allocating output arrays and passing them in, and instead of hand-written
+  Gaussian elimination or Jacobi rotations.
+example: solvers-returning-tuples
+doc: www/src/pages/reference.astro section arrays
+see: unpacking, multiple-returns, lib-linalg, contracts, lin_solve, eig_sym, svd
+keywords: solve linear system lu inverse inv cholesky eig eigenvalues eigenvectors eigh svd singular lapack linalg
+usage: call:lin_solve, call:inv, call:cholesky, call:eig_sym, call:eig_herm, call:svd, call:lin_solve_multi, call:tridiag_solve
+
+== fft
+title: Fast Fourier transforms on complex arrays
+what: `fft(z)` and `ifft(z)` transform a complex vector in place, and `fft3`/`ifft3` a rank-3
+  complex array; `ifft` divides by the length, so `ifft(fft(z))` gives `z` back to rounding.
+  The arrays are packed `(re, im)` doubles, so the interpreter, C and wasm walk the same
+  memory and agree to the byte.
+when: Instead of an O(n^2) DFT loop, for spectral derivatives, convolutions and periodic
+  Poisson solves.
+example: fft
+doc: www/src/pages/reference.astro section Builtins
+see: complex-arrays, complex-numbers, fft
+keywords: fft ifft fourier transform spectral dft convolution frequency fft3
+usage: call:fft, call:ifft, call:fft3, call:ifft3
+
+== random-draws
+title: Seeded random draws of any shape
+what: `srand(seed)` seeds one generator; `rand()` and `randn()` draw a number, and
+  `rand(d1, ...)`, `randn(d1, ...)` draw an array of up to four axes in row-major order.
+  `randn` is Box-Muller from two uniform draws. The same seed gives the same numbers in
+  every engine.
+when: Instead of a loop that fills an array one `rand()` at a time. For NumPy's own streams
+  (PCG64, MT19937, `default_rng`), use lib/nprandom.
+example: random-draws
+doc: www/src/pages/reference.astro section Builtins
+see: lib-random, lib-nprandom, rand, randn
+keywords: random rand randn normal gaussian uniform seed srand rng noise
+usage: call:rand, call:randn, call:srand
+
+== numpy-agreement
+title: The array builtins agree with NumPy to the bit
+what: `sum`, `mean`, `var` and `std`, of a whole array or along an axis, and `trace` add
+  in NumPy's pairwise order (blocks of 8192), so they print what NumPy prints, and
+  `mean(a)` is `sum(a) / numel(a)` to the bit. `amax`/`amin`/`argmax`/`argmin` follow NumPy on NaN and signed
+  zeros. tools/arrays/numpy_cases.py checks 4,812 cases byte for byte in three engines.
+when: When porting NumPy code whose output must match, use the builtin rather than a loop:
+  a loop sums in its own order and can differ from NumPy in the last digits.
+example: numpy-agreement
+doc: tools/arrays/numpy_cases.py; www/src/pages/reference.astro section arrays
+see: axis-reductions, numpy-vocabulary, three-engine-identity
+keywords: numpy agreement bitwise pairwise summation order rounding nan signed zero byte for byte
+
+== ordered-sum
+title: Sums in a loop's order: `sum(a, ordered=true)`
+what: `sum(a, ordered=true)` adds every element left to right from 0.0, the order of a
+  Fortran or C loop, where `sum(a)` adds in NumPy's pairwise order. The two can differ in
+  the last digits (or more, when large terms cancel). `dot` and `prod` always go left to
+  right; `dot(u, v, ordered=true)` says so in the code and changes nothing. The value is
+  `true` or `false` as written, and the option takes no `axis=`.
+when: When a port must match a reference written with loops to its printed digits:
+  write the reduction as `sum(x, ordered=true)` or `dot(u, v)` instead of the loop
+  that adds one element per pass.
+example: ordered-sum
+doc: lang/viv/src/interp/arrays.rs; lang/viv/src/kwargs.rs
+see: numpy-agreement, axis-reductions, dot
+keywords: ordered sum left to right loop order fortran reference port last digits sequential
+usage: word:ordered
+
+== complex-arrays
+title: Complex arrays
+what: `czeros(n, ...)` makes a complex array of up to four axes, and a vector literal with a
+  complex element (`[1.0 + 2.0i, 3.0]`) is one, the reals promoted; a matrix literal with a
+  complex element is refused, so build a complex matrix with `czeros` and stores. Indexing gives a `Cplx`; storing a real
+  promotes it; `re`, `im` and `abs` of a complex array give arrays of numbers. A complex and a real
+  array do not mix silently, complex arrays do not broadcast, and `print`/`show` refuse a
+  whole complex array (print `re(z)` and `im(z)`).
+when: For wave functions, Fourier coefficients and anything `fft` reads.
+example: complex-arrays
+doc: www/src/pages/reference.astro section types
+see: complex-numbers, fft, czeros
+keywords: complex cplx carr imaginary czeros re im conj abs phase
+usage: call:czeros, form:complex-literal

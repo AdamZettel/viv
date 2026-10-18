@@ -1,0 +1,156 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+"""Write scf/suite/ref/stb.viv: the basis packs the PySCF suite replay needs
+that lib/hfref does not carry.
+
+    python3 scf/suite/gen_ref.py
+
+lib/hfref holds water, He, H, OH, O2 and the 6-31G* breadth set. The PySCF
+tests the suite replays also build N2 and N2+ in cc-pVDZ, water with a ghost
+hydrogen, He and Ne 3 A apart, two benzenes (plain cc-pVDZ, and the
+test_moleintor one with a hand-written C4 basis) and a water-like STO-3G
+molecule whose O carries charge 2.5. This writes their packs in the frozen
+layout of lib/hf, with the same splitting of general
+contractions as tools/hf_reference.py (it imports that function). Only
+inputs are written: geometry and basis. Every number the suite asserts comes
+from lib/hfref/pyscf_tests.viv.
+
+Running it twice gives the same bytes (every float is written with repr()).
+"""
+import os
+import sys
+
+import numpy as np
+from pyscf import gto
+
+here = os.path.dirname(os.path.abspath(__file__))
+root = os.path.dirname(os.path.dirname(here))
+sys.path.insert(0, os.path.join(root, "tools"))
+import hf_reference as hr  # noqa: E402
+
+WATER = "O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587"
+BENZENE = [
+    ["C", (-0.65830719, 0.61123287, -0.00800148)],
+    ["C", (0.73685281, 0.61123287, -0.00800148)],
+    ["C", (1.43439081, 1.81898387, -0.00800148)],
+    ["C", (0.73673681, 3.02749287, -0.00920048)],
+    ["C", (-0.65808819, 3.02741487, -0.00967948)],
+    ["C", (-1.35568919, 1.81920887, -0.00868348)],
+    ["H", (-1.20806619, -0.34108413, -0.00755148)],
+    ["H", (1.28636081, -0.34128013, -0.00668648)],
+    ["H", (2.53407081, 1.81906387, -0.00736748)],
+    ["H", (1.28693681, 3.97963587, -0.00925948)],
+    ["H", (-1.20821019, 3.97969587, -0.01063248)],
+    ["H", (-2.45529319, 1.81939187, -0.00886348)],
+]
+# test_moleintor.py's C4 basis, as written there
+C4 = '''
+#BASIS SET: (9s,4p,1d) -> [3s,2p,1d]
+    C    S
+       6665.0000000              0.0006920             -0.0001460
+       1000.0000000              0.0053290             -0.0011540
+        228.0000000              0.0270770             -0.0057250
+         64.7100000              0.1017180             -0.0233120
+         21.0600000              0.2747400             -0.0639550
+          7.4950000              0.4485640             -0.1499810
+          2.7970000              0.2850740             -0.1272620
+          0.5215000              0.0152040              0.5445290
+    C    S
+          0.1596000              1.0000000
+    C    P
+          9.4390000              0.0381090
+          2.0020000              0.2094800
+          0.5456000              0.5085570
+    C    P
+          0.1517000              1.0000000
+    C    D
+          0.5500000              1.0000000        '''
+
+
+def moleintor_mol():
+    atoms = [list(a) for a in BENZENE]
+    for k in range(1, 6):
+        atoms[k][0] = "C%d" % k
+    mol = gto.Mole()
+    mol.verbose = 0
+    mol.atom = atoms
+    mol.basis = {"H": "cc-pvdz", "C1": "CC PVDZ", "C2": "CC PVDZ", "C3": "cc-pVDZ",
+                 "C4": gto.basis.parse(C4), "C": "CC PVDZ"}
+    mol.ecp = {"C1": "LANL2DZ"}
+    mol.build()
+    return mol
+
+
+def systems():
+    out = []
+    out.append(("n2", "N2 1 A apart along z, cc-pVDZ (test_rhf.py / test_uhf.py n2sym)",
+                gto.M(atom="N 0 0 0; N 0 0 1", basis="cc-pvdz", verbose=0), None))
+    ghost = gto.Mole()
+    ghost.atom = [["O", (0., 0., 0.)], ["ghost", (0., -0.757, 0.587)], [1, (0., 0.757, 0.587)]]
+    ghost.verbose = 0
+    ghost.spin = 1
+    ghost.basis = {"O": "ccpvdz", "H": "ccpvdz", "GHOST": gto.basis.load("ccpvdz", "H")}
+    ghost.build()
+    out.append(("ghost", "O, a ghost H (charge 0, basis kept) and H, cc-pVDZ (test_rhf.py:562)", ghost, None))
+    out.append(("hene", "He and Ne 3 A apart along x, cc-pVDZ (test_moleintor.py:303)",
+                gto.M(atom="He 0 0 0; Ne 3 0 0", basis="ccpvdz", verbose=0), None))
+    out.append(("frac", "the water-like molecule of test_mole.py:980, STO-3G; the O charge 2.5 is in pst_frac_atoms",
+                gto.M(atom=[["h", (0., 1., 1.)], ["O", (0., 0., 0.)], ["h", (1., 1., 0.)]], basis="sto3g", verbose=0), None))
+    mi = moleintor_mol()
+    out.append(("bzi", "benzene of test_moleintor.py: cc-pVDZ, with C4 given as a hand-written general contraction",
+                mi, mi.ao_loc_nr()[mi.nbas // 4]))
+    out.append(("bz", "benzene of test_bz.py, cc-pVDZ (114 AOs)",
+                gto.M(atom=BENZENE, basis={"H": "ccpvdz", "C": "ccpvdz"}, verbose=0), None))
+    return out
+
+
+def lit(A, integer):
+    rows = []
+    for r in np.asarray(A, dtype=float):
+        if integer:
+            rows.append("[" + ", ".join(str(int(v)) for v in r) + "]")
+        else:
+            rows.append("[" + ", ".join(repr(float(v)) for v in r) + "]")
+    return "[" + ",\n        ".join(rows) + "]"
+
+
+def main():
+    L = ["###",
+         "post: Basis packs for the PySCF suite replay",
+         "agent: claude",
+         "",
+         "Generated by `python3 scf/suite/gen_ref.py`; do not edit. Geometry and",
+         "basis only, in the frozen pack layout: atoms[natm,4] = (Z, x, y, z) in",
+         "Bohr; shells[nsh,8] = (atom, l, nprim, p0, cart0, sph0, ncart, nsph), general",
+         "contractions split; prims[nprim,2] = (exponent, raw bas_ctr_coeff).",
+         "###",
+         ""]
+    for key, doc, mol, bound in systems():
+        pk = hr.packs(mol)
+        P = "STB_" + key.upper()
+        L.append("# ---- %s ----" % doc)
+        L.append("%s_NAO_SPH = %d" % (P, pk["nao_sph"]))
+        L.append("%s_NAO_CART = %d" % (P, pk["nao_cart"]))
+        assert pk["nao_sph"] == mol.nao_nr() and pk["nao_cart"] == mol.nao_cart()
+        if bound is not None:
+            L.append("# the first spherical AO of PySCF shell nbas/4 = %d (PySCF counts a general" % (mol.nbas // 4))
+            L.append("# contraction as one shell), where test_moleintor.py:109 cuts its shell slice")
+            L.append("%s_SLICE_AO = %d" % (P, bound))
+        L.append("def stb_%s_atoms() {" % key)
+        L.append("    return " + lit(pk["atoms"], False))
+        L.append("}")
+        L.append("def stb_%s_shells() {" % key)
+        L.append("    return " + lit(pk["shells"], True))
+        L.append("}")
+        L.append("def stb_%s_prims() {" % key)
+        L.append("    return " + lit(pk["prims"], False))
+        L.append("}")
+        L.append("")
+    path = os.path.join(here, "ref", "stb.viv")
+    with open(path, "w") as f:
+        f.write("\n".join(L).rstrip("\n") + "\n")
+    print("wrote", os.path.relpath(path, root))
+
+
+if __name__ == "__main__":
+    main()

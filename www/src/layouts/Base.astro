@@ -1,0 +1,318 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import '../styles/data-palette.css';
+import '../styles/viv.css';
+import '../styles/data-palette.css';
+import { SIDES, GITHUB, REPO_PUBLIC, sideOf, currentLink } from '../lib/site';
+import flip from '../data/flip.json';
+
+export interface Props {
+  title: string;
+  description: string;
+  /** the h1 shown above the content; omit to render your own header */
+  heading?: string;
+  eyebrow?: string;
+  /** 'narrow' for prose pages, 'wide' for the workbench, default otherwise */
+  width?: 'narrow' | 'default' | 'wide';
+  /** full-viewport, no padding — the workbench and terminal use this */
+  bleed?: boolean;
+  /** An app, not a document: the slot fills the window under the bar, and the footer is left off. */
+  app?: boolean;
+  /** A section's own favicon (a path under public/), in place of Viv's. */
+  icon?: string;
+  /** A section's own og:image (a path under public/). */
+  image?: string;
+  /** Which side's theme the page wears; by default the side its path is on (the home page: vipyr). */
+  theme?: 'vipyr' | 'viv';
+  /** Draw the Viv side's warp hairlines (its plain pages do; the doc shell does not). */
+  warp?: boolean;
+  /** A page with no address of its own (the 404 page): no canonical link, and robots noindex. */
+  noindex?: boolean;
+}
+
+const { title, description, heading, eyebrow, width = 'default', bleed = false, app = false, icon, image, theme, warp, noindex = false } = Astro.props;
+const path = Astro.url.pathname.replace(/\/$/, '') || '/';
+const listed = sideOf(path);
+// Two sides, two themes: viv.css scopes each token set by data-side. A page
+// outside both sides' lists (the notebooks, the catalog, the claims, the
+// atlas, the inventory) shows Viv code, so it takes Viv's theme; the home page
+// starts on vipyr's.
+const sideId = theme ?? listed?.id ?? (path === '/' ? 'vipyr' : 'viv');
+// such a page still carries its side's nav row, so a reader can get back to
+// the sections from it; only the home page has none
+const side = listed ?? (path === '/' ? undefined : SIDES.find((s) => s.id === sideId));
+const cur = side ? currentLink(side, path) : undefined;
+// The same code on the other side (scripts/flip-build.mjs): the flip control
+// beside the switch appears only when this page has a counterpart.
+const flips: { href: string; label: string }[] = (flip.pages as Record<string, { href: string; label: string }[]>)[path] || [];
+const flipTo = sideId === 'vipyr' ? 'Viv' : 'vipyr';
+// the second switch names languages: a vipyr page is Python, a Viv page is Viv
+const langHere = sideId === 'vipyr' ? 'Python' : 'Viv';
+const langThere = sideId === 'vipyr' ? 'Viv' : 'Python';
+// The side switch goes to this page's counterpart on the other side when there
+// is one (the same code, or the same kind of page), and to that side's home
+// only when there is none: from vipyr's Gallery, "Viv" opens Viv's Gallery.
+const PAIRS: [string, string][] = [
+  ['/vipyr/gallery', '/gallery'],
+  ['/vipyr/api', '/reference'],
+  ['/vipyr/install', '/install'],
+  ['/vipyr/getting-started', '/tour'],
+];
+const pairOf = (p: string, from: 0 | 1) => PAIRS.find((pr) => p === pr[from] || p.startsWith(pr[from] + '/'))?.[1 - from];
+const toViv = sideId === 'vipyr' ? (flips.length === 1 ? flips[0].href : pairOf(path, 0)) ?? '/tour' : '/tour';
+const toVipyr = sideId === 'viv' ? (flips.length === 1 ? flips[0].href : pairOf(path, 1)) ?? '/vipyr' : '/vipyr';
+// The warp frames the default 1180px page column exactly (viv.css .page and
+// .warp share that width), so it is drawn on those pages only: a wide, narrow,
+// bleed or app page has other column edges, and the lines would cut through it.
+const showWarp = sideId === 'viv' && (warp ?? (!bleed && !app && width === 'default'));
+const FOOT = [
+  // the two sides each have a Gallery: the footer, which lists both, names them apart
+  { h: 'vipyr', links: [...SIDES[0].pages.map((l) => [l.href, l.href === '/vipyr/gallery' ? 'vipyr gallery' : l.label]), ['/vipyr/ports', 'Ports of classic codes']] },
+  { h: 'Viv language', links: SIDES[1].pages.map((l) => [l.href, l.href === '/gallery' ? 'Viv gallery' : l.label]) },
+  {
+    h: 'Programs',
+    links: [
+      ['/dft', 'Plane-wave DFT'],
+      ['/pde', 'PDE solvers'],
+      ['/engines', 'Engines'],
+      ['/examples', 'Example programs'],
+      ['/c/claims', 'Claims'],
+    ],
+  },
+  {
+    h: 'Build',
+    links: [
+      ['/install', 'Install the compiler'],
+      ['/internals', 'Compiler internals'],
+      ['/knotkit', 'knotkit, the compiler kit'],
+      ['/compare', 'Python and Viv, side by side'],
+      ['/cli', 'Terminal'],
+      ['/embed', 'Embed on your page'],
+      ['/agents', 'Use Viv with your agent'],
+    ],
+  },
+  // the repository, once it is public (REPO_PUBLIC in src/lib/repo.js)
+  ...(REPO_PUBLIC ? [{ h: 'Elsewhere', links: [[GITHUB, 'Source on GitHub']] }] : []),
+];
+---
+
+<!doctype html>
+<html lang="en" data-side={sideId}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={new URL(Astro.url.pathname, 'https://viv-lang.org')} />}
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Viv" />
+    <meta name="twitter:card" content="summary" />
+    {image && <meta property="og:image" content={new URL(image, 'https://viv-lang.org')} />}
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <link rel="alternate" type="application/atom+xml" title="Viv posts" href="/feed.xml" />
+    <link rel="icon" href={icon || (sideId === 'viv' ? '/brand/viv/favicon-32.png' : '/brand/vipyr/favicon-32.png')} />
+    <link rel="apple-touch-icon" href={sideId === 'viv' ? '/brand/viv/viv-icon-180.png' : '/brand/vipyr/vipyr-icon-180.png'} />
+    <link rel="preload" href="/fonts/Outfit-wght.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Serif:wght@500;600&display=swap"
+    />
+    <script is:inline>
+      // Set the theme before first paint so there is no flash.
+      try {
+        const saved = localStorage.getItem('viv-theme');
+        const dark = saved
+          ? saved === 'dark'
+          : window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      } catch {
+        document.documentElement.dataset.theme = 'light';
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="site-note" role="note" data-by="user">
+      This site is version 0.0.1. Most of the code on this site is drafted by an agent and needs review. I apologize
+      for the AI-speak, we are working on rewriting it!
+    </div>
+    {showWarp && <div class="warp" aria-hidden="true"></div>}
+    <header class="site-head">
+      <div class="site-head-in">
+        <a class="home-link" href="/" aria-label="viv-lang.org, home">viv-lang.org</a>
+        <nav class="coin" aria-label="The two sides of the site">
+          <a class="coin-vipyr" href={toVipyr} aria-current={side?.id === 'vipyr' ? 'true' : undefined}>
+            <img src="/brand/vipyr/vipyr-mark-light.svg" class="brand-on-light" alt="" width="20" height="19" />
+            <img src="/brand/vipyr/vipyr-mark-dark.svg" class="brand-on-dark" alt="" width="20" height="19" />
+            vipyr
+          </a>
+          <a class="coin-viv" href={toViv} aria-current={side?.id === 'viv' ? 'true' : undefined}>
+            <img src="/brand/viv/viv-mark-light.svg" class="brand-on-light" alt="" width="20" height="20" />
+            <img src="/brand/viv/viv-mark-dark.svg" class="brand-on-dark" alt="" width="20" height="20" />
+            Viv
+          </a>
+        </nav>
+        {
+          flips.length === 1 && (
+            <div class="lang" role="group" aria-label="This program in Python and in Viv">
+              <span class="lang-on" aria-current="true">{langHere}</span>
+              <a class="lang-off" href={flips[0].href} title={flips[0].label}>{langThere}</a>
+            </div>
+          )
+        }
+        {
+          flips.length > 1 && (
+            <div class="side flip-side lang" role="group" aria-label="This program in Python and in Viv">
+              <span class="lang-on" aria-current="true">{langHere}</span>
+              <button class="side-btn lang-off" type="button" aria-expanded="false" aria-controls="menu-flip" aria-label={`${langThere}: ${flips.length} pages`}>
+                {langThere}
+                <span class="flip-n">{flips.length}</span>
+              </button>
+              <div class="side-menu flip-menu" id="menu-flip" hidden>
+                {flips.map((l) => (
+                  <a href={l.href}>{l.label}</a>
+                ))}
+              </div>
+            </div>
+          )
+        }
+        {
+          // an app page (the workbench) has no footer, so the More menu is
+          // its way to the rest of the site, as it is on every other page
+          side && (
+            <nav class={app ? 'sections sections-app' : 'sections'} aria-label={`${side.label} sections`}>
+              {side.pages.map((l) => (
+                <a href={l.href} aria-current={cur === l.href ? 'page' : undefined}>
+                  {l.label}
+                </a>
+              ))}
+              {side.more && (
+                <div class="side">
+                  <button class="side-btn" type="button" aria-expanded="false" aria-controls="menu-more">
+                    More
+                    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"
+                      ><path d="M2.5 4.5L6 8l3.5-3.5" /></svg
+                    >
+                  </button>
+                  <div class="side-menu" id="menu-more" hidden>
+                    {side.more.map((l) => (
+                      <a href={l.href} aria-current={cur === l.href ? 'page' : undefined}>
+                        {l.label}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </nav>
+          )
+        }
+        <div class="head-tools">
+          <div class="search" role="search">
+            <label class="search-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"
+                ><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg
+              >
+              <span class="sr-only">Search the site</span>
+              <input
+                type="search"
+                placeholder="Search"
+                autocomplete="off"
+                spellcheck="false"
+                role="combobox"
+                aria-expanded="false"
+                aria-controls="search-results"
+                aria-autocomplete="list"
+              />
+              <kbd aria-hidden="true">/</kbd>
+            </label>
+            <ul class="search-results" id="search-results" role="listbox" aria-label="Search results" hidden></ul>
+          </div>
+          <button class="icon-btn search-open" type="button" aria-label="Search the site">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"
+              ><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg
+            >
+          </button>
+          {REPO_PUBLIC && <a class="icon-btn nav-gh" href={GITHUB} rel="noopener" target="_blank" aria-label="Source on GitHub">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
+              ><path
+                d="M12 .5a11.5 11.5 0 00-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 015.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0012 .5z"
+              /></svg
+            >
+          </a>}
+          <button class="theme-btn" type="button" aria-label="Switch between light and dark">
+            <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"
+              ><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" /></svg
+            >
+            <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"
+              ><circle cx="12" cy="12" r="4" /><path
+                d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"
+              /></svg
+            >
+          </button>
+        </div>
+      </div>
+    </header>
+
+    {
+      app ? (
+        <main id="main" class="app-main">
+          <slot />
+        </main>
+      ) : bleed ? (
+        <main id="main">
+          <slot />
+        </main>
+      ) : (
+        <main
+          id="main"
+          class={`page ${width === 'narrow' ? 'page-narrow' : width === 'wide' ? 'page-wide' : ''}`}>
+          {eyebrow && <p class="eyebrow">{eyebrow}</p>}
+          {heading && <h1>{heading}</h1>}
+          <slot />
+        </main>
+      )
+    }
+
+
+    {!app && (
+    <footer class="site-foot">
+      <div class="site-foot-in">
+        {
+          FOOT.map((col) => (
+            <div>
+              <h4>{col.h}</h4>
+              <ul>
+                {col.links.map(([href, label]) => (
+                  <li>
+                    <a
+                      href={href}
+                      rel={href.startsWith('http') ? 'noopener' : undefined}
+                      target={href.startsWith('http') ? '_blank' : undefined}>
+                      {label}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        }
+      </div>
+      <div class="foot-legal">
+        Viv, vipyr and knotkit are MIT OR Apache-2.0, by <a href="https://notesoncomputing.com"
+          >Adam Zettel</a
+        >. vipyr is set in Outfit and JetBrains Mono, Viv in IBM Plex (all SIL Open Font License).
+      </div>
+    </footer>
+    )}
+
+    <script>
+      import { initChrome } from '../lib/chrome.js';
+      initChrome();
+    </script>
+  </body>
+</html>

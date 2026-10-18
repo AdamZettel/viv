@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# Skyrme Hartree-Fock of a spherical closed-shell nucleus as one C file and a
+# Python wrapper: `viv export lib/skyrme/skyrmehf.export.toml`.
+# Paths are under the repository root. A parameter
+# left out of a run keeps the program's value (oxygen-16, SLy5, 150 points of
+# 0.1 fm); each parameter's meaning is the `#:` line above it in
+# lib/skyrme/skyrmehf.viv. The summary, description, notes, references,
+# see_also and [[examples]] are the reference page; every number in them comes from a run of this
+# program (lib/skyrme/COMPARISON.md has the runs).
+name = "skyrmehf"
+about = "lib/skyrme/spherical.viv"
+files = ["lib/skyrme/skyrmehf.viv"]
+# runs that tools/export/check.py holds to the same bits in three engines,
+# and the generated test holds to the numpy reference
+cases = "lib/skyrme/skyrmehf.cases.json"
+
+[params]
+NUCLEUS = { type = "Str", units = "", range = "a closed-shell nucleus: \"16O\", \"40Ca\", \"48Ca\", \"56Ni\", \"90Zr\", \"132Sn\", \"208Pb\", ...", doc = "the nucleus, as its mass number and element symbol (\"208Pb\"; \"Pb208\" and \"pb-208\" also work)" }
+FORCE = { type = "SkyrmeName", labels = { "sly4" = "Sly4", "sly5" = "Sly5", "siii" = "Siii", "skm*" = "Skms" }, normalize = "lower", range = "SLy4, SLy5, SIII, SkM*", doc = "the Skyrme force; t0 ... j2 start from its values" }
+T0 = { type = "Num", units = "MeV fm^3", doc = "the force's t0, the contact term" }
+T1 = { type = "Num", units = "MeV fm^5", doc = "the force's t1, the momentum-dependent term even in the relative momentum" }
+T2 = { type = "Num", units = "MeV fm^5", doc = "the force's t2, the term odd in the relative momentum" }
+T3 = { type = "Num", units = "MeV fm^(3 + 3 alpha)", doc = "the force's t3, the density-dependent term" }
+X0 = { type = "Num", doc = "the spin exchange of the t0 term" }
+X1 = { type = "Num", doc = "the spin exchange of the t1 term" }
+X2 = { type = "Num", doc = "the spin exchange of the t2 term" }
+X3 = { type = "Num", doc = "the spin exchange of the t3 term" }
+W0 = { type = "Num", units = "MeV fm^5", doc = "the spin-orbit strength" }
+ALPHA = { type = "Num", min = 0.0, max = 1.0, range = "0 to 1; 1/6 for SLy4, SLy5 and SkM*, 1 for SIII", doc = "the power of the density in the t3 term" }
+J2 = { type = "Bool", doc = "whether the J^2 terms of t1 and t2 are kept (SLy5 and SIII keep them, SLy4 and SkM* drop them)" }
+SPACING = { type = "Num", min_exclusive = 0.0, max = 1.0, units = "fm", range = "0.025 to 0.2; at 0.1 E/A is 0.014 to 0.019 MeV below its h -> 0 limit", doc = "the mesh spacing" }
+BOX = { type = "Num", min = 5.0, max = 60.0, units = "fm", range = "default 15, or 1.2 A^(1/3) + 11.5 when wider", doc = "the width of the box; the orbitals are zero past it" }
+MIXING = { type = "MixDensities", labels = { "linear" = "Linear", "pulay" = "Pulay", "broyden" = "Broyden", "every" = "Every", "every simple" = "EverySimple", "every accelerated" = "EveryAccelerated" }, normalize = "lower", contract = "mix_densities", range = "pulay (the default), linear, broyden; every runs all three each pass and continues with pulay's", doc = "how each pass's densities are mixed into the next pass's: linear keeps MIX of the new ones; pulay and broyden combine the last HISTORY passes (lib/scf/mix.viv)" }
+MIX = { type = "Num", min_exclusive = 0.0, max = 1.0, range = "0.3 to 0.6; the default 0.5 converges for all the nuclei above", doc = "the fraction of each pass's new densities mixed into the old ones; for pulay and broyden, the fraction of their combined residual" }
+HISTORY = { type = "Int", min = 1, max = 50, range = "2 to 10; default 6", doc = "how many passes pulay and broyden combine, the current one included (pulay and broyden only; linear ignores it)" }
+E_TOL = { type = "Num", min = 0.0, units = "MeV", doc = "the iteration stops when the total energy changes by less than this between passes" }
+MAX_ITER = { type = "Int", min = 1, max = 10000, doc = "at most this many passes; a run that does not settle returns converged = False" }
+
+[results]
+Z = "Int"
+N = "Int"
+E_PER_A = "Num"
+ENERGY = "Num"
+R_P = "Num"
+R_N = "Num"
+R_CH = "Num"
+LEVELS = "Arr"
+LABELS = "Str"
+SPECTRUM = "Arr"
+SPECTRUM_LABELS = "Str"
+SPECTRUM_OCC = "Arr"
+ITERATIONS = "Int"
+CONVERGED = "Bool"
+REFILLS = "Int"
+MESH = "Arr"
+RHO = "Arr"
+TAU = "Arr"
+JSO = "Arr"
+
+[reference]
+program = "lib/skyrme/refs/skyrme_hf.py (the personal site's numpy solver, constants set to skyrme_rpa's) for every nucleus and force on two meshes (lib/skyrme/refs/compare.py, lib/skyrme/COMPARISON.md); the post's numpy twin of oxygen-16 and skyrme_rpa (Colò, Cao, Van Giai and Capelli, CPC 184, 142 (2013)) for oxygen-16 with SLy5 (tools/export/test_skyrmehf.py)"
+cases = "oxygen-16 with SLy5 at the defaults, and six more nuclei with the four forces at E_TOL 1e-10 with linear mixing, as the numpy solver mixes (skyrmehf.cases.json)"
+tolerance = "1e-9 against the numpy solver at the same mesh (observed 2e-11 or less: the two eigensolvers' round-off)"

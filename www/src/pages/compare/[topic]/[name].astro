@@ -1,0 +1,284 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One Python/Viv pair: the two programs region against region, the notes
+// above, both outputs below. Everything here is scripts/compare-build.mjs's
+// output; the page adds layout, the column switch and the Run button.
+import Base from '../../../layouts/Base.astro';
+import data from '../../../data/compare.json';
+import { atlasHref } from '../../../lib/atlasLink.js';
+import '../../../styles/compare.css';
+
+export function getStaticPaths() {
+  const all = data.topics.flatMap((t) => t.pairs.map((p) => ({ p, t })));
+  return all.map(({ p, t }, i) => ({
+    params: { topic: p.topic, name: p.name },
+    props: { pair: p, topic: t, prev: all[i - 1]?.p ?? null, next: all[i + 1]?.p ?? null },
+  }));
+}
+const { pair, topic, prev, next } = Astro.props;
+const href = (p) => `/compare/${p.topic}/${p.name}`;
+const p2v = pair.p2v;
+const phr = pair.phr; // the Viv written with phrases, when the pair has it
+const LINE_SHOWN = 220; // an output line longer than this is cut for the page (figure records)
+const shown = (t) => (t.length > LINE_SHOWN ? t.slice(0, LINE_SHOWN) + ` … (${t.length - LINE_SHOWN} more characters)` : t);
+const why = { test: 'a test block’s verdict', stated: 'left out: see the notes' };
+const droppedAny = pair.outputs.python.some((l) => l.drop) || pair.outputs.viv.some((l) => l.drop);
+const workbench = `/workbench?open=compare/${pair.topic}/${pair.name}.viv`;
+// consecutive bullets make one list; a heading or a table stands alone
+const notesGroups = [];
+for (const b of pair.notes) {
+  const last = notesGroups[notesGroups.length - 1];
+  if (b.kind === 'li' && last?.kind === 'li') last.items.push(b.html);
+  else notesGroups.push(b.kind === 'li' ? { kind: 'li', items: [b.html] } : b);
+}
+---
+
+<Base
+  title={`${pair.title} in Python and Viv · Viv`}
+  description={`${pair.title} written in Python and in Viv, the same algorithm with the same output, shown side by side with the syntax differences listed.`}
+  eyebrow={`Python and Viv · ${topic.title}`}
+  heading={pair.title}
+  width="wide">
+  <nav class="cmp-crumbs" aria-label="Pairs">
+    <a href="/compare">All pairs</a>
+    {prev && <a href={href(prev)}>← {prev.title}</a>}
+    {next && <a href={href(next)}>{next.title} →</a>}
+  </nav>
+
+  <section class="cmp-notes">
+    <h2>What to notice</h2>
+    {
+      notesGroups.map((g) =>
+        g.kind === 'li' ? (
+          <ul>{g.items.map((html) => <li set:html={html} />)}</ul>
+        ) : g.kind === 'h' ? (
+          <h3 set:html={g.html} />
+        ) : g.kind === 'p' ? (
+          <p set:html={g.html} />
+        ) : (
+          <div class="cmp-table" set:html={g.html} />
+        ),
+      )
+    }
+  </section>
+
+  <div class="cmp-bar">
+    <div class="cmp-seg" role="group" aria-label="The right-hand column">
+      <button type="button" data-show="viv" aria-pressed="true">Viv</button>
+      <button type="button" data-show="p2v" aria-pressed="false">py2viv’s translation</button>
+      <button type="button" data-show="both" aria-pressed="false">Both</button>
+      {phr && <button type="button" data-show="phr" aria-pressed="false">Viv in phrases</button>}
+    </div>
+    <button type="button" class="cmp-run" data-src={pair.vivSource} data-expect={pair.outputs.viv.map((l) => l.t).join('\n') + '\n'}>
+      Run the Viv here
+    </button>
+    <a href={workbench}>Open the Viv in the workbench</a>
+    <a href={atlasHref(`compare/${pair.topic}/${pair.name}.viv`)}>The atlas of the Viv</a>
+    <span class="cmp-p2v-note">
+      {p2v.ok ? (p2v.sameOutput ? 'py2viv translates this Python; the translation prints the same output.' : 'py2viv translates this Python; the translation stops where the Python does not (see below).') : 'py2viv refuses this Python (the reason is in its column).'}
+    </span>
+  </div>
+
+  <div class="cmp-grid" data-show="viv" id="cmp-grid">
+    <div class="cmp-head py">Python <span>{pair.name}.py · {pair.pyLines} lines</span></div>
+    <div class="cmp-head viv">Viv <span>{pair.name}.viv · {pair.vivLines} lines</span></div>
+    <div class="cmp-head p2v">py2viv <span>{p2v.ok ? `translated from ${pair.name}.py` : `refuses ${pair.name}.py`}</span></div>
+    {phr && <div class="cmp-head phr">Viv in phrases <span>{pair.name}.phrased.viv · {phr.lines} lines</span></div>}
+    {
+      p2v.ok && p2v.helpers.length > 0 && (
+        <Fragment>
+          <div class="cmp-rtitle first cmp-helpers">What py2viv adds before the program</div>
+          <div class="cmp-cell py cmp-helpers" data-lang="Python"><div class="cmp-empty">(nothing)</div></div>
+          <div class="cmp-cell viv cmp-helpers" data-lang="Viv"><div class="cmp-empty">(nothing)</div></div>
+          <div class="cmp-cell p2v cmp-helpers" data-lang="py2viv">
+            <p class="cmp-helpers-note">{p2v.helpers.length} lines: a header and the guard functions its translation calls</p>
+            <div class="cmp-code">
+              {p2v.helpers.map((l) => <div class="cmp-ln"><span class="n">{l.n}</span><span class="c" set:html={l.html || ' '} /></div>)}
+            </div>
+          </div>
+        </Fragment>
+      )
+    }
+    {
+      pair.regions.map((r, i) => {
+        const trLines = p2v.ok ? (p2v.aligned ? p2v.regions[i] : i === 0 ? p2v.all : []) : null;
+        return (
+          <Fragment>
+            <div class:list={['cmp-rtitle', { first: i === 0 && !(p2v.ok && p2v.helpers.length) }]} id={`r${i + 1}`}>
+              <b>{i + 1}</b>
+              {r.title}
+            </div>
+            <div class="cmp-cell py" data-lang="Python">
+              <div class="cmp-code">
+                {r.py.map((l) => <div class="cmp-ln"><span class="n">{l.n}</span><span class="c" set:html={l.html || ' '} /></div>)}
+              </div>
+            </div>
+            <div class="cmp-cell viv" data-lang="Viv">
+              <div class="cmp-code">
+                {r.viv.map((l) => <div class="cmp-ln"><span class="n">{l.n}</span><span class="c" set:html={l.html || ' '} /></div>)}
+              </div>
+            </div>
+            <div class="cmp-cell p2v" data-lang="py2viv">
+              {p2v.ok ? (
+                trLines.length ? (
+                  <div class="cmp-code">
+                    {trLines.map((l) => <div class="cmp-ln"><span class="n">{l.n}</span><span class="c" set:html={l.html || ' '} /></div>)}
+                  </div>
+                ) : (
+                  <div class="cmp-empty">{p2v.aligned ? '(nothing)' : '(the whole translation is in the first region)'}</div>
+                )
+              ) : i === 0 ? (
+                <Fragment>
+                  <div class="cmp-refusal-head">py2viv refuses this program:</div>
+                  <pre class="cmp-refusal">{p2v.refusal}</pre>
+                </Fragment>
+              ) : (
+                <div class="cmp-empty">(refused)</div>
+              )}
+            </div>
+            {phr && (
+              <div class="cmp-cell phr" data-lang="Viv in phrases">
+                <div class="cmp-code">
+                  {phr.regions[i].map((l) => <div class="cmp-ln"><span class="n">{l.n}</span><span class="c" set:html={l.html || ' '} /></div>)}
+                </div>
+              </div>
+            )}
+          </Fragment>
+        );
+      })
+    }
+  </div>
+
+  <h2 id="output">What they print</h2>
+  {
+    pair.output === 'identical' ? (
+      <p class="cmp-verdict ok"><b>identical</b> — the two programs print the same text.</p>
+    ) : (
+      <p class="cmp-verdict diff"><b>differs</b> — <Fragment set:html={pair.reasonHtml} /></p>
+    )
+  }
+  {
+    droppedAny && (
+      <p class="cmp-legend">
+        Dimmed lines are left out of the comparison.
+        {!pair.keepPass && pair.outputs.viv.some((l) => l.drop === 'test') && ' Each Viv test block prints one PASS line; the Python checks the same facts with assert, which prints nothing.'}
+        {pair.output === 'differs' && ' The remaining lines match.'}
+      </p>
+    )
+  }
+  <div class="cmp-outgrid">
+    <div>
+      <h3>$ python3 {pair.name}.py</h3>
+      <pre>{pair.outputs.python.map((l) => <div class:list={{ drop: l.drop }} data-why={l.drop ? why[l.drop] : undefined}>{shown(l.t) || ' '}</div>)}</pre>
+    </div>
+    <div>
+      <h3>$ viv run {pair.name}.viv</h3>
+      <pre>{pair.outputs.viv.map((l) => <div class:list={{ drop: l.drop }} data-why={l.drop ? why[l.drop] : undefined}>{shown(l.t) || ' '}</div>)}</pre>
+    </div>
+  </div>
+  {
+    (pair.png || pair.svg) && (
+      <div class="cmp-figs">
+        {pair.png && (
+          <figure>
+            <img src={pair.png} alt={`The figure matplotlib saved for ${pair.title}`} loading="lazy" />
+            <figcaption>What matplotlib saves (a PNG).</figcaption>
+          </figure>
+        )}
+        {pair.svg && (
+          <figure>
+            <div class="svg" set:html={pair.svg} />
+            <figcaption>The Viv program’s figure records drawn by <code>viv plot</code> (an SVG); on a post or a notebook the page draws them.</figcaption>
+          </figure>
+        )}
+      </div>
+    )
+  }
+  {
+    p2v.ok && (
+      <div class="cmp-p2v-out">
+        <h3>$ viv run {pair.name}.py (py2viv’s translation)</h3>
+        <p class="cmp-legend">
+          {p2v.sameOutput
+            ? 'The translation prints exactly what the Python prints.'
+            : 'The translation does not print what the Python prints: it stops with a guard where a double cannot give Python’s answer.'}
+        </p>
+        <pre>{p2v.output.replace(/\n$/, '').split('\n').map((t) => <div>{shown(t) || ' '}</div>)}</pre>
+      </div>
+    )
+  }
+  <div class="cmp-live" id="cmp-live" hidden>
+    <h3>Viv compiled to wasm</h3>
+    <p class="status" aria-live="polite"></p>
+    <pre></pre>
+  </div>
+
+  <nav class="cmp-pager" aria-label="Next and previous pairs">
+    <span>{prev && <a href={href(prev)}>← {prev.title}</a>}</span>
+    <span>{next && <a href={href(next)}>{next.title} →</a>}</span>
+  </nav>
+
+  <script>
+    import { loadViv, compileAndRun } from '../../../lib/vivDirect.js';
+    import { vivModule } from '../../../lib/vivWasm.js';
+    import { expandUses, hasUses, browserResolver } from '../../../lib/uses.js';
+
+    // The column switch: Viv by hand, py2viv's translation, both, or (for a pair
+    // that has it) the Viv by hand beside the Viv written in phrases. The choice
+    // is kept for the next pair that offers it.
+    const grid = document.getElementById('cmp-grid');
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('.cmp-seg button')];
+    const show = (mode: string) => {
+      if (!grid) return;
+      grid.dataset.show = mode;
+      for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.show === mode));
+      try {
+        localStorage.setItem('viv-compare-show', mode);
+      } catch {}
+    };
+    for (const b of buttons) b.addEventListener('click', () => show(b.dataset.show || 'viv'));
+    try {
+      const saved = localStorage.getItem('viv-compare-show');
+      if (saved && buttons.some((b) => b.dataset.show === saved)) show(saved);
+    } catch {}
+
+    // Run: the Viv program compiled to wasm in this tab, as the workbench runs it,
+    // and compared with the output recorded when the site was built.
+    const run = document.querySelector<HTMLButtonElement>('.cmp-run');
+    const live = document.getElementById('cmp-live');
+    let viv: Promise<any> | null = null;
+    run?.addEventListener('click', async () => {
+      if (!live || !run) return;
+      const status = live.querySelector('.status') as HTMLElement;
+      const pre = live.querySelector('pre') as HTMLElement;
+      live.hidden = false;
+      run.disabled = true;
+      run.textContent = 'Running…';
+      status.textContent = 'Compiling and running…';
+      pre.textContent = '';
+      // the result sits under the recorded outputs, far below the button:
+      // bring it into view so the click shows something where the reader looks
+      live.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
+      try {
+        viv = viv || vivModule().then(loadViv);
+        const ex = await viv;
+        const src0 = run.dataset.src || '';
+        const src = hasUses(src0) ? await expandUses(src0, browserResolver()) : src0;
+        const r = await compileAndRun(ex, src);
+        if (r.error) {
+          status.textContent = `Stopped: ${r.error}`;
+          pre.textContent = r.partial || '';
+        } else {
+          pre.textContent = r.output;
+          const same = r.output === run.dataset.expect;
+          status.textContent = `${r.seconds.toFixed(2)} s. ${same ? 'The same output as the recorded run above.' : 'This output differs from the recorded run above.'}`;
+        }
+      } catch (e) {
+        status.textContent = `Could not run: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      run.disabled = false;
+      run.textContent = 'Run the Viv again';
+    });
+  </script>
+</Base>

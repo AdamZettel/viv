@@ -1,0 +1,60 @@
+###
+post: Linear regression by gradient descent, from TheAlgorithms/Julia
+agent: claude
+
+A port of machine_learning/linear_regression.jl, the whole script: ten
+points, W and b fitted by 1000 steps of batch gradient descent with
+alpha = 0.01. Julia writes the step as X * (X'W .+ b - Y'); with transpose
+and @ the Viv line has the same shape. The difference is at the edges:
+Julia returns (W, b, J_history), and here W and b come back through
+arrays the caller passes in.
+###
+
+from ref_values import REF_LR_B, REF_LR_J_FIRST, REF_LR_J_LAST, REF_LR_PRED, REF_LR_W
+
+#| Fit Y ~ W X + b. X is 1 x m, Y is 1 x m, W is 1 x 1 (as in the original). Writes the fitted W
+#| into W_out and b into b_out[0]; returns the cost after every step.
+def gradient_descent(W, b, X, Y, alpha, num_iters, W_out, b_out) {
+    m = len(transpose(Y))
+    J_history = zeros(num_iters)
+    for i to num_iters {
+        W = W - alpha * (1.0 / m) * (X @ (transpose(X) @ W + b - transpose(Y)))
+        b = b - alpha * (1.0 / m) * sum(transpose(X) @ W + b - transpose(Y))
+        r = transpose(X) @ W + b - transpose(Y)
+        J_history[i] = 1.0 / (2.0 * m) * sum(r * r)
+    }
+    setslab(W_out, 0, slab(W, 0))
+    b_out[0] = b
+    return J_history
+}
+
+def predict(X, W, b) {
+    return transpose(X) @ W + b
+}
+
+X = [[1.0, 3.0, 2.0, 5.0, 7.0, 8.0, 8.0, 9.0, 10.0, 12.0]]
+Y = [[2.0, 4.0, 3.0, 6.0, 8.0, 9.0, 9.0, 10.0, 11.0, 13.0]]
+W = zeros(1, len(X))
+b = zeros(1)
+J = gradient_descent(zeros(1, len(X)), 0.0, X, Y, 0.01, 1000.0, W, b)
+output = predict(X, W, b[0])
+show W
+show b
+show J[999]
+
+test "fitted W and b match the Julia script" {
+    assert_near(W[0, 0], REF_LR_W, 1.0e-14)
+    assert_near(b[0], REF_LR_B, 1.0e-14)
+}
+
+test "cost history, first and last" {
+    assert_near(J[0], REF_LR_J_FIRST, 1.0e-14)
+    assert_near(J[999], REF_LR_J_LAST, 1.0e-15)
+}
+
+test "predictions" {
+    assert_allclose(slab(transpose(output), 0), REF_LR_PRED, 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

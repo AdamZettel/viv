@@ -1,0 +1,97 @@
+###
+The Lennard-Jones equation of state at one state point, from the fits of
+Thol et al.: pressure, energy, heat capacities, chemical potential and
+activity for the full potential, the same moved to the potential cut (not
+shifted) at 2.5 sigma by the long-range and delta corrections, and for the
+potential cut and shifted at 2.5 sigma, with the residual free energy and
+its derivatives behind each. These are the numbers Allen and Tildesley's
+simulations are tested against.
+
+This is eos_lj of Allen and Tildesley's examples for Computer Simulation
+of Liquids (2nd ed., Oxford University Press, 2017;
+https://github.com/Allen-Tildesley/examples), ported to Viv. The fits are
+M. Thol, G. Rutkai, A. Koester, R. Lustig, R. Span and J. Vrabec, Journal
+of Physical and Chemical Reference Data 45, 023101 (2016) (full potential)
+and M. Thol, G. Rutkai, R. Span, J. Vrabec and R. Lustig, International
+Journal of Thermophysics 36, 25 (2015) (cut and shifted); cite those for
+the equation of state.
+###
+# The program behind `vp.liquids.eos` (eos_lj.export.toml).
+#
+#     viv run ports/liquids/eos_lj.viv
+#
+# Derived from eos_lj.f90 of https://github.com/Allen-Tildesley/examples
+# (commit 4818bc82), by Michael P. Allen and Dominic J. Tildesley, CC0-1.0;
+# see ports/liquids/LICENSE.
+from ports.liquids.eos import a_res_full, a_res_cutshift, state_point, cut_from_full
+
+#: temperature  the temperature, in units of epsilon / k_B
+temperature = 1.0
+#: density  the number density, in sigma^-3
+density = 0.75
+
+if temperature <= 0.0 or density <= 0.0 {
+    stop(f"temperature and density must be positive; they are {temperature} and {density}")
+}
+
+a_f = a_res_full(temperature, density)
+full = state_point(a_f, temperature, density)
+cut = cut_from_full(full, temperature, density)
+a_cs = a_res_cutshift(temperature, density)
+cs = state_point(a_cs, temperature, density)
+
+# ---- the full potential
+#: p_full  the pressure
+p_full = full.p
+#: e_full  the energy per atom, with the ideal gas's 3T/2
+e_full = full.e
+#: cv_full  the heat capacity per atom at constant volume, in units of k_B
+cv_full = full.cv
+#: cp_full  the heat capacity per atom at constant pressure
+cp_full = full.cp
+#: mu_full  the chemical potential
+mu_full = full.mu
+#: z_full  the activity, exp(mu / T) in units of the thermal wavelength cubed
+z_full = full.z
+#: a_res_full_table  the table tau^i delta^j d^(i+j) a_res / d tau^i d delta^j, rows i and columns j from 0 to 2 (entries with i + j > 2 are not used)
+a_res_full_table = a_f
+
+# ---- cut (not shifted) at 2.5 sigma, from the full fit
+#: p_cut  the pressure
+p_cut = cut.p
+#: e_cut  the energy per atom
+e_cut = cut.e
+#: mu_cut  the chemical potential
+mu_cut = cut.mu
+#: z_cut  the activity
+z_cut = cut.z
+
+# ---- cut and shifted at 2.5 sigma
+#: p_cs  the pressure
+p_cs = cs.p
+#: e_cs  the energy per atom
+e_cs = cs.e
+#: cv_cs  the heat capacity per atom at constant volume
+cv_cs = cs.cv
+#: cp_cs  the heat capacity per atom at constant pressure
+cp_cs = cs.cp
+#: mu_cs  the chemical potential
+mu_cs = cs.mu
+#: z_cs  the activity
+z_cs = cs.z
+#: a_res_cs_table  the cut-and-shifted fit's table, as a_res_full
+a_res_cs_table = a_cs
+
+print(f"T = {temperature}  rho = {density}")
+print(f"full:          P = {fmt(p_full, '.6f')}  E/N = {fmt(e_full, '.6f')}  Cv/N = {fmt(cv_full, '.6f')}  Cp/N = {fmt(cp_full, '.6f')}  mu = {fmt(mu_full, '.6f')}  z = {fmt(z_full, '.6f')}")
+print(f"cut:           P = {fmt(p_cut, '.6f')}  E/N = {fmt(e_cut, '.6f')}  mu = {fmt(mu_cut, '.6f')}  z = {fmt(z_cut, '.6f')}")
+print(f"cut-and-shift: P = {fmt(p_cs, '.6f')}  E/N = {fmt(e_cs, '.6f')}  Cv/N = {fmt(cv_cs, '.6f')}  Cp/N = {fmt(cp_cs, '.6f')}  mu = {fmt(mu_cs, '.6f')}  z = {fmt(z_cs, '.6f')}")
+
+test "the heat capacities are positive and C_p exceeds C_v in the one-phase region" {
+    assert_true(cv_full > 0.0 and cp_full > cv_full)
+    assert_true(cv_cs > 0.0 and cp_cs > cv_cs)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

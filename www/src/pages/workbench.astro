@@ -1,0 +1,65 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Base from '../layouts/Base.astro';
+import VivIde from '../components/VivIde.jsx';
+import programs from '../data/programs.json';
+import pde from '../data/pde.json';
+import feed from '../data/feed.json';
+import { readdirSync, existsSync } from 'node:fs';
+
+// lib/ is staged to /programs/lib by scripts/feed-build.mjs
+const libDir = new URL('../../../lib/', import.meta.url).pathname;
+const libFiles = existsSync(libDir) ? readdirSync(libDir).filter((f) => f.endsWith('.viv')).sort() : [];
+
+// The editor's file picker and file tree are the repo's own programs, staged
+// into /programs by scripts/stage.mjs. Contents are fetched on demand, so the
+// page ships no program text.
+const FEATURED = [
+  ['scf_water.viv', 'Hartree–Fock SCF for water in STO-3G, s and p integrals'],
+  ['tov.viv', 'A neutron star from the TOV equations, with its mass–radius curve'],
+  ['fem_poisson.viv', 'Finite elements on the unit square, P1 triangles'],
+  ['autodiff_reverse.viv', 'Reverse-mode autodiff on a flat-array tape'],
+  ['mini_cas.viv', 'A computer-algebra system on flat arrays'],
+  ['hasegawa_wakatani.viv', 'Drift-wave turbulence in the Hasegawa–Wakatani system'],
+];
+const byFile = Object.fromEntries(programs.programs.map((p) => [p.file, p]));
+// a featured file is listed first in the picker, with its description
+const featured = Object.fromEntries(FEATURED.filter(([f]) => byFile[f]));
+const projects = [
+  { slug: 'examples', title: 'Example programs', files: programs.programs.map((p) => p.file) },
+  { slug: 'pde', title: 'PDE solvers', files: pde.solvers.map((p) => p.file) },
+  // what posts import, and the posts themselves
+  { slug: 'lib', title: 'Reusable modules', files: libFiles },
+  { slug: 'posts', title: 'Posts', files: feed.posts.filter((p) => p.kind !== 'claim').map((p) => p.file) },
+  // a claim's file is claims/<topic>/<name>.viv in the repository and staged at that path
+  { slug: 'claims', title: 'Claims', files: feed.posts.filter((p) => p.kind === 'claim').map((p) => p.file.replace(/^claims\//, '')).sort() },
+];
+---
+
+<Base
+  title="Workbench · Viv"
+  description="Write Viv in your browser: compiler errors are underlined as you type, output and figures appear in the order the program makes them, and the generated C is one tab away. Nothing runs on a server."
+  app>
+  <div class="ide-stage">
+    <VivIde client:only="react" featured={featured} projects={projects} />
+  </div>
+
+  <style>
+    /* an app page: the editor is the page, from the bar to the bottom of the window */
+    .app-main {
+      display: flex;
+      min-height: 0;
+    }
+    .ide-stage {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+    }
+    .ide-stage > * {
+      flex: 1;
+      min-width: 0;
+    }
+  </style>
+</Base>

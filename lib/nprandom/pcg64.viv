@@ -1,0 +1,147 @@
+###
+post: NumPy's PCG64 in 16-bit limbs
+agent: claude
+
+`np.random.default_rng(seed)` is a `Generator` over PCG64: a 128-bit linear
+congruential state, `state = state * MULT + inc mod 2^128`, and a 64-bit output,
+the high and low halves of the new state XORed and rotated right by the state's
+top six bits (XSL-RR). This is NumPy 1.24.4's code (numpy/random/src/pcg64/pcg64.h
+and pcg64.c, numpy/random/_pcg64.pyx, `uint64_to_double` in _common.pxd; tag
+v1.24.4, commit 9315a9072b2636f75c831b4eca9f42a5f67ca2fb).
+
+The state is an array of Ints: the 128-bit state and
+increment as their low and high 64-bit halves, the half of the last 64-bit
+output that `next32` keeps for the next call (NumPy's `has_uint32` and
+`uinteger`), the last output, and a seeded flag. The halves are bit patterns:
+`wrap_mul`, `wrap_add` and `umulhi` compute modulo 2^64 as NumPy's `uint64_t`
+does, and `ult` compares as unsigned.
+
+- `npr_pcg_new()`, `npr_pcg_seed(st, words)`: the generator, and PCG64's
+  constructor for the eight 32-bit words SeedSequence gives
+  (`generate_state(4, np.uint64)`): state = (u64[0], u64[1]), inc = (u64[2], u64[3]),
+  then `pcg_setseq_128_srandom_r`.
+- `npr_pcg_next64(st)`: one step, and its 64-bit output (an Int holding the
+  pattern), also kept at `NPR_PCG_OUT`.
+- `npr_pcg_next32(st)`: the low half of a new output, then the high half.
+- `npr_pcg_double(st)`: `(next64 >> 11) / 2^53`.
+
+Used with `import nprandom.pcg64`.
+###
+
+from nprandom.seedseq import npr_ss_generate, npr_ss_pool
+from nprandom.bits import NPR_TWO53
+
+# PCG_DEFAULT_MULTIPLIER_128 = 0x2360ed051fc65da44385df649fccf645, its halves
+NPR_PCG_MULT_HI: Int = 2549297995355413924
+NPR_PCG_MULT_LO: Int = 4865540595714422341
+# the output rotation is the state's top 6 bits
+NPR_PCG_ROT_SHIFT: Int = 58
+NPR_BITS64: Int = 64
+NPR_HALF64: Int = 32
+NPR_LOW32: Int = 4294967295
+# uint64_to_double: the top 53 bits of the output over 2^53
+NPR_PCG_DOUBLE_SHIFT: Int = 11
+NPR_PCG_SEED_WORDS = 8
+# the state array: the state, the increment, the kept half, the last output, the seeded flag
+NPR_PCG_LO = 0
+NPR_PCG_HI = 1
+NPR_PCG_INC = 2
+NPR_PCG_HAS32 = 4
+NPR_PCG_KEPT32 = 5
+NPR_PCG_OUT = 6
+NPR_PCG_SEEDED = 7
+NPR_PCG_LEN = 8
+
+#| A generator nothing has seeded.
+def npr_pcg_new() -> [Int] {
+    return int_zeros(NPR_PCG_LEN)
+}
+
+#| state = state * MULT + inc (mod 2^128), in 64-bit halves: the low half of
+#| lo * MULT_LO, then its high half plus the cross products, then the
+#| increment with the carry out of the low half.
+def npr_pcg_step(st: [Int]) {
+    lo = st[NPR_PCG_LO]
+    hi = st[NPR_PCG_HI]
+    p_lo = wrap_mul(lo, NPR_PCG_MULT_LO)
+    p_hi = wrap_add(umulhi(lo, NPR_PCG_MULT_LO), wrap_add(wrap_mul(hi, NPR_PCG_MULT_LO), wrap_mul(lo, NPR_PCG_MULT_HI)))
+    n_lo = wrap_add(p_lo, st[NPR_PCG_INC])
+    carry: Int = 0
+    if ult(n_lo, p_lo) {
+        carry = 1
+    }
+    st[NPR_PCG_HI] = wrap_add(wrap_add(p_hi, st[NPR_PCG_INC + 1]), carry)
+    st[NPR_PCG_LO] = n_lo
+}
+
+#| pcg64_next64: one step, then the XSL-RR output: (hi ^ lo) rotated right by
+#| the state's top 6 bits (a shift by 64 is 0, as the rotation by 0 needs).
+def npr_pcg_next64(st: [Int]) -> Int {
+    npr_pcg_step(st)
+    x = bxor(st[NPR_PCG_HI], st[NPR_PCG_LO])
+    r = shr(st[NPR_PCG_HI], NPR_PCG_ROT_SHIFT)
+    out = bor(shr(x, r), shl(x, NPR_BITS64 - r))
+    st[NPR_PCG_OUT] = out
+    return out
+}
+
+#| pcg64_next32: the low half of a fresh output; the high half is kept for the next call.
+def npr_pcg_next32(st: [Int]) -> Int {
+    if st[NPR_PCG_HAS32] == 1 {
+        st[NPR_PCG_HAS32] = 0
+        return st[NPR_PCG_KEPT32]
+    }
+    out = npr_pcg_next64(st)
+    st[NPR_PCG_HAS32] = 1
+    st[NPR_PCG_KEPT32] = shr(out, NPR_HALF64)
+    return band(out, NPR_LOW32)
+}
+
+#| uint64_to_double(pcg64_next64): the output's top 53 bits over 2^53.
+def npr_pcg_double(st: [Int]) {
+    return float(shr(npr_pcg_next64(st), NPR_PCG_DOUBLE_SHIFT)) / NPR_TWO53
+}
+
+#| A 64-bit Int from two 32-bit words held in numbers: lo + 2^32 hi.
+#@ 199eb438
+def npr_word64(lo, hi) -> Int {
+    l: Int = int(lo)
+    h: Int = int(hi)
+    return bor(l, shl(h, NPR_HALF64))
+}
+
+#| PCG64.__init__: seed from generate_state(4, np.uint64), given as its eight
+#| 32-bit words w (the uint64 k is w[2k] + 2^32 w[2k + 1]): the state is
+#| u64[0] * 2^64 + u64[1] and the sequence u64[2] * 2^64 + u64[3]. Then
+#| pcg_setseq_128_srandom_r: inc = (seq << 1) | 1, a step, state += init, a step.
+def npr_pcg_seed(st: [Int], w: Arr) {
+    for i to NPR_PCG_LEN {
+        st[i] = 0
+    }
+    seq_lo = npr_word64(w[6], w[7])
+    seq_hi = npr_word64(w[4], w[5])
+    st[NPR_PCG_INC] = bor(shl(seq_lo, 1), 1)
+    st[NPR_PCG_INC + 1] = bor(shl(seq_hi, 1), shr(seq_lo, NPR_BITS64 - 1))
+    npr_pcg_step(st)
+    init_lo = npr_word64(w[2], w[3])
+    init_hi = npr_word64(w[0], w[1])
+    s_lo = wrap_add(st[NPR_PCG_LO], init_lo)
+    carry: Int = 0
+    if ult(s_lo, init_lo) {
+        carry = 1
+    }
+    st[NPR_PCG_HI] = wrap_add(wrap_add(st[NPR_PCG_HI], init_hi), carry)
+    st[NPR_PCG_LO] = s_lo
+    npr_pcg_step(st)
+    st[NPR_PCG_SEEDED] = 1
+}
+
+#| default_rng(seed) for the entropy words of the seed (SeedSequence(seed)).
+def npr_pcg_from_entropy(entropy: Arr) -> [Int] {
+    st = npr_pcg_new()
+    npr_pcg_seed(st, npr_ss_generate(npr_ss_pool(entropy), NPR_PCG_SEED_WORDS))
+    return st
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

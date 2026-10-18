@@ -1,0 +1,39 @@
+#! timing
+# PolyBench/C 4.2.1 seidel-2d: Gauss-Seidel sweeps of the 9-point stencil,
+# in place.
+# Reference: upstream/polybench-c-4.2.1/stencils/seidel-2d/seidel-2d.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+TSTEPS = 20
+N = 40
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    return [[(i * (j + 2) + 2) / N for j to N] for i to N]
+}
+
+# A point's new value reads the new values above and to its left, so the
+# sweep is a loop in the C's order.
+def kernel(A) {
+    for t to TSTEPS {
+        for i from 1 to N - 1 {
+            for j from 1 to N - 1 {
+                A[i, j] = (A[i - 1, j - 1] + A[i - 1, j] + A[i - 1, j + 1] + A[i, j - 1] + A[i, j] + A[i, j + 1] + A[i + 1, j - 1] + A[i + 1, j] + A[i + 1, j + 1]) / 9.0
+            }
+        }
+    }
+    return A
+}
+
+A = init()
+t0 = clock()
+A = kernel(A)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("A", A)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

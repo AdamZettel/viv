@@ -1,0 +1,222 @@
+# The bridge to the legacy integral code, lib/gto_md.
+#
+# Before lib/hf there was lib/gto (s functions) and lib/gto_md (McMurchie-
+# Davidson for any angular momentum, one primitive integral at a time), held
+# against PySCF through the tables in lib/qcref. lib/hf never uses them. This
+# program is the one place they meet: the legacy routines are wrapped as
+# extra members of the lib/hf registries (a legacy S next to md1_s,
+# os_overlap and gh_overlap; the legacy ERIs next to MD and HGP; the legacy
+# contraction next to bas_contract), and each registry is swept as usual.
+# The legacy code reads its own layout (padded exponent and coefficient
+# tables per shell, one row per basis function), so each member converts the
+# basis packs to that layout first.
+#
+# Held here, for water STO-3G and 6-31G: every legacy integral within 1e-12
+# of the new code's, the legacy RHF (plain iteration from a zero density,
+# lib/gto) within 1e-10 of the new pipeline's energy, and the legacy tables
+# in lib/qcref describing the same molecule as the packs in lib/hfref.
+#
+#     tools/both-engines.sh scf legacy_bridge
+from gto_md import (
+    md_eri_fast, md_one_electron, md_prep_center, md_prep_cn, md_prep_expo, md_prep_nprim,
+    md_shell_cn,
+)
+from gto import gto_rhf
+from qcref import (
+    water631g_coords, water631g_shell_coef, water631g_shell_expo, water_charges, water_coords,
+    WATER_ENUC, water_shell_coef, water_shell_expo,
+)
+from hf.hf import hf_energy, hf_gap
+from hf.molecule import mol_enuc, molecule_packs
+from hf.basis import (
+    AO_LX, AO_LZ, AO_SH, AT_CHG, AT_X, AT_Z, bas_ao_table, bas_contract, bas_nao_cart, bas_nc,
+    PR_COEF, PR_EXP, SH_ATOM, SH_L, SH_NPRIM, SH_P0,
+)
+from hf.md_onebody import md1_s, md1_t, md1_v
+from hf.md_eri import mderi_screened
+from hf.eri_store import es_len8, es_pack8, es_unpack8
+from hf.opts import scf_checked
+from hf.integrals import (
+    bas_contract_numeric, int_contract_closed, int_sweep3, INT_TOL_CN, INT_TOL_ERI, INT_TOL_ONE,
+)
+from hf.sweep import sw_rep_new, SW_REP_NSTRAT
+from hf.os_onebody import os_kinetic, os_nuclear, os_overlap
+from hf.gh_onebody import gh_kinetic, gh_overlap
+from hf.hgp_eri import hgp_eri
+from hfref.water_sto3g import (
+    watersto3g_atoms, WATERSTO3G_E_NUC, WATERSTO3G_E_RHF, watersto3g_prims, watersto3g_shells,
+)
+from hfref.water_631g import water631g_atoms, WATER631G_E_RHF, water631g_prims, water631g_shells
+
+# ---- the packs in the legacy layout ----------------------------------------------
+
+def lgb_coords(atoms: Arr) {
+    return atoms[:, AT_X:AT_Z + 1]
+}
+
+def lgb_charges(atoms: Arr) {
+    return atoms[:, AT_CHG]
+}
+
+#| The longest contraction, which the legacy tables pad every shell to.
+def lgb_nprim(shells: Arr) {
+    return round(max(shells[:, SH_NPRIM]))
+}
+
+#| `[nsh, nprim]` exponents (`col` = PR_EXP) or coefficients (PR_COEF),
+#| padded the legacy way: exponent 1, coefficient 0.
+def lgb_table(shells: Arr, prims: Arr, col) {
+    np = lgb_nprim(shells)
+    T = zeros(len(shells), np)
+    for s to len(shells) {
+        for i to np {
+            T[s, i] = 1.0 - col
+            if i < shells[s, SH_NPRIM] {
+                T[s, i] = prims[round(shells[s, SH_P0]) + i, col]
+            }
+        }
+    }
+    return T
+}
+
+def lgb_shell_atom(shells: Arr) {
+    return shells[:, SH_ATOM]
+}
+
+def lgb_shell_nprim(shells: Arr) {
+    return shells[:, SH_NPRIM]
+}
+
+#| For each basis function, its shell (legacy `bf_shell`).
+def lgb_bf_shell(shells: Arr) {
+    return bas_ao_table(shells)[:, AO_SH]
+}
+
+#| For each basis function, its Cartesian powers (legacy `bf_pow`).
+def lgb_bf_pow(shells: Arr) {
+    return bas_ao_table(shells)[:, AO_LX:AO_LZ + 1]
+}
+
+# ---- legacy members of the lib/hf registries ------------------------------------------
+
+#| lib/gto_md's one-electron matrices: `which` 0 S, 1 T, 2 V.
+def lgb_one(atoms: Arr, shells: Arr, prims: Arr, which) {
+    return md_one_electron(lgb_coords(atoms), lgb_charges(atoms), lgb_bf_shell(shells), lgb_bf_pow(shells), lgb_shell_atom(shells), lgb_table(shells, prims, PR_EXP), lgb_table(shells, prims, PR_COEF), bas_nao_cart(shells), lgb_nprim(shells), len(atoms), which)
+}
+
+def lgb_overlap(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return lgb_one(atoms, shells, prims, 0)
+}
+
+def lgb_kinetic(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return lgb_one(atoms, shells, prims, 1)
+}
+
+def lgb_nuclear(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return lgb_one(atoms, shells, prims, 2)
+}
+
+#| lib/gto_md's dense `[n, n, n, n]` ERIs (md_eri_fast), packed-8.
+def lgb_eri(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    n = bas_nao_cart(shells)
+    bs = lgb_bf_shell(shells)
+    bp = lgb_bf_pow(shells)
+    np = lgb_nprim(shells)
+    ex = lgb_table(shells, prims, PR_EXP)
+    CEN = md_prep_center(bs, lgb_shell_atom(shells), lgb_coords(atoms), n)
+    EXP = md_prep_expo(bs, ex, n, np)
+    CN = md_prep_cn(bs, bp, ex, lgb_table(shells, prims, PR_COEF), n, np)
+    NP = md_prep_nprim(bs, lgb_shell_nprim(shells), n)
+    return es_pack8(md_eri_fast(CEN, EXP, CN, NP, bp, n), n)
+}
+
+#| lib/gto_md's contraction (md_shell_cn) for the x^l component of each
+#| shell, divided by that component's factor Nc(l, 0, 0), which the legacy
+#| code folds into its coefficients and lib/hf applies per component.
+def lgb_contract(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    ex = lgb_table(shells, prims, PR_EXP)
+    co = lgb_table(shells, prims, PR_COEF)
+    np = lgb_nprim(shells)
+    cn = zeros(len(prims))
+    for s to len(shells) {
+        l = shells[s, SH_L]
+        c = md_shell_cn(ex, co, s, [l, 0.0, 0.0], np)
+        for i to round(shells[s, SH_NPRIM]) {
+            cn[round(shells[s, SH_P0]) + i] = c[i] / bas_nc(l, 0, 0)
+        }
+    }
+    return cn
+}
+
+# ---- the checks for one basis -------------------------------------------------------
+
+#| Sweep each registry with its legacy member added, and return the largest
+#| |legacy - new| over S, T, V, the ERIs and the contraction, the new values
+#| taken from each registry's production member.
+def lgb_integrals(atoms: Arr, shells: Arr, prims: Arr) {
+    n = bas_nao_cart(shells)
+    rep = sw_rep_new()
+    w = 0.0
+    S = int_sweep3([md1_s, os_overlap, gh_overlap, lgb_overlap], 0, atoms, shells, prims, n * n, INT_TOL_ONE, rep)
+    assert_near(rep[SW_REP_NSTRAT], 4, 0.0)
+    w = max(w, hf_gap(lgb_overlap(atoms, shells, prims), md1_s(atoms, shells, prims), n * n))
+    T = int_sweep3([md1_t, os_kinetic, gh_kinetic, lgb_kinetic], 0, atoms, shells, prims, n * n, INT_TOL_ONE, rep)
+    w = max(w, hf_gap(lgb_kinetic(atoms, shells, prims), md1_t(atoms, shells, prims), n * n))
+    V = int_sweep3([md1_v, os_nuclear, lgb_nuclear], 0, atoms, shells, prims, n * n, INT_TOL_ONE, rep)
+    assert_near(rep[SW_REP_NSTRAT], 3, 0.0)
+    w = max(w, hf_gap(lgb_nuclear(atoms, shells, prims), md1_v(atoms, shells, prims), n * n))
+    G = int_sweep3([mderi_screened, hgp_eri, lgb_eri], 0, atoms, shells, prims, es_len8(n), INT_TOL_ERI, rep)
+    assert_near(rep[SW_REP_NSTRAT], 3, 0.0)
+    w = max(w, hf_gap(lgb_eri(atoms, shells, prims), mderi_screened(atoms, shells, prims), es_len8(n)))
+    cn = int_sweep3([int_contract_closed, bas_contract_numeric, lgb_contract], 0, atoms, shells, prims, len(prims), INT_TOL_CN, rep)
+    return max(w, hf_gap(lgb_contract(atoms, shells, prims), bas_contract(shells, prims), len(prims)))
+}
+
+#| `legacy E - new E` and `new E - eref` for the RHF energy of `nocc` doubly
+#| occupied orbitals: legacy integrals and legacy SCF (`iters` plain
+#| iterations from a zero density), against the lib/hf pipeline.
+def lgb_energy(atoms: Arr, shells: Arr, prims: Arr, nocc, iters, eref) {
+    S = lgb_overlap(atoms, shells, prims)
+    H = lgb_kinetic(atoms, shells, prims) + lgb_nuclear(atoms, shells, prims)
+    n = bas_nao_cart(shells)
+    G = es_unpack8(lgb_eri(atoms, shells, prims), n)
+    mol = molecule_packs(atoms, shells, prims)
+    el = gto_rhf(H, S, G, n, nocc, mol_enuc(mol), iters)
+    r = hf_energy(mol, scf_checked())
+    assert_near(r.converged, 1.0, 0.0)
+    return el - r.energy, r.energy - eref
+}
+
+# ---- the tests ------------------------------------------------------------------
+
+test "the legacy tables in lib/qcref describe the molecules in lib/hfref" {
+    lgb_R = water_coords()
+    lgb_R6 = water631g_coords()
+    lgb_at = watersto3g_atoms()
+    assert_true(all(water_charges() == lgb_at[:, AT_CHG]))
+    assert_true(all(lgb_R == lgb_at[:, AT_X:AT_Z + 1]))
+    assert_true(all(lgb_R6 == lgb_at[:, AT_X:AT_Z + 1]))
+    assert_near(WATER_ENUC, WATERSTO3G_E_NUC, 0.0)
+    # the legacy tables' exponents and coefficients are the packs' prims
+    assert_near(hf_gap(water_shell_expo(), lgb_table(watersto3g_shells(), watersto3g_prims(), PR_EXP), 15), 0.0, 0.0)
+    assert_near(hf_gap(water_shell_coef(), lgb_table(watersto3g_shells(), watersto3g_prims(), PR_COEF), 15), 0.0, 0.0)
+    assert_near(hf_gap(water631g_shell_expo(), lgb_table(water631g_shells(), water631g_prims(), PR_EXP), 54), 0.0, 0.0)
+    assert_near(hf_gap(water631g_shell_coef(), lgb_table(water631g_shells(), water631g_prims(), PR_COEF), 54), 0.0, 0.0)
+}
+
+test "water STO-3G: every legacy integral within 1e-12 of lib/hf, and the legacy RHF within 1e-10" {
+    assert_lt(lgb_integrals(watersto3g_atoms(), watersto3g_shells(), watersto3g_prims()), 1.0e-12)
+    lgb_de, lgb_dref = lgb_energy(watersto3g_atoms(), watersto3g_shells(), watersto3g_prims(), 5, 60, WATERSTO3G_E_RHF)
+    assert_lt(abs(lgb_de), 1.0e-10)
+    assert_lt(abs(lgb_dref), 1.0e-9)
+}
+
+test "water 6-31G: every legacy integral within 1e-12 of lib/hf, and the legacy RHF within 1e-10" {
+    assert_lt(lgb_integrals(water631g_atoms(), water631g_shells(), water631g_prims()), 1.0e-12)
+    lgb_de, lgb_dref = lgb_energy(water631g_atoms(), water631g_shells(), water631g_prims(), 5, 80, WATER631G_E_RHF)
+    assert_lt(abs(lgb_de), 1.0e-10)
+    assert_lt(abs(lgb_dref), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

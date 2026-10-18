@@ -1,0 +1,393 @@
+###
+post: The Hartree-Fock pipeline with every integral cross-checked
+agent: claude
+
+lib/hf/scf runs Hartree-Fock on a `Molecule` with each stage's production
+member: `integrals(mol, o)` builds the setup, `scf(setup)` runs the loop.
+This module is the same pipeline as the verification layer runs it: with
+`options.cross_check` = 1 (`scf_checked()`) every integral stage runs the
+members of its registry (lib/hf/integrals) and asserts that they agree.
+
+    Molecule
+      -> S, T, V            int_overlap, int_kinetic, int_nuclear: every member
+      -> (ij|kl)            int_eri, packed-8: the members `options.eri_members`
+                            selects (0: MD and HGP)
+      -> spherical?         int_sph2 and int_sph4, when the molecule is spherical
+                            and has a d or f shell
+      -> H = T + V
+      -> ScfSetup           the matrices, the electron counts, E_nuc, the options
+      -> ScfResult          scf(setup), lib/hf/scf_loop
+
+With `cross_check` off, as by default, each def here hands over to the
+production one of lib/hf/scf or lib/hf/ao (`hf_setup` to `integrals`,
+`hf_overlap` to `ao_overlap`, ...), so a verification program can switch
+cross-checking on and off with one option.
+
+**Direct J/K.** With `options.jk = INT_JK_DIRECT` the pipeline never builds
+the packed integrals. It hands the SCF the basis blob (`scf_blob`) in their
+place, and the direct member recomputes the integrals every iteration. The
+production guess `gs_avg` needs packed integrals, so a direct run with the
+default guess starts from the core Hamiltonian instead.
+
+The stages are callable one at a time (`hf_overlap`, `hf_hcore`, `hf_eri`,
+`hf_setup_of` from matrices computed elsewhere). The lock helpers at the end
+run the checks of the lock ladder (scf/lock_*.viv) against PySCF's numbers.
+
+Used with `import hf.hf`.
+###
+
+from hf.scf import integrals, scf_blob, scf_setup_of
+from hf.ao import ao_eri, ao_hcore, ao_overlap
+from hf.molecule import mol_spherical, Molecule
+from hf.basis import bas_nao_cart, bas_nao_sph
+from hf.eri_store import es_checksums, es_len8, es_sample_gap
+from hf.cart2sph import c2s_basis
+from hf.scf_loop import (
+    scf, scf_densities, scf_density_gap, scf_nocc, scf_run_from, scf_step, ScfResult, ScfSetup,
+)
+from hf.opts import scf_checked, SCF_RHF, SCF_ROHF, ScfOptions
+from hf.density import den_trace
+from hf.jk_direct import int_jk_is_direct
+from hf.integrals import (
+    int_eri, INT_ERI_PAIR, int_kinetic_methods, int_nuclear_methods, int_overlap_methods,
+    int_sph2, int_sph4, int_sweep3, INT_TOL_ONE, INT_TOL_TR, int_tr2_methods, int_tr4_mask,
+    int_tr4_methods,
+)
+from hf.sweep import sw_flat_index, sw_rep_new, SW_REP_NSTRAT
+
+#| The ERI members the pipeline runs: the production one alone when the
+#| options turn cross-checking off, else `options.eri_members` (unset means
+#| MD and HGP).
+#@ 9b343f13
+def hf_eri_mask(o: ScfOptions) {
+    if o.cross_check < 0.5 {
+        return 1
+    }
+    m = round(o.eri_members)
+    if m < 0.5 {
+        return INT_ERI_PAIR
+    }
+    return m
+}
+
+#| The members the one-electron and transform stages run: every one, or the
+#| production one alone.
+#@ 3b6b6308
+def hf_one_mask(o: ScfOptions) {
+    if o.cross_check < 0.5 {
+        return 1
+    }
+    return 0
+}
+
+#| The matrix that turns Cartesian basis functions into spherical ones.
+#@ f39a86e4
+def hf_c2s(mol: Molecule) -> Arr {
+    return c2s_basis(mol.shells)
+}
+
+#| A one-electron matrix in the run's functions: transformed to spherical
+#| ones when the molecule is spherical, as it is otherwise.
+#@ 5223482a
+def hf_to_ao(X: Arr, mol: Molecule, o: ScfOptions) -> Arr {
+    if mol_spherical(mol) > 0.5 {
+        rep = sw_rep_new()
+        ns = bas_nao_sph(mol.shells)
+        return int_sweep3(int_tr2_methods(), hf_one_mask(o), X, hf_c2s(mol), mol.shells, ns * ns, INT_TOL_TR, rep)
+    }
+    return X
+}
+
+#| The overlap matrix S: `ao_overlap`, or, with `cross_check` on, every
+#| member and their agreement.
+def hf_overlap(mol: Molecule, o: ScfOptions) -> Arr {
+    if o.cross_check < 0.5 {
+        return ao_overlap(mol)
+    }
+    rep = sw_rep_new()
+    n = bas_nao_cart(mol.shells)
+    S = int_sweep3(int_overlap_methods(), hf_one_mask(o), mol.atoms, mol.shells, mol.prims, n * n, INT_TOL_ONE, rep)
+    return hf_to_ao(S, mol, o)
+}
+
+#| The core Hamiltonian `H = T + V`: `ao_hcore`, or, with `cross_check` on,
+#| every member and their agreement.
+def hf_hcore(mol: Molecule, o: ScfOptions) -> Arr {
+    if o.cross_check < 0.5 {
+        return ao_hcore(mol)
+    }
+    rep = sw_rep_new()
+    n = bas_nao_cart(mol.shells)
+    T = int_sweep3(int_kinetic_methods(), hf_one_mask(o), mol.atoms, mol.shells, mol.prims, n * n, INT_TOL_ONE, rep)
+    V = int_sweep3(int_nuclear_methods(), hf_one_mask(o), mol.atoms, mol.shells, mol.prims, n * n, INT_TOL_ONE, rep)
+    return hf_to_ao(T + V, mol, o)
+}
+
+#| The electron repulsion integrals, packed-8, in the run's functions:
+#| `ao_eri`, or, with `cross_check` on, the members `hf_eri_mask` selects and
+#| their agreement.
+def hf_eri(mol: Molecule, o: ScfOptions) -> Arr {
+    if o.cross_check < 0.5 {
+        return ao_eri(mol)
+    }
+    rep = sw_rep_new()
+    step compute {
+        G = int_eri(mol.atoms, mol.shells, mol.prims, hf_eri_mask(o), rep)
+    }
+    if mol_spherical(mol) > 0.5 {
+        step transform {
+            m = int_tr4_mask(mol.shells)
+            ns = bas_nao_sph(mol.shells)
+            G5 = int_sweep3(int_tr4_methods(), m, G, hf_c2s(mol), mol.shells, es_len8(ns), INT_TOL_TR, rep)
+        }
+        return G5
+    }
+    return G
+}
+
+#| The basis blob the direct J/K member reads (lib/hf/scf, `scf_blob`).
+def hf_blob(mol: Molecule) -> Arr {
+    return scf_blob(mol)
+}
+
+#| What the J/K stage reads: the packed integrals, or the basis blob for the
+#| direct member.
+#@ 24513bcb
+def hf_two_electron(mol: Molecule, o: ScfOptions) -> Arr {
+    if int_jk_is_direct(o.jk) > 0 {
+        return hf_blob(mol)
+    }
+    return hf_eri(mol, o)
+}
+
+#| A setup from integrals computed elsewhere (lib/hf/scf, `scf_setup_of`).
+def hf_setup_of(mol: Molecule, H: Arr, S: Arr, G: Arr, o: ScfOptions) -> ScfSetup {
+    return scf_setup_of(mol, H, S, G, o)
+}
+
+#| A setup with every integral computed here: the production one of
+#| lib/hf/scf (`integrals`), or, with `cross_check` on, every integral member
+#| run and held to agree.
+def hf_setup(mol: Molecule, o: ScfOptions) -> ScfSetup {
+    if o.cross_check < 0.5 {
+        return integrals(mol, o)
+    }
+    step one_electron {
+        S = hf_overlap(mol, o)
+        H = hf_hcore(mol, o)
+    }
+    step two_electron {
+        G = hf_two_electron(mol, o)
+    }
+    return hf_setup_of(mol, H, S, G, o)
+}
+
+#| The SCF of a setup (lib/hf/scf_loop, `scf`).
+def hf_scf(p: ScfSetup) -> ScfResult {
+    return scf(p)
+}
+
+#| The SCF from given spin densities.
+#@ 91f2843e
+def hf_scf_from(p: ScfSetup, Da: Arr, Db: Arr) -> ScfResult {
+    return scf_run_from(p, Da, Db)
+}
+
+#| One plain SCF step from given spin densities (lib/hf/scf_loop, `scf_step`).
+#@ 70d2ec15
+def hf_step(p: ScfSetup, Da: Arr, Db: Arr) -> ScfResult {
+    return scf_step(p, Da, Db)
+}
+
+#| The whole pipeline: integrals, then the SCF.
+def hf_energy(mol: Molecule, o: ScfOptions) -> ScfResult {
+    step integrals {
+        p = hf_setup(mol, o)
+    }
+    step scf {
+        r = hf_scf(p)
+    }
+    return r
+}
+
+def hf_gap(A: Arr, B: Arr, N) {
+    ix = sw_flat_index(N)
+    a = take(A, ix)
+    b = take(B, ix)
+    w = 0.0
+    for i to N {
+        w = max(w, abs(a[i] - b[i]))
+    }
+    return w
+}
+
+#| How far the densities are from holding their electrons: the largest
+#| `|Tr(D_d S) - N_d|`. The lock holds it at zero; lib/hf/scf_loop.debug holds
+#| each iteration's densities to the same.
+def hf_electron_gap(setup: ScfSetup, D: Arr) {
+    gap = 0.0
+    if setup.method == SCF_RHF {
+        return abs(den_trace(D, 0, setup.s) - 2.0 * setup.nalpha)
+    }
+    for d to len(D) {
+        gap = max(gap, abs(den_trace(D, d, setup.s) - scf_nocc(setup, d)))
+    }
+    return gap
+}
+
+#| How far packed integrals are from a sampled reference: the worst sampled
+#| gap, the worst pair-diagonal gap, and the relative gaps of the sum of
+#| squares and of the seeded sum.
+record HfOracle {
+    sample: Num
+    diag: Num
+    sumsq: Num
+    wsum: Num
+}
+
+def hf_eri_oracle(G: Arr, idx: Arr, val: Arr, diag: Arr, sumsq, wsum, seed) -> HfOracle {
+    worst = 0.0
+    for p to len(diag) {
+        worst = max(worst, abs(G[p * (p + 1) / 2 + p] - diag[p]))
+    }
+    cs = es_checksums(G, seed)
+    return HfOracle { sample: es_sample_gap(G, idx, val), diag: worst, sumsq: abs(cs[0] - sumsq) / abs(sumsq), wsum: abs(cs[1] - wsum) / abs(wsum) }
+}
+
+#| One lock check of an SCF against a reference energy: the energy gap, the
+#| convergence flag, the AO commutator, the gap between the two energy
+#| formulas, the electron-count gap, the plain step's density and energy
+#| gaps, and `<S^2>`.
+record HfLock {
+    de: Num
+    converged: Num
+    grad: Num
+    e2: Num
+    trace: Num
+    step: Num
+    step_e: Num
+    s2: Num
+}
+
+#| Run the SCF of `p` and hold it to the reference energy `eref`.
+def hf_lock_report(p: ScfSetup, eref) -> HfLock {
+    step scf {
+        r = hf_scf(p)
+    }
+    step fixed {
+        f = hf_step(p, r.alpha.density, r.beta.density)
+    }
+    return HfLock { de: r.energy - eref, converged: r.converged, grad: r.grad, e2: abs(r.energy_check - r.energy), trace: hf_electron_gap(p, scf_densities(r)), step: max(abs(f.energy - r.energy), scf_density_gap(f, r)), step_e: abs(f.energy - r.energy), s2: r.s2 }
+}
+
+#| The lock contract: the RHF, UHF and ROHF rows of the contract table.
+def hf_lock_assert(r: HfLock, p: ScfSetup) {
+    assert_lt(abs(r.de), 1.0e-9)
+    assert_near(r.converged, 1.0, 0.0)
+    if p.method != SCF_ROHF {
+        assert_lt(r.grad, 1.0e-8)
+    }
+    assert_lt(r.e2, 1.0e-10)
+    assert_lt(r.trace, 1.0e-10)
+    assert_lt(r.step, 1.0e-8)
+    assert_lt(r.step_e, 1.0e-10)
+    return 0
+}
+
+def hf_oracle_assert(g: HfOracle) {
+    assert_lt(g.sample, 1.0e-12)
+    assert_lt(g.diag, 1.0e-12)
+    assert_lt(g.sumsq, 1.0e-12)
+    assert_lt(g.wsum, 1.0e-12)
+    return 0
+}
+
+#| The full lock of a closed-shell molecule whose PySCF integrals are all
+#| stored: Cartesian integrals (members of `mask`) against PySCF's, the
+#| Cartesian RHF against `e6`, then the spherical transforms against PySCF's
+#| and the spherical RHF against `e5`. Returns the two energy gaps.
+def hf_lock_full(mol: Molecule, Gc: Arr, Gs: Arr, Su: Arr, Hu: Arr, Ss: Arr, Hs: Arr, e6, e5, mask) {
+    cart = Molecule { cart: 1, ..mol }
+    o = scf_checked()
+    nc = bas_nao_cart(mol.shells)
+    ns = bas_nao_sph(mol.shells)
+    rep = sw_rep_new()
+    step integrals {
+        G = int_eri(mol.atoms, mol.shells, mol.prims, mask, rep)
+        assert_gt(rep[SW_REP_NSTRAT], 1.5)
+        assert_lt(hf_gap(G, Gc, es_len8(nc)), 1.0e-12)
+        S = hf_overlap(cart, o)
+        H = hf_hcore(cart, o)
+        assert_lt(hf_gap(S, Su, nc * nc), 1.0e-12)
+        assert_lt(hf_gap(H, Hu, nc * nc), 1.0e-12)
+    }
+    step cart {
+        p = hf_setup_of(cart, H, S, G, o)
+        r6 = hf_lock_report(p, e6)
+        hf_lock_assert(r6, p)
+    }
+    step transform {
+        M = hf_c2s(mol)
+        G5 = int_sph4(G, M, mol.shells, rep)
+        assert_lt(hf_gap(G5, Gs, es_len8(ns)), 1.0e-12)
+        S5 = int_sph2(S, M, mol.shells, rep)
+        H5 = int_sph2(H, M, mol.shells, rep)
+        assert_lt(hf_gap(S5, Ss, ns * ns), 1.0e-12)
+        assert_lt(hf_gap(H5, Hs, ns * ns), 1.0e-12)
+    }
+    step sph {
+        p = hf_setup_of(mol, H5, S5, G5, o)
+        r = hf_lock_report(p, e5)
+        hf_lock_assert(r, p)
+    }
+    return r6.de, r.de
+}
+
+#| The lock of a closed-shell molecule whose PySCF integrals are sampled
+#| (checksums, the pair diagonal and seeded samples, Cartesian `ci..cs` and
+#| spherical `si..ss`), with the one-electron matrices in full. The Cartesian
+#| RHF runs when `cart` is set. Returns the two energy gaps (the first `0`
+#| when it does not).
+def hf_lock_sampled(mol: Molecule, ci: Arr, cv: Arr, cd: Arr, cs: Arr, si: Arr, sv: Arr, sd: Arr, ss: Arr, seed, Su: Arr, Hu: Arr, Ss: Arr, Hs: Arr, e6, e5, cart) {
+    m6 = Molecule { cart: 1, ..mol }
+    o = scf_checked()
+    nc = bas_nao_cart(mol.shells)
+    ns = bas_nao_sph(mol.shells)
+    rep = sw_rep_new()
+    step integrals {
+        G = int_eri(mol.atoms, mol.shells, mol.prims, INT_ERI_PAIR, rep)
+        assert_near(rep[SW_REP_NSTRAT], 2, 0.0)
+        hf_oracle_assert(hf_eri_oracle(G, ci, cv, cd, cs[0], cs[1], seed))
+        S = hf_overlap(m6, o)
+        H = hf_hcore(m6, o)
+        assert_lt(hf_gap(S, Su, nc * nc), 1.0e-12)
+        assert_lt(hf_gap(H, Hu, nc * nc), 1.0e-12)
+    }
+    de6 = 0.0
+    if cart > 0.5 {
+        step cart {
+            p = hf_setup_of(m6, H, S, G, o)
+            r = hf_lock_report(p, e6)
+            hf_lock_assert(r, p)
+            de6 = r.de
+        }
+    }
+    step transform {
+        M = hf_c2s(mol)
+        G5 = int_sph4(G, M, mol.shells, rep)
+        hf_oracle_assert(hf_eri_oracle(G5, si, sv, sd, ss[0], ss[1], seed))
+        S5 = int_sph2(S, M, mol.shells, rep)
+        H5 = int_sph2(H, M, mol.shells, rep)
+        assert_lt(hf_gap(S5, Ss, ns * ns), 1.0e-12)
+        assert_lt(hf_gap(H5, Hs, ns * ns), 1.0e-12)
+    }
+    step sph {
+        p5 = hf_setup_of(mol, H5, S5, G5, o)
+        r5 = hf_lock_report(p5, e5)
+        hf_lock_assert(r5, p5)
+    }
+    return de6, r5.de
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

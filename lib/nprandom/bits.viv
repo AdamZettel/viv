@@ -1,0 +1,65 @@
+###
+post: Unsigned 32- and 64-bit arithmetic on doubles, for NumPy's generators
+agent: claude
+
+This module computes in doubles, which hold an integer exactly up to 2^53. NumPy's
+generators compute with unsigned 32-, 64- and 128-bit integers that wrap around
+on overflow. This module holds the pieces that keep that arithmetic exact:
+
+- a 32-bit word is a double in [0, 2^32); `band`, `bor`, `bxor`, `shl`, `shr`
+  are Viv builtins that read and return such words;
+- `npr_mul32(a, b)` is `a * b mod 2^32`, computed from 16-bit halves so no
+  product passes 2^48;
+- a 64-bit number is an Int, its unsigned arithmetic the
+  builtins `wrap_add`, `wrap_mul`, `umulhi` and `ult`; a 128-bit one is two Ints.
+
+Used by the other files of lib/nprandom.
+###
+
+NPR_TWO32 = 4294967296.0
+NPR_TWO53 = 9007199254740992.0
+NPR_U32_MAX = 4294967295
+NPR_TWO16 = 65536.0
+
+#| `a * b mod 2^32` for words `a` and `b`: a = hi * 2^16 + lo, and each partial
+#| product stays below 2^48.
+def npr_mul32(a, b) {
+    a_hi = floor(a / NPR_TWO16)
+    a_lo = a - a_hi * NPR_TWO16
+    return mod(a_lo * b + mod(a_hi * b, NPR_TWO16) * NPR_TWO16, NPR_TWO32)
+}
+
+#| `(a + b) mod 2^32`, and `(a - b) mod 2^32`, for words.
+def npr_add32(a, b) {
+    return mod(a + b, NPR_TWO32)
+}
+
+def npr_sub32(a, b) {
+    return mod(a - b + NPR_TWO32, NPR_TWO32)
+}
+
+#| The smallest `2^k - 1` at or above `r` (NumPy's gen_mask), for 0 <= r < 2^63.
+def npr_mask(r: Int) -> Int {
+    m: Int = 0
+    while m < r {
+        m = m * 2 + 1
+    }
+    return m
+}
+
+test "32-bit products wrap as C's uint32_t does" {
+    # 0xffffffff squared is 1 mod 2^32; 1812433253 * 3141592653 mod 2^32, from Python
+    assert_near(npr_mul32(4294967295, 4294967295), 1, 0.0)
+    assert_near(npr_mul32(1812433253, 3141592653), 1677005153, 0.0)
+    assert_near(npr_sub32(1, 2), 4294967295, 0.0)
+    assert_true(npr_mask(0) == 0)
+    assert_true(npr_mask(5) == 7)
+    assert_true(npr_mask(8) == 15)
+    assert_true(npr_mask(4294967296) == 8589934591)
+    # 2^64 mod 1000000007 is 582344008, from Python: 4 (2^62 mod r) mod r
+    r: Int = 1000000007
+    assert_true(4611686018427387904 % r * 4 % r == 582344008)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

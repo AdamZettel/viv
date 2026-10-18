@@ -1,0 +1,250 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Base from '../layouts/Base.astro';
+import Toc from '../components/Toc.astro';
+import facts from '../data/facts.json';
+
+const kit = facts.inventory.filter((r) => r.path.startsWith('crates/'));
+const kitLines = kit.reduce((s, r) => s + r.lines, 0);
+
+const SIBLINGS = [
+  {
+    name: 'viv',
+    tag: 'the language the kit was built for',
+    what: 'A general-purpose numerical language with floats, arrays, records and complex numbers, functions that cross-check several methods against each other, and three backends.',
+    status: 'in use',
+    link: '/',
+    doc: null,
+  },
+  {
+    name: 'weft',
+    tag: 'compiles to Viv',
+    what: 'A language for the weak form of a PDE, in the style of FEniCS\'s UFL. Write the variational form, such as bilinear: dot(grad(u), grad(v)), and its compiler generates the finite-element solver. For nonlinear problems it differentiates the residual symbolically to build the Newton Jacobian.',
+    status: 'v1 + nonlinear',
+    link: null,
+    doc: 'weak-forms',
+  },
+  {
+    name: 'skein',
+    tag: 'a second language, written to test the kit',
+    what: 'A teaching Scheme that compiles to C through the kit: tagged values, lambda-lifted closures with capture, and proper tail calls through a trampoline, so (sum-to 1000000 0) runs in constant stack space.',
+    status: 'v1, GC pending',
+    link: null,
+    doc: 'scheme',
+  },
+  {
+    name: 'oa',
+    tag: 'an experiment',
+    what: 'Operator algebra for many-body problems. An early skeleton, written to find out what the kit needs from a language whose values are operators rather than numbers.',
+    status: 'skeletal',
+    link: null,
+    doc: null,
+  },
+];
+
+const COMMITMENTS = [
+  [
+    'The IR is the source of truth',
+    'Source text is what people edit, the AST exists only inside the parser, and the IR is what every later phase works on. No code after lowering sees the AST.',
+  ],
+  [
+    'Every node carries identity, location and lineage',
+    'A NodeId (its structural hash), a Span (where it came from), and a lowering chain (what transformed it). All three are mandatory, because retrofitting any of them would mean touching every IR-aware component.',
+  ],
+  [
+    'NodeId is a structural hash',
+    'BLAKE3 over the variant tag, the literal payload, and the children’s hashes. References between nodes are by hash, not by pointer or index — so structurally identical nodes have one identity, and changing a child changes the parent’s address. The IR is immutable; transformations produce new IR.',
+  ],
+  [
+    'The IR is stratified',
+    'When a construct is lowered, both the construct and what it becomes stay in the IR, linked by the lowering chain. sum(xs) and the accumulator loop it becomes are both kept, so a tool can show or debug either one.',
+  ],
+  [
+    'Lowering rules are stored as data',
+    'A lowering rule is a pattern, a replacement and some metadata, stored in a table and content-addressed like the IR, instead of a hardcoded compiler pass. A better lowering for an operator product can then be shared as data rather than as a compiler patch.',
+  ],
+  [
+    'Compiled programs contain no kit code',
+    'No kit code appears at runtime in a compiled program. No kit allocator, no GC, no imposed calling convention. Racket programs carry Racket’s runtime; programs compiled with the kit carry nothing from it.',
+  ],
+  [
+    'Errors and warnings are structured values',
+    'Errors and warnings are values with severity, spans and suggestions. Renderers consume them: ANSI for a terminal, JSON for an editor, HTML for a page, plain text for tests. Adding a renderer touches nothing that produces diagnostics.',
+  ],
+  [
+    'The host supplies all I/O',
+    'The compiler core never reads a file or touches the network directly; everything goes through an environment the host passes in. The native CLI supplies one, the wasm build supplies one that bridges to JS, tests supply an in-memory one, so the same compiler runs in a browser.',
+  ],
+];
+const TOC: [string, string][] = [
+  ['pitch', 'What a language gets from it'],
+  ['commitments', 'The commitments'],
+  ['inside', 'Parts of the kit'],
+  ['siblings', 'Languages built on the kit'],
+  ['ahead', 'What is not done'],
+];
+---
+
+<Base
+  title="knotkit, the compiler kit under Viv"
+  description="knotkit is a Rust library for building compilers: a content-addressed IR, a C99 backend, structured diagnostics, and I/O supplied by the host, so the compiler itself can run in a browser. Compiled programs contain no kit code. Viv, weft, skein and oa are built on it."
+  eyebrow="The kit underneath"
+  heading="knotkit">
+  <div class="withtoc">
+    <div>
+  <p class="lede">
+    knotkit is a Rust library for building compilers. Its goal is to make a new language cheap
+    enough to build that, for a problem with clean algebraic structure, <strong>writing a DSL costs
+    less than working around an existing language's abstractions</strong>. Viv is the language it
+    was built for; three other languages use it too.
+  </p>
+  <p>
+    The kit is {kitLines.toLocaleString()} lines of Rust. It is small: a library you call rather than a
+    framework you build inside, and each piece can be used on its own.
+  </p>
+
+  <h2 id="pitch">What a language gets from it</h2>
+  <p>
+    <strong>A C backend.</strong> The C99 backend emits readable C with no dependencies, so
+    <code>clang -O3</code> applies the LLVM optimizer without the kit containing any LLVM code, and
+    the output can call any C library. A direct LLVM backend would be far more code to maintain for
+    most of the same benefit.
+  </p>
+  <p>
+    <strong>A compiler that runs in a browser.</strong> The compiler does all file and output
+    access through an interface the host supplies, so it compiles to wasm and runs in a browser
+    unchanged. The compiler on this website is the same Rust crate.
+  </p>
+
+  <h2 id="commitments">The architectural commitments</h2>
+  <p>
+    The kit's design rests on a written list of commitments, recorded because they are expensive to
+    change later. The main ones:
+  </p>
+  <dl class="deflist">
+    {
+      COMMITMENTS.map(([h, body]) => (
+        <>
+          <dt>{h}</dt>
+          <dd>{body}</dd>
+        </>
+      ))
+    }
+  </dl>
+  <p>
+    There are structural commitments too: a language is described to the kit rather than written as a subclass of it,
+    ownership is an opt-in the kit supports with a borrow checker at the IR level, and backends stay
+    faithful to IR semantics so debug information survives code generation. There is also a list of
+    things the kit deliberately does not do. It is not general compiler infrastructure: it assumes structured control flow and statically determinable types,
+    so heavily dynamic languages, first-class continuations and reflection are out of scope. It is
+    not LLVM and not MLIR. And it provides no standard library, because a standard library would add
+    a runtime to every compiled program.
+  </p>
+  <p>
+    One rule keeps the kit small: <strong>a feature is added only when a language built on it cannot
+    proceed without it.</strong>
+  </p>
+
+  <h2 id="inside">Parts of the kit</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Piece</th><th>File</th><th class="r">Lines</th></tr></thead>
+      <tbody>
+        {
+          kit.map((r) => (
+            <tr>
+              <td>{r.what.replace(/^Kit: /, '')}</td>
+              <td><code>{r.path}</code></td>
+              <td class="r num">{r.lines.toLocaleString()}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The C backend is the biggest piece and the most reused: it is generic over the source IR, so
+    any language that implements the kit's code-generation interface gets a C99 backend without
+    writing one. Viv and skein both
+    use it unmodified. See it working on a nine-line program in
+    <a href="/internals#c-backend">the internals walkthrough</a>.
+  </p>
+
+  <h2 id="siblings">Languages built on the kit</h2>
+  <p>
+    Building a first language shows what the kit has to support. Building a second one shows which
+    parts work the same way for any language and which were specific to the first.
+  </p>
+  <div class="grid grid-2">
+    {
+      SIBLINGS.map((s) => (
+        <div class="card sib">
+          <h3>{s.link ? <a href={s.link}>{s.name}</a> : s.name}</h3>
+          <p class="sibtag">{s.tag}</p>
+          <p>{s.what}</p>
+          <span class="card-tag">
+            <span class={`pill ${s.status.includes('skeletal') ? 'pill-wip' : 'pill-ok'}`}>
+              {s.status}
+            </span>
+          </span>
+        </div>
+      ))
+    }
+  </div>
+  <p>
+    <strong>weft compiles to Viv, not to C.</strong> A weak form compiles to a Viv program, which
+    compiles to C, which compiles to native code or wasm. The element kernel it generates is
+    bit-identical to the hand-written one in <code>fem_poisson.viv</code>.
+  </p>
+
+  <h2 id="ahead">What is not done</h2>
+  <p>
+    The commitments document separates what is built from what the design
+    only allows for. The stratified IR and lineage tracking exist, but
+    <strong>zoom-level abstraction</strong> — rendering one program at several levels at once and
+    cycling through them interactively — is not built. Content addressing is in from day one, but
+    the <strong>content-addressed store</strong> (definitions kept by hash, names as a mutable
+    index) is at v0: <code>viv hash</code> and <code>viv diff</code> work, the store and
+    <code>snapshot</code>/<code>log</code> do not. The <strong>borrow checker</strong> is a
+    supported opt-in in the design and no language opts in yet. And
+    <strong>cross-language interop at the IR level</strong> — compiling two kit languages into one
+    program — is possible in the design but not built.
+  </p>
+
+  <div class="nextprev">
+    <span><a href="/internals">← One program through the compiler</a></span>
+    <span><a href="/reference">Language reference →</a></span>
+  </div>
+</div>
+    <Toc items={TOC} />
+  </div>
+
+  <style>
+    h2 {
+      scroll-margin-top: 72px;
+    }
+    .r {
+      text-align: right;
+      padding-right: 1.3rem;
+    }
+    .sib h3 {
+      font-family: var(--font-mono);
+      font-size: 1.05rem;
+    }
+    .sib h3 a {
+      text-decoration: none;
+    }
+    .sibtag {
+      font: 500 11px var(--font-mono) !important;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-faint) !important;
+      margin: -2px 0 7px !important;
+      flex: none !important;
+    }
+    .card-tag .pill {
+      margin: 0;
+    }
+  </style>
+</Base>

@@ -1,0 +1,23 @@
+# Water 6-31G, from the molecule to the RHF energy: every integral
+# computed (McMurchie-Davidson for the ERIs), then RHF, with production
+# members only (`rhf` with the default options), as a release build would run it. One of
+# the four kernels the engines are raced on:
+#
+#     tools/race.sh bench/hf_scf_631g.viv
+#
+# It prints the energy; the test holds it to PySCF's (WATER631G_E_RHF).
+from hf.scf import rhf
+from hf.molecule import molecule_from
+from basis.pople631g import basis_631g
+from hfref.water_631g import WATER631G_E_RHF
+
+hf631_mol = molecule_from([8, 1, 1], [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]], basis_631g())
+hf631_e = rhf(hf631_mol).energy
+show hf631_e
+
+test "the benchmark energy is PySCF's 6-31G energy within 1e-9" {
+    assert_lt(abs(hf631_e - WATER631G_E_RHF), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,72 @@
+# Landau damping by a 1D1V Vlasov-Poisson solver, written in Viv.
+#
+# The setup of Gkeyll's vlasov/creg/rt_vlasov_landau_damping_1x1v_p2 regression
+# test (k0 = 0.5, vt = 1, a box one wavelength long, a small cosine density
+# perturbation), solved with the Cheng-Knorr split step of lib/vlasov: an exact
+# spectral shift in x, a cubic B-spline shift in v. A Langmuir wave oscillates
+# near the Bohm-Gross frequency and damps, with no collisions, at the Landau
+# rate. Gkeyll uses modal discontinuous Galerkin; a different scheme with the
+# same physical invariants is how benchmarks are meant to be compared.
+#
+# Units omega_pe = 1, vt = 1, so k0 = 0.5 means k lambda_D = 0.5, the Canosa
+# point. The exact root, computed here with lib/zfunc, is 1.41566 - 0.15336 i.
+#
+# This is the k = 0.5 setup of the exported program in plasma/ (plasma/k05.viv,
+# plasma/landau.viv), written as one file. The first version of this example
+# interpolated linearly in x and measured gamma = -0.1714, 11.8% off; the
+# numerical diffusion of linear interpolation damped the wave on its own.
+
+from vlasov import (
+    VL_PI, vl_field, vl_field_energy, vl_fit, vl_initial, vl_landau_root,
+    vl_phase_tables, vl_shift_v, vl_shift_x, vl_wavenumbers,
+)
+
+k0 = 0.5               #: k0  the perturbation's wavenumber
+vt = 1.0               #: vt  thermal speed, which is the Debye length in these units
+alpha = 1.0e-4         #: alpha  relative amplitude of the density perturbation
+nx = 16.0              #: nx  grid points in x; the linear wave has one mode
+nv = 256.0             #: nv  grid points in v on [-vmax, vmax)
+vmax = 6.0             #: vmax  the velocity grid's edge
+dt = 0.05              #: dt  time step
+t_end = 40.0           #: t_end  the run's length
+
+lx = 2.0 * VL_PI / k0
+dx = lx / nx
+dv = 2.0 * vmax / nv
+nsteps = floor(t_end / dt + 0.5)
+x = arange(nx) * dx
+v = -vmax + arange(nv) * dv
+kx = vl_wavenumbers(nx, lx)
+pc, ps = vl_phase_tables(kx, v, 0.5 * dt)
+F = vl_initial(x, v, vt, k0, alpha)
+mass0 = sum(F)
+
+t = zeros(nsteps)
+W = zeros(nsteps)
+for n to nsteps {
+    vl_shift_x(F, pc, ps)
+    E = vl_field(F, kx, dv)
+    t[n] = (n + 0.5) * dt
+    W[n] = vl_field_energy(E, dx)
+    vl_shift_v(F, E, dt, dv)
+    vl_shift_x(F, pc, ps)
+}
+
+# the peaks of log W from t = 10, when the faster-damped roots have died away
+gamma_meas, omega_meas, npk, rms = vl_fit(t, W, 10.0, t_end)
+root = vl_landau_root(k0 * vt)
+
+show gamma_meas    # measured Landau damping rate; exact -0.15336
+show omega_meas    # measured frequency; exact 1.41566
+show npk           # field-energy peaks in the fit
+
+test "gamma matches the dispersion root to 8e-4 and omega to 2e-4 (relative)" {
+    assert_near(gamma_meas, im(root), 8.0e-4 * abs(im(root)))
+    assert_near(omega_meas, re(root), 2.0e-4 * re(root))
+}
+test "particles are conserved to rounding" {
+    assert_near(sum(F) / mass0, 1.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

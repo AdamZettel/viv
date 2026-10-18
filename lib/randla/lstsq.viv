@@ -1,0 +1,174 @@
+###
+post: Sketch-and-precondition least squares
+agent: claude
+
+`sap_lstsq(A, b, kind, gamma, seed, tol, maxiter)` solves min |A x - b| for a
+tall A (m by n, m much larger than n) to full accuracy, the way Blendenpik
+(Avron, Maymounkov and Toledo 2010) and LSRN (Meng, Saunders and Mahoney
+2014) do it:
+
+1. Sketch: S A and S b with S of d = gamma * n rows (`kind` is "srht",
+   "saso" or "gaussian").
+2. Factor: S A = Q R. Because S keeps the geometry of range(A), A R^-1 has
+   singular values in [1/(1 + eps), 1/(1 - eps)]: a condition number near
+   (1 + sqrt(n/d)) / (1 - sqrt(n/d)), 3 for gamma = 4, whatever the
+   condition number of A.
+3. Warm start from the sketch-and-solve answer x0 = R^-1 Q^T S b
+   (RandLAPACK's SPO starts the same way).
+4. LSQR (Paige and Saunders 1982) on min |A R^-1 y - (b - A x0)|; each step
+   is one product with A, one with A^T and two triangular solves, and the
+   well-conditioned operator makes the iteration count depend on the
+   tolerance only.
+
+A must have full column rank: a rank-deficient A makes R singular, and the
+iteration runs to `maxiter` (the second result) without converging. For a
+rank-deficient problem, `rsvd` or a pivoted QR is the tool.
+
+The cost is the sketch, an O(d n^2) QR, and about 30 iterations of
+O(m n) for tol = 1e-14, against O(m n^2) for a Householder QR of A. The
+advantage appears once m n^2 dominates; below that, `qr_lstsq` is simpler.
+
+Used with `from randla.lstsq import ...`.
+###
+
+from randla.sketch import gaussian, saso_apply, srht_apply
+from randla.dense import householder_qr, solve_upper, upper_inverse
+from randla.lowrank import with_spectrum
+
+# nonzeros per column of the sparse sign sketch (RandBLAS suggests 2 to 8)
+SASO_NNZ: Int = 8
+# the stream every least-squares sketch is drawn from
+LSTSQ_STREAM: Int = 7
+
+#| S [A b] for the sketch `kind` with d rows.
+def sketch_rows(Ab: Arr, d: Int, kind: Str, seed: Int) -> Arr {
+    m: Int = int(shape(Ab)[0])
+    if kind == "srht" {
+        return srht_apply(Ab, d, seed, LSTSQ_STREAM)
+    }
+    if kind == "saso" {
+        return saso_apply(Ab, d, SASO_NNZ, seed, LSTSQ_STREAM)
+    }
+    return (gaussian(d, m, seed, LSTSQ_STREAM) / sqrt(float(d))) @ Ab
+}
+
+#| The least-squares solution by a Householder QR of A: the direct
+#| reference.
+def qr_lstsq(A: Arr, b: Arr) -> Arr {
+    Q, R = householder_qr(A)
+    return solve_upper(R, transpose(Q) @ b)
+}
+
+#| min |A x - b| by sketch-and-precondition with LSQR. Returns x and the
+#| number of LSQR iterations. LSQR stops when |M^T r| <= tol |M| |r| for the
+#| preconditioned operator M = A R^-1 (Paige and Saunders' second test), or
+#| when |r| <= tol |b| (a consistent system).
+def sap_lstsq(A: Arr, b: Arr, kind: Str = "srht", gamma: Num = 4.0, seed: Int = 0,
+              tol: Num = 1.0e-14, maxiter: Int = 200) {
+    #: b appended to A, so one sketch serves both
+    m: Int = int(shape(A)[0])
+    n: Int = int(shape(A)[1])
+    d: Int = min(m, int(ceil(gamma * float(n))))
+    Ab = zeros(m, n + 1)
+    Ab[:, 0:n] = A
+    Ab[:, n] = b
+    #: sketch-and-solve gives x0 and the preconditioner R
+    SAb = sketch_rows(Ab, d, kind, seed)
+    Q, R = householder_qr(SAb[:, 0:n])
+    x0 = solve_upper(R, transpose(Q) @ SAb[:, n])
+    r0 = b - A @ x0
+    At = transpose(A)
+    # R^-1 formed once (n by n): each LSQR step is then four matrix-vector
+    # products and no triangular solve
+    Ri = upper_inverse(R)
+    Rit = transpose(Ri)
+    bnorm = norm(b)
+    # LSQR on M = A R^-1 with right side r0
+    y = zeros(n)
+    u = r0
+    beta = norm(u)
+    if beta == 0.0 {
+        return x0, 0
+    }
+    u = u / beta
+    v = Rit @ (At @ u)
+    alpha = norm(v)
+    if alpha == 0.0 {
+        return x0, 0
+    }
+    v = v / alpha
+    w = v
+    phibar = beta
+    rhobar = alpha
+    anorm2 = 0.0
+    iters: Int = 0
+    for it to maxiter {
+        iters = it + 1
+        #: Golub-Kahan step on M = A R^-1
+        u = A @ (Ri @ v) - alpha * u
+        beta = norm(u)
+        if beta > 0.0 {
+            u = u / beta
+        }
+        anorm2 += alpha * alpha + beta * beta
+        v = Rit @ (At @ u) - beta * v
+        alpha = norm(v)
+        if alpha > 0.0 {
+            v = v / alpha
+        }
+        #: a plane rotation removes beta
+        rho = sqrt(rhobar * rhobar + beta * beta)
+        c = rhobar / rho
+        s = beta / rho
+        theta = s * alpha
+        rhobar = -c * alpha
+        phi = c * phibar
+        phibar = s * phibar
+        y = y + (phi / rho) * w
+        w = v - (theta / rho) * w
+        # |r| = phibar and |M^T r| = phibar alpha |c|
+        if phibar <= tol * bnorm {
+            break
+        }
+        if phibar * alpha * abs(c) <= tol * sqrt(anorm2) * phibar {
+            break
+        }
+    }
+    return x0 + Ri @ y, iters
+}
+
+#| The normwise backward-error proxy |A^T r| / (|A|_F |r|) of x.
+def normal_residual(A: Arr, b: Arr, x: Arr) -> Num {
+    r = b - A @ x
+    return norm(transpose(A) @ r) / (norm(A) * norm(r))
+}
+
+test "sketch-and-precondition matches the QR solution on an ill-conditioned problem" {
+    m: Int = 1000
+    n: Int = 40
+    # singular values from 1 down to 1e-6, geometrically
+    s = exp(log(10.0) * linspace(0.0, -6.0, n))
+    A = with_spectrum(m, n, s, 21)
+    xt = gaussian(n, 1, 21, 5)[:, 0]
+    noise = gaussian(m, 1, 21, 6)[:, 0]
+    b = A @ xt + 1.0e-3 * noise
+    xq = qr_lstsq(A, b)
+    rq = norm(b - A @ xq)
+    # the least-squares perturbation bound (Golub and Van Loan, section 5.3) at
+    # unit roundoff: two backward-stable solvers can differ by this much
+    kappa = s[0] / s[n - 1]
+    eps = 1.1102230246251565e-16
+    fwd = 10.0 * eps * (kappa + kappa * kappa * rq / (s[0] * norm(xq)))
+    for kind in ["srht", "saso", "gaussian"] {
+        x, it = sap_lstsq(A, b, kind=kind)
+        # the residual norms agree to rounding
+        assert_lt(abs(norm(b - A @ x) - rq) / rq, 1.0e-13)
+        assert_lt(norm(x - xq) / norm(xq), fwd)
+        # A^T r as small as the direct solver gets it, within a factor 10
+        assert_lt(normal_residual(A, b, x), 10.0 * normal_residual(A, b, xq))
+        assert_lt(float(it), 60.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

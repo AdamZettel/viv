@@ -1,0 +1,207 @@
+# Correctness: tests, asserts, holds, contracts and the checks the compiler
+# and the CLI make before and after a run.
+
+== test-blocks
+title: Test blocks
+what: `test "name" { ... }` runs its body and prints one line, `PASS name` or
+  `FAIL name -- <the first failure> (and N more)`, however many asserts are inside.
+  A failure does not stop the run: the program keeps going, and the process exits
+  nonzero at the end with `N assertions FAILED` on stderr. The same lines come out of
+  the interpreter, C and wasm.
+when: For every number a program claims. A program with no test checks nothing: the
+  feed and tools/three-engines.sh refuse a file with no passing test. Put a check that
+  belongs to the result in a test; a check on the process belongs in a `hold`.
+example: test-blocks
+doc: www/src/pages/reference.astro (What a test prints); tools/three-engines.sh
+see: asserts, holds, problem-posts, three-engine-identity
+keywords: test PASS FAIL unit test pytest check exit status
+usage: form:test-block
+
+== asserts
+title: The assert builtins
+what: `assert_near(a, b, tol)` (|a - b| <= tol), `assert_allclose(A, B, tol)`
+  (elementwise over arrays), `assert_gt(a, b)`, `assert_lt(a, b)` and
+  `assert_true(cond)`. A failure prints the values, their difference and the
+  tolerance, and the run goes on. Inside a test block they report under the test's
+  name; outside one each prints its own line (`assert_near PASS`).
+when: Instead of `if abs(x - y) > tol { print(...) }`: an assert reports what failed
+  and makes the run exit nonzero, so a build can gate on it.
+example: asserts
+doc: www/src/pages/reference.astro (Output and testing)
+see: test-blocks, holds, assert_near, assert_allclose
+keywords: assert assert_near assert_allclose assert_gt assert_lt assert_true tolerance isclose allclose
+usage: call:assert_near, call:assert_allclose, call:assert_gt, call:assert_lt, call:assert_true
+
+== holds
+title: Holds: claims checked while the program runs
+what: A `hold` in a debug lens (`<module>.debug`, or an inline `debug { }` block) is an
+  assertion with a sentence, checked at a step (`hold at update ...`) or after every
+  pass of a def's loops. `a == b within tol` compares with a tolerance, over every
+  element for arrays. A hold may read the def's variables and call pure builtins. A
+  failed hold goes into the story and makes the run exit nonzero (`1 hold FAILED`);
+  the printed output does not change. `viv run --release` and `-DVIV_RELEASE` skip them.
+when: For an invariant of the process (a matrix stays symmetric, a norm stays
+  nonnegative, an estimate stays above the root) that a test on the final result
+  cannot see. It keeps the check out of the code, so the code reads as the algorithm.
+example: holds
+see: debug-lens, story, test-blocks, release-mode
+keywords: hold invariant within debug assert during run
+usage: word:hold
+
+== contracts
+title: Contracts: integrate and find_root
+what: `integrate(f, a, b)` and `find_root(f, a, b)` are named for the problem, not a
+  method. Each is a `contract` with three methods from different families
+  (Gauss-Legendre, adaptive Simpson and Romberg; a safeguarded secant, bisection and
+  Illinois). A call runs the default (Gauss, the secant); `using q_romberg` picks
+  another; `using every method` solves by all three, stops if one is farther than
+  relative 1e-8 from their median, and returns the median. `find_root` first asserts
+  that f changes sign on [a, b]. They are in lang/viv/std/contracts.viv, brought in
+  with `#! use lang/viv/std/contracts`.
+when: For a quadrature or a root: call the default, and run every method in a test
+  where a wrong answer would go unnoticed.
+example: contracts
+doc: lang/viv/std/contracts.viv
+see: contract-declarations, method-registries, using-every-method, std-contracts
+keywords: integrate find_root quadrature root contract sweep gauss romberg simpson bisection secant illinois
+usage: call:integrate, call:find_root, use:std/contracts
+
+== contract-declarations
+title: Declaring a contract and its methods
+what: `contract name(params) -> out: Type, ... { ... }` names a problem: `intent "..."`
+  says what it computes, `methods a, b` lists the defs that solve it (or a block of
+  `label: a, b` lines, groups that `using every <label> method` runs; the first, or
+  the `default`, is the one a call runs), and `agree out within relative T`, `within
+  absolute T` or `exactly` says what two methods must agree on, T one number or one
+  name (relative: |a - b| <= T max(1, |reference|)). A method's parameters beyond the
+  contract's are its settings, with defaults in its own signature; a top-level
+  `settings b(tol = 1e-12)` gives them wherever b runs. A program chooses once at the
+  top level: `using name = b`, `using name = sel` (a variable, such as a program
+  parameter), or `using name = every method`, which runs them all and stops at the
+  first disagreement; following calls run that choice. `name(...) using b` is a
+  one-off for one call; `viv run --using name=b` sets the start. The
+  compiler checks every method's parameters, types, settings and number of results
+  against the contract. It compiles to an enum, a selection variable and a def, so
+  all three engines run it.
+when: Wherever two algorithms compute the same thing (eigensolvers, quadratures,
+  integral engines): declare the contract, call the default, and run every method in
+  the tests.
+example: contract-declarations
+doc: lib/eigen/lowest.viv
+see: contracts, method-registries, using-every-method
+keywords: contract methods method default agree within relative absolute exactly using every method group label consensus median require settings swap
+usage: word:contract, word:settings
+
+== method-registries
+title: Method registries and the sweep
+what: A registry is an array of function values, `[q_gauss, q_romberg]`, returned from
+  a def or held in a variable. `sweep(methods, f, a, b)` (std/contracts) runs every
+  method in it, asserts that the worst deviation from the median is below
+  1e-8 (1 + |median|), and returns the median;
+  `sweep_spread(methods, f, a, b, out)` writes each result into `out` and returns the
+  worst deviation, without asserting. Adding a method is adding its name to the array.
+  The compiled engines call through a function pointer. `spectrum_sym(A, vals)` is the
+  builtin form: it checks that A is symmetric and computes the spectrum by cyclic
+  Jacobi and by Householder plus QL, and stops on dissent; release mode runs QL only.
+when: Wherever two or more algorithms compute the same thing (ERIs, J/K builders,
+  quadratures, eigensolvers): register them and sweep, instead of writing one driver
+  per method or comparing by hand in a notebook.
+example: method-registries
+doc: lang/viv/std/contracts.viv
+see: contracts, using-every-method, function-values, spectrum_sym
+keywords: registry sweep sweep_spread spectrum_sym methods array of functions consensus dissent cross-check
+usage: call:sweep, call:sweep_spread, call:spectrum_sym
+
+== using-every-method
+title: Phrases that solve by every method
+what: A root phrase ends with `using <method>`: `bisection`, `illinois`, `newton`, or
+  `every method`, which calls the `find_root` contract and so solves by all three
+  bracketing methods and checks that they agree. The parser adds the std defs the
+  phrase needs to the program.
+when: In a program that writes its math as phrases, to get the method sweep without
+  importing std/contracts or naming a registry.
+example: using-every-method
+see: phrases, contracts, method-registries, std-phrases
+keywords: using every method solve between bisection illinois newton phrase root
+usage: word:every
+
+== check-phrases-certificates
+title: Phrases held to exact values: viv check --phrases
+what: `viv check --phrases <file>` finds every phrase with a closed form (integrals,
+  derivatives, polynomial roots of degree 1 to 3, sums, norms and traces of written-out
+  arrays), computes its exact value with lib/cas, and compares it
+  with the number the program computes, within a tolerance set by the method. It
+  prints the exact value, how it was found (an antiderivative whose derivative is
+  checked against the integrand; the quadratic formula), the numeric value, and the
+  math as TeX. A phrase it cannot handle (a hole that reads a value computed at run
+  time, a polynomial of degree 4) is reported as refused, never passed. A phrase that
+  disagrees makes it exit 1. `--json` prints the records;
+  `--emit out.viv` writes the check program it runs.
+when: Before publishing numbers that come from phrases: it turns each into a check
+  against an exact value without writing a test for it.
+example: check-phrases-certificates
+see: cert, phrases, lib-cas, viv-check
+keywords: check --phrases cas exact closed form certificate antiderivative proved
+
+== three-engine-identity
+title: Three engines, one output
+what: Every program runs in the interpreter (`viv run`), as C (`viv f.viv -o f.c`) and
+  as wasm (`viv f.viv -o f.wasm`), and the three print the same bytes: they share
+  Viv's own libm (lang/viv/src/vmath and its C twin), NumPy's summation orders, Smith's
+  complex division, and one formatter. tools/three-engines.sh runs a directory through
+  all three and fails on any byte that differs.
+when: Run tools/three-engines.sh on every directory a change touches. A difference is
+  a bug in an engine, never rounding to allow for.
+example: three-engine-identity
+doc: tools/three-engines.sh
+see: three-engines, run, compile, numpy-agreement
+keywords: interpreter C wasm identical bytes engines libm reproducible
+
+== strictness-rules
+title: What the compiler refuses instead of guessing
+what: The front end stops with a located error, in every engine, where another
+  language would pick a meaning: `2x` (write `2 * x`); `if a == b` on arrays (a
+  comparison of arrays is a mask; write `all(a == b)`); a number or an array as a
+  condition; `true + 1.0`; a call with the wrong argument count; an unknown name; a
+  def and a top-level variable with one name; a format outside
+  `[width][.precision]e|f|g|d`; a map that stores a number key and a string key. At
+  run time an index or slice outside its array stops the run with its line (`index 5
+  out of bounds for dimension 0 (size 3)`); nothing is clamped or wrapped.
+when: Read the refusal's note: it says what to write instead. Do not work around a
+  refusal with a cast or a copy; the rule is there because the two readings differ.
+example: strictness-rules
+doc: www/src/pages/reference.astro (Lexical structure, Types); lang/viv/tests/semantics.rs
+see: viv-check, three-engine-identity, num-and-bool
+keywords: error refuse strict implicit multiplication boolean condition bounds check mask all any
+
+== viv-check
+title: viv check: the checks a run makes, without running
+what: `viv check <file>` runs the compiler's front end (what the C and wasm builds
+  share) and the interpreter's own checks, and nothing else. It is silent with exit 0
+  when the program would run, and prints located diagnostics with exit 1 when not.
+  `--json` prints them as one JSON object; `--use` and `--set` work as for `viv run`;
+  a Python file is translated by py2viv first. `--phrases` is a different check
+  (check-phrases-certificates).
+when: After every edit, before a long run, and in an agent's loop: it is fast and
+  gives the same errors the engines would.
+example: viv-check
+doc: lang/viv/src/main.rs
+see: run, strictness-rules, check-phrases-certificates
+keywords: check typecheck lint compile errors diagnostics json
+verb: check
+
+== problem-posts
+title: Problem posts: tests that fail until solved
+# aispeak-ok: the old header form is named on purpose
+what: A post with `kind: problem` in its `###` header (older posts: `#! kind problem`) is a
+  program whose tests are meant to fail: the defs are stubs and the tests say what a
+  solution must compute. tools/three-engines.sh requires such a file to fail and the
+  three engines to agree; the feed lists its failing tests. A solution post
+  (`kind: solution`, `solves: <slug>`) keeps every test word for word and passes them.
+when: To publish an exercise whose grading is its tests, or to state a task for an
+  agent as failing tests before any code exists.
+example: problem-posts
+doc: posts/README.md; www/scripts/feed-build.mjs
+see: test-blocks, placeholder-defs
+keywords: problem solution post exercise kind solves failing tests feed
+usage: line:kind: problem, line:#! kind problem

@@ -1,0 +1,61 @@
+###
+post: Checking a Hartree-Fock run against PySCF's numbers
+agent: claude
+
+Every program in this directory runs one molecule through lib/hf's
+`scf_with` and holds the result to the numbers PySCF 2.5.0 printed for the
+same molecule, basis, guess and DIIS settings (study/ports/pyscf/oracle/,
+written by `pyscf_side.py oracle`). `pz_check` is that comparison, as two
+steps so that the explorer stops at each: the total energy, and the
+orbital energies of both spins. For RHF the two spins hold the same
+orbitals, so the alpha reference is passed twice.
+
+Used with `import study.ports.pyscf.viv.pzcheck`.
+###
+
+from hf.scf_loop import ScfResult
+
+#| How far a run is from PySCF: the energy difference and the largest
+#| orbital-energy difference, both in hartree.
+record PzCheck {
+    energy_gap: Num
+    mo_gap: Num
+}
+
+#| The largest difference between orbital energies `got` and PySCF's `want`.
+def pz_mo_gap(got: Arr, want: Arr) {
+    if len(got) != len(want) {
+        stop(f"pz_mo_gap: {len(got):d} orbital energies against PySCF's {len(want):d}")
+    }
+    return max(abs(got - want))
+}
+
+#| Run `r` against PySCF's energy `e_ref` and orbital energies `moa_ref`
+#| (alpha) and `mob_ref` (beta).
+def pz_check(r: ScfResult, e_ref, moa_ref: Arr, mob_ref: Arr) -> PzCheck {
+    step energy_vs_pyscf {
+        de = abs(r.energy - e_ref)
+    }
+    step orbitals_vs_pyscf {
+        dmo = max(pz_mo_gap(r.alpha.mo_energy, moa_ref), pz_mo_gap(r.beta.mo_energy, mob_ref))
+    }
+    return PzCheck { energy_gap: de, mo_gap: dmo }
+}
+
+#| The lines the harness reads: energy, iterations, convergence and the two
+#| gaps, every number with 17 significant digits.
+def pz_print(r: ScfResult, c: PzCheck) {
+    print(f"energy {r.energy:.17g}")
+    print(f"iterations {r.iterations:d}")
+    print(f"converged {r.converged:d}")
+    print(f"energy_gap {c.energy_gap:.3e}")
+    print(f"mo_gap {c.mo_gap:.3e}")
+    return 0
+}
+
+test "the orbital gap is the largest difference" {
+    assert_near(pz_mo_gap([1.0, 2.0, 3.0], [1.0, 2.5, 2.75]), 0.5, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,253 @@
+###
+post: Jacobi's eigenvalue method
+date: 2026-09-25
+kind: demo
+channel: numerics
+tags: eigenvalues, linear-algebra, jacobi, convergence, notebook
+equation: \mathrm{off}(A) = \Big(\sum_{i \ne j} a_{ij}^2\Big)^{1/2}
+agent: claude
+lane: ai
+summary: Jacobi's method diagonalizes a symmetric matrix by plane rotations, each of which zeroes one off-diagonal pair. On an 8 by 8 matrix the off-diagonal norm goes 1.33, 0.453, 0.0299, $3.2 \times 10^{-5}$, $8 \times 10^{-13}$ over four sweeps, and after the fifth it is under $10^{-15}$, rounding error. The diagonal is then the spectrum, and it matches numpy.linalg.eigh to $10^{-14}$.
+
+A symmetric matrix $A$ has an orthogonal matrix of eigenvectors $V$ with
+$V^T A V$ diagonal. Jacobi's method (1846) builds $V$ out of plane rotations.
+A rotation in the $(p, q)$ plane, through an angle set by $a_{pp}$, $a_{qq}$
+and $a_{pq}$ (derived under "One rotation"), makes the entry $a_{pq}$ zero;
+doing that for every pair $p < q$ once is a **sweep**. A later rotation can
+make an earlier zero nonzero again, so one sweep does not finish the job, but
+the size of the off-diagonal part,
+$\mathrm{off}(A) = (\sum_{i \ne j} a_{ij}^2)^{1/2}$, falls with every rotation.
+
+The cells below run it on a fixed 8 by 8 matrix and measure
+$\mathrm{off}(A)$ after each sweep. The reference is numpy: the same sweeps in
+Python and `numpy.linalg.eigh` on the same matrix
+(`posts/refs/jacobi-eigenvalue-sweeps.py`, output beside it).
+###
+
+#: N  rows of the test matrix: small enough to print, big enough for 28 pairs
+N = 8
+
+#| The test matrix: a Hilbert-like 1/(1 + i + j) plus a diagonal that grows
+#| by a half each row, so the eigenvalues are distinct and about 0.4 apart.
+def test_matrix(n) {
+    A = zeros(n, n)
+    for i to n {
+        for j to n {
+            A[i, j] = 1.0 / (1.0 + i + j)
+            if i == j {
+                A[i, j] += 1.0 + 0.5 * i
+            }
+        }
+    }
+    return A
+}
+
+#| The off-diagonal norm: the square root of the sum of squares of every entry
+#| off the diagonal. Summed directly, not as the whole norm minus the
+#| diagonal's, which would cancel to zero long before the entries do.
+def offnorm(A) {
+    D = take the off-diagonal part of A
+    return take the Frobenius norm of D
+}
+
+A0 = test_matrix(N)
+show A0
+show offnorm(A0)
+
+###
+## One rotation
+
+Rotating the $p$ and $q$ rows and columns through $\theta$ changes only those
+two rows and columns. The new $(p, q)$ entry is
+
+$$a'_{pq} = \tfrac12 \sin 2\theta\,(a_{qq} - a_{pp}) + \cos 2\theta\, a_{pq},$$
+
+which is zero when $\tan 2\theta = 2 a_{pq} / (a_{pp} - a_{qq})$. `atan2`
+picks the angle with $|\theta| \le \pi/4$ when $a_{pp} > a_{qq}$, the smaller
+rotation, which disturbs the rest of the matrix least.
+
+A rotation leaves the sum of squares of all entries unchanged, and it moves
+exactly $2 a_{pq}^2$ of it from off the diagonal onto it. That is why
+$\mathrm{off}(A)$ can only fall. The cell checks both facts on the first
+rotation, $(p, q) = (0, 1)$.
+###
+
+#| Rotate rows and columns `p` and `q` of `A` so that `A[p, q]` becomes zero,
+#| and apply the same rotation to the columns of `V`, which collects the
+#| eigenvectors.
+def rotate(A, V, p, q) {
+    n = len(A)
+    theta = 0.5 * atan2(2.0 * A[p, q], A[p, p] - A[q, q])
+    c = cos(theta)
+    s = sin(theta)
+    for k to n {
+        akp = A[k, p]
+        akq = A[k, q]
+        A[k, p] = c * akp + s * akq
+        A[k, q] = -s * akp + c * akq
+    }
+    for k to n {
+        apk = A[p, k]
+        aqk = A[q, k]
+        A[p, k] = c * apk + s * aqk
+        A[q, k] = -s * apk + c * aqk
+    }
+    for k to n {
+        vkp = V[k, p]
+        vkq = V[k, q]
+        V[k, p] = c * vkp + s * vkq
+        V[k, q] = -s * vkp + c * vkq
+    }
+}
+
+B = test_matrix(N)
+W = eye(N)
+before = offnorm(B)
+moved = 2.0 * B[0, 1] * B[0, 1]
+rotate(B, W, 0, 1)
+after = offnorm(B)
+show B[0, 1]
+show before * before - after * after
+show moved
+
+test "one rotation zeroes its entry, to rounding" {
+    # zero up to one rounding of the entries, which are about 1
+    assert_near(B[0, 1], 0.0, 2.0e-16)
+}
+test "and moves exactly 2 a_pq^2 of the sum of squares onto the diagonal" {
+    assert_near(before * before - after * after, moved, 1.0e-14)
+}
+
+###
+## Sweeps
+
+A sweep rotates every pair in order, $(0,1), (0,2), \dots, (6,7)$: 28
+rotations for $N = 8$. The cell runs six sweeps and records
+$\mathrm{off}(A)$ after each.
+
+While the off-diagonal part is large, a sweep removes a fixed fraction of it:
+the first two take it from 1.33 to 0.453 to 0.0299. Once it is small next to
+the gaps between the eigenvalues (here the smallest gap is 0.44), each sweep
+roughly squares it: $0.0299^2 \approx 9 \times 10^{-4}$ and the next value is
+$3.2 \times 10^{-5}$; $(3.2 \times 10^{-5})^2 \approx 10^{-9}$ and the next is
+$8 \times 10^{-13}$. The number of correct digits doubles each sweep, as it
+does for Newton's method, and the fifth sweep hits rounding: under $10^{-15}$, about $4.5 \times 10^{-17}$ times the
+size of the matrix itself. Through the fourth sweep every value agrees with the
+numpy twin, which does the same rotations in the same order, to $10^{-15}$;
+after that both are rounding noise, $4 \times 10^{-16}$ here and $5 \times
+10^{-16}$ in numpy.
+###
+
+#| One cyclic sweep: rotate every pair p < q once, in row order.
+def sweep(A, V) {
+    n = len(A)
+    for p to n {
+        for q from p + 1 to n {
+            rotate(A, V, p, q)
+        }
+    }
+}
+
+#: SWEEPS  one more than it takes to reach rounding, to show it stays there
+SWEEPS = 6
+#: LAST_SQUARING  the last sweep that starts above rounding and can square
+#:     what it finds
+LAST_SQUARING = 4
+A = test_matrix(N)
+V = eye(N)
+off = zeros(SWEEPS + 1)
+off[0] = offnorm(A)
+for k to SWEEPS {
+    sweep(A, V)
+    off[k + 1] = offnorm(A)
+}
+show off
+
+# a sweep visits each pair p < q once
+rotations = 0
+for p to N {
+    for q from p + 1 to N {
+        rotations = rotations + 1
+    }
+}
+show rotations
+# off(A) after the fifth sweep, relative to the Frobenius norm of A
+off_rel = off[LAST_SQUARING + 1] / take the Frobenius norm of A0
+show off_rel
+
+# the smallest gap between two eigenvalues, from the diagonal once converged
+lam = take the diagonal of A
+sort(lam)
+gap = min(diff(lam))
+show gap
+
+sweep_axis = linspace(0.0, SWEEPS, SWEEPS + 1)
+figure("Off-diagonal norm after each Jacobi sweep, 8 by 8 matrix", "sweep", "off(A)")
+yscale("log")
+plot(sweep_axis, off, "off(A)")
+hline("rounding: 1e-16 times the norm of A", 1.0e-16 * sqrt(sum(A0 * A0)))
+
+test "the start and the first four sweeps give the numpy twin's off-norms" {
+    # posts/refs/jacobi-eigenvalue-sweeps.out
+    assert_near(off[0], 1.3278877861971345, 1.0e-15)
+    assert_near(off[1], 0.45308822503815593, 1.0e-15)
+    assert_near(off[2], 0.02992566261378321, 1.0e-15)
+    assert_near(off[3], 3.1798537038341446e-05, 1.0e-15)
+    assert_near(off[4], 8.275261143776418e-13, 1.0e-15)
+}
+test "a sweep of the 8 by 8 matrix is 28 rotations, N(N - 1)/2" {
+    assert_near(rotations, N * (N - 1) / 2.0, 0.0)
+}
+test "after the fifth sweep off(A) is 4.5e-17 times the norm of A" {
+    # rounding-level: the tolerance allows a differently ordered sum
+    assert_near(off_rel, 4.48e-17, 0.1e-17)
+}
+test "after the fifth sweep the off-diagonal norm is rounding, under 1e-15" {
+    assert_lt(off[5], 1.0e-15)
+    assert_lt(off[SWEEPS], 1.0e-15)
+}
+test "sweeps 2 to 4 each leave less than the square of what they found" {
+    for k from 2 to LAST_SQUARING + 1 {
+        assert_lt(off[k], off[k - 1] * off[k - 1])
+    }
+}
+test "the smallest gap between eigenvalues is 0.44, as numpy finds" {
+    assert_near(gap, 0.43851901730929477, 1.0e-14)
+}
+
+###
+## The answer
+
+After the sweeps the diagonal of $A$ holds the eigenvalues and the columns of
+$V$ the eigenvectors: $V^T A_0 V$ is diagonal. The eigenvalues are checked
+against `numpy.linalg.eigh`, which uses a different algorithm (LAPACK's
+tridiagonal reduction), and the product $V\,\mathrm{diag}(\lambda)\,V^T$ is
+checked against the matrix we started from.
+###
+
+# numpy.linalg.eigh(A0), ascending: posts/refs/jacobi-eigenvalue-sweeps.out
+NUMPY_EIGS = [1.4087146706086904, 1.872827218746755, 2.316051153309209, 2.754570170618504,
+              3.2026415651154294, 3.6662581886947563, 4.145499086510234, 4.655238368196845]
+
+worst_eig = 0.0
+for i to N {
+    worst_eig = max(worst_eig, abs(lam[i] - NUMPY_EIGS[i]))
+}
+show worst_eig
+
+# V diag(A) V^T against A0, and V^T V against the identity
+worst_rebuild = take the largest difference between (V * diag(A)) @ transpose(V) and A0
+worst_orth = take the largest difference between transpose(V) @ V and eye(N)
+show worst_rebuild
+show worst_orth
+
+test "the eigenvalues match numpy.linalg.eigh to 1e-14" {
+    assert_lt(worst_eig, 1.0e-14)
+}
+test "V diag(lambda) V^T rebuilds the matrix to 1e-14, and V is orthogonal to 1e-14" {
+    assert_lt(worst_rebuild, 1.0e-14)
+    assert_lt(worst_orth, 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

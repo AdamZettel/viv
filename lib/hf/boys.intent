@@ -1,0 +1,148 @@
+module lib/hf/boys
+  The Boys function $F_n(x) = \int_0^1 t^{2n} e^{-x t^2} dt$, which every
+  Gaussian integral with a $1/r$ in it reduces to: the attraction of an
+  electron to a nucleus and the repulsion between two electrons. $n$ runs
+  from zero to the total angular momentum of the integral, and $x$ grows with
+  the exponents and the distance between the centers.
+
+  Each member returns every order from $F_0$ to $F_{n_{\max}}$ at once,
+  because an integral needs all of them and neighboring orders follow from
+  one another by a recursion. The members use only `exp`, `sqrt`, `cos` and
+  arithmetic, so the interpreter and the compiled C give the same bits.
+  The production path is the series below a switch point and the large-$x$
+  form above it; the quadrature member shares no code with the series and is
+  there to check it. The tests hold every member against a table computed by
+  mpmath (lib/hfref/boys).
+
+boys_series_one  @e38fb5e5
+  why   The one evaluation every other member starts from or is checked
+        against. Every term of the series is positive, so no digits cancel.
+  n       the order
+  x       the argument
+  term    the current term, $\frac{(2x)^k}{(2n+1)(2n+3)\cdots(2n+2k+1)}$
+  total   the sum of the terms so far; $F_n(x)$ is $e^{-x}$ times it
+  k       how many terms after the first have been added
+
+boys_switch  @393ceaa9
+  why   Below $x_n$ the large-$x$ form drops a tail that matters; above it the
+        form is exact to rounding. The value is fixed by a test against the
+        generator's table
+        [test "each order's switch matches the generator's, and is right on both sides"].
+  n     the highest order the caller needs
+  xs    the switch for each order, as tools/boys_reference.py computes it
+
+boys_down  @aaec5b5c
+  why   Going down, $F_{n-1} = (2x F_n + e^{-x}) / (2n - 1)$ adds two positive
+        numbers, so it keeps every digit; one evaluation at the top order,
+        by the series or by the grid's Taylor sum, then gives all the others
+        for the price of a multiply and an add.
+  top   $F_{n_{\max}}(x)$
+  nmax  the highest order wanted
+  x     the argument
+  out   $F_0 \ldots F_{n_{\max}}$
+  ex    $e^{-x}$
+  k     how many steps down have been taken
+  n     the order just computed; the step writes order $n - 1$
+
+boys_series_down  @4ab05d8d
+  why   One series evaluation at the top order, then the downward step for
+        the rest.
+  nmax  the highest order wanted
+  x     the argument
+
+boys_asym_up  @b291afd1
+  why   At large $x$ the series needs hundreds of terms, while
+        $F_0 = \frac12\sqrt{\pi/x}$ is exact to rounding above the switch.
+        Going up, $F_{n+1} = ((2n+1) F_n - e^{-x}) / (2x)$, subtracts, but
+        above the switch $2x > 2n + 1$ and the subtraction loses no digits.
+        Keeping the $e^{-x}$ term is what lets the switch sit near where the
+        series gets slow instead of far above it.
+  nmax  the highest order wanted
+  x     the argument
+  out   $F_0 \ldots F_{n_{\max}}$
+  ex    $e^{-x}$
+
+boys_values  @8eb35eae
+  why   Callers name the production choice, not a member, so the choice can
+        change in one place
+        [test "boys_values matches mpmath to 1e-14 at every tabulated point and order"].
+  nmax  the highest order wanted
+  x     the argument
+
+boys_gl_nodes  @31e0f0f2
+  why   The quadrature member needs Gauss-Legendre nodes, and computing them
+        here keeps the module free of a table of constants to check.
+  m     the number of nodes
+  GL    the result: nodes in row `0`, weights in row `1`
+  z     the node being refined, starting from the cosine guess
+  dp    $P_m'(z)$, the derivative of the Legendre polynomial, which Newton's
+        step divides by and the weight formula uses
+  p1    $P_j(z)$ as the three-term recurrence climbs; p2 and p3 are the two
+        orders below it
+
+boys_gl_pass  @5ee5111f
+  why   One pass of the composite rule, for every order at once: the
+        exponential is computed once per node and the powers $t^{2n}$ by
+        repeated multiplication.
+  nmax  the highest order wanted
+  x     the argument
+  npan  how many equal panels $[0, 1]$ is cut into
+  GL    nodes and weights on $[-1, 1]$, from boys_gl_nodes
+  out   $F_0 \ldots F_{n_{\max}}$
+  width the width of one panel
+  mid   the panel's midpoint
+  t     the node mapped into the panel
+  w     the node's weight times $e^{-x t^2}$, times $t^{2n}$ as $n$ climbs
+
+boys_quadrature  @1916339c
+  why   The only member that shares no formula with the series, so it is the
+        one that can catch a mistake in it.
+  nmax    the highest order wanted
+  x       the argument
+  GL      the Gauss-Legendre nodes and weights
+  prev    the previous pass's values
+  cur     this pass's values
+  npan    the panel count, doubled each pass
+  change  the largest relative change of any order between the two passes
+
+boys_grid_range  @45a29d20
+  why   Integral codes evaluate the Boys function once per primitive pair or quartet, at nearby
+        arguments; a table at evenly spaced nodes turns each evaluation into
+        a short Taylor sum. The extra `BOYS_TAYLOR_K` orders per node are the
+        derivatives that sum needs, since $dF_n/dx = -F_{n+1}$.
+  ncap  the highest order the grid serves
+  i0    the index of the first node
+  npts  how many nodes
+  ncol  the columns of a row: the header, or the orders up to `ncap + BOYS_TAYLOR_K`
+  G     the grid: header row, then one row of orders per node, from the series
+
+boys_grid_new  @09c1dab7
+  why   A caller builds one grid inside its own integral def, so the grid is
+        freed when that def returns and nothing global holds it.
+  nmax  the highest order the caller needs
+  xmax  the largest argument the caller expects
+  top   where the grid stops: `xmax`, or the switch when that comes first
+
+boys_grid_eval  @7928c3ea
+  why   The fast path of the integral codes. Anything the grid does not cover
+        goes to the series, so a grid built too small costs time and not
+        accuracy [test "a grid built once by the caller matches mpmath to 1e-13"].
+  G      the grid from boys_grid_new
+  nmax   the highest order wanted
+  x      the argument
+  i      the index of the node nearest `x`
+  r      that node's row in `G`
+  d      $x - x_0$, the distance from the node
+  fac    $(-d)^k / k!$, the Taylor factor of term `k`
+  total  $F_{n_{\max}}(x)$ as the Taylor sum builds it; boys_down gives the lower orders
+
+boys_taylor  @c0f5e4bf
+  why   Lets the registry's tests run the grid's evaluation code on the same
+        footing as the other members.
+  nmax  the highest order wanted
+  x     the argument
+  G     a one-node grid at the node nearest `x`
+
+boys_methods  @4b3e541a
+  why   The tests loop over the members by index, and a program can pick one by
+        an option, without either naming the defs.

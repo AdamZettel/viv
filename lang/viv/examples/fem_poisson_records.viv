@@ -1,0 +1,177 @@
+# The 2D Poisson FEM (see fem_poisson.viv), refactored with records to show the
+# named-field bundling that motivated them: the mesh is a single `Mesh` value
+# passed to functions (instead of three loose global arrays), and each element's
+# geometry is a `Tri` value passed to helpers (instead of nine loose scalars).
+# Same problem, same result (RMS error falls ~4x per mesh halving; u_center -> 0.0625).
+#
+# Note the load-bearing record rule: `Mesh` holds array *handles*, so returning a
+# Mesh from make_mesh shares the underlying storage (no copy of the big arrays).
+
+record Mesh { node_x: Arr, node_y: Arr, elem: Arr }
+record Tri { ax: Num, ay: Num, bx: Num, by: Num, cx: Num, cy: Num }
+
+# --- dense linear solver: A x = b by Gaussian elimination w/ partial pivoting ---
+def solve_linear(A, b, x, n) {
+    for k to n {
+        piv = k
+        big = A[k, k]
+        if big < 0.0 { big = -big }
+        for i to n {
+            if i > k {
+                ai = A[i, k]
+                if ai < 0.0 { ai = -ai }
+                if ai > big {
+                    big = ai
+                    piv = i
+                }
+            }
+        }
+        if piv > k {
+            for j to n {
+                tmp = A[k, j]
+                A[k, j] = A[piv, j]
+                A[piv, j] = tmp
+            }
+            tb = b[k]
+            b[k] = b[piv]
+            b[piv] = tb
+        }
+        for i to n {
+            if i > k {
+                f = A[i, k] / A[k, k]
+                for j to n {
+                    A[i, j] = A[i, j] - f * A[k, j]
+                }
+                b[i] = b[i] - f * b[k]
+            }
+        }
+    }
+    for kk to n {
+        i = n - 1.0 - kk
+        s = b[i]
+        for j to n {
+            if j > i {
+                s = s - A[i, j] * x[j]
+            }
+        }
+        x[i] = s / A[i, i]
+    }
+}
+
+# Build an N x N structured triangular mesh of the unit square, as a Mesh value.
+def make_mesh(N) -> Mesh {
+    nn = (N + 1.0) * (N + 1.0)
+    ne = 2.0 * N * N
+    node_x = zeros(nn)
+    node_y = zeros(nn)
+    for i to N + 1.0 {
+        for j to N + 1.0 {
+            idx = i * (N + 1.0) + j
+            node_x[idx] = i / N
+            node_y[idx] = j / N
+        }
+    }
+    elem = zeros(ne, 3)
+    ecount = 0.0
+    for i to N {
+        for j to N {
+            m00 = i * (N + 1.0) + j
+            m10 = (i + 1.0) * (N + 1.0) + j
+            m01 = i * (N + 1.0) + (j + 1.0)
+            m11 = (i + 1.0) * (N + 1.0) + (j + 1.0)
+            elem[ecount, 0] = m00
+            elem[ecount, 1] = m10
+            elem[ecount, 2] = m11
+            ecount = ecount + 1.0
+            elem[ecount, 0] = m00
+            elem[ecount, 1] = m11
+            elem[ecount, 2] = m01
+            ecount = ecount + 1.0
+        }
+    }
+    return Mesh { node_x: node_x, node_y: node_y, elem: elem }
+}
+
+# Gather element e's three node coordinates from the mesh into a Tri.
+def tri_of(m: Mesh, e) -> Tri {
+    na = m.elem[e, 0]
+    nb = m.elem[e, 1]
+    nc = m.elem[e, 2]
+    return Tri { ax: m.node_x[na], ay: m.node_y[na], bx: m.node_x[nb], by: m.node_y[nb], cx: m.node_x[nc], cy: m.node_y[nc] }
+}
+
+# Element area (a Tri is all the geometry a P1 triangle needs).
+def tri_area(t: Tri) -> Num {
+    detJ = (t.bx - t.ax) * (t.cy - t.ay) - (t.cx - t.ax) * (t.by - t.ay)
+    if detJ < 0.0 { detJ = -detJ }
+    return 0.5 * detJ
+}
+
+# --- assemble and solve ---
+N = 8
+m = make_mesh(N)
+nn = len(m.node_x)
+ne = len(m.elem)
+
+K = zeros(nn, nn)
+rhs = zeros(nn)
+bv = zeros(3)
+cv = zeros(3)
+nl = zeros(3)
+for e to ne {
+    t = tri_of(m, e)
+    area = tri_area(t)
+    bv[0] = t.by - t.cy
+    bv[1] = t.cy - t.ay
+    bv[2] = t.ay - t.by
+    cv[0] = t.cx - t.bx
+    cv[1] = t.ax - t.cx
+    cv[2] = t.bx - t.ax
+    nl[0] = m.elem[e, 0]
+    nl[1] = m.elem[e, 1]
+    nl[2] = m.elem[e, 2]
+    xc = (t.ax + t.bx + t.cx) / 3.0
+    yc = (t.ay + t.by + t.cy) / 3.0
+    fval = 2.0 * (xc * (1.0 - xc) + yc * (1.0 - yc))
+    for a to 3 {
+        gI = nl[a]
+        for c to 3 {
+            gJ = nl[c]
+            ke = (bv[a] * bv[c] + cv[a] * cv[c]) / (4.0 * area)
+            K[gI, gJ] = K[gI, gJ] + ke
+        }
+        rhs[gI] = rhs[gI] + fval * area / 3.0
+    }
+}
+
+# Dirichlet u = 0 on the boundary (row replacement).
+for gI to nn {
+    xx = m.node_x[gI]
+    yy = m.node_y[gI]
+    onb = xx < 1.0e-9 or xx > 1.0 - 1.0e-9 or yy < 1.0e-9 or yy > 1.0 - 1.0e-9
+    if onb {
+        for gJ to nn {
+            K[gI, gJ] = 0.0
+        }
+        K[gI, gI] = 1.0
+        rhs[gI] = 0.0
+    }
+}
+
+u = zeros(nn)
+solve_linear(K, rhs, u, nn)
+err2 = 0.0
+for gI to nn {
+    ue = m.node_x[gI] * (1.0 - m.node_x[gI]) * m.node_y[gI] * (1.0 - m.node_y[gI])
+    d = u[gI] - ue
+    err2 = err2 + d * d
+}
+rms = sqrt(err2 / nn)
+center = N / 2.0 * (N + 1.0) + N / 2.0
+u_center = u[center]
+show N
+show rms
+show u_center
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

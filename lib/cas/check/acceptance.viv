@@ -1,0 +1,83 @@
+###
+post: Phrases with closed forms, each held to the CAS
+agent: claude
+
+The acceptance program of the CAS's first client (section
+4.6). Every phrase below asks for a quantity the CAS has in closed form:
+integrals of polynomials, trigonometric and exponential functions and
+Gaussians, derivatives, roots of quadratics and cubics, and a few sums and
+norms of arrays written out here. `viv check --phrases` holds each phrase's
+number to the exact value; `acceptance_check.viv` beside this file is the
+program it writes (`viv check --phrases --emit`), which runs in all three
+engines. Two phrases at the end have no closed form in the CAS and are
+refused, with the reason.
+###
+import cas.cas
+
+pi = 3.141592653589793
+c = 2.0
+k = 3.0
+M = [[4.0, 1.0, 2.0], [1.5, 5.0, 3.0], [2.0, 3.5, 6.0]]
+u = [1.0, -2.0, 2.0]
+v = [3.0, 0.5, 4.0]
+
+# polynomials
+p1 = integrate x^2 from 1 to 2
+p2 = integrate 3*x^2 - 2*x + 1 from 0 to 2
+p3 = take the integral of x^5 - x from -1 to 2 using romberg
+p4 = integrate x^4 from 0 to 1 using simpson with 10 intervals
+# trigonometric
+t1 = integrate sin(x) from 0 to pi
+t2 = integrate cos(2*x) from 0 to pi/4
+t3 = integrate sin(x)*cos(x) from 0 to pi/2
+t4 = integrate x*sin(x) from 0 to pi using adaptive simpson
+t5 = take the integral of 1/(1 + x^2) from 0 to 1
+t6 = integrate 1/sqrt(1 - x^2) from 0 to 0.5
+# exponential and logarithmic
+e1 = integrate exp(x) from 0 to 1
+e2 = integrate x*exp(-x) from 0 to 1
+e3 = integrate exp(x) from 0 to 1 using the trapezoid rule with 100 intervals
+e4 = integrate 1/x from 1 to 3
+e5 = integrate cosh(x) from 0 to 1 using every method
+# Gaussian
+g1 = integrate exp(-x^2) from 0 to 1
+g2 = integrate x*exp(-x^2) from 0 to 2
+g3 = integrate x^2*exp(-k*x^2) from 0 to 1
+# derivatives
+d1 = differentiate x^3 - 2*x at 2
+d2 = take the derivative of sin(x)*exp(x) at 0.5
+d3 = differentiate log(1 + x^2) at 1
+# forward-mode `deriv` has no rule for atan or erf; the CAS's table has both
+d4 = differentiate atan(x) at 1 using the symbolic derivative
+d5 = differentiate erf(x) at 0 using the symbolic derivative
+d6 = differentiate sqrt(x) at 4 using the symbolic derivative
+d7 = take the derivative of k*x^3 + sin(x) at 0.5 using the symbolic derivative
+# roots: quadratics
+r1 = solve x^2 = c between 0 and 2
+r2 = solve x^2 - 5*x + 6 between 2.5 and 4 using bisection
+r3 = solve 2*x^2 + 3*x - 2 = 0 starting at 1
+r4 = solve x^2 - 2*x + 1 starting at 3 using newton
+# roots: cubics
+r5 = solve x^3 - 6*x^2 + 11*x - 6 between 2.5 and 3.5 using illinois
+r6 = solve x^3 - 2*x - 5 between 2 and 3
+r7 = solve x^3 - 3*x + 1 between 0 and 1 using every method
+# arrays written out
+a1 = take the trace of M
+a2 = take the norm of [3.0, 4.0]
+a3 = take the dot product of u and v
+a4 = take the mean of [1.0, 2.0, 4.0]
+a5 = take the distance between u and v
+# no closed form in the CAS: refused, not passed
+n1 = integrate exp(x^3) from 0 to 1
+n2 = solve x^5 - x - 1 between 1 and 2
+
+show p1, r1, d1
+
+test "the integral of x^2 from 1 to 2 is 7/3, and the root of x^2 = 2 is sqrt(2)" {
+    assert_near(p1, 7.0 / 3.0, 1.0e-15)
+    assert_near(r1, sqrt(2.0), 1.0e-14)
+    assert_near(d1, 10, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

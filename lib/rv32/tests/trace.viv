@@ -1,0 +1,29 @@
+# The trace and the instruction mix of a small program.
+
+from rv32.asm import assemble
+from rv32.sim import machine
+from rv32.trace import trace, mix, describe, CLASSES
+
+PROGRAM = "li t0, 3\nli a0, 0\n1: add a0, a0, t0\naddi t0, t0, -1\nbnez t0, 1b\nmul a0, a0, a0\nli a7, 93\necall\n"
+
+test "a trace records each instruction and the register it wrote" {
+    steps = trace(machine(assemble(PROGRAM).image, 0), 4)
+    assert_true(len(steps) == 4)
+    assert_true(steps[2].op == "add")
+    assert_true(steps[2].rd == 10)
+    assert_true(steps[2].value == 3)
+    assert_true(describe(steps[0]) == "00000000  00300293  addi")
+}
+
+test "the mix counts every instruction once, by class" {
+    m, counts = mix(machine(assemble(PROGRAM).image, 0), 1000)
+    assert_true(m.exit_code == 36)
+    assert_true(sum([float(c) for c in counts]) == float(m.steps))
+    assert_true(counts[0] == 2 + 6 + 1)     # li, li, 3 x (add, addi), li a7
+    assert_true(counts[1] == 1)             # mul
+    assert_true(counts[4] == 3)             # bnez taken twice, then not
+    assert_true(counts[6] == 1)             # ecall
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

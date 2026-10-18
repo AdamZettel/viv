@@ -1,0 +1,86 @@
+module lib/minpack/qrsolv  documents every variable
+  lmpar needs, for many values of $\lambda$, the solution of the damped
+  least-squares problem $\min_x \lVert A x - b \rVert^2 + \lVert D x \rVert^2$
+  ($D$ diagonal, with $\sqrt{\lambda}$ folded in), where $A P = Q R$ is already
+  factored. Stacking the two terms gives a least-squares problem with the
+  triangle $R$ on top of the diagonal block $D P$; qrsolv reduces that block to
+  zero with Givens rotations (rotations in the plane of two coordinates), row
+  by row, which costs $O(n^3)$ per value of $D$ instead of the $O(m n^2)$ of a
+  new factorization of the whole m x n matrix.
+
+qrsolv  @8c4c0403
+  what  Solve $\min_x \lVert A x - b \rVert^2 + \lVert D x \rVert^2$ from the
+        QR factorization of $A$: r's upper triangle ($R$), ipvt ($P$), qtb
+        (the first n entries of $Q^\top b$). Returns nothing; x is the
+        solution and sdiag the diagonal of the triangle $S$ with
+        $S^\top S = P^\top (A^\top A + D^2) P$, whose strict lower part is
+        left in r's lower triangle.
+  how   Copy $R$ into the lower triangle as $R^\top$, so the upper triangle
+        survives for the next call. Then fold the rows of $D P$ into that
+        copy one at a time: each row has one nonzero entry, and a Givens
+        rotation against each row of the triangle below it moves that entry
+        right until nothing is left of the row. The rotations are applied to
+        the right-hand side too, where they touch one entry beyond the first
+        n (qtbpj). What remains is the triangle $S$: back-substitute with it
+        (zeroing the components from the first zero on its diagonal if it is
+        singular) and undo the column permutation, $x = P z$.
+  why   The rotations never touch R itself, only its copy, so lmpar can call
+        qrsolv again with another par. The answer equals the normal
+        equations' solution on a well-conditioned example
+        [test "qrsolv solves the damped problem that the normal equations solve"],
+        and with D = 0 it is the ordinary least-squares solution
+        [test "with d = 0 qrsolv returns the ordinary least-squares solution"].
+  r      $R$  on entry, the upper triangle from qrfac; on return its strict lower
+         triangle holds the strict lower part of $S^\top$
+  ipvt   $\pi$  the column order from qrfac: column j of $A P$ is column $\pi_j$ of $A$
+  diag   $D$  the diagonal of the damping, $\sqrt{\lambda}$ times lmder's scaling
+  qtb    $\tilde b$  the first n entries of $Q^\top b$
+  x      $x$  the solution, on return
+  sdiag  $s$  the row of $D P$ being eliminated during a stage; afterwards S's diagonal
+  wa     $w$  the right-hand side as the rotations change it, then the solution $z$ before the permutation
+  qtbpj  $\beta$  the one entry of the rotated right-hand side beyond the first n
+  cs     $\cos\theta$  the cosine of the current rotation
+  sn     $\sin\theta$  the sine of the current rotation
+  tn     $\tan\theta$  $s_k / R_{kk}$, when that is at most 1 in size
+  ctn    $\cot\theta$  $R_{kk} / s_k$, when that is at most 1 in size
+  nsing  $n_s$  the number of leading nonzero diagonal entries of $S$: n unless $S$ is singular
+  n      $n$  the number of parameters
+  x@copy  $R$'s diagonal, saved here while the copy overwrites it; eliminate puts
+         it back
+  x@permute  $x$  the solution, $x = P z$
+  j      a row of $D P$ being folded in, or a row of $S$
+  i      a row index below k
+  ii     how far past row k a loop has gone
+  kk     how far past row j a loop has gone (the back substitution: j = nsing - 1 - kk)
+  k      the row of the triangle the rotation acts on, from j to n - 1
+  l      $\pi_j$  the column of $A$ in position j (ipvt[j])
+  temp   the rotated entry of the right-hand side, held while qtbpj is updated
+  temp@eliminate#2  the rotated entry of the triangle, held while the eliminated row's
+         entry is updated
+  sum    row j of $S^\top$ below the diagonal dotted with the components of $z$
+         already solved
+
+  $$ \min_z \left\lVert \begin{bmatrix} R \\ D P \end{bmatrix} z - \begin{bmatrix} (Q^\top b)_{1:n} \\ 0 \end{bmatrix} \right\rVert, \qquad x = P z $$  [test "qrsolv solves the damped problem that the normal equations solve"]
+  copy           copy R's upper triangle into the lower one (as R^T) and save its diagonal in x, and qtb in wa
+    why            lmpar calls qrsolv once for every $\lambda$ it tries, with the same $R$; working on a copy keeps $R$ for the next call.
+  eliminate      for each row of D P, rotate its single nonzero into the triangle with Givens rotations, updating the right-hand side
+    why            A Givens rotation mixes two rows so that one chosen entry becomes zero. Rotating the row of $D P$ against the rows of the triangle, one column at a time, folds it into the triangle and leaves a new triangle $S$ for the damped problem.
+    $$ \begin{bmatrix} \cos\theta & \sin\theta \\ -\sin\theta & \cos\theta \end{bmatrix} \begin{bmatrix} R_{kk} \\ s_k \end{bmatrix} = \begin{bmatrix} \sqrt{R_{kk}^2 + s_k^2} \\ 0 \end{bmatrix}, \qquad \tan\theta = \frac{s_k}{R_{kk}} $$
+    how            Row j meets the $n - j$ rows of the triangle below it, and each rotation touches the rest of both rows: $O(n^3)$ work for all n rows, whatever m is.
+    run            On the first call, the diagonal of $S$ is {sdiag}.
+    = sdiag#2      the row of $D P$ for column j: its only nonzero is $D$'s entry for the variable in position j
+    = tn           the tangent of the angle that zeroes $s_k$ against $R_{kk}$, used when it is at most 1 in size
+    = cs           the cosine from the tangent, written so that nothing can overflow
+      > When $|s_k| > |R_{kk}|$ the other branch does the same with the cotangent, so the quantity squared is never larger than 1.
+      $$ \cos\theta = \frac{1}{\sqrt{1 + \tan^2\theta}} = \frac{1/2}{\sqrt{1/4 + \tan^2\theta / 4}} $$
+    = r            rotate the diagonal entry: it becomes $\sqrt{R_{kk}^2 + s_k^2}$, and $s_k$ becomes 0
+    = qtbpj#2      the same rotation on the right-hand side: the entry beyond the first n picks up what the rotation moved out of row k
+    = sdiag#3      the same rotation on the rest of row k and the rest of the eliminated row: one line, one column after another
+    = sdiag#4      the new triangle's diagonal entry j is final once every row has passed column j
+  solve          back-substitute with the triangle S, zeroing components after the first zero pivot
+    = nsing#2      the first zero on the diagonal of $S$, if any: from there on the components are set to 0
+    = sum#2        the dot product of row j of $S^\top$ with the components already solved: one line
+    = wa#2         component j of $z$
+      $$ z_j = \frac{w_j - \sum_{i > j} S_{ji} z_i}{s_j} $$
+  permute        undo the column permutation: x[ipvt[j]] = z[j]
+    $$ x_{\pi_j} = z_j $$

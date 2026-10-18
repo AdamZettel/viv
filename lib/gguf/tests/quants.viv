@@ -1,0 +1,58 @@
+# lib/gguf/quants.viv on the quantized tensors of tests/tiny.gguf, which hold
+# random blocks (tools/gguf/make_fixture.py); tests/tiny.ref holds what
+# gguf-py 0.19.0's dequantize gives for each. Paths are from the repository root.
+# The Q4_1 and Q4_K blocks have minimums far larger than their scales, so
+# single precision rounds q * d + m: computed in double without fround, 164
+# of the 2048 Q4_1 numbers and 532 of the 2048 Q4_K numbers would differ
+# from gguf-py's (counted with NumPy on 2026-10-14).
+#! file lib/gguf/tests/tiny.gguf
+#! file lib/gguf/tests/tiny.ref
+from gguf.tensors import read_gguf, find_tensor, f32_values
+from gguf.quants import tensor_values, tensor_rows
+
+TINY = "lib/gguf/tests/tiny.gguf"
+REF = "lib/gguf/tests/tiny.ref"
+F32_BYTES: Int = 4
+
+g = read_gguf(TINY)
+
+#| What gguf-py's dequantize gives for the tensor called `name`.
+def ref_values(name: Str) -> Arr {
+    k = find_tensor(g, name)
+    n = g.tensors[k].n_elems
+    return f32_values(read_bytes(REF, k * n * F32_BYTES, n * F32_BYTES), n)
+}
+
+#| How many numbers of tensor `name` differ from gguf-py's.
+def differ(name: Str) -> Int {
+    x = tensor_values(TINY, g.tensors[find_tensor(g, name)])
+    ref = ref_values(name)
+    return int(sum(x != ref))
+}
+
+print("numbers that differ from gguf-py: q8_0", differ("t.q8_0"), "q4_0", differ("t.q4_0"), "q4_1", differ("t.q4_1"), "q4_k", differ("t.q4_k"), "q6_k", differ("t.q6_k"))
+test "Q8_0, number for number as gguf-py dequantizes it" {
+    assert_true(differ("t.q8_0") == 0)
+    # the second row on its own
+    t = g.tensors[find_tensor(g, "t.q8_0")]
+    assert_allclose(tensor_rows(TINY, t, 1, 1), ref_values("t.q8_0")[t.dims[0]:2 * t.dims[0]], 0.0)
+}
+
+test "Q4_0, number for number as gguf-py dequantizes it" {
+    assert_true(differ("t.q4_0") == 0)
+}
+
+test "Q4_1, number for number as gguf-py dequantizes it" {
+    assert_true(differ("t.q4_1") == 0)
+}
+
+test "Q4_K, number for number as gguf-py dequantizes it" {
+    assert_true(differ("t.q4_k") == 0)
+}
+
+test "Q6_K, number for number as gguf-py dequantizes it" {
+    assert_true(differ("t.q6_k") == 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

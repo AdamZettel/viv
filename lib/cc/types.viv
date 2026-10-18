@@ -1,0 +1,78 @@
+# The checks between parsing and code generation.
+#
+# In phase 1 every value is an int, so there are no types to work out yet;
+# what is left to check is what the parser cannot see while it reads one
+# function: that every call names a function the file defines, with as many
+# arguments as it has parameters, that no function is defined twice, and
+# that there is a main. Phase 2 (pointers, arrays, char) gives every node
+# a type here, as chibicc's type.c does.
+
+from cc.lexer import tokenize
+from cc.parser import Program, Function, Node, NodeKind, parse
+
+MAX_PARAMS: Int = 8             # a0..a7 carry the arguments; there is no stack passing yet
+RUNTIME = ["print_int"]         # functions codegen.viv's runtime provides, one parameter each
+
+#| The index of the function called `name`, or -1.
+def find_function(prog: Program, name: Str) -> Int {
+    for k to len(prog.funcs) {
+        if prog.funcs[k].name == name {
+            return int(k)
+        }
+    }
+    return -1
+}
+
+#| Stop unless every call node is a call of a defined function with the
+#| right number of arguments.
+def check_calls(prog: Program) {
+    for node in prog.nodes {
+        match node.kind {
+            Call => {
+                if node.name in RUNTIME {
+                    if len(node.body) != 1 {
+                        stop(f"`{node.name}` takes 1 argument")
+                    }
+                    continue
+                }
+                f = find_function(prog, node.name)
+                if f < 0 {
+                    stop(f"call of undefined function `{node.name}`")
+                }
+                want = prog.funcs[f].nparams
+                if len(node.body) != want {
+                    stop(f"`{node.name}` takes {want} arguments, called with {len(node.body)}")
+                }
+            }
+            _ => { continue }
+        }
+    }
+}
+
+#| The program, unchanged, once it passes the checks.
+def check_program(prog: Program) -> Program {
+    for k to len(prog.funcs) {
+        f = prog.funcs[k]
+        if f.nparams > MAX_PARAMS {
+            stop(f"`{f.name}` has {f.nparams} parameters; at most {MAX_PARAMS} are supported")
+        }
+        if find_function(prog, f.name) != k or f.name in RUNTIME {
+            stop(f"`{f.name}` is defined twice")
+        }
+    }
+    if find_function(prog, "main") < 0 {
+        stop("no main function")
+    }
+    check_calls(prog)
+    return prog
+}
+
+test "a well-formed program passes unchanged" {
+    prog = check_program(parse(tokenize("int f(int x) { return x; } int main() { return f(1); }")))
+    assert_true(len(prog.funcs) == 2)
+    assert_true(find_function(prog, "f") == 0)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2019 Rui Ueyama
+# SPDX-FileCopyrightText: 2026 The Viv authors

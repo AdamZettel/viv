@@ -1,0 +1,359 @@
+###
+What a simulation's configurations are used for after the run, as Allen
+and Tildesley's analysis programs compute it:
+
+- the pair distribution function g(r), from a histogram of pair
+  separations over many configurations (pair_distribution.f90);
+- the velocity autocorrelation function <v(0) . v(t)>, the mean-square
+  displacement <|r(t) - r(0)|^2> and their cross-correlation
+  <v(0) . (r(t) - r(0))>, over time origins spaced along a trajectory
+  (diffusion.f90), and the diffusion coefficient that each gives;
+- the statistical error of a time average when successive values are
+  correlated, by block averaging (error_calc.f90).
+
+The histogram and the correlation functions accumulate one configuration
+at a time, so a simulation can feed them as it runs instead of writing the
+configurations out.
+###
+# Derived from pair_distribution.f90, diffusion.f90 and error_calc.f90 of
+# https://github.com/Allen-Tildesley/examples (commit 4818bc82), by Michael P.
+# Allen and Dominic J. Tildesley, CC0-1.0; see ports/liquids/LICENSE. The
+# diffusion coefficients from the curves (diffusion_coefficients) are this
+# port's; upstream leaves that step to the reader.
+
+# ---- g(r)
+
+from setup import DIM
+
+#| A g(r) histogram: counts[k] pairs (each counted twice, i-j and j-i) with
+#| separation in [k dr, (k + 1) dr), frames[0] configurations so far, the
+#| bin width dr in box units.
+record PairHistogram {
+    counts: [Int]
+    frames: [Int]
+    dr: Num
+}
+
+#| An empty histogram for bins of width dr (in sigma) out to half the box.
+def pair_histogram(dr: Num, box: Num) -> PairHistogram {
+    dr_box = dr / box
+    nk: Int = int(floor(0.5 / dr_box))
+    return PairHistogram { counts: int_zeros(nk), frames: int_zeros(1), dr: dr_box }
+}
+
+#| Adds one configuration (n, 3), positions in sigma, to the histogram.
+def pair_add(h: PairHistogram, frame: Arr, box: Num) {
+    nat: Int = int(shape(frame)[0])
+    nk: Int = len(h.counts)
+    r = frame / box
+    for i to nat - 1 {
+        for j from i + 1 to nat {
+            dx = r[i, 0] - r[j, 0]
+            dy = r[i, 1] - r[j, 1]
+            dz = r[i, 2] - r[j, 2]
+            dx = dx - round(dx)
+            dy = dy - round(dy)
+            dz = dz - round(dz)
+            rij_sq = dx * dx + dy * dy + dz * dz
+            k: Int = int(floor(sqrt(rij_sq) / h.dr))
+            if k < nk {
+                h.counts[k] += 2
+            }
+        }
+    }
+    h.frames[0] += 1
+}
+
+#| g(r) at the bins' midpoints (in sigma) for n atoms: each bin's count
+#| per atom and per frame over the count an ideal gas of the same density
+#| would give, (4 pi rho / 3) (r_hi^3 - r_lo^3), in box units where rho = n.
+def pair_g(h: PairHistogram, nat: Int, box: Num) {
+    nk: Int = len(h.counts)
+    const = 4.0 * pi * nat / 3.0
+    g = zeros(nk)
+    rmid = zeros(nk)
+    for k to nk {
+        g[k] = 1.0 * h.counts[k] / (1.0 * nat * h.frames[0])
+        r_lo = 1.0 * k * h.dr
+        r_hi = r_lo + h.dr
+        h_id = const * (r_hi * r_hi * r_hi - r_lo * r_lo * r_lo)
+        g[k] = g[k] / h_id
+        rmid[k] = (k + 1.0 - 0.5) * (h.dr * box)
+    }
+    return rmid, g
+}
+
+# ---- time correlation functions
+
+#| The accumulators of diffusion.f90: n0 time origins kept in a ring, each
+#| origin's positions and velocities, the sums of msd, rvcf and vacf at each
+#| separation 0 to nt (in frames) and how many origin pairs went into each,
+#| the previous frame (to unfold the periodic boundaries), and the counters
+#| [frame number t, ring slot mk, ring full (0 or 1)].
+record Correlations {
+    nt: Int
+    origin_interval: Int
+    t0: [Int]
+    r0: Arr
+    v0: Arr
+    r_old: Arr
+    msd: Arr
+    rvcf: Arr
+    vacf: Arr
+    norm: Arr
+    counters: [Int]
+}
+
+T_FRAME: Int = 0
+MK: Int = 1
+FULL: Int = 2
+
+#| Accumulators for n atoms, separations up to nt frames, an origin every
+#| origin_interval frames.
+def correlations(nat: Int, nt: Int, origin_interval: Int) -> Correlations {
+    n0: Int = nt // origin_interval + 1
+    return Correlations { nt: nt, origin_interval: origin_interval, t0: int_zeros(n0), r0: zeros(n0 * nat, DIM),
+                          v0: zeros(n0 * nat, DIM), r_old: zeros(nat, DIM), msd: zeros(nt + 1), rvcf: zeros(nt + 1),
+                          vacf: zeros(nt + 1), norm: zeros(nt + 1), counters: int_zeros(DIM) }
+}
+
+#| Adds the next frame of a trajectory: positions (n, 3) in sigma as the
+#| simulation keeps them (inside the box) and velocities. Positions are
+#| unfolded against the previous frame, so an atom that crossed the box
+#| edge keeps its true displacement.
+def correlations_add(c: Correlations, frame_r: Arr, frame_v: Arr, box: Num) {
+    nat: Int = int(shape(frame_r)[0])
+    n0: Int = len(c.t0)
+    t: Int = c.counters[T_FRAME]
+    r = copy(frame_r)
+    if t > 0 {
+        for i to nat {
+            for k to DIM {
+                r[i, k] = r[i, k] - c.r_old[i, k]
+                r[i, k] = r[i, k] - round(r[i, k] / box) * box
+                r[i, k] = r[i, k] + c.r_old[i, k]
+            }
+        }
+    }
+    if t % c.origin_interval == 0 {
+        mk: Int = c.counters[MK] + 1
+        if mk > n0 {
+            c.counters[FULL] = 1
+            mk = mk - n0
+        }
+        c.counters[MK] = mk
+        c.t0[mk - 1] = t
+        for i to nat {
+            for k to DIM {
+                c.r0[(mk - 1) * nat + i, k] = r[i, k]
+                c.v0[(mk - 1) * nat + i, k] = frame_v[i, k]
+            }
+        }
+    }
+    nk: Int = c.counters[MK]
+    if c.counters[FULL] == 1 {
+        nk = n0
+    }
+    for o to nk {
+        dt: Int = t - c.t0[o]
+        if dt <= c.nt {
+            s_msd = 0.0
+            s_rv = 0.0
+            s_vv = 0.0
+            for i to nat {
+                for k to DIM {
+                    d = r[i, k] - c.r0[o * nat + i, k]
+                    s_msd += d * d
+                    s_rv += d * c.v0[o * nat + i, k]
+                    s_vv += frame_v[i, k] * c.v0[o * nat + i, k]
+                }
+            }
+            c.msd[dt] = c.msd[dt] + s_msd
+            c.rvcf[dt] = c.rvcf[dt] + s_rv
+            c.vacf[dt] = c.vacf[dt] + s_vv
+            c.norm[dt] = c.norm[dt] + 1.0
+        }
+    }
+    for i to nat {
+        for k to DIM {
+            c.r_old[i, k] = r[i, k]
+        }
+    }
+    c.counters[T_FRAME] = t + 1
+}
+
+#| The averaged functions per atom at separations 0 to nt frames: vacf,
+#| rvcf and msd (upstream's diffusion.out columns 2 to 4).
+def correlations_result(c: Correlations, nat: Int) {
+    vacf = c.vacf / c.norm / (1.0 * nat)
+    rvcf = c.rvcf / c.norm / (1.0 * nat)
+    msd = c.msd / c.norm / (1.0 * nat)
+    return vacf, rvcf, msd
+}
+
+#| The diffusion coefficient two ways, from curves sampled every delta in
+#| time: one third of the integral of the VACF (trapezoids over the whole
+#| range), and one sixth of the slope of the MSD, a least-squares line
+#| through its second half. They agree when the range is long enough for
+#| the VACF to have decayed and the MSD to have become linear.
+def diffusion_coefficients(vacf: Arr, msd: Arr, delta: Num) {
+    m: Int = len(vacf)
+    integral = 0.0
+    for k from 1 to m {
+        integral += 0.5 * (vacf[k - 1] + vacf[k]) * delta
+    }
+    k0: Int = (m - 1) // 2
+    np = 1.0 * (m - k0)
+    st = 0.0
+    sy = 0.0
+    for k from k0 to m {
+        st += k * delta
+        sy += msd[k]
+    }
+    tbar = st / np
+    ybar = sy / np
+    sxy = 0.0
+    sxx = 0.0
+    for k from k0 to m {
+        sxy += (k * delta - tbar) * (msd[k] - ybar)
+        sxx += (k * delta - tbar) * (k * delta - tbar)
+    }
+    return integral / 3.0, sxy / sxx / 6.0
+}
+
+# ---- errors of correlated averages (error_calc.f90)
+
+#| Block analysis of a series a(1..m), two ways, as error_calc.f90 does
+#| after its run:
+#|  - for nblock = 20 down to 4 blocks, the standard error of the mean from
+#|    the scatter of the block means;
+#|  - by repeated halving (Flyvbjerg and Petersen): the series is averaged
+#|    in pairs again and again, and after each halving the naive error of
+#|    the shorter series is computed.
+#| Each estimate comes with the statistical inefficiency s = tblock
+#| var(block means) / var(a), which levels off at 2 tau (tau the
+#| correlation time in steps) once blocks are long enough; the error is
+#| then sqrt(s var(a) / m). Returns the mean, the sample variance, the
+#| naive error, then for each method the block lengths, the errors and s.
+def blocking(series: Arr) {
+    m: Int = len(series)
+    max_blocks: Int = 20
+    min_blocks: Int = 4
+    mean_a = 0.0
+    for t to m {
+        mean_a += series[t]
+    }
+    mean_a = mean_a / m
+    a = series - mean_a
+    var_1 = 0.0
+    for t to m {
+        var_1 += a[t] * a[t]
+    }
+    var_1 = var_1 / (m - 1)
+    err_naive = sqrt(var_1 / m)
+    nb_fixed: Int = max_blocks - min_blocks + 1
+    t_fixed = zeros(nb_fixed)
+    e_fixed = zeros(nb_fixed)
+    s_fixed = zeros(nb_fixed)
+    for q to nb_fixed {
+        nblock: Int = max_blocks - q
+        tblock: Int = m // nblock
+        trun: Int = nblock * tblock
+        a_run = 0.0
+        for t to trun {
+            a_run += a[t]
+        }
+        a_run = a_run / trun
+        a_var = 0.0
+        for blk to nblock {
+            a_blk = 0.0
+            for t from blk * tblock to (blk + 1) * tblock {
+                a_blk += a[t] - a_run
+            }
+            a_blk = a_blk / tblock
+            a_var = a_var + a_blk * a_blk
+        }
+        a_var = a_var / (nblock - 1)
+        t_fixed[q] = 1.0 * tblock
+        e_fixed[q] = sqrt(a_var / nblock)
+        s_fixed[q] = tblock * a_var / var_1
+    }
+    t_half = zeros(0)
+    e_half = zeros(0)
+    s_half = zeros(0)
+    b = copy(a)
+    nblock: Int = m
+    tblock: Int = 1
+    nblock = nblock // 2
+    tblock = tblock * 2
+    while nblock >= 3 {
+        for t to nblock {
+            b[t] = (b[2 * t] + b[2 * t + 1]) / 2.0
+        }
+        b_avg = 0.0
+        for t to nblock {
+            b_avg += b[t]
+        }
+        b_avg = b_avg / nblock
+        b_var = 0.0
+        for t to nblock {
+            b[t] = b[t] - b_avg
+            b_var += b[t] * b[t]
+        }
+        b_var = b_var / (nblock - 1)
+        t_half = append(t_half, 1.0 * tblock)
+        e_half = append(e_half, sqrt(b_var / nblock))
+        s_half = append(s_half, tblock * b_var / var_1)
+        nblock = nblock // 2
+        tblock = tblock * 2
+    }
+    return mean_a, var_1, err_naive, t_fixed, e_fixed, s_fixed, t_half, e_half, s_half
+}
+
+test "g(r) of points spread uniformly is 1 within its noise" {
+    srand(3.0)
+    nat: Int = 200
+    box = 10.0
+    nframes: Int = 20
+    h = pair_histogram(0.5, box)
+    for fr to nframes {
+        x = (rand(nat, 3) - 0.5) * box
+        pair_add(h, x, box)
+    }
+    rmid, g = pair_g(h, nat, box)
+    assert_near(rmid[0], 0.25, 1.0e-12)
+    last = len(g) - 1
+    assert_near(g[last], 1.0, 0.05)
+}
+
+test "atoms moving at constant velocity: msd = |v|^2 t^2, vacf = |v|^2, rvcf = |v|^2 t" {
+    nat: Int = 4
+    box = 5.0
+    v = [[0.3, 0.0, 0.0], [0.0, -0.2, 0.0], [0.1, 0.1, 0.1], [0.0, 0.0, 0.0]]
+    nt: Int = 20
+    nsteps: Int = 3 * nt
+    c = correlations(nat, nt, 5)
+    r = zeros(nat, DIM)
+    for t to nsteps {
+        x = r + v * t
+        x = x - box * round(x / box)
+        correlations_add(c, x, v, box)
+    }
+    vacf, rvcf, msd = correlations_result(c, nat)
+    v2 = sum(v * v) / nat
+    assert_near(vacf[7], v2, 1.0e-14)
+    assert_near(rvcf[7], 7.0 * v2, 1.0e-12)
+    assert_near(msd[20], 400.0 * v2, 1.0e-10)
+}
+
+test "blocking an uncorrelated series gives s near 1" {
+    srand(11.0)
+    a = rand(4096)
+    mean_a, var_1, err_naive, t_fixed, e_fixed, s_fixed, t_half, e_half, s_half = blocking(a)
+    assert_near(var_1, 1.0 / 12.0, 0.01)
+    assert_near(s_half[2], 1.0, 0.5)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,144 @@
+#|| Crank-Nicolson finite differences for the Black-Scholes equation, in the
+#|| time to expiry tau: V_tau = 1/2 sigma^2 S^2 V_SS + (r - q) S V_S - r V.
+#|| The first steps are fully implicit (Rannacher, Numer. Math. 43, 1984),
+#|| which damps the oscillation the kinked payoff sets off in Crank-Nicolson.
+#|| An American put solves the linear complementarity problem at each step
+#|| by the Brennan-Schwartz sweep (J. Finance 32, 1977): eliminate from large
+#|| S down, then substitute up with the early-exercise floor.
+
+# Quadratic interpolation of the grid values at x, from the three nodes
+# nearest it.
+def _interp(S0: Num, lo: Num, dS: Num, v: Arr) -> Num {
+    m: Int = int(len(v))
+    i: Int = int(floor((S0 - lo) / dS + 0.5))
+    if i < 1 {
+        i = 1
+    }
+    if i > m - 2 {
+        i = m - 2
+    }
+    t = (S0 - lo) / dS - i
+    return v[i - 1] * 0.5 * t * (t - 1.0) + v[i] * (1.0 - t * t) + v[i + 1] * 0.5 * t * (t + 1.0)
+}
+
+#| The American put by Crank-Nicolson on M space intervals over [0, Smax]
+#| and Nt time steps, of which the first `implicit` are fully implicit
+#| (two half-size steps each).
+def cn_american_put(S0: Num, K: Num, T: Num, r: Num, q: Num, sigma: Num, Smax: Num, M: Int, Nt: Int, implicit: Int) -> Num {
+    dS = Smax / M
+    v = zeros(M + 1)
+    pay = zeros(M + 1)
+    for i to M + 1 {
+        pay[i] = max(K - i * dS, 0.0)
+        v[i] = pay[i]
+    }
+    a = zeros(M + 1)
+    b = zeros(M + 1)
+    c = zeros(M + 1)
+    for i to M + 1 {
+        a[i] = 0.5 * sigma * sigma * i * i - 0.5 * (r - q) * i
+        b[i] = -sigma * sigma * i * i - r
+        c[i] = 0.5 * sigma * sigma * i * i + 0.5 * (r - q) * i
+    }
+    dt = T / Nt
+    bp = zeros(M + 1)
+    dp = zeros(M + 1)
+    rhs = zeros(M + 1)
+    nsteps = Nt + implicit
+    for n to nsteps {
+        theta = 0.5
+        h = dt
+        if n < 2 * implicit {
+            theta = 1.0
+            h = 0.5 * dt
+        }
+        # the right side: (I + (1 - theta) h L) v
+        for i from 1 to M {
+            rhs[i] = v[i] + (1.0 - theta) * h * (a[i] * v[i - 1] + b[i] * v[i] + c[i] * v[i + 1])
+        }
+        # boundaries: V(0) = K (exercised at once), V(Smax) = 0
+        v0 = K
+        rhs[1] = rhs[1] + theta * h * a[1] * v0
+        # the left side I - theta h L, eliminated from the top down
+        bp[M - 1] = 1.0 - theta * h * b[M - 1]
+        dp[M - 1] = rhs[M - 1]
+        for i from 1 to M - 1 reversed {
+            mlt = (-theta * h * c[i]) / bp[i + 1]
+            bp[i] = 1.0 - theta * h * b[i] - mlt * (-theta * h * a[i + 1])
+            dp[i] = rhs[i] - mlt * dp[i + 1]
+        }
+        v[0] = v0
+        for i from 1 to M {
+            x = (dp[i] - (-theta * h * a[i]) * v[i - 1]) / bp[i]
+            v[i] = max(x, pay[i])
+        }
+        v[M] = 0.0
+    }
+    return _interp(S0, 0.0, Smax / M, v)
+}
+
+#| A European down-and-out call (barrier H below the strike, no rebate) by
+#| Crank-Nicolson on [H, Smax], V(H) = 0, with M intervals and Nt steps,
+#| the first `implicit` fully implicit.
+def cn_down_out_call(S0: Num, K: Num, H: Num, T: Num, r: Num, q: Num, sigma: Num, Smax: Num, M: Int, Nt: Int, implicit: Int) -> Num {
+    dS = (Smax - H) / M
+    v = zeros(M + 1)
+    for i to M + 1 {
+        v[i] = max(H + i * dS - K, 0.0)
+    }
+    a = zeros(M + 1)
+    b = zeros(M + 1)
+    c = zeros(M + 1)
+    for i to M + 1 {
+        x = (H + i * dS) / dS
+        a[i] = 0.5 * sigma * sigma * x * x - 0.5 * (r - q) * x
+        b[i] = -sigma * sigma * x * x - r
+        c[i] = 0.5 * sigma * sigma * x * x + 0.5 * (r - q) * x
+    }
+    dt = T / Nt
+    n_in = M - 1
+    sub = zeros(n_in)
+    dia = zeros(n_in)
+    sup = zeros(n_in)
+    rhs = zeros(n_in)
+    tau = 0.0
+    nsteps = Nt + implicit
+    for n to nsteps {
+        theta = 0.5
+        h = dt
+        if n < 2 * implicit {
+            theta = 1.0
+            h = 0.5 * dt
+        }
+        tau += h
+        top = Smax * exp(-q * tau) - K * exp(-r * tau)
+        for k to n_in {
+            i = k + 1
+            rhs[k] = v[i] + (1.0 - theta) * h * (a[i] * v[i - 1] + b[i] * v[i] + c[i] * v[i + 1])
+            sub[k] = -theta * h * a[i]
+            dia[k] = 1.0 - theta * h * b[i]
+            sup[k] = -theta * h * c[i]
+        }
+        rhs[n_in - 1] = rhs[n_in - 1] + theta * h * c[M - 1] * top
+        inner = tridiag_solve(sub, dia, sup, rhs)
+        v[0] = 0.0
+        for k to n_in {
+            v[k + 1] = inner[k]
+        }
+        v[M] = top
+    }
+    return _interp(S0, H, dS, v)
+}
+
+test "Longstaff and Schwartz's first American put (S=36, K=40): binomial 4.48668" {
+    p = cn_american_put(36.0, 40.0, 1.0, 0.06, 0.0, 0.2, 160.0, 800, 400, 2)
+    assert_near(p, 4.48668, 1.0e-3)
+}
+
+test "a barrier far below the money changes almost nothing" {
+    c = cn_down_out_call(100.0, 100.0, 20.0, 1.0, 0.05, 0.0, 0.2, 400.0, 760, 400, 2)
+    assert_near(c, 10.450583572185565, 1.0e-3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

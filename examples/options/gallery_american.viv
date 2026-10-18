@@ -1,0 +1,70 @@
+###
+post: The American put by Crank-Nicolson, drawn
+agent: claude
+
+The first figure of vipyr's gallery example plot_american_put.py, drawn in
+Viv: the value of an American put (K = 50, five months, r = 0.1,
+sigma = 0.4, Hull's example) from a Crank-Nicolson solve with early exercise
+(`cn_american_put` in examples/options/cnpde.viv), against the European put
+from the Black-Scholes formula and the payoff. The grid is half of vipyr's figure
+grid in each direction (200 prices, 100 steps), to keep the run short. Two checks: Hull's five-step binomial tree
+gives 4.49, and at S = 50 the finite-difference value on vipyr's grid agrees
+with a 1000-step tree.
+###
+
+from examples.options.cnpde import cn_american_put
+from examples.options.crr import crr_price
+from examples.options.bs import bs_price
+
+STRIKE: Num = 50.0
+MATURITY: Num = 5.0 / 12.0
+RATE: Num = 0.1
+DIVIDEND: Num = 0.0
+VOL: Num = 0.4
+S_MAX: Num = 200.0
+#: the figure's grid: prices and time steps, and Rannacher's implicit start steps
+M_PRICES: Int = 200
+N_STEPS: Int = 100
+IMPLICIT: Int = 4
+#: vipyr's figure grid, used for the one check at S = 50
+M_CHECK: Int = 400
+N_CHECK: Int = 200
+S_LO: Num = 25.0
+S_HI: Num = 85.0
+S_STEP: Num = 5.0
+#: Hull, Options, Futures and Other Derivatives, the five-step American put: 4.49
+HULL_STEPS: Int = 5
+HULL_VALUE: Num = 4.49
+HULL_TOL: Num = 0.005
+#: a tree deep enough to be the reference at S = 50, averaged over two depths
+TREE_STEPS: Int = 1000
+TREE_TOL: Num = 2e-3
+
+S = arange(S_LO, S_HI + S_STEP, S_STEP)
+am = [cn_american_put(s, STRIKE, MATURITY, RATE, DIVIDEND, VOL, S_MAX, M_PRICES, N_STEPS, IMPLICIT) for s in S]
+eu = [bs_price(s, STRIKE, MATURITY, RATE, DIVIDEND, VOL, false) for s in S]
+payoff = [max(STRIKE - s, 0.0) for s in S]
+
+figure("Put value, K = 50, five months", "stock price S", "value")
+plot(S, am, "American (Crank-Nicolson)")
+plot(S, eu, "European (Black-Scholes)")
+plot(S, payoff, "payoff K - S")
+style("American (Crank-Nicolson)", "s1 nomarker")
+style("European (Black-Scholes)", "s2 nomarker")
+style("payoff K - S", "s6 dash thin nomarker")
+
+hull = crr_price(STRIKE, STRIKE, MATURITY, RATE, DIVIDEND, VOL, HULL_STEPS, false, true)
+tree = 0.5 * (crr_price(STRIKE, STRIKE, MATURITY, RATE, DIVIDEND, VOL, TREE_STEPS, false, true)
+              + crr_price(STRIKE, STRIKE, MATURITY, RATE, DIVIDEND, VOL, TREE_STEPS + 1, false, true))
+at_money = cn_american_put(STRIKE, STRIKE, MATURITY, RATE, DIVIDEND, VOL, S_MAX, M_CHECK, N_CHECK, IMPLICIT)
+show hull
+show tree
+show at_money
+
+test "Hull's tree, and the finite differences against a deep tree" {
+    assert_near(hull, HULL_VALUE, HULL_TOL)
+    assert_near(at_money, tree, TREE_TOL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

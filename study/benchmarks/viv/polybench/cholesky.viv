@@ -1,0 +1,40 @@
+#! timing
+# PolyBench/C 4.2.1 cholesky: A = L L^T, L written over the lower triangle
+# of A, row by row (the upper triangle is left as it is).
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/solvers/cholesky/cholesky.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+N = 40
+DUMP = 1
+
+from polybench import dump
+
+# A lower triangular L0 with 1 - j/N below the diagonal and 1 on it, and
+# A = L0 L0^T, which is symmetric positive definite.
+def init() {
+    L0 = [[1.0 if j == i else (1.0 - j / N if j < i else 0.0) for j to N] for i to N]
+    return L0 @ transpose(L0)
+}
+
+# Each entry of row i needs the entries left of it in rows i and j, so the
+# rows and the entries within a row are computed in order.
+def kernel(A) {
+    for i to N {
+        for j to i {
+            A[i, j] = (A[i, j] - sum(A[i, k] * A[j, k] for k to j)) / A[j, j]
+        }
+        A[i, i] = sqrt(A[i, i] - sum(A[i, k] * A[i, k] for k to i))
+    }
+    return A
+}
+
+A = init()
+t0 = clock()
+A = kernel(A)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("A", A)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,165 @@
+# Finite-element solution of the 2D Poisson equation  -Laplacian(u) = f  on the
+# unit square with u = 0 on the boundary, using linear (P1) triangular elements.
+#
+# Manufactured solution u(x,y) = x(1-x) y(1-y), so f = 2[x(1-x) + y(1-y)] and
+# u = 0 on the boundary automatically. Validation: the RMS nodal error falls ~4x
+# per mesh halving (O(h^2), the theoretical P1 rate), and u at the center -> 0.0625.
+#
+# Data layout is struct-of-arrays (node_x/node_y coordinates, elem connectivity) --
+# the same paradigm as the MD and QC examples. This baseline establishes whether
+# FEM needs any object/record support beyond what Viv already has.
+
+# --- dense linear solver: A x = b by Gaussian elimination w/ partial pivoting ---
+def solve_linear(A, b, x, n) {
+    for k to n {
+        piv = k
+        big = A[k, k]
+        if big < 0.0 { big = -big }
+        for i to n {
+            if i > k {
+                ai = A[i, k]
+                if ai < 0.0 { ai = -ai }
+                if ai > big {
+                    big = ai
+                    piv = i
+                }
+            }
+        }
+        if piv > k {
+            for j to n {
+                tmp = A[k, j]
+                A[k, j] = A[piv, j]
+                A[piv, j] = tmp
+            }
+            tb = b[k]
+            b[k] = b[piv]
+            b[piv] = tb
+        }
+        for i to n {
+            if i > k {
+                f = A[i, k] / A[k, k]
+                for j to n {
+                    A[i, j] = A[i, j] - f * A[k, j]
+                }
+                b[i] = b[i] - f * b[k]
+            }
+        }
+    }
+    for kk to n {
+        i = n - 1.0 - kk
+        s = b[i]
+        for j to n {
+            if j > i {
+                s = s - A[i, j] * x[j]
+            }
+        }
+        x[i] = s / A[i, i]
+    }
+}
+
+# --- mesh: unit square split into 2*N*N right triangles ---
+N = 8
+nn = (N + 1.0) * (N + 1.0)
+ne = 2.0 * N * N
+node_x = zeros(nn)
+node_y = zeros(nn)
+for i to N + 1.0 {
+    for j to N + 1.0 {
+        idx = i * (N + 1.0) + j
+        node_x[idx] = i / N
+        node_y[idx] = j / N
+    }
+}
+elem = zeros(ne, 3)
+ecount = 0.0
+for i to N {
+    for j to N {
+        n00 = i * (N + 1.0) + j
+        n10 = (i + 1.0) * (N + 1.0) + j
+        n01 = i * (N + 1.0) + (j + 1.0)
+        n11 = (i + 1.0) * (N + 1.0) + (j + 1.0)
+        elem[ecount, 0] = n00
+        elem[ecount, 1] = n10
+        elem[ecount, 2] = n11
+        ecount = ecount + 1.0
+        elem[ecount, 0] = n00
+        elem[ecount, 1] = n11
+        elem[ecount, 2] = n01
+        ecount = ecount + 1.0
+    }
+}
+
+# --- assemble global stiffness K and load vector rhs ---
+K = zeros(nn, nn)
+rhs = zeros(nn)
+nl = zeros(3)
+bv = zeros(3)
+cv = zeros(3)
+for el to ne {
+    n0 = elem[el, 0]
+    n1 = elem[el, 1]
+    n2 = elem[el, 2]
+    x0 = node_x[n0]
+    y0 = node_y[n0]
+    x1 = node_x[n1]
+    y1 = node_y[n1]
+    x2 = node_x[n2]
+    y2 = node_y[n2]
+    detJ = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    area = 0.5 * detJ
+    if area < 0.0 { area = -area }
+    bv[0] = y1 - y2
+    bv[1] = y2 - y0
+    bv[2] = y0 - y1
+    cv[0] = x2 - x1
+    cv[1] = x0 - x2
+    cv[2] = x1 - x0
+    nl[0] = n0
+    nl[1] = n1
+    nl[2] = n2
+    xc = (x0 + x1 + x2) / 3.0
+    yc = (y0 + y1 + y2) / 3.0
+    fval = 2.0 * (xc * (1.0 - xc) + yc * (1.0 - yc))
+    for a to 3 {
+        gI = nl[a]
+        for c to 3 {
+            gJ = nl[c]
+            ke = (bv[a] * bv[c] + cv[a] * cv[c]) / (4.0 * area)
+            K[gI, gJ] = K[gI, gJ] + ke
+        }
+        rhs[gI] = rhs[gI] + fval * area / 3.0
+    }
+}
+
+# --- Dirichlet boundary condition u = 0 on the square's edges (row replacement) ---
+for gI to nn {
+    xx = node_x[gI]
+    yy = node_y[gI]
+    onb = xx < 1.0e-9 or xx > 1.0 - 1.0e-9 or yy < 1.0e-9 or yy > 1.0 - 1.0e-9
+    if onb {
+        for gJ to nn {
+            K[gI, gJ] = 0.0
+        }
+        K[gI, gI] = 1.0
+        rhs[gI] = 0.0
+    }
+}
+
+# --- solve and measure the error against the exact solution ---
+u = zeros(nn)
+solve_linear(K, rhs, u, nn)
+err2 = 0.0
+for gI to nn {
+    ue = node_x[gI] * (1.0 - node_x[gI]) * node_y[gI] * (1.0 - node_y[gI])
+    d = u[gI] - ue
+    err2 = err2 + d * d
+}
+rms = sqrt(err2 / nn)
+center = N / 2.0 * (N + 1.0) + N / 2.0
+u_center = u[center]
+show N
+show rms
+show u_center
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,26 @@
+# PySCF's max_memory=0 ROHF row for water cc-pVDZ (test_rhf.py:701): the
+# ROHF driver on the closed shell, from a zero density, with the direct J/K
+# member recomputing the ERIs from the basis every iteration. See
+# vdz_direct_r.viv for why this row has a program of its own.
+#
+#     tools/both-engines.sh scf/suite vdz_direct_ro
+from hf.hf import hf_scf, hf_setup
+from hf.molecule import molecule_packs
+from hf.opts import scf_checked, SCF_ROHF, ScfOptions
+from hf.guess import GS_ZERO
+from hf.jk_direct import INT_JK_DIRECT
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.pyscf_tests import PST_FILE_RHF, PST_RHF_701, PST_RHF_701_P
+from scf.suite.ref.sts import sts_row
+
+sdo_m = molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+sdo_p = hf_setup(sdo_m, ScfOptions { method: SCF_ROHF, jk: INT_JK_DIRECT, guess: GS_ZERO, ..scf_checked() })
+
+test "direct ROHF on the closed shell from a zero density: -76.026765673119627 (test_rhf.py:701)" {
+    sdo_r = hf_scf(sdo_p)
+    assert_near(sdo_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 701, sdo_r.energy, PST_RHF_701, PST_RHF_701_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

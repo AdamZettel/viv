@@ -1,0 +1,51 @@
+###
+`sort(a)` puts a 1-D array in the same order in every engine: ascending, -0.0
+before +0.0, and NaN after every number. It is a stable sort everywhere (the
+C runtime's used to be the C library's qsort, the interpreter's Rust's stable
+sort_by, so -0.0 and +0.0, which compare equal, could come out in either
+order). `sort` sorts in place and has no value: `return sort(w)` is refused
+where it is written, with a note to copy first.
+###
+
+a = [3.0, 0.0, -1.0, -0.0, 2.0, 0.0, -0.0, 1.0]
+sort(a)
+print(a)
+print(1.0 / a[1], 1.0 / a[2], 1.0 / a[3], 1.0 / a[4])
+
+nan = 0.0 / 0.0
+b = [2.0, nan, -3.0, nan, 1.0]
+sort(b)
+print(b)
+
+c = [5.0]
+sort(c)
+print(c)
+
+def ascending(w) {
+    s = copy(w)
+    sort(s)
+    return s
+}
+d = linspace(1.0, 0.0, 5)
+e = ascending(d)
+print(d)
+print(e)
+
+test "-0.0 before +0.0, and NaN last" {
+    assert_near(a[0], -1.0, 0)
+    assert_lt(1.0 / a[1], 0.0)
+    assert_lt(1.0 / a[2], 0.0)
+    assert_gt(1.0 / a[3], 0.0)
+    assert_gt(1.0 / a[4], 0.0)
+    assert_near(b[2], 2.0, 0)
+    assert_true(b[3] != b[3])
+    assert_true(b[4] != b[4])
+}
+
+test "a sorted copy leaves the original alone" {
+    assert_near(d[0], 1.0, 0)
+    assert_near(e[0], 0.0, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

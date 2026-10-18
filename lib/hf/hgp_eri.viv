@@ -1,0 +1,533 @@
+###
+post: Electron repulsion integrals by the Head-Gordon-Pople recurrences
+agent: claude
+
+The two-electron integral over four contracted Cartesian Gaussians,
+
+    (ab|cd) = double integral a(1) b(1) (1/r12) c(2) d(2),
+
+is the costly part of every Hartree-Fock build: water in 6-31G* already has
+18,145 of them that differ by symmetry. This module computes them by the
+scheme of Head-Gordon and Pople (J. Chem. Phys. 89, 5777, 1988), which splits
+the work in two:
+
+1. A **vertical** recurrence (Obara and Saika's, with the auxiliary index `m`)
+   builds `[e0|f0]^(m)` for one primitive quartet: all the angular momentum
+   of the bra sits on A (`e` runs up to `la + lb`) and all of the ket on C.
+   These are summed over the primitives.
+2. A **horizontal** recurrence then moves power from A to B and from C to D
+   on the contracted sums:
+
+       (a, b+1_i | = (a+1_i, b | + AB_i (a, b |
+
+   It needs no exponents, so it runs once per shell quartet instead of once
+   per primitive quartet. That is the point of the scheme: the expensive
+   step works on a short list of targets, and the cheap step does the
+   fan-out.
+
+**The vertical step.** With `zeta = a + b`, `eta = c + d`, the product centers
+`P` and `Q`, `W = (zeta P + eta Q)/(zeta + eta)` and
+`rho = zeta eta / (zeta + eta)`:
+
+    [00|00]^(m) = 2 pi^(5/2) / (zeta eta sqrt(zeta + eta))
+                  exp(-ab/zeta AB^2 - cd/eta CD^2) F_m(rho PQ^2)
+
+    [e+1_i,0|f0]^(m) = PA_i [e0|f0]^(m) + WP_i [e0|f0]^(m+1)
+        + e_i/(2 zeta) ([e-1_i,0|f0]^(m) - rho/zeta [e-1_i,0|f0]^(m+1))
+        + f_i/(2(zeta+eta)) [e0|f-1_i,0]^(m+1)
+
+and the same with the roles of bra and ket swapped for raising `f`:
+`QC_i`, `WQ_i`, `f_i/(2 eta)`, `rho/eta`. The code first raises `e` with
+`f = 0`, where the last term vanishes, and then raises `f` for every `e` it
+still needs. `F_m` comes from `boys_values` in `lib/hf/boys.viv`; nothing else
+in the module touches a special function.
+
+**Components.** Every Cartesian component with total power up to `L` has one
+index: `l(l+1)(l+2)/6` for the components below `l`, then PySCF's order in
+the shell (`lx` counting down, then `ly`). `hgp_ctab(L)` tabulates the powers
+and the neighbors one step up and down along each axis. `lib/hf/os_onebody`
+has the same table under its own prefix; this module keeps its own copy so
+that the ERI family can be loaded, tested and replaced without the one-body
+one.
+
+**Normalization and storage.** Contracted coefficients come from
+`bas_contract`, and each component gets `bas_nc(lx, ly, lz)` at the end, so
+the values are PySCF's `int2e_cart` divided by `F` for each index. `hgp_eri`
+fills the packed-8 vector of `lib/hf/eri_store.viv`, one shell quartet per
+symmetry class, with no screening.
+
+Used with `import hf.hgp_eri`.
+###
+
+from hf.basis import (
+    AT_X, AT_Z, bas_contract, bas_nao_cart, bas_nc, bas_ncart, BAS_NDIM, bas_powers, PR_EXP,
+    SH_ATOM, SH_CART0, SH_L, SH_NPRIM, SH_P0,
+)
+from hf.boys import boys_values
+from hf.eri_store import es_len8, es_pair
+
+HGP_PI = 3.141592653589793
+
+HGP_CT_LX = 0
+HGP_CT_LY = 1
+HGP_CT_LZ = 2
+HGP_CT_L = 3
+HGP_CT_DN = 4
+HGP_CT_UP = 7
+HGP_CT_PIV = 10
+HGP_CT_LEN = 11
+
+# the geometry record of one primitive quartet that hgp_vrr reads: PA, WP, QC
+# and WQ (BAS_NDIM each), then seven scalars (see hgp_vrr)
+HGP_G_LEN = 19
+
+# the tests: lib/hfref/prims has four single-primitive shells per case, one
+# per center, with l up to f, so its quartets reach (ff|ff)
+HGP_T_NCTR = 4
+HGP_T_LMAX = 3
+
+#| Components with total power below `l`.
+def hgp_ncum(l) {
+    return l * (l + 1) * (l + 2) / 6
+}
+
+#| Index of component (lx, ly, lz) in the table of `hgp_ctab`.
+def hgp_cidx(lx, ly, lz) {
+    l = lx + ly + lz
+    a = l - lx
+    return hgp_ncum(l) + a * (a + 1) / 2 + lz
+}
+
+#| One row per Cartesian component with total power up to `L`: the powers,
+#| `l`, the index one step down along x, y, z (-1 where that power is 0), one
+#| step up (-1 at `l = L`), and the pivot, the first axis with a nonzero power
+#| (-1 for s). Both recurrences lower the pivot.
+def hgp_ctab(L) {
+    T = zeros(hgp_ncum(L + 1), HGP_CT_LEN)
+    for l to L + 1 {
+        for a to l + 1 {
+            lx = l - a
+            for lz to a + 1 {
+                ly = a - lz
+                r = hgp_cidx(lx, ly, lz)
+                T[r, HGP_CT_LX] = lx
+                T[r, HGP_CT_LY] = ly
+                T[r, HGP_CT_LZ] = lz
+                T[r, HGP_CT_L] = l
+                T[r, HGP_CT_PIV] = -1
+                for k to BAS_NDIM {
+                    T[r, HGP_CT_DN + k] = -1
+                    T[r, HGP_CT_UP + k] = -1
+                }
+                if lx > 0 {
+                    T[r, HGP_CT_DN] = hgp_cidx(lx - 1, ly, lz)
+                }
+                if ly > 0 {
+                    T[r, HGP_CT_DN + 1] = hgp_cidx(lx, ly - 1, lz)
+                }
+                if lz > 0 {
+                    T[r, HGP_CT_DN + 2] = hgp_cidx(lx, ly, lz - 1)
+                }
+                if l < L {
+                    T[r, HGP_CT_UP] = hgp_cidx(lx + 1, ly, lz)
+                    T[r, HGP_CT_UP + 1] = hgp_cidx(lx, ly + 1, lz)
+                    T[r, HGP_CT_UP + 2] = hgp_cidx(lx, ly, lz + 1)
+                }
+                if lz > 0 {
+                    T[r, HGP_CT_PIV] = 2
+                }
+                if ly > 0 {
+                    T[r, HGP_CT_PIV] = 1
+                }
+                if lx > 0 {
+                    T[r, HGP_CT_PIV] = 0
+                }
+            }
+        }
+    }
+    return T
+}
+
+#| The vertical recurrence for one primitive quartet, written into
+#| `V[e, f, m]`, then added into `acc[e - ncum(la), f - ncum(lc)]` for
+#| `la <= l_e <= La` and `lc <= l_f <= Lc`. `g` holds the quartet's geometry:
+#| PA, WP, QC, WQ (3 each, from index 0), then 1/(2 zeta), rho/zeta,
+#| 1/(2 eta), rho/eta, 1/(2(zeta + eta)), the prefactor and rho PQ^2 (from
+#| index 12).
+def hgp_vrr(g: Arr, CT: Arr, la, La, lc, Lc, V: Arr, acc: Arr) {
+    M = La + Lc
+    ne = hgp_ncum(La + 1)
+    nf = hgp_ncum(Lc + 1)
+    hz = g[12]
+    rz = g[13]
+    he = g[14]
+    re = g[15]
+    hs = g[16]
+    F = boys_values(M, g[18])
+    for m to M + 1 {
+        V[0, 0, m] = g[17] * F[m]
+    }
+    # raise e on A with f = 0
+    for q to ne - 1 {
+        e = q + 1
+        i = CT[e, HGP_CT_PIV]
+        e1 = CT[e, HGP_CT_DN + i]
+        ni = CT[e1, i]
+        if ni > 0 {
+            e2 = CT[e1, HGP_CT_DN + i]
+            for m to M + 1 - CT[e, HGP_CT_L] {
+                V[e, 0, m] = g[i] * V[e1, 0, m] + g[3 + i] * V[e1, 0, m + 1] + ni * hz * (V[e2, 0, m] - rz * V[e2, 0, m + 1])
+            }
+        } else {
+            for m to M + 1 - CT[e, HGP_CT_L] {
+                V[e, 0, m] = g[i] * V[e1, 0, m] + g[3 + i] * V[e1, 0, m + 1]
+            }
+        }
+    }
+    # raise f on C for every e still needed: reaching l_e >= la at the top
+    # ket level Lc takes l_e >= la - (Lc - l_f) at level l_f
+    for q to nf - 1 {
+        f = q + 1
+        i = CT[f, HGP_CT_PIV]
+        f1 = CT[f, HGP_CT_DN + i]
+        lf = CT[f, HGP_CT_L]
+        nfi = CT[f1, i]
+        f2 = f1
+        if nfi > 0 {
+            f2 = CT[f1, HGP_CT_DN + i]
+        }
+        e0 = hgp_ncum(max(0, la - (Lc - lf)))
+        for t to ne - e0 {
+            e = e0 + t
+            le = CT[e, HGP_CT_L]
+            ei = CT[e, i]
+            em = e
+            if ei > 0 {
+                em = CT[e, HGP_CT_DN + i]
+            }
+            for m to M + 1 - le - lf {
+                w = g[6 + i] * V[e, f1, m] + g[9 + i] * V[e, f1, m + 1]
+                if nfi > 0 {
+                    w = w + nfi * he * (V[e, f2, m] - re * V[e, f2, m + 1])
+                }
+                if ei > 0 {
+                    w = w + ei * hs * V[em, f1, m + 1]
+                }
+                V[e, f, m] = w
+            }
+        }
+    }
+    ea = hgp_ncum(la)
+    fc = hgp_ncum(lc)
+    for t to ne - ea {
+        for s to nf - fc {
+            acc[t, s] = acc[t, s] + V[ea + t, fc + s, 0]
+        }
+    }
+    return 0.0
+}
+
+#| The unit-Cartesian block `[ncart(la), ncart(lb), ncart(lc), ncart(ld)]` of
+#| shells `sa`, `sb`, `sc`, `sd`, in that order. `CT` must reach
+#| `la + lb + 1` and `lc + ld + 1`.
+def hgp_quartet(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, CT: Arr, sa, sb, sc, sd) {
+    la = shells[sa, SH_L]
+    lb = shells[sb, SH_L]
+    lc = shells[sc, SH_L]
+    ld = shells[sd, SH_L]
+    La = la + lb
+    Lc = lc + ld
+    A = atoms[shells[sa, SH_ATOM], AT_X:AT_Z + 1]
+    B = atoms[shells[sb, SH_ATOM], AT_X:AT_Z + 1]
+    C = atoms[shells[sc, SH_ATOM], AT_X:AT_Z + 1]
+    D = atoms[shells[sd, SH_ATOM], AT_X:AT_Z + 1]
+    AB2 = sum((A - B) * (A - B))
+    CD2 = sum((C - D) * (C - D))
+    ne = hgp_ncum(La + 1)
+    nf = hgp_ncum(Lc + 1)
+    V = zeros(ne, nf, La + Lc + 1)
+    acc = zeros(ne - hgp_ncum(la), nf - hgp_ncum(lc))
+    g = zeros(HGP_G_LEN)
+    Q = zeros(BAS_NDIM)
+    pa0 = shells[sa, SH_P0]
+    pb0 = shells[sb, SH_P0]
+    pc0 = shells[sc, SH_P0]
+    pd0 = shells[sd, SH_P0]
+    for ua to shells[sa, SH_NPRIM] {
+        a = prims[pa0 + ua, PR_EXP]
+        for ub to shells[sb, SH_NPRIM] {
+            b = prims[pb0 + ub, PR_EXP]
+            zeta = a + b
+            kab = exp(-a * b / zeta * AB2) * cn[pa0 + ua] * cn[pb0 + ub]
+            P = (a * A + b * B) / zeta
+            for uc to shells[sc, SH_NPRIM] {
+                c = prims[pc0 + uc, PR_EXP]
+                for ud to shells[sd, SH_NPRIM] {
+                    d = prims[pd0 + ud, PR_EXP]
+                    eta = c + d
+                    kcd = exp(-c * d / eta * CD2) * cn[pc0 + uc] * cn[pd0 + ud]
+                    rho = zeta * eta / (zeta + eta)
+                    pq2 = 0.0
+                    for k to BAS_NDIM {
+                        Q[k] = (c * C[k] + d * D[k]) / eta
+                        W = (zeta * P[k] + eta * Q[k]) / (zeta + eta)
+                        g[k] = P[k] - A[k]
+                        g[3 + k] = W - P[k]
+                        g[6 + k] = Q[k] - C[k]
+                        g[9 + k] = W - Q[k]
+                        pq2 = pq2 + (P[k] - Q[k]) * (P[k] - Q[k])
+                    }
+                    g[12] = 0.5 / zeta
+                    g[13] = rho / zeta
+                    g[14] = 0.5 / eta
+                    g[15] = rho / eta
+                    g[16] = 0.5 / (zeta + eta)
+                    g[17] = 2.0 * pow(HGP_PI, 2.5) / (zeta * eta * sqrt(zeta + eta)) * kab * kcd
+                    g[18] = rho * pq2
+                    hgp_vrr(g, CT, la, La, lc, Lc, V, acc)
+                }
+            }
+        }
+    }
+    return hgp_hrr(acc, CT, la, lb, lc, ld, A, B, C, D)
+}
+
+#| Both horizontal steps on the contracted `acc[e, f]` (bra power all on A,
+#| ket power all on C), then the component factors.
+def hgp_hrr(acc: Arr, CT: Arr, la, lb, lc, ld, A: Arr, B: Arr, C: Arr, D: Arr) {
+    La = la + lb
+    Lc = lc + ld
+    ea = hgp_ncum(la)
+    fc = hgp_ncum(lc)
+    ne = hgp_ncum(La + 1)
+    nfk = hgp_ncum(Lc + 1) - fc
+    nbc = hgp_ncum(lb + 1)
+    na = bas_ncart(la)
+    nb = bas_ncart(lb)
+    # bra: HB[e, j, s] with e on A (global index), j over every power on B up
+    # to lb, and s the ket index relative to fc
+    HB = zeros(ne, nbc, nfk)
+    HB[ea:ne, 0, :] = acc
+    for q to nbc - 1 {
+        j = q + 1
+        i = CT[j, HGP_CT_PIV]
+        j1 = CT[j, HGP_CT_DN + i]
+        lj = CT[j, HGP_CT_L]
+        ab = A[i] - B[i]
+        for t to hgp_ncum(La - lj + 1) - ea {
+            e = ea + t
+            eu = CT[e, HGP_CT_UP + i]
+            for s to nfk {
+                HB[e, j, s] = HB[eu, j1, s] + ab * HB[e, j1, s]
+            }
+        }
+    }
+    # ket: HK[r, f, k] with r = the bra component pair, f on C (global
+    # index), k over every power on D up to ld
+    nf = hgp_ncum(Lc + 1)
+    ndc = hgp_ncum(ld + 1)
+    HK = zeros(na * nb, nf, ndc)
+    b0 = hgp_ncum(lb)
+    for r to na {
+        for c to nb {
+            HK[r * nb + c, fc:fc + nfk, 0] = HB[ea + r, b0 + c, :]
+        }
+    }
+    for q to ndc - 1 {
+        k = q + 1
+        i = CT[k, HGP_CT_PIV]
+        k1 = CT[k, HGP_CT_DN + i]
+        lk = CT[k, HGP_CT_L]
+        cd = C[i] - D[i]
+        for t to hgp_ncum(Lc - lk + 1) - fc {
+            f = fc + t
+            fu = CT[f, HGP_CT_UP + i]
+            for r to na * nb {
+                HK[r, f, k] = HK[r, fu, k1] + cd * HK[r, f, k1]
+            }
+        }
+    }
+    nc = bas_ncart(lc)
+    nd = bas_ncart(ld)
+    d0 = hgp_ncum(ld)
+    out = zeros(na, nb, nc, nd)
+    for r to na {
+        e = ea + r
+        wa = bas_nc(CT[e, 0], CT[e, 1], CT[e, 2])
+        for c to nb {
+            wb = wa * bas_nc(CT[b0 + c, 0], CT[b0 + c, 1], CT[b0 + c, 2])
+            for s to nc {
+                wc = wb * bas_nc(CT[fc + s, 0], CT[fc + s, 1], CT[fc + s, 2])
+                for u to nd {
+                    wd = wc * bas_nc(CT[d0 + u, 0], CT[d0 + u, 1], CT[d0 + u, 2])
+                    out[r, c, s, u] = HK[r * nb + c, fc + s, d0 + u] * wd
+                }
+            }
+        }
+    }
+    return out
+}
+
+#| The component table big enough for every quartet of a shell pack.
+def hgp_ctab_for(shells: Arr) {
+    return hgp_ctab(2 * round(max(shells[:, SH_L])))
+}
+
+#| The smallest exponent of shell `s`.
+def hgp_min_exp(shells: Arr, prims: Arr, s) {
+    p0 = shells[s, SH_P0]
+    return min(prims[p0:p0 + shells[s, SH_NPRIM], PR_EXP])
+}
+
+#| `true` when shell `t` should go first in the pair (s, t), `false` when `s`
+#| should.
+#|
+#| The vertical step puts all of a pair's power on its first center, and the
+#| horizontal step moves some of it to the second. The higher `l` goes first,
+#| so there is less to move. Between equal `l`, the shell with the larger
+#| smallest exponent goes first: the product Gaussian sits near the tighter
+#| center, so powers of the distance to it stay small, while powers of the
+#| distance to the diffuse center grow and then cancel in the horizontal
+#| step. On the prims (ff|ff) set, ordering by `l` alone leaves errors of
+#| 8.8e-12 relative to the exact value, and 1.2e-10 on one Schwarz diagonal;
+#| with the exponent tie-break the worst are 2.1e-13 and 1.4e-13 (measured
+#| against an mpmath HGP at 40 digits). Ordering every pair by exponent alone
+#| gave the same worst errors and took 7% longer on water def2-TZVP.
+def hgp_swap(shells: Arr, prims: Arr, s, t) {
+    ls = shells[s, SH_L]
+    lt = shells[t, SH_L]
+    if lt != ls {
+        return lt > ls
+    }
+    return hgp_min_exp(shells, prims, t) > hgp_min_exp(shells, prims, s)
+}
+
+#| The block of shells (s1 s2|s3 s4) in that index order, computed in the
+#| order `hgp_swap` picks for each pair.
+def hgp_block(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, CT: Arr, s1, s2, s3, s4) {
+    fb = hgp_swap(shells, prims, s1, s2)
+    fk = hgp_swap(shells, prims, s3, s4)
+    sa = s1
+    sb = s2
+    if fb {
+        sa = s2
+        sb = s1
+    }
+    sc = s3
+    sd = s4
+    if fk {
+        sc = s4
+        sd = s3
+    }
+    blk = hgp_quartet(atoms, shells, prims, cn, CT, sa, sb, sc, sd)
+    na = bas_ncart(shells[sa, SH_L])
+    nb = bas_ncart(shells[sb, SH_L])
+    nc = bas_ncart(shells[sc, SH_L])
+    nd = bas_ncart(shells[sd, SH_L])
+    out = zeros(bas_ncart(shells[s1, SH_L]), bas_ncart(shells[s2, SH_L]), bas_ncart(shells[s3, SH_L]), bas_ncart(shells[s4, SH_L]))
+    for r to na {
+        for c to nb {
+            i1 = r
+            i2 = c
+            if fb {
+                i1 = c
+                i2 = r
+            }
+            for t to nc {
+                for u to nd {
+                    if fk {
+                        out[i1, i2, u, t] = blk[r, c, t, u]
+                    } else {
+                        out[i1, i2, t, u] = blk[r, c, t, u]
+                    }
+                }
+            }
+        }
+    }
+    return out
+}
+
+#| One shell quartet into the packed vector. Packed-8 indices do not depend on
+#| the order of the indices, so the block goes in as `hgp_quartet` returns it,
+#| in whatever order `hgp_swap` chose.
+def hgp_store(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, CT: Arr, s1, s2, s3, s4, Gp: Arr) {
+    sa = s1
+    sb = s2
+    if hgp_swap(shells, prims, s1, s2) {
+        sa = s2
+        sb = s1
+    }
+    sc = s3
+    sd = s4
+    if hgp_swap(shells, prims, s3, s4) {
+        sc = s4
+        sd = s3
+    }
+    blk = hgp_quartet(atoms, shells, prims, cn, CT, sa, sb, sc, sd)
+    a0 = shells[sa, SH_CART0]
+    b0 = shells[sb, SH_CART0]
+    c0 = shells[sc, SH_CART0]
+    d0 = shells[sd, SH_CART0]
+    na = bas_ncart(shells[sa, SH_L])
+    nb = bas_ncart(shells[sb, SH_L])
+    nc = bas_ncart(shells[sc, SH_L])
+    nd = bas_ncart(shells[sd, SH_L])
+    for r to na {
+        for c to nb {
+            ij = es_pair(a0 + r, b0 + c)
+            for t to nc {
+                for u to nd {
+                    Gp[es_pair(ij, es_pair(c0 + t, d0 + u))] = blk[r, c, t, u]
+                }
+            }
+        }
+    }
+    return 0.0
+}
+
+#| Stage member: every unique (ij|kl) of the basis, packed-8,
+#| `[es_len8(nao_cart)]`, unit-Cartesian, unscreened.
+def hgp_eri(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    cn = bas_contract(shells, prims)
+    CT = hgp_ctab_for(shells)
+    Gp = zeros(es_len8(bas_nao_cart(shells)))
+    nsh = len(shells)
+    for s1 to nsh {
+        for s2 to s1 + 1 {
+            for s3 to s1 + 1 {
+                s4max = s3 + 1
+                if s3 == s1 {
+                    s4max = s2 + 1
+                }
+                for s4 to s4max {
+                    hgp_store(atoms, shells, prims, cn, CT, s1, s2, s3, s4, Gp)
+                }
+            }
+        }
+    }
+    return Gp
+}
+
+# ---- tests ----------------------------------------------------------------------
+# The reference modules used above exist for these tests. An import cannot sit
+# inside a test block, so a program that uses this module also compiles their
+# literal-returning defs, which nothing calls.
+
+test "the component table lists every power once, in PySCF's order within a shell" {
+    hgp_ct = hgp_ctab(2 * HGP_T_LMAX)
+    hgp_bad = 0
+    for hgp_l to 2 * HGP_T_LMAX + 1 {
+        hgp_pw = bas_powers(hgp_l)
+        for hgp_c to len(hgp_pw) {
+            hgp_r = hgp_ncum(hgp_l) + hgp_c
+            if hgp_ct[hgp_r, HGP_CT_LX] != hgp_pw[hgp_c, 0] or hgp_ct[hgp_r, HGP_CT_LY] != hgp_pw[hgp_c, 1] or hgp_ct[hgp_r, HGP_CT_LZ] != hgp_pw[hgp_c, 2] {
+                hgp_bad = hgp_bad + 1
+            }
+        }
+    }
+    assert_near(hgp_bad, 0.0, 0.0)
+    assert_near(len(hgp_ct), 84, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

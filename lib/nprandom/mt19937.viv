@@ -1,0 +1,184 @@
+###
+post: NumPy's Mersenne Twister, word for word
+agent: claude
+
+`np.random.seed(s)` and every draw of NumPy's legacy functions (`np.random.rand`,
+`randint`, `shuffle`, ...) come from one MT19937 generator. This is that
+generator, transcribed from NumPy 1.24.4 (numpy/random/src/mt19937/mt19937.c
+and mt19937.h, and `_legacy_seeding` in numpy/random/_mt19937.pyx; tag v1.24.4,
+commit 9315a9072b2636f75c831b4eca9f42a5f67ca2fb). The constants carry the
+reference's names.
+
+The state is an array of `NPR_MT_LEN` numbers: the 624 key words, the position
+of the next word, and a flag that says whether it was seeded (a draw from an
+unseeded state has no reproducible value, so the py2viv translation stops on
+one). Each word is a double in [0, 2^32), and the bit operations are Viv's
+builtins, so the interpreter, compiled C and wasm compute the same words.
+
+- `npr_mt_new()`: an unseeded state.
+- `npr_mt_seed(st, s)`: `np.random.seed(s)` for an int s in [0, 2^32 - 1], by
+  Knuth's recurrence, `key[i] = 1812433253 * (key[i-1] ^ (key[i-1] >> 30)) + i`.
+- `npr_mt_seed_array(st, key)`: `np.random.seed([k0, k1, ...])`, the
+  reference's `init_by_array`.
+- `npr_mt_next32(st)`: the next tempered word.
+- `npr_mt_double(st)`: NumPy's double in [0, 1), made from `a = next >> 5` and
+  `b = next >> 6` as `(a * 2^26 + b) / 2^53`.
+- `npr_mt_masked64(st, mask)`: a 64-bit draw, `(next << 32) | next` with the
+  first word high (as NumPy's build evaluates it), ANDed with `mask`, as Ints.
+
+Used with `import nprandom.mt19937`.
+###
+
+from nprandom.bits import npr_add32, npr_mul32, npr_sub32, NPR_TWO53
+
+NPR_N = 624
+NPR_M = 397
+# 0x9908b0df, 0x80000000, 0x7fffffff
+NPR_MATRIX_A = 2567483615
+NPR_UPPER_MASK = 2147483648
+NPR_LOWER_MASK = 2147483647
+# the tempering masks 0x9d2c5680 and 0xefc60000, and the shifts
+NPR_TEMPER_B = 2636928640
+NPR_TEMPER_C = 4022730752
+NPR_TEMPER_U = 11
+NPR_TEMPER_S = 7
+NPR_TEMPER_T = 15
+NPR_TEMPER_L = 18
+# Knuth's multiplier (mt19937_seed, init_genrand), init_by_array's seed and multipliers
+NPR_SEED_MULT = 1812433253
+NPR_SEED_SHIFT = 30
+NPR_INIT_SEED = 19650218
+NPR_INIT_MULT1 = 1664525
+NPR_INIT_MULT2 = 1566083941
+# the double: a 27-bit and a 26-bit part
+NPR_DOUBLE_SHIFT_A = 5
+NPR_DOUBLE_SHIFT_B = 6
+NPR_TWO26 = 67108864.0
+# where the position and the seeded flag live in the state
+NPR_MT_POS = NPR_N
+NPR_MT_SEEDED = NPR_N + 1
+NPR_MT_LEN = NPR_N + 2
+
+#| A state nothing has seeded yet.
+def npr_mt_new() {
+    return zeros(NPR_MT_LEN)
+}
+
+#| mt19937_seed: np.random.seed(s) of an int s in [0, 2^32 - 1].
+def npr_mt_seed(st: Arr, seed) {
+    s = seed
+    for pos to NPR_N {
+        st[pos] = s
+        s = npr_add32(npr_mul32(NPR_SEED_MULT, bxor(s, shr(s, NPR_SEED_SHIFT))), pos + 1)
+    }
+    st[NPR_MT_POS] = NPR_N
+    st[NPR_MT_SEEDED] = 1
+}
+
+#| init_genrand: the start of init_by_array.
+def npr_mt_init_genrand(st: Arr, s) {
+    st[0] = s
+    for i from 1 to NPR_N {
+        st[i] = npr_add32(npr_mul32(NPR_SEED_MULT, bxor(st[i - 1], shr(st[i - 1], NPR_SEED_SHIFT))), i)
+    }
+    st[NPR_MT_POS] = NPR_N
+}
+
+#| mt19937_init_by_array: np.random.seed of an array of words.
+def npr_mt_seed_array(st: Arr, key: Arr) {
+    npr_mt_init_genrand(st, NPR_INIT_SEED)
+    key_length = len(key)
+    i = 1
+    j = 0
+    k = max(NPR_N, key_length)
+    while k > 0 {
+        prev = st[i - 1]
+        mixed = npr_mul32(bxor(prev, shr(prev, NPR_SEED_SHIFT)), NPR_INIT_MULT1)
+        st[i] = npr_add32(npr_add32(bxor(st[i], mixed), key[j]), j)
+        i = i + 1
+        j = j + 1
+        if i >= NPR_N {
+            st[0] = st[NPR_N - 1]
+            i = 1
+        }
+        if j >= key_length {
+            j = 0
+        }
+        k = k - 1
+    }
+    k = NPR_N - 1
+    while k > 0 {
+        prev = st[i - 1]
+        mixed = npr_mul32(bxor(prev, shr(prev, NPR_SEED_SHIFT)), NPR_INIT_MULT2)
+        st[i] = npr_sub32(bxor(st[i], mixed), i)
+        i = i + 1
+        if i >= NPR_N {
+            st[0] = st[NPR_N - 1]
+            i = 1
+        }
+        k = k - 1
+    }
+    st[0] = NPR_UPPER_MASK
+    st[NPR_MT_POS] = NPR_N
+    st[NPR_MT_SEEDED] = 1
+}
+
+#| mt19937_gen: all 624 words at once, in the reference's three runs. Word i
+#| takes the upper bit of key[i] and the lower 31 of key[i + 1], shifted right
+#| once, XORed with MATRIX_A when its lowest bit is set, and with key[i + M].
+def npr_mt_gen(st: Arr) {
+    for i to NPR_N - NPR_M {
+        y = bor(band(st[i], NPR_UPPER_MASK), band(st[i + 1], NPR_LOWER_MASK))
+        v = bxor(st[i + NPR_M], shr(y, 1))
+        if band(y, 1) == 1 {
+            v = bxor(v, NPR_MATRIX_A)
+        }
+        st[i] = v
+    }
+    for i from NPR_N - NPR_M to NPR_N - 1 {
+        y = bor(band(st[i], NPR_UPPER_MASK), band(st[i + 1], NPR_LOWER_MASK))
+        v = bxor(st[i + NPR_M - NPR_N], shr(y, 1))
+        if band(y, 1) == 1 {
+            v = bxor(v, NPR_MATRIX_A)
+        }
+        st[i] = v
+    }
+    y = bor(band(st[NPR_N - 1], NPR_UPPER_MASK), band(st[0], NPR_LOWER_MASK))
+    v = bxor(st[NPR_M - 1], shr(y, 1))
+    if band(y, 1) == 1 {
+        v = bxor(v, NPR_MATRIX_A)
+    }
+    st[NPR_N - 1] = v
+    st[NPR_MT_POS] = 0
+}
+
+#| mt19937_next: the next word, tempered.
+def npr_mt_next32(st: Arr) {
+    if st[NPR_MT_POS] == NPR_N {
+        npr_mt_gen(st)
+    }
+    pos = st[NPR_MT_POS]
+    y = st[pos]
+    st[NPR_MT_POS] = pos + 1
+    y = bxor(y, shr(y, NPR_TEMPER_U))
+    y = bxor(y, band(shl(y, NPR_TEMPER_S), NPR_TEMPER_B))
+    y = bxor(y, band(shl(y, NPR_TEMPER_T), NPR_TEMPER_C))
+    return bxor(y, shr(y, NPR_TEMPER_L))
+}
+
+#| mt19937_next_double: a double in [0, 1) from two words.
+def npr_mt_double(st: Arr) {
+    a = shr(npr_mt_next32(st), NPR_DOUBLE_SHIFT_A)
+    b = shr(npr_mt_next32(st), NPR_DOUBLE_SHIFT_B)
+    return (a * NPR_TWO26 + b) / NPR_TWO53
+}
+
+#| mt19937_next64 ANDed with a mask: the first word drawn is the high one.
+def npr_mt_masked64(st: Arr, mask: Int) -> Int {
+    hi: Int = int(npr_mt_next32(st))
+    lo: Int = int(npr_mt_next32(st))
+    return band(bor(shl(hi, 32), lo), mask)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

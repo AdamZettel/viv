@@ -1,0 +1,104 @@
+#! pde A shock and a rarefaction in inviscid Burgers' equation
+#! equation u_t + \left(\tfrac12 u^2\right)_x = 0
+#! kind hyperbolic
+#! method Godunov's method: the exact Riemann solution at every cell face
+#! checks the shock speed, exact conservation, and the rarefaction fan u = x/t
+#! | Take the viscosity away and smooth data stops being enough: characteristics cross, the
+#! | derivative blows up in finite time, and the solution continues as a **shock**. A finite
+#! | difference of a discontinuity means nothing, so the method has to be built on the integral form
+#! | instead -- what flows into a cell minus what flows out.
+#! |
+#! | Godunov's answer: at each face the two neighboring cells pose a *Riemann problem*, which for
+#! | Burgers has a closed-form solution; use its flux. For $f = u^2/2$ that flux is
+#! | $\max\left(f(\max(u_L, 0)),\ f(\min(u_R, 0))\right)$.
+#! |
+#! | The same two states, in opposite orders, give opposite behavior. $u_L > u_R$ is a shock,
+#! | moving at $\tfrac12(u_L + u_R)$. $u_L < u_R$ is a **rarefaction**: the jump opens into the fan
+#! | $u = x/t$. A scheme that gets the first right by conserving, and the second right by not
+#! | inventing an expansion shock, has earned the name *entropy-satisfying*.
+
+XMIN = -1.0
+XMAX = 2.0
+
+#| Godunov's flux at every face between a cell and its right neighbor.
+def godunov_flux(u) {
+    ul = max(u, 0.0)
+    ur = min(roll(u, -1.0), 0.0)
+    return max(0.5 * ul * ul, 0.5 * ur * ur)
+}
+
+#| March n cells to t_end from a step (left state, right state) at x = 0.
+def march(n, t_end, left, right) {
+    h = (XMAX - XMIN) / n
+    u = zeros(n)
+    for i to n {
+        x = XMIN + (i + 0.5) * h
+        u[i] = right
+        if x < 0.0 { u[i] = left }
+    }
+    steps = round(t_end / (0.5 * h))
+    dt = t_end / steps
+    hold = zeros(n) + 1.0
+    hold[0] = 0.0
+    hold[n - 1.0] = 0.0
+    for s to steps {
+        f = godunov_flux(u)
+        u = u - (dt / h) * (f - roll(f, 1.0)) * hold
+    }
+    return u
+}
+
+N = 300
+H = (XMAX - XMIN) / N
+T_END = 1.2
+shock = march(N, T_END, 1.0, 0.0)
+fan = march(N, T_END, 0.0, 1.0)
+
+# the shock: where is it, and was anything lost?
+mass = sum(shock) * H
+mass_exact = (0.0 - XMIN) + 0.5 * T_END
+position = XMIN + mass
+show mass
+show position
+
+# the fan: compare with u = x/t inside it
+fan_error = 0.0
+X = zeros(N)
+FAN_EXACT = zeros(N)
+for i to N {
+    X[i] = XMIN + (i + 0.5) * H
+    e = 0.0
+    if X[i] > 0.0 { e = min(X[i] / T_END, 1.0) }
+    FAN_EXACT[i] = e
+    fan_error = fan_error + abs(fan[i] - e) * H
+}
+show fan_error
+
+figure("Two Riemann problems for Burgers' equation at t = 1.2", "x", "u")
+plot(X, shock, "$u_L = 1$, $u_R = 0$: a shock at $x = t/2$")
+plot(X, fan, "$u_L = 0$, $u_R = 1$: a rarefaction, computed")
+plot(X, FAN_EXACT, "the fan u = x/t, exact")
+
+test "conservation is exact: the mass is what flowed in, to rounding" {
+    assert_near(mass, mass_exact, 1.0e-12)
+}
+test "so the shock sits at x = t/2, the Rankine-Hugoniot speed" {
+    assert_near(position, 0.5 * T_END, 1.0e-12)
+}
+test "the shock is captured in at most three cells, with no overshoot" {
+    worst = 0.0
+    smeared = 0.0
+    for i to N {
+        worst = max(worst, shock[i] - 1.0)
+        worst = max(worst, 0.0 - shock[i])
+        if shock[i] > 0.01 and shock[i] < 0.99 { smeared = smeared + 1.0 }
+    }
+    assert_lt(worst, 1.0e-12)
+    assert_lt(smeared, 3.5)
+}
+test "the rarefaction opens into the fan u = x/t, not an expansion shock" {
+    assert_lt(fan_error, 0.02)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,773 @@
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* The code map (components/CodeMap.jsx): a thin bar, the route from the
+   entry, the map on the left and the def's source on the right. */
+
+.cm {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: var(--bg);
+}
+.cm-empty {
+  padding: 24px 16px;
+  color: var(--text-muted);
+}
+
+/* ---- the bar */
+.cm-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  min-height: 42px;
+}
+.cm-back-ref {
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.cm-back-ref code {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.cm-back-ref:hover code {
+  text-decoration: underline;
+}
+.cm-count {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.cm-of {
+  color: var(--text-faint);
+}
+.cm-search {
+  position: relative;
+  margin-left: auto;
+  width: min(320px, 40vw);
+}
+.cm-search input {
+  width: 100%;
+  font: inherit;
+  font-size: 13.5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+}
+.cm-search input:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 1px;
+}
+.cm-hits {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  max-height: 60vh;
+  overflow: auto;
+}
+.cm-hits button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.cm-hits button:hover,
+.cm-hits button:focus-visible {
+  background: var(--accent-wash);
+}
+.cm-hits code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.cm-hits span {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.cm-nav {
+  display: flex;
+  gap: 4px;
+}
+.cm-nav button,
+.cm-zoom button {
+  font: inherit;
+  font-size: 14px;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+}
+.cm-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.cm-nav button:focus-visible,
+.cm-zoom button:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 1px;
+}
+
+/* ---- the route from the entry */
+.cm-route {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+.cm-route button {
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--text-muted);
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cm-route button:hover {
+  color: var(--accent);
+}
+.cm-route button.is-cur {
+  color: var(--heading);
+  font-weight: 600;
+}
+.cm-sep {
+  color: var(--text-faint);
+  padding: 0 2px;
+}
+
+/* ---- the body: map and pane */
+.cm-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.cm-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  background-color: var(--bg-soft);
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--border-strong) 45%, transparent) 1px, transparent 1.2px);
+  background-size: 22px 22px;
+}
+.cm-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.cm-svg:active {
+  cursor: grabbing;
+}
+.cm-region rect {
+  fill: var(--bg-card);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.cm-region.is-cur rect {
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+}
+.cm-region.is-cur .cm-region-name {
+  fill: var(--heading);
+}
+.cm-region-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--text-muted);
+  cursor: pointer;
+}
+.cm-region-n {
+  fill: var(--text-faint);
+  font-weight: 400;
+}
+.cm-trunks path {
+  fill: none;
+  stroke: color-mix(in srgb, var(--border-strong) 45%, var(--bg-soft));
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.cm-trunks.is-quiet path {
+  opacity: 0.35;
+}
+/* high-performance HMI (ISA-101): a quiet grey baseline, and one strong
+   channel for what is active. Callees: solid accent; callers: dashed amber. */
+.cm-edges path.is-in {
+  stroke-dasharray: 6 4;
+}
+.cm-edges path {
+  fill: none;
+  stroke-linecap: round;
+}
+.cm-edges path.is-all {
+  stroke: var(--text-faint);
+  opacity: 0.35;
+}
+.cm-edges path.is-out {
+  stroke: var(--accent-fill);
+}
+.cm-edges path.is-in {
+  stroke: var(--hot);
+}
+.cm-edges path.is-route {
+  stroke: var(--accent-fill);
+}
+.cm-arrow path {
+  stroke: none;
+}
+.cm-arrow-out path,
+.cm-arrow-route path {
+  fill: var(--accent-fill);
+}
+.cm-arrow-in path {
+  fill: var(--hot);
+}
+.cm-arrow-all path {
+  fill: var(--text-faint);
+  opacity: 0.5;
+}
+.cm-nav .cm-all[aria-pressed='true'] {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cm-tile {
+  cursor: pointer;
+}
+.cm-tile rect:first-child {
+  fill: var(--bg-code);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.cm-tile text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  fill: var(--text);
+  pointer-events: none;
+}
+.cm-tile:hover rect:first-child,
+.cm-tile:focus-visible rect:first-child {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.cm-tile:focus {
+  outline: none;
+}
+.cm-tile:focus-visible rect:first-child {
+  stroke-width: 2.5;
+}
+.cm-tile.is-callee rect:first-child {
+  stroke: var(--accent-fill);
+  stroke-width: 2;
+}
+.cm-tile.is-caller rect:first-child {
+  stroke: var(--hot);
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+}
+.cm-tile.is-route rect:first-child {
+  fill: var(--accent-wash);
+  stroke: var(--accent-fill);
+  stroke-width: 2;
+}
+.cm-tile.is-hit rect:first-child {
+  stroke: var(--hot);
+  stroke-width: 2;
+}
+.cm-tile.is-sel rect:first-child {
+  fill: var(--accent-fill);
+  stroke: var(--accent-fill);
+}
+.cm-tile.is-sel text {
+  fill: var(--on-accent);
+  font-weight: 600;
+}
+.cm-heat {
+  fill: var(--hot);
+  opacity: 0.45;
+}
+/* a tile's loop and contract marks are read on the tile that is shown or
+   pointed at; elsewhere they are noise */
+.cm-tile text.cm-loop {
+  font-size: 9.5px;
+  fill: var(--text-faint);
+  display: none;
+}
+.cm-tile.is-sel text.cm-loop,
+.cm-tile:hover text.cm-loop {
+  display: inline;
+}
+.cm-tile.is-sel text.cm-loop {
+  fill: var(--on-accent);
+}
+
+.cm-zoom {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cm-mini {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cm-mini rect {
+  fill: var(--border-strong);
+}
+.cm-mini rect.is-cur {
+  fill: var(--accent-soft);
+}
+.cm-mini .cm-mini-view {
+  fill: color-mix(in srgb, var(--accent-fill) 10%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1.2;
+}
+.cm-legend {
+  position: absolute;
+  left: 56px;
+  top: 12px;
+  max-width: 460px;
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.cm-legend p {
+  margin: 0 0 8px;
+}
+.cm-legend p:last-child {
+  margin-bottom: 0;
+}
+.cm-legend kbd {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+}
+.cm-k {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  vertical-align: middle;
+  border-radius: 2px;
+}
+.cm-k-out {
+  background: var(--accent-fill);
+}
+.cm-k-in {
+  background: var(--hot);
+}
+.cm-k-heat {
+  background: var(--hot);
+  opacity: 0.75;
+  height: 5px;
+}
+.cm-builtins code,
+.cm-rel code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+.cm-builtins small,
+.cm-rel small {
+  color: var(--text-faint);
+  margin-left: 1px;
+}
+
+/* ---- the source pane */
+.cm-pane {
+  width: clamp(380px, 42%, 760px);
+  border-left: 1px solid var(--border);
+  overflow: auto;
+  background: var(--bg);
+}
+.cm-pane-head {
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cm-pane-head h1 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--heading);
+  overflow-wrap: anywhere;
+}
+.cm-params {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+.cm-where {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.cm-where a {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.cm-rel {
+  margin: 4px 0;
+  font-size: 13px;
+  line-height: 1.9;
+}
+.cm-rel > span:first-child {
+  display: inline-block;
+  min-width: 64px;
+  margin-right: 6px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.cm-rel button,
+.cm-steps a {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 7px;
+  margin: 0 4px 2px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.cm-steps a {
+  font-family: var(--font-sans);
+  color: var(--text);
+  white-space: normal;
+  display: inline-block;
+}
+.cm-rel button:hover,
+.cm-steps a:hover {
+  border-color: var(--accent);
+}
+.cm-rel button.is-caller {
+  color: var(--hot);
+  border-style: dashed;
+}
+.cm-inloop {
+  color: var(--hot) !important;
+  margin-left: 3px !important;
+}
+.cm-code {
+  margin: 0;
+  white-space: normal;
+  padding: 8px 0 16px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--bg-code);
+  border: 0;
+  border-radius: 0;
+  overflow-x: auto;
+}
+.cm-ln {
+  display: flex;
+  padding-right: 12px;
+}
+.cm-num {
+  flex: none;
+  width: 3.6em;
+  padding-right: 10px;
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+}
+/* never cut off: a long line wraps, its continuation hanging under it a
+   step further in (the indent is set per line in CodeMap.jsx) */
+.cm-txt {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  flex: 1;
+  min-width: 0;
+}
+.cm-ln.is-out {
+  opacity: 0.55;
+}
+.cm-ln.is-step {
+  margin-top: 6px;
+  background: var(--accent-wash);
+  font-weight: 600;
+}
+.cm-ln.is-deep .cm-num {
+  color: var(--hot);
+}
+.cm-mark {
+  flex: none;
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--hot);
+}
+.cm-ref {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 2px;
+}
+.cm-ref:hover {
+  text-decoration-color: var(--accent);
+}
+.cm-whole {
+  margin: 10px 16px 18px;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  .cm-body {
+    flex-direction: column;
+  }
+  .cm-stage {
+    flex: none;
+    height: 46vh;
+    height: 46dvh;
+  }
+  /* the pane scrolls by itself, so a def chosen on the map shows its first
+     line without the map scrolling away */
+  .cm-pane {
+    width: 100%;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    max-height: 64vh;
+    max-height: 64dvh;
+    overflow: auto;
+  }
+  .cm-bar {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 6px 16px;
+  }
+  .cm-route {
+    padding: 4px 16px;
+  }
+  .cm-search {
+    order: 5;
+    width: 100%;
+    margin-left: 0;
+  }
+  .cm-nav {
+    margin-left: auto;
+  }
+  .cm-of {
+    display: none;
+  }
+  .cm-mini {
+    display: none;
+  }
+  .cm-legend {
+    left: 52px;
+    right: 8px;
+  }
+}
+.cm-ln.is-gap {
+  margin-top: 10px;
+  border-top: 1px dashed var(--border-strong);
+  padding-top: 6px;
+}
+.cm-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.cm-labels span {
+  position: absolute;
+  transform: translateY(-100%);
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--heading);
+  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.cm-labels span.is-cur {
+  color: var(--accent);
+}
+
+/* ---- intents and contracts */
+.cm-intent {
+  margin: 2px 0 6px;
+  font-size: 13.5px;
+  color: var(--text);
+  line-height: 1.45;
+}
+.cm-tile text.cm-contract-mark {
+  font-size: 10px;
+}
+.cm-contract {
+  margin: 8px 0 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  font-size: 13px;
+}
+.cm-contract-group {
+  margin: 6px 0 0;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.cm-contract-head {
+  margin: 0 0 6px;
+  line-height: 1.45;
+}
+.cm-contract-head > span:first-child {
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.cm-contract-head code,
+.cm-contract-note code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  margin-right: 4px;
+}
+.cm-contract ul {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+}
+.cm-contract li {
+  margin: 3px 0;
+  line-height: 1.45;
+}
+.cm-contract li button {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 7px;
+  margin-right: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--accent);
+  cursor: pointer;
+}
+.cm-contract li.is-cur button {
+  color: var(--text);
+  cursor: default;
+}
+.cm-contract li small {
+  color: var(--text-faint);
+  margin-right: 6px;
+}
+.cm-contract li > span {
+  color: var(--text-muted);
+}
+.cm-contract-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cm-contract-note a {
+  color: var(--accent);
+}
+.cm-contract-sweep {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin: 4px 0 0;
+}
+.cm-contract-sweep th,
+.cm-contract-sweep td {
+  padding: 1px 10px 1px 0;
+  text-align: right;
+  white-space: nowrap;
+}
+.cm-contract-sweep th:first-child,
+.cm-contract-sweep td:first-child {
+  text-align: left;
+}
+.cm-contract-sweep th {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+/* ---- a tile's second line: its intent */
+.cm-tile text.cm-sub {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: 10.5px;
+  fill: var(--text-faint);
+}
+.cm-tile text.cm-sub.is-missing {
+  font-style: italic;
+  fill: var(--hot);
+}
+.cm-tile.is-sel text.cm-sub {
+  fill: var(--on-accent);
+  opacity: 0.85;
+}
+.cm-intent.is-missing {
+  color: var(--hot);
+  font-style: italic;
+}
+.cm-k-dash {
+  background: repeating-linear-gradient(90deg, var(--hot) 0 5px, transparent 5px 8px);
+}
+.cm-k-dash {
+  background: repeating-linear-gradient(90deg, var(--hot) 0 5px, transparent 5px 8px);
+}

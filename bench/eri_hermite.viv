@@ -1,0 +1,31 @@
+# The same integrals by the Hermite expansion of McMurchie and Davidson.
+# Must print the same number as bench/eri_closed_form.viv.
+from qcfuzz import (
+    fuzz_bf_pow, fuzz_geometry, fuzz_shell_atom, fuzz_shell_coef, fuzz_shell_expo,
+    fuzz_shell_nprim,
+)
+from gto_md import md_eri_fast, md_prep_center, md_prep_cn, md_prep_expo, md_prep_nprim
+from qcref import NPRIM
+
+NATM = 6
+REPS = 6
+acc = 0.0
+for r to REPS {
+    R = fuzz_geometry(NATM, 11.0 + 7.0 * r)
+    bfa = fuzz_shell_atom(NATM)
+    bp = fuzz_bf_pow(NATM)
+    se = fuzz_shell_expo(NATM)
+    sc = fuzz_shell_coef(NATM)
+    CEN = md_prep_center(bfa, bfa, R, NATM)
+    EXP = md_prep_expo(bfa, se, NATM, NPRIM)
+    CN = md_prep_cn(bfa, bp, se, sc, NATM, NPRIM)
+    NP = md_prep_nprim(bfa, fuzz_shell_nprim(NATM), NATM)
+    G = md_eri_fast(CEN, EXP, CN, NP, bp, NATM)
+    for u to NATM {
+        acc = acc + G[u, u, u, u]
+    }
+}
+show acc
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

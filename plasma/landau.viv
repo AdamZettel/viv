@@ -1,0 +1,84 @@
+# Landau damping of a Langmuir wave, by the Vlasov-Poisson solver in lib/vlasov.
+#
+#     viv run --use plasma/k05.viv plasma/landau.viv            one deck, no checks
+#     viv run --use plasma/k05.viv --use plasma/landau.viv plasma/landau_check.viv
+#     viv export plasma/vlasov.export.toml                      the C library and Python wrapper
+#
+# A deck (plasma/k05.viv, plasma/k04.viv) sets the grid, the wave and the fit
+# window; this file runs the solver, records the field energy at every step,
+# fits its decay, and computes the exact Landau root for the same k lambda_D.
+# The check file holds the run to that root and to the conservation laws.
+#
+# The box is one wavelength of the perturbation, Lx = 2 pi / k0, so k0 is the
+# box's longest mode and the only one the linear problem excites.
+
+import vlasov
+
+step grid "the box, the velocity grid, and the step count" {
+    if K0 <= 0.0 or VT <= 0.0 or VMAX <= 0.0 or DT <= 0.0 {
+        stop(f"K0, VT, VMAX and DT must be positive; they are {K0}, {VT}, {VMAX} and {DT}")
+    }
+    LX = 2.0 * vlasov.VL_PI / K0           #: LX  box length, one wavelength: 2 pi / k0
+    DX = LX / NX
+    DV = 2.0 * VMAX / NV
+    #: NSTEPS  time steps, T_END / DT rounded to the nearest whole step
+    NSTEPS = floor(T_END / DT + 0.5)
+    if T_FIT1 > NSTEPS * DT or T_FIT0 >= T_FIT1 {
+        stop(f"the fit window [{T_FIT0}, {T_FIT1}] must lie inside the run, [0, {NSTEPS * DT}]")
+    }
+    XG = arange(NX) * DX
+    VG = -VMAX + arange(NV) * DV
+    KX = vlasov.vl_wavenumbers(NX, LX)
+    PC, PS = vlasov.vl_phase_tables(KX, VG, 0.5 * DT)
+}
+
+step start "the perturbed Maxwellian and its invariants" {
+    F = vlasov.vl_initial(XG, VG, VT, K0, ALPHA)
+    E0 = vlasov.vl_field(F, KX, DV)
+    MASS0 = sum(F) * DX * DV
+    L2_0 = sum(F * F) * DX * DV
+    KIN0 = 0.5 * sum(F * reshape(VG * VG, NV, 1)) * DX * DV
+    W0 = vlasov.vl_field_energy(E0, DX)
+}
+
+#: TIME  the times of the field-energy samples: (n + 1/2) DT, after the first half shift of step n
+TIME = zeros(NSTEPS)
+#: WFIELD  the field energy, integral of E^2 / 2 dx, at each of TIME
+WFIELD = zeros(NSTEPS)
+MASS_DRIFT = 0.0       #: MASS_DRIFT  the largest |mass - initial mass| / initial mass over the run
+
+step run "Strang split steps: x by dt/2, the field, v by dt, x by dt/2" {
+    for n to NSTEPS {
+        vlasov.vl_shift_x(F, PC, PS)
+        E = vlasov.vl_field(F, KX, DV)
+        TIME[n] = (n + 0.5) * DT
+        WFIELD[n] = vlasov.vl_field_energy(E, DX)
+        vlasov.vl_shift_v(F, E, DT, DV)
+        vlasov.vl_shift_x(F, PC, PS)
+        MASS_DRIFT = max(MASS_DRIFT, abs(sum(F) * DX * DV - MASS0) / MASS0)
+    }
+}
+
+step measure "fit the field energy's decay, and the exact root" {
+    GAMMA, OMEGA, NPEAKS, FIT_RMS = vlasov.vl_fit(TIME, WFIELD, T_FIT0, T_FIT1)
+    ROOT = vlasov.vl_landau_root(K0 * VT)
+    GAMMA_EXACT = im(ROOT)
+    OMEGA_EXACT = re(ROOT)
+    GAMMA_ERR = abs(GAMMA - GAMMA_EXACT) / abs(GAMMA_EXACT)    #: GAMMA_ERR  relative error of the measured damping rate
+    OMEGA_ERR = abs(OMEGA - OMEGA_EXACT) / OMEGA_EXACT         #: OMEGA_ERR  relative error of the measured frequency
+}
+
+step invariants "what the run kept" {
+    EN = vlasov.vl_field(F, KX, DV)
+    L2_DRIFT = (sum(F * F) * DX * DV - L2_0) / L2_0         #: L2_DRIFT  relative change of the integral of f^2 over the run
+    #: ENERGY_DRIFT  change of kinetic plus field energy over the run, in units of the initial field energy
+    ENERGY_DRIFT = (0.5 * sum(F * reshape(VG * VG, NV, 1)) * DX * DV + vlasov.vl_field_energy(EN, DX) - KIN0 - W0) / W0
+}
+
+show GAMMA, GAMMA_EXACT, GAMMA_ERR
+show OMEGA, OMEGA_EXACT, OMEGA_ERR
+show NPEAKS, FIT_RMS
+show MASS_DRIFT, L2_DRIFT, ENERGY_DRIFT
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

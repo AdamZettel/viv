@@ -1,0 +1,134 @@
+#! pde The time-dependent Schrödinger equation
+#! equation i\,\psi_t = -\tfrac12\,\psi_{xx} + V(x)\,\psi
+#! kind dispersive
+#! method split-step Fourier (Strang splitting): the kinetic step is exact in momentum space
+#! checks a free packet's spreading, a coherent state's oscillation, norm conservation, and the measured order of the splitting
+#! | Two operators, each trivial in its own basis. The potential multiplies $\psi(x)$ by a phase;
+#! | the kinetic energy multiplies $\hat\psi(k)$ by a phase. Neither can be applied exactly to the
+#! | other's representation -- but an FFT moves between them, so alternate:
+#! | half a potential step, a full kinetic step, half a potential step. That is **Strang splitting**.
+#! | Every factor is a pure phase, so the norm is conserved to rounding whatever the time step, and
+#! | the error is $O(\Delta t^2)$, from the two operators failing to commute.
+#! |
+#! | **Free particle.** With $V = 0$ there is nothing to split and one step of any length is exact.
+#! | A Gaussian packet moves at its group velocity $k_0$ and spreads as
+#! | $\sigma(t) = \sigma_0\sqrt{1 + (t/2\sigma_0^2)^2}$.
+#! |
+#! | **Harmonic oscillator.** In $V = \tfrac12 x^2$ the ground state displaced to $x_0$ is a coherent
+#! | state: it keeps its shape and its center follows the classical orbit, $\langle x\rangle = x_0\cos t$.
+#! |
+#! | Where you look for the splitting error matters. For this potential Strang splitting solves,
+#! | exactly, an oscillator whose frequency is off by $O(\Delta t^2)$ -- so the computed center is
+#! | $x_0\cos(t + \delta)$ with a phase error $\delta \propto \Delta t^2$. After a FULL period that is
+#! | $x_0(1 - \delta^2/2)$: the error is quadratic in $\delta$ and the scheme looks fourth order. At a
+#! | QUARTER period, where the orbit crosses the origin, it is $-x_0\,\delta$, and the true order shows.
+#! | Both are measured below.
+
+pi = 3.141592653589793
+N = 256
+L = 40.0
+DX = L / N
+X = linspace(-0.5 * L, 0.5 * L - DX, N)
+
+#: K  the wavenumber of each FFT bin: 2 pi j / L, with the upper half wrapped to negative
+K = zeros(N)
+for j to N {
+    K[j] = 2.0 * pi * j / L
+    if j >= N / 2.0 { K[j] = 2.0 * pi * (j - N) / L }
+}
+
+#| A normalized Gaussian packet of width sigma at x0, with momentum k0.
+def packet(x0, sigma, k0) {
+    envelope = exp(-(X - x0) * (X - x0) / (4.0 * sigma * sigma)) / sqrt(sqrt(2.0 * pi) * sigma)
+    return complex(envelope * cos(k0 * X), envelope * sin(k0 * X))
+}
+
+#| exp(-i theta) for a real array theta, as a complex array.
+def phase(theta) {
+    return complex(cos(theta), 0.0 - sin(theta))
+}
+
+#| One kinetic step of length dt: exact, in momentum space. Returns a new array.
+def kinetic_step(psi, dt) {
+    out = psi * 1.0
+    fft(out)
+    out = out * phase(0.5 * K * K * dt)
+    ifft(out)
+    return out
+}
+
+def norm_of(psi) {
+    return sum(abs(psi) * abs(psi)) * DX
+}
+def mean_x(psi) {
+    return sum(abs(psi) * abs(psi) * X) * DX
+}
+def width_of(psi) {
+    m = mean_x(psi)
+    return sqrt(sum(abs(psi) * abs(psi) * (X - m) * (X - m)) * DX)
+}
+
+# ---- a free packet: one exact step ----
+SIGMA0 = 1.0
+K0 = 2.0
+T_FREE = 3.0
+free0 = packet(-6.0, SIGMA0, K0)
+free1 = kinetic_step(free0, T_FREE)
+free_center = mean_x(free1)
+free_width = width_of(free1)
+free_norm = norm_of(free1)
+show free_center
+show free_width
+show free_norm
+
+#| Evolve the coherent state for `periods` of an oscillator period in `steps` Strang steps.
+def evolve(periods, steps) {
+    dt = 2.0 * pi * periods / steps
+    half_v = phase(0.25 * X * X * dt)
+    psi = packet(3.0, sqrt(0.5), 0.0)
+    for s to steps {
+        psi = kinetic_step(psi * half_v, dt) * half_v
+    }
+    return psi
+}
+
+# a quarter period: the center should be at the origin, and its distance from it is the phase error
+quarter = evolve(0.25, 100.0)
+q_center = mean_x(quarter)
+q_width = width_of(quarter)
+q_norm = norm_of(quarter)
+order = log(abs(mean_x(evolve(0.25, 50.0))) / abs(q_center)) / log(2.0)
+# a full period: back at x0, up to the SQUARE of the phase error
+full_order = log(abs(mean_x(evolve(1.0, 100.0)) - 3.0) / abs(mean_x(evolve(1.0, 200.0)) - 3.0)) / log(2.0)
+show q_center
+show q_width
+show order
+show full_order
+
+figure("A free Gaussian packet: it moves at k0 and spreads", "x", "probability density")
+plot(X, abs(free0) * abs(free0), "t = 0")
+plot(X, abs(free1) * abs(free1), "t = 3")
+
+test "every step is a pure phase: the norm is conserved to rounding" {
+    assert_near(free_norm, 1.0, 1.0e-12)
+    assert_near(q_norm, 1.0, 1.0e-12)
+}
+test "a free packet moves at its group velocity: <x> = x0 + k0 t" {
+    assert_near(free_center, -6.0 + K0 * T_FREE, 1.0e-9)
+}
+test "and spreads as sigma0 sqrt(1 + (t / 2 sigma0^2)^2)" {
+    assert_near(free_width, SIGMA0 * sqrt(1.0 + (T_FREE / (2.0 * SIGMA0 * SIGMA0)) * (T_FREE / (2.0 * SIGMA0 * SIGMA0))), 1.0e-9)
+}
+test "a coherent state follows the classical orbit: at a quarter period it is at the origin, its width unchanged" {
+    assert_near(q_center, 0.0, 1.0e-3)
+    assert_near(q_width, sqrt(0.5), 1.0e-3)
+}
+test "Strang splitting is second order, measured where the phase error shows linearly" {
+    assert_near(order, 2.0, 0.1)
+}
+test "and looks fourth order after a full period, where the error is the square of the phase error" {
+    assert_near(full_order, 4.0, 0.1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# Lennard-Jones molecular dynamics at constant NVE as one C file and a Python
+# wrapper: `viv export ports/liquids/md_nve.export.toml`.
+# Paths are under the repository root. A parameter
+# left out of a run keeps the program's value (256 atoms at density 0.75
+# from an fcc lattice at T = 1, r_cut = 2.5, dt = 0.005, 10 blocks of 1000
+# steps); each parameter's meaning is the `#:` line above it in
+# ports/liquids/md_nve.viv.
+#
+# Upstream: md_nve_lj of https://github.com/Allen-Tildesley/examples (CC0),
+# by M. P. Allen and D. J. Tildesley, for Computer Simulation of Liquids, 2nd
+# ed. (OUP, 2017). The comparison with upstream's Fortran is
+# ports/liquids/COMPARISON.md; ports/liquids/test_liquids.py holds runs to it.
+name = "md_nve"
+about = "ports/liquids/md_nve.viv"
+files = ["ports/liquids/md_nve.viv"]
+cases = "ports/liquids/md_nve.cases.json"
+
+[params]
+n = { type = "Int", min = 32, max = 100000 }
+density = { type = "Num", min_exclusive = 0.0 }
+temperature = { type = "Num", min_exclusive = 0.0 }
+r_cut = { type = "Num", min_exclusive = 0.0 }
+dt = { type = "Num", min_exclusive = 0.0 }
+nblock = { type = "Int", min = 1, max = 100000 }
+nstep = { type = "Int", min = 0, max = 100000000 }
+neighbors = { type = "Enum", values = ["all", "link", "verlet"] }
+seed = { type = "Int", min = 0, max = 2147483646 }
+r_start = { type = "Arr", rank = 2 }
+v_start = { type = "Arr", rank = 2 }
+box_start = { type = "Num", min = 0.0 }
+sample = { type = "Int", min = 0, max = 100000000 }
+gr_dr = { type = "Num", min_exclusive = 0.0 }
+nt = { type = "Int", min = 1, max = 1000000 }
+origin_interval = { type = "Int", min = 1, max = 1000000 }
+
+[results]
+box = "Num"
+rho = "Num"
+e_cs = "Num"
+e_cs_err = "Num"
+p_cs = "Num"
+p_cs_err = "Num"
+e_full = "Num"
+e_full_err = "Num"
+p_full = "Num"
+p_full_err = "Num"
+t_kin = "Num"
+t_kin_err = "Num"
+t_config = "Num"
+t_config_err = "Num"
+cv_cs = "Num"
+cv_cs_err = "Num"
+conserved_msd = "Num"
+blocks = { type = "Arr", rank = 2 }
+initial = "Arr"
+energy_series = "Arr"
+r_final = { type = "Arr", rank = 2 }
+v_final = { type = "Arr", rank = 2 }
+verlet_rebuilds = "Int"
+gr_r = "Arr"
+gr = "Arr"
+vacf = "Arr"
+rvcf = "Arr"
+msd = "Arr"
+d_vacf = "Num"
+d_msd = "Num"
+corr_time = "Arr"
+
+[reference]
+upstream = "md_nve_lj (and its md_nve_lj_ll and md_nve_lj_vl builds) of https://github.com/Allen-Tildesley/examples at 4818bc82, built with gfortran -O2 by ports/liquids/oracle/build.py; same bits from the same start"
+eos = "Thol et al., Journal of Physical and Chemical Reference Data 45, 023101 (2016) and International Journal of Thermophysics 36, 25 (2015), as eos_lj computes them"
+tests = "ports/liquids/test_liquids.py: every tolerance is stated beside its check"

@@ -1,0 +1,58 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// The notebook view's index: every program it can open, by where it lives.
+import Base from '../../layouts/Base.astro';
+import feed from '../../data/feed.json';
+import { notebookFiles, notebookGroups } from '../../lib/notebookBuild.js';
+import { readFileSync } from 'node:fs';
+import { splitNotebook, isNotebook } from '../../lib/notebook.js';
+
+const files = notebookFiles().map((f) => {
+  const cells = splitNotebook(readFileSync(f.file, 'utf8'));
+  const post = f.head === 'posts' ? feed.posts.find((p) => `posts/${p.slug}` === f.path) : null;
+  return { ...f, notebook: isNotebook(cells), code: cells.filter((c) => c.kind === 'code' && !c.empty).length, title: post ? post.title : '' };
+});
+const groups = notebookGroups.map((g) => ({ ...g, files: files.filter((f) => f.head === g.head) })).filter((g) => g.files.length);
+const withProse = files.filter((f) => f.notebook);
+---
+
+<Base
+  title="Notebooks · Viv"
+  description="Every Viv program in the repository, read as a notebook: prose between the code, each cell runnable in the browser with its output under it."
+  eyebrow="Notebooks"
+  heading="Programs as notebooks"
+  width="narrow">
+  <p class="lede">
+    A Viv notebook is an ordinary <code>.viv</code> file. A line that is exactly <code>###</code> opens a
+    block of prose that runs to the next <code>###</code> line; the compiler skips it, and this view renders it.
+    The code between two prose blocks is a cell. Running a cell runs it together with every cell above it,
+    as one program, and its output appears under it. The file still runs from the command line, in both
+    engines, exactly as written.
+  </p>
+  <p>
+    {withProse.length === 1 ? 'One file has' : `${withProse.length} files have`} prose cells so far; every
+    other file opens as a single code cell, split nowhere, with its output under it.
+  </p>
+  {withProse.length > 0 && (
+    <>
+      <h2 id="with-prose">With prose cells</h2>
+      <ul class="nb-index">
+        {withProse.map((f) => <li><a href={`/nb/${f.path}`}>{f.title || f.path}</a> <span>{f.code} code cells</span></li>)}
+      </ul>
+    </>
+  )}
+  {groups.map((g) => (
+    <>
+      <h2 id={g.head}>{g.title}</h2>
+      <ul class="nb-index">
+        {g.files.map((f) => <li><a href={`/nb/${f.path}`}>{f.title || f.path}</a> <span>{f.notebook ? `${f.code} code cells` : `${(f.bytes / 1024).toFixed(0)} KB`}</span></li>)}
+      </ul>
+    </>
+  ))}
+  <style>
+    .nb-index { list-style: none; padding: 0; margin: 0 0 1.5rem; columns: 2 18rem; column-gap: 2rem; }
+    .nb-index li { break-inside: avoid; padding: 2px 0; overflow-wrap: anywhere; }
+    .nb-index span { font: 11px var(--font-mono); color: var(--text-faint); margin-left: 0.3rem; }
+  </style>
+</Base>

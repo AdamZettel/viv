@@ -1,0 +1,255 @@
+###
+post: Overlap, kinetic energy and nuclear attraction, one shell pair at a time
+agent: claude
+
+The one-electron part of the Fock matrix is `H = T + V`, and the orthogonalizer
+needs the overlap `S`. All three come from the Hermite tables of
+`lib/hf/hermite`, and all three are computed per shell pair: the E tables
+depend on the two exponents and the distance between the centers, not on which
+component of the shell is asked for. So one set of tables per primitive pair
+serves the 36 component pairs of a (d|d) block, and the loops run over the
+real primitive count of each shell.
+
+For one primitive pair, one axis, with `s(i, j) = E(i, j, 0) sqrt(pi/p)`:
+
+- **overlap** is `s(i, j)` on each axis, multiplied over x, y, z;
+- **kinetic energy** applies `-1/2 d^2/dx^2` to the right-hand Gaussian,
+  which gives three overlaps with the power of `x_B` shifted by -2, 0, +2:
+
+      t(i, j) = -2 b^2 s(i, j+2) + b (2j + 1) s(i, j) - j (j - 1)/2 s(i, j-2)
+
+  and `T = t_x s_y s_z + s_x t_y s_z + s_x s_y t_z`. That is why the E tables
+  are built with `lb + 2`;
+- **nuclear attraction** from a charge `Z` at `C` is
+
+      V = -Z (2 pi / p) sum_tuv E_x(t) E_y(u) E_z(v) R(t, u, v)
+
+  with `R` at `P - C` and exponent `p`.
+
+Each value is for unit-normalized Cartesian components: the contracted
+coefficients `cn` from `bas_contract` and the component factor `bas_nc`
+multiply every block, so the results compare directly with the `_unit`
+matrices of `lib/hfref`. Ghost atoms (Z = 0) are skipped.
+
+Used with `import hf.md_onebody`.
+###
+
+from hf.basis import (
+    AT_CHG, AT_X, AT_Y, AT_Z, bas_contract, bas_nao_cart, bas_nc, bas_ncart, bas_powers, PR_EXP,
+    SH_ATOM, SH_CART0, SH_L, SH_NCART, SH_NPRIM, SH_P0,
+)
+import hf.boys
+from hf.hermite import herm_boys_fill, herm_efill, herm_esize, herm_grid, HERM_GRID_XMAX, herm_rfill
+
+MD1_PI = 3.141592653589793
+MD1_S = 0
+MD1_T = 1
+MD1_V = 2
+# the three matrices a pair block holds: S, T and V
+MD1_NMAT = 3
+# rows of lib/hfref/prims' shell table per case (one per function of an ERI quartet)
+MD1_PS_ROWS = 4
+# a prims case's atoms: the two shell centers and the point charge
+MD1_T_NATOM = 3
+# a row of md1_prims_fix: (case, pick, kind, value)
+MD1_FIX_ROW = 4
+
+#| The Boys grid a one-electron build needs: orders up to `2 lmax`.
+def md1_grid(shells: Arr) {
+    lmax = 0
+    for s to len(shells) {
+        lmax = max(lmax, shells[s, SH_L])
+    }
+    return herm_grid(2 * lmax, HERM_GRID_XMAX)
+
+}
+
+#| S, T and V for shell pair `(sa, sb)`, as `[3, ncart_a * ncart_b]` with the
+#| component pair `(ia, ib)` at column `ia * ncart_b + ib`. `cn` comes from
+#| `bas_contract` and `G` from `md1_grid`.
+def md1_pair(atoms: Arr, shells: Arr, prims: Arr, cn: Arr, G: Arr, sa, sb) {
+    la = shells[sa, SH_L]
+    lb = shells[sb, SH_L]
+    na = bas_ncart(la)
+    nb = bas_ncart(lb)
+    PA = bas_powers(la)
+    PB = bas_powers(lb)
+    ca = round(shells[sa, SH_ATOM])
+    cb = round(shells[sb, SH_ATOM])
+    Ax = atoms[ca, AT_X]
+    Ay = atoms[ca, AT_Y]
+    Az = atoms[ca, AT_Z]
+    Bx = atoms[cb, AT_X]
+    By = atoms[cb, AT_Y]
+    Bz = atoms[cb, AT_Z]
+    # component factors, one per row and column
+    NA = zeros(na)
+    NB = zeros(nb)
+    for i to na {
+        NA[i] = bas_nc(PA[i, 0], PA[i, 1], PA[i, 2])
+    }
+    for j to nb {
+        NB[j] = bas_nc(PB[j, 0], PB[j, 1], PB[j, 2])
+    }
+    #: two extra powers on b, for the kinetic integral
+    L = la + lb
+    lb2 = lb + 2
+    ld = lb2 + 1
+    nt = la + lb2 + 1
+    EX = zeros(herm_esize(la, lb2))
+    EY = zeros(herm_esize(la, lb2))
+    EZ = zeros(herm_esize(la, lb2))
+    D = L + 1
+    RS = zeros(2 * D * D * D)
+    F = zeros(L + 1)
+    out = zeros(MD1_NMAT, na * nb)
+    pa0 = round(shells[sa, SH_P0])
+    pb0 = round(shells[sb, SH_P0])
+    for ip to shells[sa, SH_NPRIM] {
+        a = prims[pa0 + ip, PR_EXP]
+        for jp to shells[sb, SH_NPRIM] {
+            b = prims[pb0 + jp, PR_EXP]
+            p = a + b
+            c = cn[pa0 + ip] * cn[pb0 + jp]
+            herm_efill(EX, 0, la, lb2, a, b, Ax - Bx)
+            herm_efill(EY, 0, la, lb2, a, b, Ay - By)
+            herm_efill(EZ, 0, la, lb2, a, b, Az - Bz)
+            sq = sqrt(MD1_PI / p)
+            Px = (a * Ax + b * Bx) / p
+            Py = (a * Ay + b * By) / p
+            Pz = (a * Az + b * Bz) / p
+            #: T per axis: -2b^2 S(j+2) + b(2j+1) S(j) - j(j-1)/2 S(j-2)
+            for i to na {
+                ax = PA[i, 0]
+                ay = PA[i, 1]
+                az = PA[i, 2]
+                for j to nb {
+                    bx = PB[j, 0]
+                    by = PB[j, 1]
+                    bz = PB[j, 2]
+                    sx = EX[(ax * ld + bx) * nt] * sq
+                    sy = EY[(ay * ld + by) * nt] * sq
+                    sz = EZ[(az * ld + bz) * nt] * sq
+                    tx = -2.0 * b * b * EX[(ax * ld + bx + 2) * nt] * sq + b * (2 * bx + 1) * sx
+                    ty = -2.0 * b * b * EY[(ay * ld + by + 2) * nt] * sq + b * (2 * by + 1) * sy
+                    tz = -2.0 * b * b * EZ[(az * ld + bz + 2) * nt] * sq + b * (2 * bz + 1) * sz
+                    if bx > 1 {
+                        tx = tx - 0.5 * bx * (bx - 1) * EX[(ax * ld + bx - 2) * nt] * sq
+                    }
+                    if by > 1 {
+                        ty = ty - 0.5 * by * (by - 1) * EY[(ay * ld + by - 2) * nt] * sq
+                    }
+                    if bz > 1 {
+                        tz = tz - 0.5 * bz * (bz - 1) * EZ[(az * ld + bz - 2) * nt] * sq
+                    }
+                    w = c * NA[i] * NB[j]
+                    k = i * nb + j
+                    out[MD1_S, k] = out[MD1_S, k] + w * sx * sy * sz
+                    out[MD1_T, k] = out[MD1_T, k] + w * (tx * sy * sz + sx * ty * sz + sx * sy * tz)
+                }
+            }
+            #: nuclear attraction: an R table at P - C per charged atom
+            for at to len(atoms) {
+                Zc = atoms[at, AT_CHG]
+                if Zc == 0.0 {
+                    continue
+                }
+                X = Px - atoms[at, AT_X]
+                Y = Py - atoms[at, AT_Y]
+                Z = Pz - atoms[at, AT_Z]
+                herm_boys_fill(G, L, p * (X * X + Y * Y + Z * Z), F)
+                herm_rfill(RS, L, p, X, Y, Z, F, -Zc * 2.0 * MD1_PI / p)
+                for i to na {
+                    ax = PA[i, 0]
+                    ay = PA[i, 1]
+                    az = PA[i, 2]
+                    for j to nb {
+                        bx = PB[j, 0]
+                        by = PB[j, 1]
+                        bz = PB[j, 2]
+                        ox = (ax * ld + bx) * nt
+                        oy = (ay * ld + by) * nt
+                        oz = (az * ld + bz) * nt
+                        acc = 0.0
+                        for t to ax + bx + 1 {
+                            for u to ay + by + 1 {
+                                eu = EX[ox + t] * EY[oy + u]
+                                for v to az + bz + 1 {
+                                    acc = acc + eu * EZ[oz + v] * RS[(t * D + u) * D + v]
+                                }
+                            }
+                        }
+                        k = i * nb + j
+                        out[MD1_V, k] = out[MD1_V, k] + c * NA[i] * NB[j] * acc
+                    }
+                }
+            }
+        }
+    }
+    return out
+}
+
+#| S, T and V for the whole basis, `[3, n, n]` over Cartesian AOs. Each shell
+#| pair is computed once, for `sa >= sb`, and mirrored, so every matrix is
+#| exactly symmetric.
+def md1_all(atoms: Arr, shells: Arr, prims: Arr) {
+    n = bas_nao_cart(shells)
+    cn = bas_contract(shells, prims)
+    G = md1_grid(shells)
+    M = zeros(MD1_NMAT, n, n)
+    for sa to len(shells) {
+        for sb to sa + 1 {
+            md1_scatter(M, md1_pair(atoms, shells, prims, cn, G, sa, sb), shells, sa, sb)
+        }
+    }
+    return M
+}
+
+#| Write a `md1_pair` block into `M` at both `(sa, sb)` and `(sb, sa)`.
+def md1_scatter(M: Arr, B: Arr, shells: Arr, sa, sb) {
+    na = shells[sa, SH_NCART]
+    nb = shells[sb, SH_NCART]
+    a0 = shells[sa, SH_CART0]
+    b0 = shells[sb, SH_CART0]
+    for k to MD1_NMAT {
+        for i to na {
+            for j to nb {
+                M[k, a0 + i, b0 + j] = B[k, i * nb + j]
+                M[k, b0 + j, a0 + i] = B[k, i * nb + j]
+            }
+        }
+    }
+    return 0
+}
+
+#| One matrix out of `md1_all`.
+def md1_pick(atoms: Arr, shells: Arr, prims: Arr, which) {
+    return slab(md1_all(atoms, shells, prims), which)
+}
+
+#| Integral-stage members `(atoms, shells, prims) -> [n, n]`.
+def md1_s(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return md1_pick(atoms, shells, prims, MD1_S)
+}
+
+def md1_t(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return md1_pick(atoms, shells, prims, MD1_T)
+}
+
+def md1_v(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return md1_pick(atoms, shells, prims, MD1_V)
+}
+
+#| The core Hamiltonian `T + V`.
+def md1_h(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    M = md1_all(atoms, shells, prims)
+    return slab(M, MD1_T) + slab(M, MD1_V)
+}
+
+#| Test helper: the largest absolute gap between matrix `k` of `M` and `R`.
+def md1_gap(M: Arr, k, R: Arr) {
+    return max(abs(slab(M, k) - R))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

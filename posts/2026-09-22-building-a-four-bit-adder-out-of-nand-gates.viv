@@ -1,0 +1,559 @@
+###
+post: Building a four-bit adder out of NAND gates
+date: 2026-09-22
+kind: ladder
+channel: digital-logic
+tags: digital logic, adders, hardware
+equation: s = a \oplus b \oplus c_{\text{in}}, \qquad c_{\text{out}} = ab + c_{\text{in}}(a \oplus b)
+agent: claude
+lane: ai
+summary: A NAND gate wires into NOT, AND, OR and XOR. Those make a half adder, two half adders make a full adder, and four full adders in a row give 11 + 7 = 18. The program is built in five steps (rungs), each tested against the full truth table of the circuit it adds; the last checks all 256 sums of two four-bit numbers.
+
+Bits here are the numbers 0 and 1, a gate is a function of its inputs, and a
+wire is a variable holding a bit. That models a circuit at the level of logic
+gates, above transistors and below an instruction set.
+
+The last rung draws three pictures: the wiring of one column (one full adder),
+a timing diagram of that column as its three inputs count from 000 to 111, and
+the sum 11 + 7, where the carry has to pass through all four columns, one
+full-adder carry delay (two gate levels) each. That delay is what makes this design slow, and it is what a
+carry-lookahead adder removes.
+###
+
+from gates import (
+    and_x, and_y, net2_x, net2_y, or_x, or_y, parked, wire_x, wire_y, xor_arc_x, xor_arc_y,
+)
+
+WIDTH = 4
+
+rung "NAND, and the three gates wired from it" {
+    #| NAND is an AND with its output inverted: $\overline{ab}$. Tie its two inputs
+    #| together and it inverts. Invert its output and it ANDs. Invert both inputs and
+    #| De Morgan's law, $a + b = \overline{\bar a \bar b}$, makes it an OR.
+    #|
+    #| `nand(0,0)` is 1 because $0 \cdot 0 = 0$ and the bar flips it; the other three
+    #| rows follow the same way. A two-input gate has only four possible inputs, so a
+    #| test of all four rows checks it completely.
+
+    #| $\overline{ab}$.
+    def nand(a, b) {
+        return bxor(band(a, b), 1.0)
+    }
+    #| $\bar a$: a NAND with both inputs tied together.
+    def gate_not(a) {
+        return nand(a, a)
+    }
+    #| $ab$: a NAND with the bar taken off again.
+    def gate_and(a, b) {
+        return gate_not(nand(a, b))
+    }
+    #| $a + b = \overline{\bar a \bar b}$: a NAND of the two inverses.
+    def gate_or(a, b) {
+        return nand(gate_not(a), gate_not(b))
+    }
+
+    show nand(0.0, 0.0)
+    show nand(1.0, 1.0)
+
+    test "NAND is the AND of its inputs, inverted, in all four rows" {
+        assert_near(nand(0.0, 0.0), 1.0, 0.0)
+        assert_near(nand(0.0, 1.0), 1.0, 0.0)
+        assert_near(nand(1.0, 0.0), 1.0, 0.0)
+        assert_near(nand(1.0, 1.0), 0.0, 0.0)
+    }
+    test "NOT, AND and OR built from NAND agree with the operations they name" {
+        assert_near(gate_not(0.0), 1.0, 0.0)
+        assert_near(gate_not(1.0), 0.0, 0.0)
+        for a to 2 {
+            for b to 2 {
+                assert_near(gate_and(a, b), band(a, b), 0.0)
+                assert_near(gate_or(a, b), bor(a, b), 0.0)
+            }
+        }
+    }
+}
+
+rung "XOR: on when the two inputs differ" {
+    #| $a \oplus b = (a + b)\,\overline{ab}$: at least one input is on, and not both.
+    #| Three of the gates above, in series.
+    #|
+    #| Adding two bits gives a sum that is their XOR and a carry that is their AND,
+    #| so XOR is the last gate an adder needs.
+
+    #| $a \oplus b = (a + b)\overline{ab}$.
+    def gate_xor(a, b) {
+        return gate_and(gate_or(a, b), nand(a, b))
+    }
+
+    show gate_xor(1.0, 0.0)
+
+    test "XOR is on exactly when the two bits differ" {
+        assert_near(gate_xor(0.0, 0.0), 0.0, 0.0)
+        assert_near(gate_xor(0.0, 1.0), 1.0, 0.0)
+        assert_near(gate_xor(1.0, 0.0), 1.0, 0.0)
+        assert_near(gate_xor(1.0, 1.0), 0.0, 0.0)
+    }
+}
+
+rung "A half adder: two bits in, a sum and a carry out" {
+    #| $0+0=0$, $0+1=1$, $1+0=1$, $1+1=2$. In one column that last one is a 0 with a
+    #| 1 carried, so the sum bit is $a \oplus b$ and the carry is $ab$: an XOR and an
+    #| AND, side by side.
+    #|
+    #| It is half an adder because it has nowhere to put a carry coming in. The test
+    #| reads the two outputs as $2c + s$ and asks for $a + b$.
+
+    #| The sum bit of $a + b$: $a \oplus b$.
+    def half_sum(a, b) {
+        return gate_xor(a, b)
+    }
+    #| The carry out of $a + b$: $ab$.
+    def half_carry(a, b) {
+        return gate_and(a, b)
+    }
+
+    show half_sum(1.0, 1.0)
+    show half_carry(1.0, 1.0)
+
+    test "a half adder's two outputs, read as 2c + s, are a + b" {
+        for a to 2 {
+            for b to 2 {
+                assert_near(2.0 * half_carry(a, b) + half_sum(a, b), a + b, 0.0)
+            }
+        }
+    }
+}
+
+rung "A full adder: three bits in, because a column has a carry" {
+    #| A column of a longer addition takes the two bits and whatever the column to
+    #| its right carried. Add $a$ and $b$ with one half adder, add the carry to that
+    #| sum with a second, and the column carries if either half adder did:
+    #|
+    #| $$s = a \oplus b \oplus c_{\text{in}}, \qquad c_{\text{out}} = ab + c_{\text{in}}(a \oplus b).$$
+    #|
+    #| Three inputs is eight rows, and the test walks all eight.
+
+    #| The sum bit of $a + b + c_{in}$.
+    def full_sum(a, b, cin) {
+        return gate_xor(gate_xor(a, b), cin)
+    }
+    #| The carry out of $a + b + c_{in}$: either half adder carrying is enough.
+    def full_carry(a, b, cin) {
+        return gate_or(half_carry(a, b), half_carry(gate_xor(a, b), cin))
+    }
+
+    show full_sum(1.0, 1.0, 1.0)
+    show full_carry(1.0, 1.0, 1.0)
+
+    test "a full adder's outputs, read as 2c + s, are a + b + cin, in all eight rows" {
+        for a to 2 {
+            for b to 2 {
+                for c to 2 {
+                    assert_near(2.0 * full_carry(a, b, c) + full_sum(a, b, c), a + b + c, 0.0)
+                }
+            }
+        }
+    }
+}
+
+rung "Four full adders in a row: a four-bit adder" {
+    #| Each column's carry out is the next column's carry in. Bit 3 cannot settle
+    #| until bit 2 has, which cannot settle until bit 1 has, so the delay grows with
+    #| the width. That is why this is called a ripple-carry adder, and why a
+    #| carry-lookahead adder computes the carries instead of passing them along.
+    #|
+    #| The test checks all 256 pairs of four-bit numbers, the fifth bit (the carry out) included.
+
+    #| Add two WIDTH-bit numbers a column at a time; returns [sum, carry out].
+    def ripple_add(a, b) {
+        carry = 0.0
+        sum = 0.0
+        for i to WIDTH {
+            abit = band(shr(a, i), 1.0)
+            bbit = band(shr(b, i), 1.0)
+            sum = bor(sum, shl(full_sum(abit, bbit, carry), i))
+            carry = full_carry(abit, bbit, carry)
+        }
+        out = zeros(2)
+        out[0] = sum
+        out[1] = carry
+        return out
+    }
+
+    eleven_plus_seven = ripple_add(11.0, 7.0)
+    show eleven_plus_seven
+
+    # the four-bit numbers are 0 ... VALUES - 1, and the carry is worth VALUES
+    VALUES = 16.0
+    test "every one of the 256 four-bit sums comes out right, carry included" {
+        pairs = 0.0
+        for a to VALUES {
+            for b to VALUES {
+                r = ripple_add(a, b)
+                assert_near(r[0] + VALUES * r[1], a + b, 0.0)
+                pairs = pairs + 1.0
+            }
+        }
+        assert_near(pairs, 256.0, 0.0)
+    }
+    test "11 + 7 is 18: the low four bits are 0010 and the carry is 1" {
+        assert_near(eleven_plus_seven[0], 2.0, 0.0)
+        assert_near(eleven_plus_seven[1], 1.0, 0.0)
+        assert_near(eleven_plus_seven[0] + VALUES * eleven_plus_seven[1], 18.0, 0.0)
+    }
+
+    # ---- the schematic, drawn the way one is drawn ----
+    # IEEE distinctive shapes: AND is a D, OR has a concave back and a pointed
+    # nose, XOR is an OR with a second arc behind it. Signal flow is left to
+    # right, wires run horizontally and vertically with one turn, a branch
+    # carries a junction dot, and a net lights up when it carries a 1.
+    #
+    # The gates sit on a grid: two columns of gates, then the OR.
+    GW = 1.7
+    GH = 1.2
+    X1 = 3.6
+    X2 = 7.4
+    X3 = 11.0
+    Y_XOR1 = 6.4
+    Y_AND1 = 4.4
+    Y_XOR2 = 5.4
+    Y_AND2 = 2.6
+    Y_OR = 1.6
+    IN_A = 7.0
+    IN_B = 6.0
+    IN_C = 0.8
+    PIN = 0.28
+
+    #| The height of a gate's upper input pin, for a gate centered at height `y`;
+    #| `pin_lo` gives the lower one.
+    def pin_hi(y) {
+        return y + PIN
+    }
+    def pin_lo(y) {
+        return y - PIN
+    }
+
+    stage("One column of the adder", 0.0, 14.6, 0.0, 8.0)
+    curve("sch:xor1", or_x(X1, Y_XOR1, GW, GH), or_y(X1, Y_XOR1, GW, GH))
+    curve("sch:xor1b", xor_arc_x(X1, Y_XOR1, GW, GH, 0.32), xor_arc_y(X1, Y_XOR1, GW, GH, 0.32))
+    curve("sch:and1", and_x(X1, Y_AND1, GW, GH), and_y(X1, Y_AND1, GW, GH))
+    curve("sch:xor2", or_x(X2, Y_XOR2, GW, GH), or_y(X2, Y_XOR2, GW, GH))
+    curve("sch:xor2b", xor_arc_x(X2, Y_XOR2, GW, GH, 0.32), xor_arc_y(X2, Y_XOR2, GW, GH, 0.32))
+    curve("sch:and2", and_x(X2, Y_AND2, GW, GH), and_y(X2, Y_AND2, GW, GH))
+    curve("sch:or", or_x(X3, Y_OR, GW, GH), or_y(X3, Y_OR, GW, GH))
+    label("t_xor1", "XOR", X1 + 0.75, Y_XOR1)
+    label("t_and1", "AND", X1 + 0.7, Y_AND1)
+    label("t_xor2", "XOR", X2 + 0.75, Y_XOR2)
+    label("t_and2", "AND", X2 + 0.7, Y_AND2)
+    label("t_or", "OR", X3 + 0.75, Y_OR)
+    label("pin_a", "a", 0.5, IN_A)
+    label("pin_b", "b", 0.5, IN_B)
+    label("pin_c", "c_in", 0.5, IN_C)
+    label("pin_s", "s", 14.1, Y_XOR2)
+    label("pin_co", "c_out", 14.0, Y_OR)
+
+    # where each net branches, and the junction dots that mark it
+    BR_A = 2.2
+    BR_B = 2.7
+    BR_C = 6.4
+    BR_N1 = 6.9
+    jx = [BR_A, BR_B, BR_C, BR_N1]
+    jy = [pin_hi(Y_XOR1), pin_lo(Y_XOR1), pin_lo(Y_XOR2), pin_hi(Y_XOR2)]
+    dots("junction", jx, jy, 0.09)
+
+    #| The x coordinates of the path of net `which` (0 to 7: a, b, c_in, the three
+    #| internal wires, s, c_out); `net_y` gives the y coordinates.
+    def net_x(which) {
+        if which == 0 {
+            return net2_x(0.8, IN_A, BR_A, X1, pin_hi(Y_XOR1), X1, pin_hi(Y_AND1))
+        }
+        if which == 1 {
+            return net2_x(0.8, IN_B, BR_B, X1, pin_lo(Y_XOR1), X1, pin_lo(Y_AND1))
+        }
+        if which == 2 {
+            return net2_x(0.8, IN_C, BR_C, X2, pin_lo(Y_XOR2), X2, pin_lo(Y_AND2))
+        }
+        if which == 3 {
+            return net2_x(X1 + GW, Y_XOR1, BR_N1, X2, pin_hi(Y_XOR2), X2, pin_hi(Y_AND2))
+        }
+        if which == 4 {
+            return wire_x(X1 + GW, Y_AND1, 9.9, X3, pin_hi(Y_OR))
+        }
+        if which == 5 {
+            return wire_x(X2 + GW, Y_AND2, 10.2, X3, pin_lo(Y_OR))
+        }
+        if which == 6 {
+            return wire_x(X2 + GW, Y_XOR2, 13.6, 13.6, Y_XOR2)
+        }
+        return wire_x(X3 + GW, Y_OR, 13.4, 13.4, Y_OR)
+    }
+    def net_y(which) {
+        if which == 0 {
+            return net2_y(0.8, IN_A, BR_A, X1, pin_hi(Y_XOR1), X1, pin_hi(Y_AND1))
+        }
+        if which == 1 {
+            return net2_y(0.8, IN_B, BR_B, X1, pin_lo(Y_XOR1), X1, pin_lo(Y_AND1))
+        }
+        if which == 2 {
+            return net2_y(0.8, IN_C, BR_C, X2, pin_lo(Y_XOR2), X2, pin_lo(Y_AND2))
+        }
+        if which == 3 {
+            return net2_y(X1 + GW, Y_XOR1, BR_N1, X2, pin_hi(Y_XOR2), X2, pin_hi(Y_AND2))
+        }
+        if which == 4 {
+            return wire_y(X1 + GW, Y_AND1, 9.9, X3, pin_hi(Y_OR))
+        }
+        if which == 5 {
+            return wire_y(X2 + GW, Y_AND2, 10.2, X3, pin_lo(Y_OR))
+        }
+        if which == 6 {
+            return wire_y(X2 + GW, Y_XOR2, 13.6, 13.6, Y_XOR2)
+        }
+        return wire_y(X3 + GW, Y_OR, 13.4, 13.4, Y_OR)
+    }
+
+    # the wires themselves, drawn once and left alone
+    curve("sch:net_a", net_x(0), net_y(0))
+    curve("sch:net_b", net_x(1), net_y(1))
+    curve("sch:net_c", net_x(2), net_y(2))
+    curve("sch:net_n1", net_x(3), net_y(3))
+    curve("sch:net_n2", net_x(4), net_y(4))
+    curve("sch:net_n3", net_x(5), net_y(5))
+    curve("sch:net_s", net_x(6), net_y(6))
+    curve("sch:net_co", net_x(7), net_y(7))
+
+    # the full adder's nets: a, b, c, n1, n2, n3, s, co
+    NET_COUNT = 8.0
+    # the rows of the truth table of three inputs
+    TRUTH_ROWS = 8.0
+
+    #| Which of the eight nets carry a 1, for one row of the truth table.
+    def net_values(a, b, c) {
+        x1 = gate_xor(a, b)
+        v = zeros(NET_COUNT)
+        v[0] = a
+        v[1] = b
+        v[2] = c
+        v[3] = x1
+        v[4] = gate_and(a, b)
+        v[5] = gate_and(x1, c)
+        v[6] = full_sum(a, b, c)
+        v[7] = full_carry(a, b, c)
+        return v
+    }
+    #| A net's path when it carries a 1, and a path off the picture when it carries a 0.
+    def live_x(which, on) {
+        if on > 0.5 {
+            return net_x(which)
+        }
+        return parked(len(net_x(which)))
+    }
+    def live_y(which, on) {
+        if on > 0.5 {
+            return net_y(which)
+        }
+        return parked(len(net_y(which)))
+    }
+
+    # Eight rows, in order. A net carrying a 1 is drawn over in the live color.
+    for row to TRUTH_ROWS {
+        a = band(shr(row, 2), 1.0)
+        b = band(shr(row, 1), 1.0)
+        c = band(row, 1.0)
+        v = net_values(a, b, c)
+        curve("live:a", live_x(0, v[0]), live_y(0, v[0]))
+        curve("live:b", live_x(1, v[1]), live_y(1, v[1]))
+        curve("live:c", live_x(2, v[2]), live_y(2, v[2]))
+        curve("live:n1", live_x(3, v[3]), live_y(3, v[3]))
+        curve("live:n2", live_x(4, v[4]), live_y(4, v[4]))
+        curve("live:n3", live_x(5, v[5]), live_y(5, v[5]))
+        curve("live:s", live_x(6, v[6]), live_y(6, v[6]))
+        curve("live:co", live_x(7, v[7]), live_y(7, v[7]))
+        say("a + b + c_in on this row", a + b + c)
+        frame(0.9)
+    }
+
+    # ---- the same column over all eight rows, as a timing diagram ----
+    # One row per unit of x. A signal is a square wave: it holds its value across
+    # a row and steps at the boundary, which is how the whole table fits in one
+    # picture and how a logic analyzer would show it.
+    ROWS = 8
+
+    #| The x of a square wave over n rows: 0, 1, 1, 2, 2, ... n.
+    def step_x(n) {
+        xs = zeros(2 * n)
+        for i to 2 * n {
+            xs[i] = floor(i / 2.0) + mod(i, 2.0)
+        }
+        return xs
+    }
+    #| The y: the bit for a row, held across that row, lifted onto a baseline.
+    def step_y(bits, n, base, height) {
+        ys = zeros(2 * n)
+        for i to 2 * n {
+            ys[i] = base + height * bits[floor(i / 2.0)]
+        }
+        return ys
+    }
+
+    a_bits = zeros(ROWS)
+    b_bits = zeros(ROWS)
+    c_bits = zeros(ROWS)
+    s_bits = zeros(ROWS)
+    o_bits = zeros(ROWS)
+    for row to ROWS {
+        a_bits[row] = band(shr(row, 2), 1.0)
+        b_bits[row] = band(shr(row, 1), 1.0)
+        c_bits[row] = band(row, 1.0)
+        s_bits[row] = full_sum(a_bits[row], b_bits[row], c_bits[row])
+        o_bits[row] = full_carry(a_bits[row], b_bits[row], c_bits[row])
+    }
+    xs = step_x(ROWS)
+
+    # A logic analyzer's picture. The names sit in a gutter on the left, a dashed
+    # boundary marks every row, each signal holds its value across a row, and the
+    # total is written underneath. Read a column downwards and c_out, s is that
+    # total in binary.
+    stage("All eight rows, as a timing diagram", -2.0, 8.3, 0.4, 9.6)
+    vline("g0", 0.0)
+    vline("g1", 1.0)
+    vline("g2", 2.0)
+    vline("g3", 3.0)
+    vline("g4", 4.0)
+    vline("g5", 5.0)
+    vline("g6", 6.0)
+    vline("g7", 7.0)
+    vline("g8", 8.0)
+    label("k_row", "row", -1.3, 9.15)
+    label("n0", "0", 0.5, 9.15)
+    label("n1", "1", 1.5, 9.15)
+    label("n2", "2", 2.5, 9.15)
+    label("n3", "3", 3.5, 9.15)
+    label("n4", "4", 4.5, 9.15)
+    label("n5", "5", 5.5, 9.15)
+    label("n6", "6", 6.5, 9.15)
+    label("n7", "7", 7.5, 9.15)
+    label("s_a", "a", -1.3, 8.12)
+    label("s_b", "b", -1.3, 6.82)
+    label("s_c", "c_in", -1.3, 5.52)
+    label("s_s", "s", -1.3, 3.72)
+    label("s_o", "c_out", -1.3, 2.42)
+    hline("mid", 4.6)
+    curve("in:a", xs, step_y(a_bits, ROWS, 7.7, 0.85))
+    curve("in:b", xs, step_y(b_bits, ROWS, 6.4, 0.85))
+    curve("in:c", xs, step_y(c_bits, ROWS, 5.1, 0.85))
+    curve("out:s", xs, step_y(s_bits, ROWS, 3.3, 0.85))
+    curve("out:c", xs, step_y(o_bits, ROWS, 2.0, 0.85))
+    label("k_tot", "a + b + c_in", -1.3, 1.05)
+    label("t0", "0", 0.5, 1.05)
+    label("t1", "1", 1.5, 1.05)
+    label("t2", "1", 2.5, 1.05)
+    label("t3", "2", 3.5, 1.05)
+    label("t4", "1", 4.5, 1.05)
+    label("t5", "2", 5.5, 1.05)
+    label("t6", "2", 6.5, 1.05)
+    label("t7", "3", 7.5, 1.05)
+    # the grid, the names and the row ruler are there before anything is driven
+    together()
+    fade_in("g0", 0.3)
+    fade_in("g1", 0.3)
+    fade_in("g2", 0.3)
+    fade_in("g3", 0.3)
+    fade_in("g4", 0.3)
+    fade_in("g5", 0.3)
+    fade_in("g6", 0.3)
+    fade_in("g7", 0.3)
+    fade_in("g8", 0.3)
+    fade_in("k_row", 0.3)
+    fade_in("n0", 0.3)
+    fade_in("n1", 0.3)
+    fade_in("n2", 0.3)
+    fade_in("n3", 0.3)
+    fade_in("n4", 0.3)
+    fade_in("n5", 0.3)
+    fade_in("n6", 0.3)
+    fade_in("n7", 0.3)
+    fade_in("s_a", 0.3)
+    fade_in("s_b", 0.3)
+    fade_in("s_c", 0.3)
+    fade_in("s_s", 0.3)
+    fade_in("s_o", 0.3)
+    fade_in("mid", 0.3)
+    apart()
+    say("The three inputs count from 000 up to 111, one row per column")
+    together()
+    draw("in:a", 2.4)
+    draw("in:b", 2.4)
+    draw("in:c", 2.4)
+    apart()
+    say("s is high when an odd number of inputs are high; c_out when two or more are")
+    together()
+    draw("out:s", 2.4)
+    draw("out:c", 2.4)
+    apart()
+    say("Read a column downwards: c_out and s spell the total in binary")
+    together()
+    fade_in("k_tot", 0.5)
+    fade_in("t0", 0.5)
+    fade_in("t1", 0.5)
+    fade_in("t2", 0.5)
+    fade_in("t3", 0.5)
+    fade_in("t4", 0.5)
+    fade_in("t5", 0.5)
+    fade_in("t6", 0.5)
+    fade_in("t7", 0.5)
+    apart()
+    wait(1.0)
+
+    # ---- 11 + 7, where the carry has to cross every column ----
+    # 1011 + 0111 carries out of all four columns, so the last bit waits on the
+    # first three. The moving dot is that carry; a mark appears under each column
+    # as it settles. Keyframes, so the dot slides and the marks rise into place.
+    stage("11 + 7: the carry crosses all four columns", -1.2, 9.2, -1.2, 4.8)
+    label("cols_a", "a = 1 0 1 1", 4.0, 4.3)
+    label("cols_b", "b = 0 1 1 1", 4.0, 3.6)
+    label("d0", "1", 7.0, 2.8)
+    label("d1", "1", 5.0, 2.8)
+    label("d2", "0", 3.0, 2.8)
+    label("d3", "1", 1.0, 2.8)
+    label("e0", "1", 7.0, 2.2)
+    label("e1", "1", 5.0, 2.2)
+    label("e2", "1", 3.0, 2.2)
+    label("e3", "0", 1.0, 2.2)
+    hline("rule", 1.7)
+    label("r0", "0", 7.0, 1.0)
+    label("r1", "1", 5.0, 1.0)
+    label("r2", "0", 3.0, 1.0)
+    label("r3", "0", 1.0, 1.0)
+    label("r4", "1", -0.7, 1.0)
+    label("p0", "1s", 7.0, 0.1)
+    label("p1", "2s", 5.0, 0.1)
+    label("p2", "4s", 3.0, 0.1)
+    label("p3", "8s", 1.0, 0.1)
+
+    # a mark under a column means that column has settled; parked below the
+    # window until it does, which the stage clips
+    settled_x = zeros(WIDTH)
+    settled_y = zeros(WIDTH)
+    for i to WIDTH {
+        settled_x[i] = 7.0 - 2.0 * i
+        settled_y[i] = -2.1
+    }
+    dots("settled", settled_x, settled_y, 0.17)
+    circle("carry", 8.4, 1.7, 0.16)
+    say("The ones column first, with nothing carried in")
+    frame(0.7)
+
+    for i to WIDTH {
+        settled_y[i] = 0.55
+        dots("settled", settled_x, settled_y, 0.17)
+        circle("carry", 6.0 - 2.0 * i, 1.7, 0.16)
+        say("Columns settled", i + 1.0)
+        frame(0.9)
+    }
+    say("11 + 7 = 18, which is 1 0010. Four columns, four carry delays.")
+    frame(1.4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

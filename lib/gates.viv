@@ -1,0 +1,179 @@
+###
+post: Gate symbols and orthogonal wiring, for drawing a schematic
+agent: claude
+
+The distinctive shapes of IEEE Std 91: AND is a D with a flat back and a
+semicircular nose, OR has a concave back and a pointed nose, XOR is an OR with a
+second arc behind it, and an inverting output is a small circle on the nose.
+Each one comes back as a closed outline to hand to `curve`, so a schematic is
+line art.
+
+The wiring helpers build orthogonal paths: a wire leaves a gate horizontally,
+turns once, and arrives horizontally, which is how a schematic is drawn and read.
+A net that feeds two gates is one path that retraces itself, so it can be drawn,
+and lit, as one thing.
+
+Used with `import gates`. The drawing calls stay in the post, because the
+ids they need are string literals.
+###
+
+GATE_ARC = 17   # odd, so a sample lands exactly on the nose
+GATE_CORNERS = 3   # an AND outline's back and top corners, before the arc
+
+#| Sample x along a quadratic Bezier from x0 through the control x1 to x2.
+def bez(p0, p1, p2, n) {
+    out = zeros(n)
+    for i to n {
+        t = i / (n - 1.0)
+        u = 1.0 - t
+        out[i] = u * u * p0 + 2.0 * u * t * p1 + t * t * p2
+    }
+    return out
+}
+
+#| Concatenate two arrays.
+def joined(a, b) {
+    out = zeros(len(a) + len(b))
+    for i to len(a) {
+        out[i] = a[i]
+    }
+    for j to len(b) {
+        out[len(a) + j] = b[j]
+    }
+    return out
+}
+
+#| The x of an AND outline: back at x, nose reaching x + w, height h, centered on y.
+def and_x(x, y, w, h) {
+    r = 0.5 * h
+    straight = x + w - r
+    xs = zeros(GATE_CORNERS + GATE_ARC)
+    xs[0] = x
+    xs[1] = x
+    xs[2] = straight
+    for i to GATE_ARC {
+        ang = 1.5707963267948966 * (1.0 - 2.0 * i / (GATE_ARC - 1.0))
+        xs[GATE_CORNERS + i] = straight + r * cos(ang)
+    }
+    return joined(xs, [x, x])
+}
+#| The y of that outline.
+def and_y(x, y, w, h) {
+    r = 0.5 * h
+    ys = zeros(GATE_CORNERS + GATE_ARC)
+    ys[0] = y - r
+    ys[1] = y + r
+    ys[2] = y + r
+    for i to GATE_ARC {
+        ang = 1.5707963267948966 * (1.0 - 2.0 * i / (GATE_ARC - 1.0))
+        ys[GATE_CORNERS + i] = y + r * sin(ang)
+    }
+    return joined(ys, [y - r, y - r])
+}
+
+#| The x of an OR outline: concave back at x, nose at x + w.
+def or_x(x, y, w, h) {
+    r = 0.5 * h
+    back = bez(x, x + 0.45 * w, x, GATE_ARC)
+    top = bez(x, x + 0.55 * w, x + w, GATE_ARC)
+    bot = bez(x + w, x + 0.55 * w, x, GATE_ARC)
+    return joined(joined(back, top), bot)
+}
+#| The y of that outline.
+def or_y(x, y, w, h) {
+    r = 0.5 * h
+    back = bez(y - r, y, y + r, GATE_ARC)
+    top = bez(y + r, y + r, y, GATE_ARC)
+    bot = bez(y, y - r, y - r, GATE_ARC)
+    return joined(joined(back, top), bot)
+}
+
+#| The second arc behind an XOR, a little to the left of the body.
+def xor_arc_x(x, y, w, h, gap) {
+    return bez(x - gap, x - gap + 0.45 * w, x - gap, GATE_ARC)
+}
+#| The y of that arc.
+def xor_arc_y(x, y, w, h, gap) {
+    r = 0.5 * h
+    return bez(y - r, y, y + r, GATE_ARC)
+}
+
+#| An inverter: a triangle from the back at x to a point at x + w.
+def not_x(x, y, w, h) {
+    return [x, x, x + w, x]
+}
+#| The y of that triangle.
+def not_y(x, y, w, h) {
+    r = 0.5 * h
+    return [y - r, y + r, y, y - r]
+}
+
+#| An orthogonal wire: out of (x1, y1) to the right, one turn at `xm`, into
+#| (x2, y2) from the left. Four points; a straight run repeats the last.
+def wire_x(x1, y1, xm, x2, y2) {
+    return [x1, xm, xm, x2]
+}
+#| The y of that wire.
+def wire_y(x1, y1, xm, x2, y2) {
+    return [y1, y1, y2, y2]
+}
+
+#| A net that feeds two inputs: out of (x1, y1), along to the branch at `xm`, up
+#| or down to the first input's height, into it, back to the branch, down to the
+#| second, into it. Every run is horizontal or vertical, and the retrace draws
+#| over itself, so the net is one path with a junction where it splits.
+def net2_x(x1, y1, xm, xa, ya, xb, yb) {
+    return [x1, xm, xm, xa, xm, xm, xb]
+}
+#| The y of that net.
+def net2_y(x1, y1, xm, xa, ya, xb, yb) {
+    return [y1, y1, ya, ya, ya, yb, yb]
+}
+
+#| A path parked off the picture: the same point count, far enough away that a
+#| keyframed player jumps rather than sliding it back in.
+def parked(n) {
+    out = zeros(n)
+    for i to n {
+        out[i] = -40.0
+    }
+    return out
+}
+
+test "an AND outline is closed, and spans the box it was asked for" {
+    xs = and_x(1.0, 2.0, 1.6, 1.0)
+    ys = and_y(1.0, 2.0, 1.6, 1.0)
+    assert_near(xs[0], xs[len(xs) - 1], 1.0e-12)
+    assert_near(ys[0], ys[len(ys) - 1], 1.0e-12)
+    assert_near(min(xs), 1.0, 1.0e-12)
+    assert_near(max(xs), 2.6, 1.0e-12)
+    assert_near(min(ys), 1.5, 1.0e-12)
+    assert_near(max(ys), 2.5, 1.0e-12)
+}
+test "an OR outline reaches its nose and its back sits inside the box" {
+    xs = or_x(0.0, 0.0, 2.0, 1.2)
+    ys = or_y(0.0, 0.0, 2.0, 1.2)
+    assert_near(max(xs), 2.0, 1.0e-12)
+    assert_near(min(xs), 0.0, 1.0e-12)
+    assert_near(max(ys), 0.6, 1.0e-12)
+    assert_near(min(ys), -0.6, 1.0e-12)
+}
+test "a branching net runs only horizontally and vertically" {
+    xs = net2_x(0.0, 1.0, 2.0, 4.0, 3.0, 4.0, -1.0)
+    ys = net2_y(0.0, 1.0, 2.0, 4.0, 3.0, 4.0, -1.0)
+    for i to len(xs) - 1 {
+        moved_x = abs(xs[i + 1] - xs[i])
+        moved_y = abs(ys[i + 1] - ys[i])
+        assert_true(moved_x < 1.0e-12 or moved_y < 1.0e-12)
+    }
+}
+test "a wire turns once: two horizontal runs joined by a vertical one" {
+    xs = wire_x(0.0, 1.0, 2.0, 4.0, 3.0)
+    ys = wire_y(0.0, 1.0, 2.0, 4.0, 3.0)
+    assert_near(ys[0], ys[1], 1.0e-12)
+    assert_near(xs[1], xs[2], 1.0e-12)
+    assert_near(ys[2], ys[3], 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

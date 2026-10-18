@@ -1,0 +1,64 @@
+# The assembler against encodings worked out by hand from the RISC-V
+# unprivileged manual (version 20191213, figure 2.3 and chapter 24), and
+# small programs assembled and run on the simulator.
+
+from rv32.asm import assemble
+from rv32.sim import machine, run
+from rv32.bits import pow2
+
+#| The 32-bit words of an assembled program's code.
+def words(text: Str) -> [Int] {
+    p = assemble(text)
+    out: [Int] = []
+    for k to p.text_bytes // 4 {
+        w = sum([p.image[4 * k + j] * pow2(8 * int(j)) for j to 4])
+        out = append(out, int(w))
+    }
+    return out
+}
+
+#| Assemble, run and give the exit code.
+def exit_code(text: Str) -> Int {
+    p = assemble(text)
+    return run(machine(p.image, 0), 100000).exit_code
+}
+
+test "one instruction of each format" {
+    assert_true(words("add a0, a0, a1")[0] == 0x00b50533)       # R
+    assert_true(words("sub t0, t1, t2")[0] == 0x407302b3)       # R, funct7 0x20
+    assert_true(words("addi a0, zero, -1")[0] == 0xfff00513)    # I
+    assert_true(words("srai x5, x6, 3")[0] == 0x40335293)       # I, shift with funct7
+    assert_true(words("lw ra, 12(sp)")[0] == 0x00c12083)        # load
+    assert_true(words("sw ra, -4(sp)")[0] == 0xfe112e23)        # S
+    assert_true(words("lui a0, 0x12345")[0] == 0x12345537)      # U
+    assert_true(words("mul a0, a0, a1")[0] == 0x02b50533)       # R, funct7 1
+    assert_true(words("remu t0, t1, t2")[0] == 0x027372b3)
+    assert_true(words("ecall")[0] == 0x00000073)
+    assert_true(words("ebreak")[0] == 0x00100073)
+}
+
+test "branches and jumps to labels, back and forward" {
+    w = words("top: beq x0, x0, top\njal x0, top\nj 1f\nnop\n1: ret")
+    assert_true(w[0] == 0x00000063)     # beq x0, x0, 0
+    assert_true(w[1] == 0xffdff06f)     # jal x0, -4
+    assert_true(w[2] == 0x0080006f)     # jal x0, +8
+    assert_true(w[3] == 0x00000013)     # nop = addi x0, x0, 0
+    assert_true(w[4] == 0x00008067)     # ret = jalr x0, 0(ra)
+}
+
+test "li picks one or two instructions" {
+    assert_true(len(words("li a0, 2047")) == 1)
+    w = words("li a0, 0x12345fff")
+    #: the low part 0xfff reads as -1, so lui loads 0x12346 to make up for it
+    assert_true(w[0] == 0x12346537)
+    assert_true(w[1] == 0xfff50513)
+}
+
+test "programs run: a loop, a call, data" {
+    assert_true(exit_code("li a0, 0\nli t0, 10\n1: add a0, a0, t0\naddi t0, t0, -1\nbnez t0, 1b\nli a7, 93\necall") == 55)
+    assert_true(exit_code("call f\nli a7, 93\necall\nf: li a0, 7\nret") == 7)
+    assert_true(exit_code("la t0, x\nlw a0, 0(t0)\nli a7, 93\necall\n.data\nx: .word 42") == 42)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

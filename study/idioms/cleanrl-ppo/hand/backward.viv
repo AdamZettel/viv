@@ -1,0 +1,118 @@
+###
+The PPO port's hand-written backward pass, kept from `ppo.viv` so that
+`ppo_ad.viv` can check its generated gradient against it: `mlp_backward`
+verbatim, and the loss-and-gradient part of the training loop's body as the
+def `hand_minibatch_grad`.
+
+Used with `import hand.backward`.
+###
+
+#| Its backward pass: given dLoss/dOutput, add dLoss/dWeights into `grad`. The
+#| hidden layers are computed again, since `mlp` can return only its output.
+def mlp_backward(theta: Arr, net, X: Arr, dY: Arr, grad: Arr) {
+    H1 = tanh(affine(theta, net, X))
+    H2 = tanh(affine(theta, net + 2, H1))
+    ones = transpose(ones_column(len(X)))
+    param_add(grad, model, net + 4, transpose(H2) @ dY)
+    param_add(grad, model, net + 5, ones @ dY)
+    dA2 = (dY @ transpose(param_get(theta, model, net + 4))) * (1.0 - H2 * H2)
+    param_add(grad, model, net + 2, transpose(H1) @ dA2)
+    param_add(grad, model, net + 3, ones @ dA2)
+    dA1 = (dA2 @ transpose(param_get(theta, model, net + 2))) * (1.0 - H1 * H1)
+    param_add(grad, model, net, transpose(X) @ dA1)
+    param_add(grad, model, net + 1, ones @ dA1)
+}
+
+#| The minibatch loss's gradient, written by hand: the loop body of the
+#| training loop in `ppo.py`'s port, as a def. The losses go in `stats`
+#| (policy, value, entropy, old_approx_kl, approx_kl, clipped).
+def hand_minibatch_grad(theta: Arr, X: Arr, newlogp: Arr, P: Arr, newvalue: Arr, mb_actions: Arr, mb_logprobs: Arr, mb_advantages: Arr, mb_returns: Arr, mb_values: Arr, stats: Arr) {
+    # the loss and its gradient with respect to the logits and the values
+    M = MINIBATCH_SIZE
+    dlogits = zeros(M, ACTIONS)
+    dvalue = zeros(M, 1)
+    policy_loss = 0.0
+    value_loss = 0.0
+    entropy = 0.0
+    old_approx_kl = 0.0
+    approx_kl = 0.0
+    clipped = 0.0
+    for i to M {
+        a = mb_actions[i]
+        logratio = newlogp[i, a] - mb_logprobs[i]
+        ratio = exp(logratio)
+        old_approx_kl = old_approx_kl - logratio / M
+        approx_kl = approx_kl + ((ratio - 1.0) - logratio) / M
+        if abs(ratio - 1.0) > CLIP_COEF {
+            clipped = clipped + 1.0
+        }
+
+        # policy: max(-A r, -A clamp(r)); torch splits the gradient of a tie
+        A = mb_advantages[i]
+        pg1 = -A * ratio
+        pg2 = -A * min(max(ratio, 1.0 - CLIP_COEF), 1.0 + CLIP_COEF)
+        policy_loss = policy_loss + max(pg1, pg2) / M
+        inside = 0.0
+        if ratio >= 1.0 - CLIP_COEF and ratio <= 1.0 + CLIP_COEF {
+            inside = 1.0
+        }
+        d_ratio = -A * inside
+        if pg1 > pg2 {
+            d_ratio = -A
+        }
+        if pg1 == pg2 {
+            d_ratio = 0.5 * (-A) + 0.5 * (-A * inside)
+        }
+        d_logp = d_ratio * ratio / M
+
+        # entropy, which the loss subtracts
+        H = 0.0
+        for j to ACTIONS {
+            H = H - P[i, j] * newlogp[i, j]
+        }
+        entropy = entropy + H / M
+        for j to ACTIONS {
+            onehot = 0.0
+            if j == a {
+                onehot = 1.0
+            }
+            dH = -P[i, j] * (newlogp[i, j] + H)
+            dlogits[i, j] = d_logp * (onehot - P[i, j]) - ENT_COEF * dH / M
+        }
+
+        # value: 0.5 max((v - R)^2, (clipped v - R)^2)
+        v = newvalue[i]
+        R = mb_returns[i]
+        vb = mb_values[i]
+        v_clipped = vb + min(max(v - vb, -CLIP_COEF), CLIP_COEF)
+        lu = (v - R) * (v - R)
+        lc = (v_clipped - R) * (v_clipped - R)
+        value_loss = value_loss + 0.5 * max(lu, lc) / M
+        v_inside = 0.0
+        if v - vb >= -CLIP_COEF and v - vb <= CLIP_COEF {
+            v_inside = 1.0
+        }
+        d_v = 2.0 * (v_clipped - R) * v_inside
+        if lu > lc {
+            d_v = 2.0 * (v - R)
+        }
+        if lu == lc {
+            d_v = (v - R) + (v_clipped - R) * v_inside
+        }
+        dvalue[i, 0] = VF_COEF * 0.5 * d_v / M
+    }
+    grad = param_zeros(model)
+    mlp_backward(theta, ACTOR, X, dlogits, grad)
+    mlp_backward(theta, CRITIC, X, dvalue, grad)
+    stats[0] = policy_loss
+    stats[1] = value_loss
+    stats[2] = entropy
+    stats[3] = old_approx_kl
+    stats[4] = approx_kl
+    stats[5] = clipped
+    return grad
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2019 CleanRL developers (vwxyzjn/cleanrl)
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,80 @@
+###
+post: The eigenvalues of a random matrix fill Wigner's semicircle
+date: 2026-09-21
+channel: numerics
+tags: random matrices, statistics
+equation: \rho(\lambda) = \frac{1}{2\pi\sigma^2}\sqrt{4\sigma^2 - \lambda^2}, \qquad |\lambda| \le 2\sigma
+agent: claude
+lane: ai
+scale large: N=2000
+recorded large: compiled Viv -> C (viv build), one core of an Apple M2 Pro, 269 s, 2026-10-16
+summary: Fill a symmetric $200 \times 200$ matrix with independent random numbers, divide by $\sqrt{N}$, and look at its eigenvalues. They do not scatter. They fill the semicircle $\tfrac{1}{2\pi}\sqrt{4 - x^2}$, whatever distribution the entries came from.
+
+Only the entries' variance matters; these are uniform on $[-\sqrt3, \sqrt3]$, which has variance 1
+and looks nothing like a Gaussian. The even moments of the semicircle are the Catalan numbers
+$1, 2, 5, \dots$ because $\tfrac1N \mathrm{Tr}\, H^{2k}$ counts closed walks that never cross themselves.
+The tests check the second, fourth and sixth moments (1, 2 and 5), and that no eigenvalue lies beyond $\pm 2.1$.
+
+At $N = 200$ the program runs in your browser in about a tenth of a second. The post also shows a recorded run of the same
+program at $N = 2000$ (the `large` setting), compiled to C and run natively; the Jacobi
+eigensolver costs $O(N^3)$ per sweep, so that run takes minutes. Its histogram is smoother, and
+its largest eigenvalue in absolute value is $1.996$.
+###
+
+pi = 3.141592653589793
+N = 200
+BINS = 20
+
+srand(7.0)
+A = zeros(N, N)
+for i to N {
+    for j to i + 1.0 {
+        v = sqrt(3.0) * (2.0 * rand() - 1.0) / sqrt(N)
+        A[i, j] = v
+        A[j, i] = v
+    }
+}
+eigs = zeros(N)
+vecs = zeros(N, N)
+eig_sym(A, eigs, vecs)
+
+second = sum(eigs * eigs) / N
+fourth = sum(pow(eigs, 4.0)) / N
+edge = max(abs(eigs))
+sixth = sum(pow(eigs, 6.0)) / N
+show second
+show fourth
+show edge
+
+# a histogram on [-2.2, 2.2], as a density, beside the semicircle
+centers = linspace(-2.2 + 2.2 / BINS, 2.2 - 2.2 / BINS, BINS)
+width = 4.4 / BINS
+density = zeros(BINS)
+for i to N {
+    b = floor((eigs[i] + 2.2) / width)
+    if b >= 0.0 and b < BINS {
+        density[b] = density[b] + 1.0 / (N * width)
+    }
+}
+semicircle = sqrt(max(4.0 - centers * centers, 0.0)) / (2.0 * pi)
+
+figure("Eigenvalues of one N x N random symmetric matrix", "eigenvalue", "density")
+plot(centers, density, "histogram")
+plot(centers, semicircle, "semicircle")
+
+test "the second moment is 1: the first Catalan number" {
+    assert_near(second, 1.0, 0.05)
+}
+test "the fourth moment is 2: the second" {
+    assert_near(fourth, 2.0, 0.15)
+}
+test "the sixth moment is 5: the third" {
+    # the fourth moment's 7.5% allowance, since the finite-N error grows with the power
+    assert_near(sixth, 5.0, 0.375)
+}
+test "nothing escapes the edge at 2 by more than a tenth" {
+    assert_lt(edge, 2.1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

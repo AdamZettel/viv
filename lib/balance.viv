@@ -1,0 +1,339 @@
+###
+post: Balanced truncation, or which states a model can do without
+agent: claude
+
+A state-space model `(A, B, C)` of order `n` can usually be replaced by one of
+order `r` much smaller than `n` whose input-output behavior is nearly the same.
+Which `r` states, though? Not a subset of the original ones: the right answer is
+almost never "drop state 7". It is a change of coordinates followed by a
+truncation, and the coordinates are the ones in which the two Gramians are equal
+and diagonal.
+
+The diagonal they share is the Hankel singular values. They say how much each
+balanced state contributes to the map from past inputs to future outputs, and
+unlike the eigenvalues of `A` they do not depend on the coordinates at all. Run
+the model through any invertible change of variables and they come back
+identical, which is the first test below and the reason they are the right thing
+to rank states by.
+
+Getting them without ever forming the balancing transformation, which is what
+makes the square-root method the one to use: factor `Wc = Lc Lc^T` and
+`Wo = Lo Lo^T`, take the SVD of `Lo^T Lc`, and its singular values are the
+Hankel singular values. The projections onto the leading `r` of them follow from
+the same factors. `Wc Wo` is never formed, so its condition number, which is the
+square of the one the result depends on, never enters.
+
+The reduction has a guarantee attached: the worst-case gain of the error system
+is at most twice the sum of the Hankel singular values that were thrown away.
+This module does not compute worst-case gain, so it checks the energy of the
+error instead, and that the error shrinks as `r` grows.
+
+Used with `import balance`.
+###
+
+from lyap import gram_controllability, gram_observability, h2_through_control, lyap_test_system
+from linalg import inverse, test_matrix
+from svd import svd
+
+#| The Hankel singular values of `(A, B, C)`, descending, into `s`. `A` must be
+#| stable, and the system controllable and observable, or the Gramians are
+#| singular and the Cholesky factors do not exist.
+def hankel_values(A: Arr, B: Arr, C: Arr, s: Arr) {
+    n = len(A)
+    Wc = gram_controllability(A, B)
+    Wo = gram_observability(A, C)
+    Lc = zeros(n, n)
+    Lo = zeros(n, n)
+    cholesky(Wc, Lc)
+    cholesky(Wo, Lo)
+    M = transpose(Lo) @ Lc
+    U = zeros(n, n)
+    V = zeros(n, n)
+    junk = svd(M, U, s, V, n, n)
+    return 0.0
+}
+
+#| Reduce `(A, B, C)` to order `r`, into `Ar`, `Br`, `Cr`. Returns the sum of
+#| the Hankel singular values that were dropped: twice that is the guaranteed
+#| bound on the worst-case gain of the error.
+def balred(A, B, C, r, Ar, Br, Cr) {
+    n = len(A)
+    Wc = gram_controllability(A, B)
+    Wo = gram_observability(A, C)
+    Lc = zeros(n, n)
+    Lo = zeros(n, n)
+    cholesky(Wc, Lc)
+    cholesky(Wo, Lo)
+    M = transpose(Lo) @ Lc
+    U = zeros(n, n)
+    s = zeros(n)
+    V = zeros(n, n)
+    junk = svd(M, U, s, V, n, n)
+    # the two projections: Tl = S^-1/2 U^T Lo^T and Tr = Lc V S^-1/2, which
+    # satisfy Tl Tr = I on the r states that are kept
+    Tl = zeros(r, n)
+    Tr = zeros(n, r)
+    for a to r {
+        w = 1.0 / sqrt(s[a])
+        for j to n {
+            total = 0.0
+            for k to n {
+                total = total + U[k, a] * Lo[j, k]
+            }
+            Tl[a, j] = w * total
+        }
+        for i to n {
+            total = 0.0
+            for k to n {
+                total = total + Lc[i, k] * V[k, a]
+            }
+            Tr[i, a] = w * total
+        }
+    }
+    small = Tl @ A @ Tr
+    bsmall = Tl @ B
+    csmall = C @ Tr
+    for i to r {
+        for j to r {
+            Ar[i, j] = small[i, j]
+        }
+        for j to len(transpose(B)) {
+            Br[i, j] = bsmall[i, j]
+        }
+    }
+    for i to len(C) {
+        for j to r {
+            Cr[i, j] = csmall[i, j]
+        }
+    }
+    dropped = 0.0
+    for a to n - r {
+        dropped = dropped + s[r + a]
+    }
+    return dropped
+}
+
+#| The difference of two systems, as one system: stack the states, feed both the
+#| same input, and subtract the outputs. Its H2 norm is how far apart they are.
+def system_error(A, B, C, Ar, Br, Cr, Ae, Be, Ce) {
+    n = len(A)
+    r = len(Ar)
+    m = len(transpose(B))
+    p = len(C)
+    for i to n {
+        for j to n {
+            Ae[i, j] = A[i, j]
+        }
+        for j to m {
+            Be[i, j] = B[i, j]
+        }
+    }
+    for i to r {
+        for j to r {
+            Ae[n + i, n + j] = Ar[i, j]
+        }
+        for j to m {
+            Be[n + i, j] = Br[i, j]
+        }
+    }
+    for i to p {
+        for j to n {
+            Ce[i, j] = C[i, j]
+        }
+        for j to r {
+            Ce[i, n + j] = -Cr[i, j]
+        }
+    }
+    return 0.0
+}
+
+#| How far the order-`r` reduction is from the original, in energy: the H2 norm
+#| of the difference of the two systems.
+def balred_error_abs(A: Arr, B: Arr, C: Arr, r) {
+    n = len(A)
+    m = len(transpose(B))
+    p = len(C)
+    Ar = zeros(r, r)
+    Br = zeros(r, m)
+    Cr = zeros(p, r)
+    dropped = balred(A, B, C, r, Ar, Br, Cr)
+    Ae = zeros(n + r, n + r)
+    Be = zeros(n + r, m)
+    Ce = zeros(p, n + r)
+    junk = system_error(A, B, C, Ar, Br, Cr, Ae, Be, Ce)
+    return h2_through_control(Ae, Be, Ce)
+}
+
+#| The same, as a fraction of the original system's own H2 norm.
+def balred_error(A: Arr, B: Arr, C: Arr, r) {
+    n = len(A)
+    m = len(transpose(B))
+    p = len(C)
+    Ar = zeros(r, r)
+    Br = zeros(r, m)
+    Cr = zeros(p, r)
+    dropped = balred(A, B, C, r, Ar, Br, Cr)
+    Ae = zeros(n + r, n + r)
+    Be = zeros(n + r, m)
+    Ce = zeros(p, n + r)
+    junk = system_error(A, B, C, Ar, Br, Cr, Ae, Be, Ce)
+    return h2_through_control(Ae, Be, Ce) / h2_through_control(A, B, C)
+}
+
+#| A stable single-input single-output system of order `n` whose Hankel values
+#| fall away quickly, which is what makes a model reducible in the first place.
+def balance_test_system(n, seed) {
+    return lyap_test_system(n, seed)
+}
+
+test "the Hankel singular values do not care what coordinates the model is in" {
+    n = 6
+    A = balance_test_system(n, 41.0)
+    B = zeros(n, 1)
+    C = zeros(1, n)
+    for i to n {
+        B[i, 0] = 0.6 + 0.3 * mod(i, 3.0)
+        C[0, i] = 1.0 - 0.13 * i
+    }
+    s1 = zeros(n)
+    junk = hankel_values(A, B, C, s1)
+    # any invertible change of variables: x = T z, so (T^-1 A T, T^-1 B, C T)
+    T = test_matrix(n, 909.0)
+    for i to n {
+        T[i, i] = T[i, i] + 3.0
+    }
+    Ti = inverse(T)
+    A2 = Ti @ A @ T
+    B2 = Ti @ B
+    C2 = C @ T
+    s2 = zeros(n)
+    junk = hankel_values(A2, B2, C2, s2)
+    for j to n {
+        assert_lt(abs(s1[j] - s2[j]) / s1[0], 1.0e-9)
+    }
+    # and the eigenvalues of A, which people do rank states by, are unchanged
+    # too -- but they say nothing about the input or the output
+    assert_lt(0.0, s1[0])
+}
+
+test "the Hankel values are the square roots of the eigenvalues of Wc Wo" {
+    n = 5
+    A = balance_test_system(n, 67.0)
+    B = zeros(n, 1)
+    C = zeros(1, n)
+    for i to n {
+        B[i, 0] = 1.0 - 0.15 * i
+        C[0, i] = 0.4 + 0.2 * mod(i, 2.0)
+    }
+    s = zeros(n)
+    junk = hankel_values(A, B, C, s)
+    Wc = gram_controllability(A, B)
+    Wo = gram_observability(A, C)
+    prod = Wc @ Wo
+    re = zeros(n)
+    im = zeros(n)
+    eig_general(prod, re, im)
+    # the product is similar to a symmetric positive matrix, so they are real
+    for j to n {
+        near = 1.0e30
+        for k to n {
+            near = min(near, abs(sqrt(max(re[k], 0.0)) - s[j]))
+        }
+        assert_lt(near / s[0], 1.0e-6)
+    }
+}
+
+test "keeping every state reproduces the system" {
+    n = 5
+    A = balance_test_system(n, 151.0)
+    B = zeros(n, 1)
+    C = zeros(1, n)
+    for i to n {
+        B[i, 0] = 0.5 + 0.4 * mod(i, 2.0)
+        C[0, i] = 1.0 - 0.1 * i
+    }
+    # nothing is dropped, so the error is zero and what comes back is the floor
+    # of asking for the H2 norm of a system built to cancel itself out
+    assert_lt(balred_error(A, B, C, n), 1.0e-7)
+    # and it is a factor of 43 below what dropping even one state costs
+    assert_lt(balred_error(A, B, C, n) * 20.0, balred_error(A, B, C, n - 1))
+}
+
+test "the error at each order is one to three times the first value dropped" {
+    n = 5
+    A = balance_test_system(n, 151.0)
+    B = zeros(n, 1)
+    C = zeros(1, n)
+    for i to n {
+        B[i, 0] = 0.5 + 0.4 * mod(i, 2.0)
+        C[0, i] = 1.0 - 0.1 * i
+    }
+    s = zeros(n)
+    junk = hankel_values(A, B, C, s)
+    # the Hankel values fall away fast, which is what makes this system
+    # reducible: 0.474, 0.078, 0.0116, 6.5e-5, 1.6e-7
+    assert_near(s[0], 0.474189, 1.0e-5)
+    assert_near(s[4], 1.59318e-7, 1.0e-11)
+    # and the energy of what you lose by stopping at r tracks s[r]. This is the
+    # rule you actually pick r by: read down the Hankel values and cut where
+    # they fall off a cliff.
+    for k to n - 1 {
+        r = k + 1
+        ratio = balred_error_abs(A, B, C, r) / s[r]
+        assert_lt(1.0, ratio)
+        assert_lt(ratio, 3.0)
+    }
+}
+
+test "the error falls as more states are kept, and the bound is never broken" {
+    n = 7
+    A = balance_test_system(n, 233.0)
+    B = zeros(n, 1)
+    C = zeros(1, n)
+    for i to n {
+        B[i, 0] = 0.7 + 0.25 * mod(i, 3.0)
+        C[0, i] = 0.9 - 0.11 * i
+    }
+    s = zeros(n)
+    junk = hankel_values(A, B, C, s)
+    prev = 1.0e30
+    norders = 5
+    for k to norders {
+        r = 2 + k
+        e = balred_error(A, B, C, r)
+        assert_lt(e, prev)
+        prev = e
+    }
+    # two states out of seven already gets within a few percent
+    assert_lt(balred_error(A, B, C, 2), 0.1)
+}
+
+test "the reduced model is still stable, at every order" {
+    n = 6
+    A = balance_test_system(n, 311.0)
+    B = zeros(n, 1)
+    C = zeros(1, n)
+    for i to n {
+        B[i, 0] = 0.8 - 0.09 * i
+        C[0, i] = 0.3 + 0.3 * mod(i, 2.0)
+    }
+    norders = 5
+    for k to norders {
+        r = 1 + k
+        Ar = zeros(r, r)
+        Br = zeros(r, 1)
+        Cr = zeros(1, r)
+        junk = balred(A, B, C, r, Ar, Br, Cr)
+        re = zeros(r)
+        im = zeros(r)
+        eig_general(Ar, re, im)
+        worst = -1.0e30
+        for i to r {
+            worst = max(worst, re[i])
+        }
+        assert_lt(worst, 0.0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

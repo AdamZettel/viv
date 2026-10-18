@@ -1,0 +1,86 @@
+#! pde The nonlinear Schrödinger equation
+#! equation i\,\psi_t + \tfrac12\,\psi_{xx} + |\psi|^2\psi = 0
+#! kind dispersive
+#! method split-step Fourier: the nonlinear step is ALSO exact, because it conserves the modulus
+#! checks the bright soliton sech(x) exp(it/2): its shape, its phase, the conserved norm, and the measured order
+#! | Light in a fiber, a Bose-Einstein condensate, deep-water wave envelopes. Dispersion spreads a
+#! | pulse; the focusing nonlinearity squeezes it. When they balance the pulse is a **soliton**, and
+#! | the simplest is $\psi = \mathrm{sech}(x)\,e^{it/2}$: a shape that does not change at all, with a
+#! | phase that turns at a steady rate.
+#! |
+#! | Split-step works even better here than for the linear equation. The nonlinear part alone,
+#! | $i\psi_t = -|\psi|^2\psi$, leaves $|\psi|$ unchanged -- so its solution is exactly
+#! | $\psi \to \psi\,e^{i|\psi|^2\Delta t}$, no time-stepping error. Both halves are exact; the only
+#! | error is the splitting itself.
+
+pi = 3.141592653589793
+N = 256
+L = 40.0
+DX = L / N
+X = linspace(-0.5 * L, 0.5 * L - DX, N)
+K = zeros(N)
+for j to N {
+    K[j] = 2.0 * pi * j / L
+    if j >= N / 2.0 { K[j] = 2.0 * pi * (j - N) / L }
+}
+SECH = 1.0 / cosh(X)
+
+#| exp(+i theta) for a real array theta.
+def phase(theta) {
+    return complex(cos(theta), sin(theta))
+}
+
+#| Evolve the soliton to time t_end in `steps` Strang steps.
+def evolve(t_end, steps) {
+    dt = t_end / steps
+    dispersion = phase(-0.5 * K * K * dt)
+    psi = complex(SECH, zeros(N))
+    for s to steps {
+        psi = psi * phase(0.5 * dt * abs(psi) * abs(psi))
+        fft(psi)
+        psi = psi * dispersion
+        ifft(psi)
+        psi = psi * phase(0.5 * dt * abs(psi) * abs(psi))
+    }
+    return psi
+}
+
+#| The phase of psi at x = 0, in radians.
+def center_phase(psi) {
+    z = psi[N / 2.0]
+    return atan2(im(z), re(z))
+}
+
+T_END = 2.0
+psi = evolve(T_END, 400.0)
+shape = abs(psi) - SECH
+shape_error = sqrt(sum(shape * shape) * DX)
+norm = sum(abs(psi) * abs(psi)) * DX
+phase_now = center_phase(psi)
+p1 = abs(center_phase(evolve(T_END, 100.0)) - 0.5 * T_END)
+p2 = abs(center_phase(evolve(T_END, 200.0)) - 0.5 * T_END)
+order = log(p1 / p2) / log(2.0)
+show shape_error
+show norm
+show phase_now
+show order
+
+figure("A bright soliton: the modulus does not move", "x", "$|\\psi|$")
+plot(X, SECH, "t = 0")
+plot(X, abs(psi), "t = 2")
+
+test "the soliton keeps its shape: |psi| is still sech(x)" {
+    assert_lt(shape_error, 1.0e-5)
+}
+test "its phase turns at rate 1/2: arg psi(0, t) = t/2" {
+    assert_near(phase_now, 0.5 * T_END, 1.0e-4)
+}
+test "the norm, 2 for sech(x), is conserved to rounding" {
+    assert_near(norm, 2.0, 1.0e-10)
+}
+test "the splitting is second order" {
+    assert_near(order, 2.0, 0.1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

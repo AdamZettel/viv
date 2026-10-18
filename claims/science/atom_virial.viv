@@ -1,0 +1,88 @@
+###
+title: LDA atoms miss the virial theorem by under 5%
+line: $-V/T$ exceeds 2 by 4.9% for hydrogen down to 0.19% for argon, with energies within $5 \times 10^{-7}$ hartree of NIST.
+claim: For the neutral atoms $Z = 1$ to 18 in the local density approximation (dftatom, LDA with VWN correlation), the virial ratio $-V/T$ exceeds 2 by between 0.001 and 0.05 (4.9% for hydrogen down to 0.19% for argon), shrinking at every step in $Z$. The same runs reproduce NIST's LDA total energies to within $5 \times 10^{-7}$ hartree on every atom, inside NIST's $10^{-6}$ rounding, so the departure comes from the model.
+topic: science
+section: atomic structure
+reference: NIST Standard Reference Database 141 (Atomic Reference Data for Electronic Structure Calculations, LDA column, lib/nistref.viv) for the total energies; the virial theorem $2T + V = 0$ for Coulomb systems, which density-functional LDA satisfies only up to the correlation functional's departure from homogeneous scaling (Levy and Perdew, Phys. Rev. A 32, 2010 (1985)). dftatom is Certik, Pask and Vackar's code (Comput. Phys. Commun. 184, 1777 (2013)) as ported in ports/dftatom.
+scope: Neutral atoms Z = 1 to 18 (hydrogen to argon) in NIST's ground configurations, nonrelativistic LDA with VWN correlation, dftatom's default mesh (6,000 points to 50 bohr) and tolerances. V is everything but the kinetic energy (Hartree, electron-nucleus, exchange-correlation). The expected cause, LDA correlation's departure from homogeneous scaling (Levy and Perdew), is not isolated here by an exchange-only run.
+lane: ai
+by: claude
+cost: fast
+###
+
+from ports.dftatom.dftatom import atom_scf, EKIN, ECOUL, EENUC, EXC, ETOT
+from nistref import AL_LDA_ETOT, AR_LDA_ETOT, B_LDA_ETOT, BE_LDA_ETOT, C_LDA_ETOT, CL_LDA_ETOT, F_LDA_ETOT, H_LDA_ETOT, HE_LDA_ETOT, LI_LDA_ETOT, MG_LDA_ETOT, N_LDA_ETOT, NA_LDA_ETOT, NE_LDA_ETOT, O_LDA_ETOT, P_LDA_ETOT, S_LDA_ETOT, SI_LDA_ETOT
+
+N_ATOMS: Int = 18
+NIST_ETOT = [H_LDA_ETOT, HE_LDA_ETOT, LI_LDA_ETOT, BE_LDA_ETOT, B_LDA_ETOT, C_LDA_ETOT, N_LDA_ETOT, O_LDA_ETOT, F_LDA_ETOT, NE_LDA_ETOT, NA_LDA_ETOT, MG_LDA_ETOT, AL_LDA_ETOT, SI_LDA_ETOT, P_LDA_ETOT, S_LDA_ETOT, CL_LDA_ETOT, AR_LDA_ETOT]
+#: dftatom's defaults (ports/dftatom/atom.viv)
+R_MIN = 1.0e-7
+R_MAX = 50.0
+MESH_A = 2.7e6
+MESH_N: Int = 6000
+C_LIGHT = 137.0359895
+REIGEN_EPS = 1.0e-10
+REIGEN_MAX: Int = 100
+MIX_EPS = 5.0e-9
+MIX_ALPHA = 0.5
+MIX_MAX: Int = 200
+
+virial_dev = zeros(N_ATOMS)
+nist_err = zeros(N_ATOMS)
+all_converged = true
+for zi to N_ATOMS {
+    d, conv, its = atom_scf(zi + 1, false, R_MIN, R_MAX, MESH_A, MESH_N, C_LIGHT, REIGEN_EPS, REIGEN_MAX, MIX_EPS, MIX_ALPHA, MIX_MAX, true)
+    if not conv {
+        all_converged = false
+    }
+    pot = d.energies[ECOUL] + d.energies[EENUC] + d.energies[EXC]
+    virial_dev[zi] = -pot / d.energies[EKIN] - 2.0
+    nist_err[zi] = abs(d.energies[ETOT] - NIST_ETOT[zi])
+}
+show virial_dev
+show nist_err
+worst_virial = max(abs(virial_dev))
+worst_nist = max(nist_err)
+show worst_virial
+show worst_nist
+show all_converged
+virial_hydrogen = virial_dev[0]
+virial_argon = virial_dev[N_ATOMS - 1]
+show virial_hydrogen
+show virial_argon
+#: NIST SRD 141 rounds its energies to 1e-6 hartree
+NIST_ROUNDING = 1.0e-6
+
+#: the figure: the excess of -V/T over 2, in percent, for Z = 1 .. 18
+PERCENT = 100.0
+fg_z = zeros(N_ATOMS)
+for fg_k to N_ATOMS {
+    fg_z[fg_k] = fg_k + 1.0
+}
+figure("Virial ratio of LDA atoms", "atomic number Z", "(-V/T - 2), %")
+yscale("log")
+plot(fg_z, abs(virial_dev) * PERCENT, "LDA, dftatom")
+style("LDA, dftatom", "s1 circle")
+
+test "every atom converged" {
+    assert_true(all_converged)
+}
+test "-V/T exceeds 2 by between 0.001 and 0.05 on every atom" {
+    for zi to N_ATOMS {
+        assert_gt(virial_dev[zi], 0.001)
+        assert_lt(virial_dev[zi], 0.05)
+    }
+}
+test "the excess shrinks at every step in Z" {
+    for zi from 1 to N_ATOMS {
+        assert_lt(virial_dev[zi], virial_dev[zi - 1])
+    }
+}
+test "total energies within 5e-7 hartree of NIST, inside its 1e-6 rounding" {
+    assert_lt(worst_nist, 5.0e-7)
+    assert_lt(worst_nist, NIST_ROUNDING)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

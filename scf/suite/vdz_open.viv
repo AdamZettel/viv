@@ -1,0 +1,58 @@
+# PySCF's open-shell water cc-pVDZ rows (test_h2o_vdz.py, test_rhf.py and
+# test_uhf.py): the H2O+ cation with ROHF, and the spin = 2 triplet with UHF,
+# where the tests ask for the orbital gradient at convergence and for the
+# overlap between the triplet and its alpha/beta mirror image.
+#
+#     tools/both-engines.sh scf/suite vdz_open
+from hf.hf import hf_scf, hf_setup, hf_setup_of
+from hf.molecule import Molecule, molecule_packs
+from hf.scf_loop import scf_densities, scf_opts, ScfSetup
+from hf.opts import scf_checked, SCF_ROHF, SCF_UHF, ScfOptions
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.pyscf_tests import (
+    PST_FILE_H2O_VDZ, PST_FILE_RHF, PST_FILE_UHF, PST_H2O_VDZ_158, PST_H2O_VDZ_158_P,
+    PST_H2O_VDZ_61, PST_H2O_VDZ_61_P, PST_RHF_414, PST_RHF_414_P, PST_RHF_498, PST_RHF_498_P,
+    PST_UHF_115, PST_UHF_115_P, PST_UHF_308, PST_UHF_308_P,
+)
+from scf.suite.ref.sts import sts_det, sts_eig, sts_fock, sts_orbital_gradient, sts_row
+
+svo_m = molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+svo_p = hf_setup(svo_m, scf_checked())
+
+#| The water setup with `charge`, `spin` and `method`.
+def svo_setup(p: ScfSetup, mol: Molecule, charge, spin, method) -> ScfSetup {
+    return hf_setup_of(Molecule { charge: charge, spin: spin, ..mol }, p.h, p.s, p.eri, ScfOptions { method: method, ..scf_checked() })
+}
+
+test "H2O+ ROHF -75.627354109594179 (test_h2o_vdz.py:61, 158; test_rhf.py:414, 498)" {
+    svo_r = hf_scf(svo_setup(svo_p, svo_m, 1, 1, SCF_ROHF))
+    assert_near(svo_r.converged, 1.0, 0.0)
+    svo_e = svo_r.energy
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 61, svo_e, PST_H2O_VDZ_61, PST_H2O_VDZ_61_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 158, svo_e, PST_H2O_VDZ_158, PST_H2O_VDZ_158_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 414, svo_e, PST_RHF_414, PST_RHF_414_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 498, svo_e, PST_RHF_498, PST_RHF_498_P), 1.0, 0.0)
+}
+
+test "the triplet: orbital gradient below 5e-7, and det <triplet | mirror> = 0.95208556738844452 over the lowest five orbitals of each spin (test_uhf.py:115, 308)" {
+    svo_t = svo_setup(svo_p, svo_m, 0, 2, SCF_UHF)
+    svo_o = scf_opts(svo_t)
+    svo_r = hf_scf(svo_t)
+    assert_near(svo_r.converged, 1.0, 0.0)
+    svo_D = scf_densities(svo_r)
+    svo_g = sts_orbital_gradient(svo_t.h, svo_t.s, svo_t.eri, svo_D, svo_o, 2)
+    assert_near(sts_row(PST_FILE_UHF, 115, svo_g, PST_UHF_115, PST_UHF_115_P), 1.0, 0.0)
+    # det_ovlp with closed-shell occupations: the five lowest alpha orbitals
+    # against the five lowest beta orbitals (and the same pair the other way
+    # round), in the orthonormal basis where the AO overlap is the identity.
+    # The product of the singular values of each 5 x 5 overlap is |det|.
+    svo_F = sts_fock(svo_t.h, svo_t.eri, svo_D, svo_o, 2)
+    svo_Ra = sts_eig(slab(svo_F, 0), svo_t.s, svo_o)
+    svo_Rb = sts_eig(slab(svo_F, 1), svo_t.s, svo_o)
+    svo_O = transpose(svo_Ra[1:len(svo_Ra), 0:5]) @ svo_Rb[1:len(svo_Rb), 0:5]
+    svo_det = sts_det(svo_O, 5)
+    assert_near(sts_row(PST_FILE_UHF, 308, svo_det * svo_det, PST_UHF_308, PST_UHF_308_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

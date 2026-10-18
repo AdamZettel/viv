@@ -1,0 +1,262 @@
+# The tests of lib/hf/md_eri that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/md_eri does not load the references.
+from hf.md_eri import (
+    mderi_block, mderi_build, MDERI_FIX_ROW, mderi_full, mderi_grid, mderi_groups, MDERI_PQ_LEN,
+    mderi_prim1, mderi_prim1_size, mderi_qlist, MDERI_QUARTET, mderi_quartet, mderi_ref_gaps,
+    mderi_schwarz, mderi_schwarz_excess, MDERI_SCREEN_TOL, mderi_screened, mderi_sph,
+    mderi_store, mderi_store_pairs, MDERI_T_LMAX,
+)
+from hf.basis import (
+    AT_LEN, AT_X, AT_Y, AT_Z, bas_ncart, bas_nsph, bas_powers, PR_COEF, PR_EXP, PR_LEN, SH_ATOM,
+    SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+)
+from hf.hermite import herm_grid, HERM_GRID_XMAX
+from hf.cart2sph import c2s_basis
+from hf.transform import tr4_two_pass
+from hfref.prims import (
+    prims_eri, prims_eri_abab, prims_eri_cdcd, PRIMS_NCASE, PRIMS_NPICK, prims_picks,
+    prims_shells,
+)
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_eri8_cart, WATER631GS_CART_ERI8_CART_LEN,
+    WATER631GS_CART_NAO_CART, water631gs_cart_prims, water631gs_cart_shells,
+)
+from hfref.water_631gs_sph import water631gs_sph_eri8_sph
+from hfref.water_ccpvdz import (
+    waterccpvdz_atoms, waterccpvdz_eri8_cart_diag, waterccpvdz_eri8_cart_idx,
+    WATERCCPVDZ_ERI8_CART_LEN, WATERCCPVDZ_ERI8_CART_SUMSQ, waterccpvdz_eri8_cart_val,
+    WATERCCPVDZ_ERI8_CART_WSUM, waterccpvdz_prims, WATERCCPVDZ_SEED_WSUM, waterccpvdz_shells,
+)
+from hfref.water_tzvp import (
+    watertzvp_atoms, watertzvp_eri8_cart_diag, watertzvp_eri8_cart_idx, WATERTZVP_ERI8_CART_LEN,
+    WATERTZVP_ERI8_CART_SUMSQ, watertzvp_eri8_cart_val, WATERTZVP_ERI8_CART_WSUM,
+    watertzvp_prims, WATERTZVP_SEED_WSUM, watertzvp_shells,
+)
+
+#| Test helper: `mderi_prim1` against the shell block for every prims case and
+#| pick: the largest relative gap in `(ab|cd)`.
+def mderi_prim1_worst() {
+    PS = prims_shells()
+    PK = prims_picks()
+    # the highest total l of a quartet, and the Boys orders it needs
+    L = MDERI_QUARTET * MDERI_T_LMAX
+    G = herm_grid(L, HERM_GRID_XMAX)
+
+    W = zeros(mderi_prim1_size(MDERI_T_LMAX))
+    F = zeros(L + 1)
+    worst = 0.0
+    for c to PRIMS_NCASE {
+        atoms = zeros(MDERI_QUARTET, AT_LEN)
+        shells = zeros(MDERI_QUARTET, SH_LEN)
+        pr = mderi_prims_case(PS, c, atoms, shells)
+        B = mderi_quartet(atoms, shells, pr, 0, 1, 2, 3)
+        nb = shells[1, SH_NCART]
+        nd = shells[3, SH_NCART]
+        PQ = zeros(MDERI_QUARTET, MDERI_PQ_LEN)
+        for k to PRIMS_NPICK {
+            r = c * PRIMS_NPICK + k
+            for f to len(PQ) {
+                pw = bas_powers(shells[f, SH_L])
+                PQ[f, 0] = pr[f, PR_EXP]
+                PQ[f, 1] = atoms[f, AT_X]
+                PQ[f, 2] = atoms[f, AT_Y]
+                PQ[f, 3] = atoms[f, AT_Z]
+                PQ[f, 4] = pw[PK[r, f], 0]
+                PQ[f, 5] = pw[PK[r, f], 1]
+                PQ[f, 6] = pw[PK[r, f], 2]
+            }
+            v = mderi_prim1(PQ, G, W, F)
+            ref = B[PK[r, 0] * nb + PK[r, 1], PK[r, 2] * nd + PK[r, 3]]
+            worst = max(worst, abs(v - ref) / abs(ref))
+        }
+    }
+    return worst
+}
+
+#| Test helper: for every prims case and pick, `(ab|cd)`, `(ab|ab)` and
+#| `(cd|cd)` against the reference. Returns the worst relative gap, how many
+#| replacements were used, how many values were tested and the largest l seen.
+def mderi_prims_worst() {
+    PS = prims_shells()
+    PK = prims_picks()
+    RG = prims_eri()
+    RA = prims_eri_abab()
+    RC = prims_eri_cdcd()
+    FX = mderi_prims_fix()
+    worst = 0.0
+    nrep = 0
+    ntest = 0
+    lmax = 0
+    for c to PRIMS_NCASE {
+        atoms = zeros(MDERI_QUARTET, AT_LEN)
+        shells = zeros(MDERI_QUARTET, SH_LEN)
+        pr = mderi_prims_case(PS, c, atoms, shells)
+        ST = mderi_store_pairs(atoms, shells, pr, [[0, 1], [2, 3]])
+        G = mderi_grid(ST)
+        B = mderi_block(ST, 0, 1, G)
+        BA = mderi_block(ST, 0, 0, G)
+        BC = mderi_block(ST, 1, 1, G)
+        nb = shells[1, SH_NCART]
+        nd = shells[3, SH_NCART]
+        lmax = max(lmax, max(shells[:, SH_L]))
+        for k to PRIMS_NPICK {
+            r = c * PRIMS_NPICK + k
+            ab = PK[r, 0] * nb + PK[r, 1]
+            cd = PK[r, 2] * nd + PK[r, 3]
+            rg, hg = mderi_prims_ref(FX, c, k, 0, RG[r])
+            ra, ha = mderi_prims_ref(FX, c, k, 1, RA[r])
+            rc, hc = mderi_prims_ref(FX, c, k, 2, RC[r])
+            worst = max(worst, abs(B[ab, cd] - rg) / abs(rg))
+            worst = max(worst, abs(BA[ab, ab] - ra) / abs(ra))
+            worst = max(worst, abs(BC[cd, cd] - rc) / abs(rc))
+            nrep = nrep + hg + ha + hc
+            ntest = ntest + 3
+        }
+    }
+    return worst, nrep, ntest, lmax
+}
+
+#| Test helper: packs for case `c` of `lib/hfref/prims`: four single-primitive
+#| shells on four ghost atoms. Fills `atoms` and `shells`; returns prims.
+def mderi_prims_case(PS: Arr, c, atoms: Arr, shells: Arr) {
+    pr = zeros(MDERI_QUARTET, PR_LEN)
+    off = 0
+    for k to len(pr) {
+        row = MDERI_QUARTET * c + k
+        l = PS[row, 0]
+        atoms[k, AT_X] = PS[row, 2]
+        atoms[k, AT_Y] = PS[row, 3]
+        atoms[k, AT_Z] = PS[row, 4]
+        shells[k, SH_ATOM] = k
+        shells[k, SH_L] = l
+        shells[k, SH_NPRIM] = 1
+        shells[k, SH_P0] = k
+        shells[k, SH_CART0] = off
+        shells[k, SH_NCART] = bas_ncart(l)
+        shells[k, SH_NSPH] = bas_nsph(l)
+        off = off + bas_ncart(l)
+        pr[k, PR_EXP] = PS[row, 1]
+        pr[k, PR_COEF] = 1.0
+    }
+    return pr
+}
+
+#| Test helper: replacement references for the prims picks where PySCF
+#| itself is off. Rows are `(case, pick, kind, value)` with kind `0` =
+#| `(ab|cd)`, `1` = `(ab|ab)`, `2` = `(cd|cd)`. Each value was computed with
+#| mpmath at fifty digits (Boys by quadrature, the E and R recursions in the
+#| same precision) for every prims value; these are the picks where PySCF's
+#| value and mpmath's disagree beyond rounding, among them three `(cd|cd)`
+#| picks of an (ff|ff) pair far apart. The module's header gives the sizes.
+#| With these in place of PySCF's values, this module matches every reference
+#| [test "every prims case up to (ff|ff) matches PySCF, or mpmath where PySCF is off, to 1e-12 relative"].
+def mderi_prims_fix() {
+    return [28, 4, 0, -0.0001283121979953601,
+        37, 6, 0, -0.00011337852708410242,
+        42, 7, 0, -1.916941788127875e-05,
+        54, 2, 2, 0.026055881851831327,
+        54, 3, 2, 0.026055881851831327,
+        54, 5, 2, 0.0033615664361231873,
+        58, 5, 2, 0.06419561549322471]
+}
+
+#| Test helper: the reference for `(case, pick, kind)`: the mpmath value when
+#| `mderi_prims_fix` lists one, else PySCF's `ref`; and `1` when it was
+#| replaced.
+def mderi_prims_ref(FX: Arr, c, k, kind, ref) {
+    for r to len(FX) / MDERI_FIX_ROW {
+        if FX[MDERI_FIX_ROW * r] == c and FX[MDERI_FIX_ROW * r + 1] == k and FX[MDERI_FIX_ROW * r + 2] == kind {
+            return FX[MDERI_FIX_ROW * r + 3], 1
+        }
+    }
+    return ref, 0
+}
+
+test "all 18145 water 6-31G* ERIs match PySCF to 1e-12" {
+    mderi_Gp = mderi_full(water631gs_cart_atoms(), water631gs_cart_shells(), water631gs_cart_prims())
+    mderi_ref = water631gs_cart_eri8_cart()
+    assert_near(len(mderi_Gp), WATER631GS_CART_ERI8_CART_LEN, 0.0)
+    assert_lt(max(abs(mderi_Gp - mderi_ref)), 1.0e-12)
+    # and the screened build gives the same vector
+    mderi_Gs = mderi_screened(water631gs_cart_atoms(), water631gs_cart_shells(), water631gs_cart_prims())
+    assert_lt(max(abs(mderi_Gs - mderi_Gp)), 1.0e-12)
+    # every quartet obeys the Schwarz bound
+    assert_lt(mderi_schwarz_excess(mderi_Gp, WATER631GS_CART_NAO_CART), 1.0e-12)
+}
+
+test "water cc-pVDZ checksums, samples and pair diagonal match PySCF" {
+    mderi_Gp = mderi_screened(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+    assert_near(len(mderi_Gp), WATERCCPVDZ_ERI8_CART_LEN, 0.0)
+    assert_lt(mderi_ref_gaps(mderi_Gp, WATERCCPVDZ_SEED_WSUM, WATERCCPVDZ_ERI8_CART_SUMSQ, WATERCCPVDZ_ERI8_CART_WSUM, waterccpvdz_eri8_cart_idx(), waterccpvdz_eri8_cart_val(), waterccpvdz_eri8_cart_diag()), 1.0e-12)
+}
+
+test "water def2-TZVP, with f shells, checksums, samples and pair diagonal match PySCF" {
+    mderi_Gp = mderi_screened(watertzvp_atoms(), watertzvp_shells(), watertzvp_prims())
+    assert_near(len(mderi_Gp), WATERTZVP_ERI8_CART_LEN, 0.0)
+    assert_lt(mderi_ref_gaps(mderi_Gp, WATERTZVP_SEED_WSUM, WATERTZVP_ERI8_CART_SUMSQ, WATERTZVP_ERI8_CART_WSUM, watertzvp_eri8_cart_idx(), watertzvp_eri8_cart_val(), watertzvp_eri8_cart_diag()), 1.0e-12)
+}
+
+test "every prims case up to (ff|ff) matches PySCF, or mpmath where PySCF is off, to 1e-12 relative" {
+    mderi_w, mderi_nrep, mderi_ntest, mderi_lmax = mderi_prims_worst()
+    assert_lt(mderi_w, 1.0e-12)
+    # every replacement row was used once, all 1536 values were tested, and f was reached
+    assert_near(mderi_nrep, 7, 0.0)
+    assert_near(mderi_ntest, 3 * PRIMS_NCASE * PRIMS_NPICK, 0.0)
+    assert_near(mderi_lmax, 3, 0.0)
+}
+
+test "with one hydrogen moved 12 bohr out, screening skips quartets and changes no integral by more than its threshold" {
+    mderi_at = water631gs_cart_atoms()
+    mderi_at[2, AT_Z] = mderi_at[2, AT_Z] - 12.0
+    mderi_sh = water631gs_cart_shells()
+    mderi_pr = water631gs_cart_prims()
+    mderi_ST = mderi_store(mderi_at, mderi_sh, mderi_pr)
+    mderi_Q = mderi_schwarz(mderi_ST, mderi_grid(mderi_ST))
+    # at 1e-14 about a fifth of the 1540 quartets fall below the bound
+    assert_lt(len(mderi_qlist(mderi_Q, mderi_ST[0], MDERI_SCREEN_TOL)), 1300)
+    mderi_Gf = mderi_full(mderi_at, mderi_sh, mderi_pr)
+    mderi_Gs = mderi_screened(mderi_at, mderi_sh, mderi_pr)
+    mderi_G8 = mderi_build(mderi_at, mderi_sh, mderi_pr, 1.0e-8)
+    assert_lt(max(abs(mderi_Gs - mderi_Gf)), 1.0e-14)
+    assert_lt(max(abs(mderi_G8 - mderi_Gf)), 1.0e-8)
+    assert_lt(mderi_schwarz_excess(mderi_Gf, WATER631GS_CART_NAO_CART), 1.0e-12)
+}
+
+test "one integral at a time agrees with the shell blocks on every prims pick" {
+    assert_lt(mderi_prim1_worst(), 1.0e-12)
+}
+
+test "spherical ERIs block by block match the two-pass transform, and PySCF's 5D water 6-31G* set" {
+    mderi_sh = water631gs_cart_shells()
+    mderi_M = c2s_basis(mderi_sh)
+    mderi_G5 = mderi_sph(water631gs_cart_atoms(), mderi_sh, water631gs_cart_prims(), mderi_M)
+    assert_near(len(mderi_G5), len(water631gs_sph_eri8_sph()), 0.0)
+    assert_lt(max(abs(mderi_G5 - water631gs_sph_eri8_sph())), 1.0e-13)
+    mderi_two = tr4_two_pass(water631gs_cart_atoms(), mderi_sh, water631gs_cart_prims(), mderi_M)
+    assert_lt(max(abs(mderi_G5 - mderi_two)), 1.0e-14)
+    # def2-TZVP has f shells (10 Cartesian functions, 7 spherical)
+    mderi_sh = watertzvp_shells()
+    mderi_M = c2s_basis(mderi_sh)
+    mderi_G5 = mderi_sph(watertzvp_atoms(), mderi_sh, watertzvp_prims(), mderi_M)
+    mderi_two = tr4_two_pass(watertzvp_atoms(), mderi_sh, watertzvp_prims(), mderi_M)
+    assert_near(len(mderi_G5), len(mderi_two), 0.0)
+    assert_lt(max(abs(mderi_G5 - mderi_two)), 1.0e-14)
+    assert_lt(1.0, max(abs(mderi_two)))
+}
+
+test "the grouped store gives the segmented store's integrals with fewer pairs, cc-pVDZ water" {
+    # oxygen's two s contractions share eight exponents: one group of two
+    # shells, so the primitive integrals of that pair are computed once
+    mderi_sh = waterccpvdz_shells()
+    mderi_GT = mderi_groups(mderi_sh, waterccpvdz_prims())
+    assert_near(len(mderi_sh) - len(mderi_GT), 1, 0.0)
+    assert_near(max(mderi_GT[:, 1]), 2, 0.0)
+    mderi_Gg = mderi_build(waterccpvdz_atoms(), mderi_sh, waterccpvdz_prims(), -1.0)
+    mderi_Gs = mderi_full(waterccpvdz_atoms(), mderi_sh, waterccpvdz_prims())
+    assert_lt(max(abs(mderi_Gg - mderi_Gs)), 1.0e-14)
+    assert_lt(1.0, max(abs(mderi_Gs)))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

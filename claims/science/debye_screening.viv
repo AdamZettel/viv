@@ -1,0 +1,150 @@
+###
+title: Strong charges still screen at the Debye length
+line: The decay length is $\lambda_D$ to 0.1% at $Q = 0.1$ and at $Q = 20$; the strong sphere's surface potential is 32% of Debye-Hückel's.
+claim: Solving the nonlinear Poisson-Boltzmann equation around a sphere of radius 0.5 Debye lengths in a 1:1 electrolyte, the potential's far-field decay length equals the Debye length to within 0.1% whether the sphere's charge is weak ($Q = 0.1$) or strong ($Q = 20$, in units of $\lambda_D kT/e$). The weak sphere's surface potential is within 0.1% of the linear Debye-Hückel value, and the strong sphere's is about 32% of it (below 40%), so nonlinear screening lowers the effective charge and leaves the screening length as it is.
+topic: science
+section: plasma and electrolytes
+reference: Debye and Hückel's linearized theory: around a sphere of radius a and charge Q the potential is $Q e^{-(r - a)/\lambda_D} / \bigl(r(1 + a/\lambda_D)\bigr)$ (Debye and Hückel, Phys. Z. 24, 185 (1923)); the nonlinear Poisson-Boltzmann equation it linearizes; charge renormalization of strongly charged spheres (Alexander et al., J. Chem. Phys. 80, 5776 (1984)).
+scope: A symmetric 1:1 electrolyte in units of $\lambda_D$ and $kT/e$, the Poisson-Boltzmann equation for $u = r\psi$ solved by Newton's method on a uniform mesh ($h = 0.005$) from $r = a = 0.5$ to 20 with $\psi = 0$ at the far end; the decay length is fitted to $\log(r\psi)$ between $r = 4$ and 8. This is the electrolyte (or a plasma's ions and electrons in equilibrium) treated as a continuum, not a kinetic Vlasov-Poisson solve.
+lane: ai
+by: claude
+cost: fast
+###
+
+RADIUS = 0.5
+R_FAR = 20.0
+H_MESH = 0.005
+Q_WEAK = 0.1
+Q_STRONG = 20.0
+FIT_FROM = 4.0
+FIT_TO = 8.0
+NEWTON_TOL = 1.0e-12
+NEWTON_MAX: Int = 100
+
+#| Solve u'' = r sinh(u / r) on [RADIUS, R_FAR] with the sphere's charge q in the inner boundary condition; returns r and psi = u / r.
+def solve_pb(q: Num) {
+    m: Int = round((R_FAR - RADIUS) / H_MESH)
+    r = zeros(m)
+    for i to m {
+        r[i] = RADIUS + i * H_MESH
+    }
+    #: start from Debye-Hueckel
+    u = zeros(m)
+    for i to m {
+        u[i] = q * exp(-(r[i] - RADIUS)) / (1.0 + RADIUS)
+    }
+    h2 = H_MESH * H_MESH
+    for it to NEWTON_MAX {
+        #: residual F and the tridiagonal Jacobian (sub, diag, super); the last point is u = 0
+        f = zeros(m)
+        dg = zeros(m)
+        lo = zeros(m)
+        up = zeros(m)
+        for i to m - 1 {
+            left = 0.0
+            if i == 0 {
+                #: the ghost point from psi'(a) = -q / a^2, i.e. u'(a) - u(a) / a = -q / a
+                left = u[1] - 2.0 * H_MESH * (u[0] / RADIUS - q / RADIUS)
+            }
+            else {
+                left = u[i - 1]
+            }
+            f[i] = (u[i + 1] - 2.0 * u[i] + left) / h2 - r[i] * sinh(u[i] / r[i])
+            dg[i] = -2.0 / h2 - cosh(u[i] / r[i])
+            up[i] = 1.0 / h2
+            lo[i] = 1.0 / h2
+            if i == 0 {
+                dg[i] = dg[i] - 2.0 * H_MESH / (RADIUS * h2)
+                up[i] = 2.0 / h2
+            }
+        }
+        f[m - 1] = u[m - 1]
+        dg[m - 1] = 1.0
+        #: Thomas algorithm for J du = -f
+        cp = zeros(m)
+        dp = zeros(m)
+        cp[0] = up[0] / dg[0]
+        dp[0] = -f[0] / dg[0]
+        for i from 1 to m {
+            den = dg[i] - lo[i] * cp[i - 1]
+            cp[i] = up[i] / den
+            dp[i] = (-f[i] - lo[i] * dp[i - 1]) / den
+        }
+        du = zeros(m)
+        du[m - 1] = dp[m - 1]
+        for k from 1 to m {
+            i: Int = m - 1 - k
+            du[i] = dp[i] - cp[i] * du[i + 1]
+        }
+        u = u + du
+        if max(abs(du)) < NEWTON_TOL {
+            return r, u / r
+        }
+    }
+    return r, u / r
+}
+
+#| The decay length fitted to log(r psi) between FIT_FROM and FIT_TO.
+def decay_length(r: Arr, psi: Arr) -> Num {
+    xs = []
+    ys = []
+    for i to len(r) {
+        if r[i] >= FIT_FROM and r[i] <= FIT_TO {
+            xs = append(xs, r[i])
+            ys = append(ys, log(r[i] * psi[i]))
+        }
+    }
+    mx = mean(xs)
+    my = mean(ys)
+    return -sum((xs - mx) * (xs - mx)) / sum((xs - mx) * (ys - my))
+}
+
+rw, psi_weak = solve_pb(Q_WEAK)
+rs, psi_strong = solve_pb(Q_STRONG)
+lambda_weak = decay_length(rw, psi_weak)
+lambda_strong = decay_length(rs, psi_strong)
+dh_surface_strong = Q_STRONG / (RADIUS * (1.0 + RADIUS))
+dh_surface_weak = Q_WEAK / (RADIUS * (1.0 + RADIUS))
+surface_ratio_weak = psi_weak[0] / dh_surface_weak
+surface_ratio_strong = psi_strong[0] / dh_surface_strong
+show lambda_weak
+show lambda_strong
+show surface_ratio_weak
+show surface_ratio_strong
+
+#: the figure: both potentials scaled to their surface value, against Debye-Hueckel's a e^-(r - a) / r
+FIG_EVERY: Int = 40
+fg_n: Int = floor(len(rw) / FIG_EVERY)
+fg_r = zeros(fg_n)
+fg_weak = zeros(fg_n)
+fg_strong = zeros(fg_n)
+fg_dh = zeros(fg_n)
+for fg_k to fg_n {
+    fg_i: Int = fg_k * FIG_EVERY
+    fg_r[fg_k] = rw[fg_i]
+    fg_weak[fg_k] = psi_weak[fg_i] / psi_weak[0]
+    fg_strong[fg_k] = psi_strong[fg_i] / psi_strong[0]
+    fg_dh[fg_k] = RADIUS * exp(-(rw[fg_i] - RADIUS)) / rw[fg_i]
+}
+figure("Potential around a charged sphere, scaled to its surface value", "r (Debye lengths)", "psi(r) / psi(a)")
+yscale("log")
+plot(fg_r, fg_dh, "Debye-Hueckel")
+style("Debye-Hueckel", "dash s6 nomarker thin")
+plot(fg_r, fg_weak, "Q = 0.1")
+style("Q = 0.1", "s1 nomarker")
+plot(fg_r, fg_strong, "Q = 20")
+style("Q = 20", "s2 nomarker")
+
+test "the decay length is the Debye length to 0.1%, weak or strong" {
+    assert_near(lambda_weak, 1.0, 0.001)
+    assert_near(lambda_strong, 1.0, 0.001)
+}
+test "the weak sphere's surface potential is Debye-Hueckel's to 0.1%" {
+    assert_near(surface_ratio_weak, 1.0, 0.001)
+}
+test "the strong sphere's is below 40% of Debye-Hueckel's" {
+    assert_lt(surface_ratio_strong, 0.4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

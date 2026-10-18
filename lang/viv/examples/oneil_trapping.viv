@@ -1,0 +1,131 @@
+# O'Neil (1965) trapping: the nonlinear sequel to Landau damping. When a wave has
+# finite amplitude, particles moving near its phase velocity are TRAPPED in its
+# troughs instead of streaming past. In the wave frame the wave potential is static,
+# phi(x) = phi0 cos(kx), so a trapped particle is a pendulum: it bounces in the
+# trough at the bounce frequency
+#
+#     omega_B = k sqrt(e phi0 / m).
+#
+# Working in units k = m = e = 1, the equation of motion is exactly the pendulum
+# xdd = -phi0 sin(x), with omega_B = sqrt(phi0). This code checks three things:
+#   1. the deep-trapping bounce period is 2 pi / omega_B, and scales as phi0^{-1/2};
+#   2. the separatrix at speed 2 omega_B / k divides trapped (bounded) from passing
+#      (circulating) orbits -- the trapping width is 4 omega_B / k;
+#   3. a bunch of trapped particles bounces coherently and then phase-mixes: the
+#      mean velocity oscillates at omega_B and decays -- O'Neil's trapping oscillation,
+#      the mechanism that halts Landau damping. Built on the Vlasov-Poisson / two-stream
+#      code; it is the nonlinear continuation of the resonance.
+
+# Bounce period of a pendulum released from rest at x0 (velocity-Verlet, half-period
+# = time to the first velocity turning point, interpolated).
+def bounce_period(x0, phi0, dt, nmax) {
+    x = x0
+    v = 0.0
+    t = 0.0
+    a = -phi0 * sin(x)
+    for i to nmax {
+        vprev = v
+        x = x + v * dt + 0.5 * a * dt * dt
+        anew = -phi0 * sin(x)
+        v = v + 0.5 * (a + anew) * dt
+        a = anew
+        t = t + dt
+        if vprev < 0.0 {
+            if v >= 0.0 {
+                frac = -vprev / (v - vprev)
+                return 2.0 * (t - dt + frac * dt)
+            }
+        }
+    }
+    return -1.0
+}
+
+# How far a particle launched from x=0 with speed v0 travels: bounded => trapped,
+# runaway => passing. Returns the final |x| (large for passing orbits).
+def excursion(v0, phi0, dt, nmax) {
+    x = 0.0
+    v = v0
+    a = -phi0 * sin(x)
+    for i to nmax {
+        x = x + v * dt + 0.5 * a * dt * dt
+        anew = -phi0 * sin(x)
+        v = v + 0.5 * (a + anew) * dt
+        a = anew
+    }
+    xm = x
+    if xm < 0.0 {
+        xm = -xm
+    }
+    return xm
+}
+
+pi = 3.141592653589793
+
+# --- 1. bounce frequency, and its phi0^{-1/2} scaling ---
+phi0 = 1.0
+omega_B = sqrt(phi0)
+T_deep = bounce_period(0.1, phi0, 0.002, 20000)
+T_theory = 2.0 * pi / omega_B
+# stronger wave: phi0 = 4 -> omega_B = 2 -> period halves
+T_strong = bounce_period(0.1, 4.0, 0.002, 20000)
+# large amplitude: the nonlinear pendulum period lengthens toward the separatrix
+T_big = bounce_period(2.5, phi0, 0.002, 20000)
+
+# --- 2. the separatrix: trapping width 4 omega_B / k (here 4) ---
+vtrap = 2.0 * omega_B            # half-width; |v| < 2 omega_B at the trough is trapped
+x_in = excursion(1.9, phi0, 0.01, 3000)    # below separatrix -> bounded
+x_out = excursion(2.1, phi0, 0.01, 3000)   # above separatrix -> circulates away
+
+# --- 3. the trapping oscillation: a trapped bunch, mean velocity vs time ---
+Nens = 400
+xe = zeros(Nens)
+ve = zeros(Nens)
+ae = zeros(Nens)
+for j to Nens {
+    xe[j] = 0.3 + 0.5 * (j + 0.5) / Nens    # a bunch loaded on one side of the trough
+    ve[j] = 0.0
+    ae[j] = -phi0 * sin(xe[j])
+}
+dt = 0.01
+Nsteps = 2000
+meanv = zeros(Nsteps)
+for step to Nsteps {
+    mv = 0.0
+    for j to Nens {
+        xe[j] = xe[j] + ve[j] * dt + 0.5 * ae[j] * dt * dt
+        anew = -phi0 * sin(xe[j])
+        ve[j] = ve[j] + 0.5 * (ae[j] + anew) * dt
+        ae[j] = anew
+        mv = mv + ve[j]
+    }
+    meanv[step] = mv / Nens
+}
+# period of the trapping oscillation: time between the first two up-crossings of <v>
+tup = zeros(4)
+nup = 0.0
+for s to Nsteps {
+    if s > 0 {
+        if meanv[s - 1.0] < 0.0 {
+            if meanv[s] >= 0.0 {
+                if nup < 4.0 {
+                    tup[nup] = s * dt
+                    nup = nup + 1.0
+                }
+            }
+        }
+    }
+}
+T_osc = tup[1] - tup[0]
+
+show omega_B     # bounce frequency (k = m = e = 1)
+show T_deep      # measured deep-trapping bounce period
+show T_theory    # 2 pi / omega_B
+show T_strong    # phi0=4: should be ~ half of T_deep
+show T_big       # large-amplitude (nonlinear) period, longer
+show vtrap       # separatrix half-width in velocity
+show x_in        # v0=1.9 (trapped): bounded, |x| < pi
+show x_out       # v0=2.1 (passing): circulated far away
+show T_osc       # trapping-oscillation period of <v>, ~ 2 pi / omega_B
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

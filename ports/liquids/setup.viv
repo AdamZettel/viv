@@ -1,0 +1,253 @@
+###
+Random draws and starting configurations for the simulations: a normal
+deviate by Box-Muller that keeps its second value for the next call, a
+random displacement in a cube, the Metropolis test, and an fcc lattice of
+atoms with Maxwell-Boltzmann velocities at a chosen temperature, the zero
+of total momentum removed.
+
+Every uniform draw is Viv's `rand()` (Park-Miller MINSTD, seeded by
+`srand`), so a run gives the same bits in every engine. Upstream draws from
+Fortran's RANDOM_NUMBER; the comparison builds of upstream draw from the
+same MINSTD stream instead (ports/liquids/oracle/minstd.f90), which is how
+the port is checked against upstream to the bit.
+###
+# Derived from maths_module.f90 (random_normal, random_normals,
+# random_translate_vector, metropolis, exprel, expm1, polyval) and
+# initialize_module.f90 (fcc_positions, ran_velocities) of
+# https://github.com/Allen-Tildesley/examples (commit 4818bc82), by Michael P.
+# Allen and Dominic J. Tildesley, CC0-1.0; see ports/liquids/LICENSE.
+
+#| the dimensions of space: x, y and z
+DIM: Int = 3
+#| exp(-delta) is not computed above this; the move is rejected
+EXPONENT_GUARD = 75.0
+#| exprel and expm1 switch to their series below this |x|
+EXPREL_SERIES = 0.01
+#| atoms per cubic fcc cell
+FCC_BASIS: Int = 4
+
+#| The state of the normal generator: Box-Muller makes two deviates from
+#| two uniform draws and hands out the second on the next call. saved[0] is
+#| 1 when saved[1] holds that second deviate.
+def normal_state() -> Arr {
+    return zeros(2)
+}
+
+#| A normal deviate with the given mean and standard deviation: upstream's
+#| random_normal, its SAVE variables in `saved`.
+def random_normal(mean: Num, std: Num, saved: Arr) -> Num {
+    if saved[0] > 0.0 {
+        saved[0] = 0.0
+        return mean + std * saved[1]
+    }
+    z1 = rand()
+    z2 = rand()
+    r = sqrt(-2.0 * log(z1)) * cos(2.0 * pi * z2)
+    saved[1] = sqrt(-2.0 * log(z1)) * sin(2.0 * pi * z2)
+    saved[0] = 1.0
+    return mean + std * r
+}
+
+#| A point drawn uniformly from the cube of half-side dr_max about old:
+#| upstream's random_translate_vector, three draws in x, y, z order.
+def random_translate(dr_max: Num, old: Arr) -> Arr {
+    z0 = rand()
+    z1 = rand()
+    z2 = rand()
+    out = zeros(DIM)
+    out[0] = old[0] + (2.0 * z0 - 1.0) * dr_max
+    out[1] = old[1] + (2.0 * z1 - 1.0) * dr_max
+    out[2] = old[2] + (2.0 * z2 - 1.0) * dr_max
+    return out
+}
+
+#| Accept a move that changes the energy by delta (in units of kT) with
+#| probability min(1, exp(-delta)): upstream's metropolis, which draws a
+#| number only when 0 <= delta <= 75.
+def metropolis(delta: Num) -> Bool {
+    if delta > EXPONENT_GUARD {
+        return false
+    }
+    if delta < 0.0 {
+        return true
+    }
+    return exp(-delta) > rand()
+}
+
+#| sinh(h) / h as its series in y = h^2 to the h^8 term, 1/1! + y/3! + y^2/5!
+#| + y^3/7! + y^4/9!, by Horner from the highest power: upstream's polyval
+#| with g = 1 / [1, 6, 120, 5040, 362880].
+def sinhc_series(y: Num) -> Num {
+    s = 1.0 / 362880.0
+    s = s * y + 1.0 / 5040.0
+    s = s * y + 1.0 / 120.0
+    s = s * y + 1.0 / 6.0
+    return s * y + 1.0
+}
+
+#| (e^x - 1) / x, without the cancellation at small x: upstream's exprel,
+#| e^(x/2) sinh(x/2) / (x/2) below |x| = 0.01.
+def exprel(x: Num) -> Num {
+    if abs(x) > EXPREL_SERIES {
+        return (exp(x) - 1.0) / x
+    }
+    return exp(x / 2.0) * sinhc_series((x / 2.0) * (x / 2.0))
+}
+
+#| e^x - 1, without the cancellation at small x: upstream's expm1,
+#| x e^(x/2) sinh(x/2) / (x/2) below |x| = 0.01.
+def expm1(x: Num) -> Num {
+    if abs(x) > EXPREL_SERIES {
+        return exp(x) - 1.0
+    }
+    return x * exp(x / 2.0) * sinhc_series((x / 2.0) * (x / 2.0))
+}
+
+#| The box side of n atoms at the given number density.
+def box_length(nat: Int, density: Num) -> Num {
+    return (1.0 * nat / density) ^ (1.0 / 3.0)
+}
+
+#| n = 4 nc^3 atoms on a face-centered cubic lattice filling a box of side
+#| box centered on the origin, in units of sigma: upstream's fcc_positions,
+#| cells in z, y, x order and the four basis atoms within each.
+def fcc_positions(nat: Int, box: Num) -> Arr {
+    nc: Int = int(round((1.0 * (nat // FCC_BASIS)) ^ (1.0 / 3.0)))
+    if nat != FCC_BASIS * nc * nc * nc {
+        stop(f"an fcc lattice holds 4 nc^3 atoms (32, 108, 256, 500, 864, ...); n = {nat} is not one of them")
+    }
+    basis = [[0.25, 0.25, 0.25], [0.25, 0.75, 0.75], [0.75, 0.75, 0.25], [0.75, 0.25, 0.75]]
+    cell = box / nc
+    box2 = box / 2.0
+    r = zeros(nat, DIM)
+    i: Int = 0
+    for iz to nc {
+        for iy to nc {
+            for ix to nc {
+                for a to FCC_BASIS {
+                    r[i, 0] = (basis[a, 0] + ix) * cell - box2
+                    r[i, 1] = (basis[a, 1] + iy) * cell - box2
+                    r[i, 2] = (basis[a, 2] + iz) * cell - box2
+                    i = i + 1
+                }
+            }
+        }
+    }
+    return r
+}
+
+#| Velocities for n atoms of unit mass at the given temperature: normal
+#| deviates, the mean removed, scaled so that the kinetic temperature with
+#| 3n - 3 degrees of freedom is exactly the one asked for (upstream's
+#| ran_velocities for atoms).
+def ran_velocities(nat: Int, temperature: Num, saved: Arr) -> Arr {
+    v = zeros(nat, DIM)
+    for i to nat {
+        for k to DIM {
+            v[i, k] = random_normal(0.0, 1.0, saved)
+        }
+    }
+    remove_drift(v)
+    s = 0.0
+    for i to nat {
+        for k to DIM {
+            s += v[i, k] * v[i, k]
+        }
+    }
+    factor = sqrt((3.0 * nat - 3.0) * temperature / s)
+    for i to nat {
+        for k to DIM {
+            v[i, k] = factor * v[i, k]
+        }
+    }
+    return v
+}
+
+#| Subtracts the mean velocity (the center-of-mass velocity, unit masses).
+def remove_drift(v: Arr) {
+    nat: Int = int(shape(v)[0])
+    for k to DIM {
+        s = 0.0
+        for i to nat {
+            s += v[i, k]
+        }
+        vcm = s / nat
+        for i to nat {
+            v[i, k] = v[i, k] - vcm
+        }
+    }
+}
+
+#| The starting configuration of a run, as upstream's programs read it
+#| after initialize wrote it: positions in box units wrapped into the box,
+#| velocities with the drift removed, and the box side. Without r_start
+#| (zero rows), n atoms on an fcc lattice at the density, with velocities at
+#| the temperature drawn from srand(seed) (upstream's initialize); with it,
+#| r_start (in sigma), v_start and box_start as given.
+def starting_configuration(nat: Int, density: Num, temperature: Num, seed: Int, r_start: Arr, v_start: Arr,
+                           box_start: Num) {
+    srand(1.0 * seed)
+    box = 0.0
+    r = zeros(0, DIM)
+    v = zeros(0, DIM)
+    if int(shape(r_start)[0]) > 0 {
+        nr: Int = int(shape(r_start)[0])
+        if box_start <= 0.0 {
+            stop("r_start needs a positive box_start")
+        }
+        if int(shape(v_start)[0]) != nr and int(shape(v_start)[0]) != 0 {
+            stop("v_start must have as many rows as r_start (or none)")
+        }
+        box = box_start
+        r = r_start / box
+        v = zeros(nr, DIM)
+        if int(shape(v_start)[0]) == nr {
+            v = copy(v_start)
+        }
+    }
+    else {
+        box = box_length(nat, density)
+        r = fcc_positions(nat, box) / box
+        v = ran_velocities(nat, temperature, normal_state())
+    }
+    nr2: Int = int(shape(r)[0])
+    for i to nr2 {
+        for k to DIM {
+            r[i, k] = r[i, k] - round(r[i, k])
+        }
+    }
+    remove_drift(v)
+    return r, v, box
+}
+
+test "exprel against (e^x - 1) / x on both sides of the switch" {
+    assert_near(exprel(0.5), (exp(0.5) - 1.0) / 0.5, 1.0e-15)
+    assert_near(exprel(1.0e-3), (exp(1.0e-3) - 1.0) / 1.0e-3, 1.0e-12)
+    assert_near(exprel(-0.009), (exp(-0.009) - 1.0) / -0.009, 1.0e-12)
+    assert_near(expm1(-0.004), exp(-0.004) - 1.0, 1.0e-15)
+}
+
+test "an fcc start of 256 atoms at density 0.75 has nearest neighbors 2^(1/2) a / 2 apart" {
+    nat: Int = 256
+    box = box_length(nat, 0.75)
+    r = fcc_positions(nat, box)
+    a = box / 4.0
+    d = r[1, :] - r[0, :]
+    assert_near(sqrt(dot(d, d)), a / sqrt(2.0), 1.0e-12)
+}
+
+test "ran_velocities has zero momentum and the asked temperature" {
+    srand(5.0)
+    nat: Int = 108
+    v = ran_velocities(nat, 1.3, normal_state())
+    assert_near(sum(v[:, 0]), 0.0, 1.0e-12)
+    s = 0.0
+    for i to nat {
+        s += dot(v[i, :], v[i, :])
+    }
+    assert_near(s / (3.0 * nat - 3.0), 1.3, 1.0e-12)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

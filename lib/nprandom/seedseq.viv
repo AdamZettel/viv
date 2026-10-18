@@ -1,0 +1,99 @@
+###
+post: NumPy's SeedSequence, the hash behind default_rng(seed)
+agent: claude
+
+`np.random.default_rng(seed)` does not use the seed as the state. It hands the
+seed to `SeedSequence`, which hashes its 32-bit words into a pool of four words
+and draws the generator's initial state from the pool. This is that code from
+NumPy 1.24.4 (numpy/random/bit_generator.pyx: hashmix, mix, mix_entropy,
+generate_state; tag v1.24.4, commit 9315a9072b2636f75c831b4eca9f42a5f67ca2fb),
+with its constants' names. Every product is a 32-bit product that wraps
+(`npr_mul32`).
+
+- `npr_ss_words(n)`: the words of a non-negative int below 2^53, lowest first,
+  as `_int_to_uint32_array` splits it (`[0]` for 0).
+- `npr_ss_pool(entropy)`: mix_entropy of an array of words into the pool.
+- `npr_ss_generate(pool, n_words)`: generate_state(n_words) as 32-bit words
+  (for `np.uint64` words, pair them up: word 2k is the low half of the k-th).
+
+Used with `import nprandom.seedseq`.
+###
+
+from nprandom.bits import npr_mul32, npr_sub32, NPR_TWO32
+
+NPR_SS_POOL_SIZE = 4
+NPR_SS_XSHIFT = 16
+# 0x43b0d7e5, 0x931e8875, 0x8b51f9dd, 0x58f38ded, 0xca01f9dd, 0x4973f715
+NPR_SS_INIT_A = 1135663077
+NPR_SS_MULT_A = 2468251765
+NPR_SS_INIT_B = 2337405405
+NPR_SS_MULT_B = 1492356589
+NPR_SS_MIX_MULT_L = 3389127133
+NPR_SS_MIX_MULT_R = 1232336661
+
+#| The 32-bit words of n (0 <= n < 2^53), lowest first.
+def npr_ss_words(n) {
+    if n < NPR_TWO32 {
+        return [n]
+    }
+    return [mod(n, NPR_TWO32), floor(n / NPR_TWO32)]
+}
+
+#| hashmix: value ^ hash_const, times the next hash_const, xor-shifted. The hash
+#| constant lives in hc[0] and moves on with each call.
+def npr_ss_hashmix(value, hc: Arr) {
+    v = bxor(value, hc[0])
+    hc[0] = npr_mul32(hc[0], NPR_SS_MULT_A)
+    v = npr_mul32(v, hc[0])
+    return bxor(v, shr(v, NPR_SS_XSHIFT))
+}
+
+#| mix: MIX_MULT_L * x - MIX_MULT_R * y, xor-shifted.
+def npr_ss_mix(x, y) {
+    r = npr_sub32(npr_mul32(NPR_SS_MIX_MULT_L, x), npr_mul32(NPR_SS_MIX_MULT_R, y))
+    return bxor(r, shr(r, NPR_SS_XSHIFT))
+}
+
+#| mix_entropy: the pool of four words from the entropy words.
+def npr_ss_pool(entropy: Arr) {
+    pool = zeros(NPR_SS_POOL_SIZE)
+    hc = [NPR_SS_INIT_A]
+    n = len(entropy)
+    for i to NPR_SS_POOL_SIZE {
+        if i < n {
+            pool[i] = npr_ss_hashmix(entropy[i], hc)
+        }
+        else {
+            pool[i] = npr_ss_hashmix(0, hc)
+        }
+    }
+    for i_src to NPR_SS_POOL_SIZE {
+        for i_dst to NPR_SS_POOL_SIZE {
+            if i_src != i_dst {
+                pool[i_dst] = npr_ss_mix(pool[i_dst], npr_ss_hashmix(pool[i_src], hc))
+            }
+        }
+    }
+    for i_src from NPR_SS_POOL_SIZE to max(n, NPR_SS_POOL_SIZE) {
+        for i_dst to NPR_SS_POOL_SIZE {
+            pool[i_dst] = npr_ss_mix(pool[i_dst], npr_ss_hashmix(entropy[i_src], hc))
+        }
+    }
+    return pool
+}
+
+#| generate_state: n_words 32-bit words from the pool, cycling through it.
+def npr_ss_generate(pool: Arr, n_words) {
+    out = zeros(n_words)
+    hc = NPR_SS_INIT_B
+    for i to n_words {
+        v = bxor(pool[mod(i, NPR_SS_POOL_SIZE)], hc)
+        hc = npr_mul32(hc, NPR_SS_MULT_B)
+        v = npr_mul32(v, hc)
+        out[i] = bxor(v, shr(v, NPR_SS_XSHIFT))
+    }
+    return out
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

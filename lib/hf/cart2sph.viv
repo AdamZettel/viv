@@ -1,0 +1,344 @@
+###
+post: From Cartesian to spherical Gaussians, one shell at a time
+agent: claude
+
+The integral kernels in this library work on Cartesian components: a d shell
+has six (xx, xy, xz, yy, yz, zz) and an f shell ten. Most basis sets are
+defined on spherical components instead: five d functions and seven f. The
+sixth Cartesian d combination, xx + yy + zz = r^2, is an s function in
+disguise, and a spherical basis leaves it out. That is why water in 6-31G*
+has 19 Cartesian functions and 18 spherical ones.
+
+Each spherical function of a shell is a fixed linear combination of the
+shell's Cartesian components, with the same radial contraction. Collect the
+coefficients in a matrix `M_l`, one row per unit-normalized Cartesian
+component (PySCF's order) and one column per spherical function:
+
+    spherical_m = sum_c M_l[c, m] * unit_c
+
+Then any one-electron matrix goes over as `X_sph = M^T X M`, and the
+electron repulsion integrals get one factor of `M` on each of their four
+indices. Here `M` is the block-diagonal matrix for a whole basis, with one
+`M_l` block per shell. This module builds `M_l` and `M`; `lib/hf/transform`
+applies them.
+
+**Two constructions.** `c2s_closed(l)` writes the table out by hand for
+l <= 3, from the textbook real polynomials:
+
+    d:  xy, yz, (2z^2 - x^2 - y^2)/2, xz, (x^2 - y^2)
+    f:  y(3x^2 - y^2), xyz, y(4z^2 - x^2 - y^2), z(2z^2 - 3x^2 - 3y^2),
+        x(4z^2 - x^2 - y^2), z(x^2 - y^2), x(x^2 - 3y^2)
+
+A polynomial `sum_c a_c x^lx y^ly z^lz` becomes a combination of unit
+components with coefficient `a_c sqrt((2lx-1)!! (2ly-1)!! (2lz-1)!!)`, since
+a unit component carries the factor `Nc = 1/sqrt(...)` (see `lib/hf/basis`).
+Scaling each column to unit norm gives the numbers in the table. For the f
+function `z(2z^2 - 3x^2 - 3y^2)`, for example, the squared norm is 60 in
+units of a unit component's self-overlap, so the zzz entry is
+`2 sqrt(15) / sqrt(60) = 1` and the xxz entry is `-3 sqrt(3) / sqrt(60)`.
+
+`c2s_general(l)` works for any `l`. It sums the general expansion of the
+real solid harmonics (Helgaker, Jorgensen and Olsen, *Molecular
+Electronic-Structure Theory*, eq. 6.4.47) into monomial coefficients, and
+then scales each column so that `M_l^T G M_l = I`, where `G` is the overlap of
+the unit components of one shell (`c2s_unit_gram`). The two constructions
+share no numbers, so their agreement at l <= 3 checks both, and the general
+one checks `lib/hfref/c2s` at l = 4.
+
+**Order and sign** follow PySCF: p stays x, y, z (not m = -1, 0, 1); d is
+xy, yz, z^2, xz, x^2 - y^2; f and higher run m = -l .. l. The signs of the
+solid-harmonic expansion match PySCF's for every l checked (0 to 4).
+
+Used with `import hf.cart2sph`, after `import hf.basis`.
+###
+
+from hf.basis import (
+    bas_nao_cart, bas_nao_sph, bas_nc, bas_ncart, BAS_NDIM, bas_nsph, bas_odfact, bas_powers,
+    shell_cart0, shell_l, shell_sph0,
+)
+
+# c2s_closed writes M_l out by hand up to f; above it defers to c2s_general
+C2S_CLOSED_LMAX = 3
+
+#| n choose k, exact in doubles for the small arguments used here.
+def c2s_binom(n, k) {
+    if k < 0 or k > n {
+        return 0.0
+    }
+    r = 1.0
+    for i to k {
+        r = r * (n - i) / (i + 1)
+    }
+    return round(r)
+}
+
+#| The overlap of the unit Cartesian components of one shell, `[ncart, ncart]`,
+#| when they share one radial part. Per axis the Gaussian moment gives
+#| `(p + q - 1)!!` for powers p and q with p + q even, and 0 when it is odd;
+#| the unit factors `Nc` scale the result so the diagonal is 1.
+def c2s_unit_gram(l) -> Arr {
+    P = bas_powers(l)
+    nc = bas_ncart(l)
+    G = zeros(nc, nc)
+    #: unit-component overlap: zero for an odd power on any axis, else (2k - 1)!!
+    for i to nc {
+        for j to nc {
+            v = 1.0
+            for d to BAS_NDIM {
+                s = P[i, d] + P[j, d]
+                if mod(s, 2.0) > 0.5 {
+                    v = 0.0
+                }
+                else {
+                    v = v * bas_odfact(s / 2)
+                }
+            }
+            G[i, j] = v * bas_nc(P[i, 0], P[i, 1], P[i, 2]) * bas_nc(P[j, 0], P[j, 1], P[j, 2])
+        }
+    }
+    return G
+}
+
+#| The row of component (lx, ly, lz) in PySCF's Cartesian order: the
+#| components with a larger lx come first, and within one lx a larger ly.
+def c2s_cart_row(l, lx, ly) {
+    a = l - lx
+    return a * (a + 1) / 2 + (a - ly)
+}
+
+#| M_l by hand for l <= 3. Rows are the unit Cartesian components in PySCF's
+#| order, columns the spherical functions in PySCF's order. Each entry is a
+#| coefficient of the polynomial named above it times
+#| sqrt((2lx-1)!! (2ly-1)!! (2lz-1)!!), divided by the polynomial's norm.
+#| Above l = 3 it returns `c2s_general(l)`.
+def c2s_closed(l) -> Arr {
+    if l > C2S_CLOSED_LMAX {
+        return c2s_general(l)
+    }
+    M = zeros(bas_ncart(l), bas_nsph(l))
+    if l == 0 {
+        M[0, 0] = 1.0
+    }
+    if l == 1 {
+        # x, y, z map to themselves
+        M[0, 0] = 1.0
+        M[1, 1] = 1.0
+        M[2, 2] = 1.0
+    }
+    if l == 2 {
+        # rows xx xy xz yy yz zz; columns xy yz z2 xz x2-y2
+        # xy, yz, xz: one component each
+        M[1, 0] = 1.0
+        M[4, 1] = 1.0
+        M[2, 3] = 1.0
+        # (2z^2 - x^2 - y^2)/2 is sqrt(3) (zz - xx/2 - yy/2) in unit components,
+        # and zz - xx/2 - yy/2 has squared norm 3/2 - 2/3 + 1/6 = 1 because
+        # two different unit squares overlap by 1/3
+        M[5, 2] = 1.0
+        M[0, 2] = -0.5
+        M[3, 2] = -0.5
+        # x^2 - y^2: unit coefficients +-sqrt(3), squared norm 3 + 3 - 2 = 4
+        M[0, 4] = sqrt(3.0) / 2.0
+        M[3, 4] = -sqrt(3.0) / 2.0
+    }
+    if l == 3 {
+        # rows xxx xxy xxz xyy xyz xzz yyy yyz yzz zzz; columns m = -3 .. 3
+        # m = -3, y(3x^2 - y^2)
+        M[1, 0] = 3.0 / (2.0 * sqrt(2.0))
+        M[6, 0] = -sqrt(10.0) / 4.0
+        # m = -2, xyz
+        M[4, 1] = 1.0
+        # m = -1, y(4z^2 - x^2 - y^2)
+        M[8, 2] = sqrt(6.0 / 5.0)
+        M[1, 2] = -sqrt(3.0 / 40.0)
+        M[6, 2] = -sqrt(6.0) / 4.0
+        # m = 0, z(2z^2 - 3x^2 - 3y^2)
+        M[9, 3] = 1.0
+        M[2, 3] = -3.0 / (2.0 * sqrt(5.0))
+        M[7, 3] = -3.0 / (2.0 * sqrt(5.0))
+        # m = 1, x(4z^2 - x^2 - y^2)
+        M[5, 4] = sqrt(6.0 / 5.0)
+        M[0, 4] = -sqrt(6.0) / 4.0
+        M[3, 4] = -sqrt(3.0 / 40.0)
+        # m = 2, z(x^2 - y^2)
+        M[2, 5] = sqrt(3.0) / 2.0
+        M[7, 5] = -sqrt(3.0) / 2.0
+        # m = 3, x(x^2 - 3y^2)
+        M[0, 6] = sqrt(10.0) / 4.0
+        M[3, 6] = -3.0 / (2.0 * sqrt(2.0))
+    }
+    return M
+}
+
+#| The column of the spherical function with index m in PySCF's order. For p
+#| PySCF keeps x, y, z, which are m = 1, -1, 0.
+def c2s_sph_col(l, m) {
+    if l == 1 {
+        if m == 1 {
+            return 0
+        }
+        if m == -1 {
+            return 1
+        }
+        return 2
+    }
+    return m + l
+}
+
+#| M_l for any l from the real solid harmonic expansion
+#|
+#|     S_lm ~ sum_t sum_u sum_w (-1)^(t + (w - wm)/2) 4^-t C(l,t) C(l-t,|m|+t) C(t,u) C(|m|,w)
+#|            x^(2t + |m| - 2u - w) y^(2u + w) z^(l - 2t - |m|)
+#|
+#| with t = 0 .. (l - |m|)/2, u = 0 .. t, and w running over the integers up
+#| to |m| that are even for m >= 0 and odd for m < 0 (wm is 0 or 1 to
+#| match). This is Helgaker's sum with v = w/2. The overall constant is left
+#| out: each column is scaled afterwards to unit norm in the metric of
+#| `c2s_unit_gram`, which also converts monomial coefficients to unit ones.
+def c2s_general(l) -> Arr {
+    nc = bas_ncart(l)
+    ns = bas_nsph(l)
+    A = zeros(nc, ns)
+    #: solid harmonic's monomial coefficients, moved to unit components
+    for mi to ns {
+        m = mi - l
+        am = abs(m)
+        wm = 0
+        if m < 0 {
+            wm = 1
+        }
+        col = c2s_sph_col(l, m)
+        for t to floor((l - am) / 2) + 1 {
+            for u to t + 1 {
+                w = wm
+                while w <= am {
+                    sgn = 1.0
+                    if mod(t + (w - wm) / 2, 2.0) > 0.5 {
+                        sgn = -1.0
+                    }
+                    c = sgn * pow(0.25, t) * c2s_binom(l, t) * c2s_binom(l - t, am + t) * c2s_binom(t, u) * c2s_binom(am, w)
+                    lx = 2 * t + am - 2 * u - w
+                    ly = 2 * u + w
+                    row = c2s_cart_row(l, lx, ly)
+                    # a monomial coefficient becomes a unit-component one by
+                    # dividing by that component's Nc
+                    A[row, col] = A[row, col] + c / bas_nc(lx, ly, l - lx - ly)
+                    w = w + 2
+                }
+            }
+        }
+    }
+    G = c2s_unit_gram(l)
+    for j to ns {
+        # the column's squared norm in the unit metric, a^T G a, entry by entry
+        v = A[:, j]
+        W = zeros(nc, nc)
+        for a to nc {
+            W[a, :] = v[a] * G[a, :] * v
+        }
+        A[:, j] = v * (1.0 / sqrt(sum(W)))
+    }
+    return A
+}
+
+#| The production M_l: the hand-written table where it exists, the general
+#| construction above it.
+def c2s_block(l) -> Arr {
+    if l <= C2S_CLOSED_LMAX {
+
+        return c2s_closed(l)
+    }
+    return c2s_general(l)
+}
+
+#| The block-diagonal M for a basis, `[nao_cart, nao_sph]`: shell s puts its
+#| M_l at rows SH_CART0 and columns SH_SPH0, and everything between shells is
+#| zero. Then PySCF's spherical X is `M^T X_unit M`.
+def c2s_basis(shells: Arr) -> Arr {
+    M = zeros(bas_nao_cart(shells), bas_nao_sph(shells))
+    for s to len(shells) {
+        l = shell_l(shells, s)
+        B = c2s_block(l)
+        c0 = shell_cart0(shells, s)
+        s0 = shell_sph0(shells, s)
+        M[c0:c0 + bas_ncart(l), s0:s0 + bas_nsph(l)] = B
+    }
+    return M
+}
+
+# ---- test helpers ----
+
+#| The largest entry of abs(M^T G M - I) for one block.
+def c2s_orth_gap(M: Arr, l) {
+    E = transpose(M) @ c2s_unit_gram(l) @ M
+    for i to len(E) {
+        E[i, i] = E[i, i] - 1.0
+    }
+    return max(abs(E))
+}
+
+test "p is x, y, z and d is xy, yz, z2, xz, x2-y2" {
+    # p: the identity, so column 0 is x, 1 is y, 2 is z
+    c2s_tp = c2s_general(1)
+    for c2s_ti to shape(c2s_tp)[0] {
+        for c2s_tj to shape(c2s_tp)[1] {
+            c2s_tw = 0.0
+            if c2s_ti == c2s_tj {
+                c2s_tw = 1.0
+            }
+            assert_near(c2s_tp[c2s_ti, c2s_tj], c2s_tw, 1.0e-15)
+        }
+    }
+    # d rows: xx 0, xy 1, xz 2, yy 3, yz 4, zz 5
+    c2s_td = c2s_general(2)
+    # column 0 is xy alone, 1 is yz alone, 3 is xz alone
+    assert_near(c2s_td[1, 0], 1.0, 1.0e-15)
+    assert_near(c2s_td[4, 1], 1.0, 1.0e-15)
+    assert_near(c2s_td[2, 3], 1.0, 1.0e-15)
+    # column 2 is z^2 - (x^2 + y^2)/2, column 4 is x^2 - y^2
+    assert_near(c2s_td[5, 2], 1.0, 1.0e-15)
+    assert_near(c2s_td[0, 2], -0.5, 1.0e-15)
+    assert_near(c2s_td[3, 2], -0.5, 1.0e-15)
+    assert_near(c2s_td[0, 4], sqrt(3.0) / 2.0, 1.0e-15)
+    assert_near(c2s_td[3, 4], -sqrt(3.0) / 2.0, 1.0e-15)
+    # every other entry of the d block is zero
+    c2s_tnz = 0.0
+    for c2s_ti to shape(c2s_td)[0] {
+        for c2s_tj to shape(c2s_td)[1] {
+            if abs(c2s_td[c2s_ti, c2s_tj]) > 1.0e-15 {
+                c2s_tnz = c2s_tnz + 1
+            }
+        }
+    }
+    assert_near(c2s_tnz, 8.0, 0.0)
+}
+
+test "the spherical functions are orthonormal: M^T G M = I up to l = 6" {
+    for c2s_tl to C2S_CLOSED_LMAX + 1 {
+        assert_lt(c2s_orth_gap(c2s_closed(c2s_tl), c2s_tl), 1.0e-15)
+    }
+    c2s_tlorth = 6
+    for c2s_tl to c2s_tlorth + 1 {
+        assert_lt(c2s_orth_gap(c2s_general(c2s_tl), c2s_tl), 1.0e-14)
+    }
+}
+
+test "the unit Gram matrix has a unit diagonal and xx overlaps yy by 1/3" {
+    c2s_tg = c2s_unit_gram(2)
+    for c2s_ti to len(c2s_tg) {
+        assert_near(c2s_tg[c2s_ti, c2s_ti], 1.0, 1.0e-15)
+    }
+    assert_near(c2s_tg[0, 3], 1.0 / 3.0, 2.0e-16)
+    assert_near(c2s_tg[0, 1], 0.0, 0.0)
+    # the Cartesian row index agrees with bas_powers for every component to l = 5
+    c2s_tlrow = 5
+    for c2s_tl to c2s_tlrow + 1 {
+        c2s_tpw = bas_powers(c2s_tl)
+        for c2s_ti to bas_ncart(c2s_tl) {
+            assert_near(c2s_cart_row(c2s_tl, c2s_tpw[c2s_ti, 0], c2s_tpw[c2s_ti, 1]), c2s_ti, 0.0)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

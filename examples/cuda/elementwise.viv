@@ -1,0 +1,48 @@
+#| An elementwise tree as one GPU kernel: one
+#| thread per element, the whole expression fused, no temporary arrays. The
+#| contract requires the kernel's values to equal the array code's, bit for
+#| bit: the same operations in the same order, and Viv's exp on both sides.
+
+kernel def damped(a: Num, x: Arr, z: Arr) -> Arr {
+    return a * x + exp(-z) / (1.0 + z * z)
+}
+
+def damped_arrays(a: Num, x: Arr, z: Arr) -> Arr {
+    return a * x + exp(-z) / (1.0 + z * z)
+}
+
+contract damped_sum(a: Num, x: Arr, z: Arr) -> y: Arr {
+    intent "a x + exp(-z) / (1 + z^2), element by element"
+    methods damped_arrays, damped
+    agree y exactly
+}
+
+#| Inputs with every sign and a spread of magnitudes.
+def wave(n: Int, k: Num, scale: Num) -> Arr {
+    v = zeros(n)
+    for i to n {
+        v[i] = scale * sin(k * i + 0.25)
+    }
+    return v
+}
+
+N: Int = 1000
+x = wave(N, 0.37, 4.0)
+z = wave(N, 0.11, 3.0)
+y = damped(2.5, x, z)
+show y[0]
+show y[N - 1]
+show sum(y)
+
+test "the kernel equals the array code bit for bit" {
+    w = damped_sum(2.5, x, z) using every method
+    assert_near(max(abs(w - damped_arrays(2.5, x, z))), 0.0, 0.0)
+}
+
+test "a length that is not a multiple of the block" {
+    w = damped_sum(-0.5, wave(257, 0.9, 1.0), wave(257, 0.3, 2.0)) using every method
+    assert_near(len(w), 257.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

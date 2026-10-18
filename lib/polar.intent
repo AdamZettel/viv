@@ -1,0 +1,77 @@
+module lib/polar
+  Newton-Schulz iteration: a matrix polynomial that moves every singular value
+  of a matrix toward one without changing its singular vectors, and without
+  computing an SVD. Run to convergence with the classical coefficients it
+  gives the polar factor, the closest matrix with orthonormal rows; run for
+  five rounds with Muon's coefficients it gives the direction the Muon
+  optimizer steps along. The post at the top of lib/polar.viv compares the two.
+
+frob  @58a88086
+  what   The Frobenius norm of a matrix: the square root of the sum of the
+         squares of its entries.
+  A      the matrix
+
+ns_poly  @40bd191f
+  what  What one step does to a single singular value. The matrix iteration is this
+        polynomial applied to each of them at once, which is the whole reason the
+        coefficients can be reasoned about at all.
+
+ns_step  @9e1bb87d
+  what  One quintic Newton-Schulz step on an `m` by `n` matrix with `m <= n`. `X X^T` is
+        the smaller of the two products, which is why Muon transposes a tall matrix
+        before starting.
+  why   With `X = U S V^T`, the step gives `U p(S) V^T`: the singular vectors stay,
+        and each singular value s becomes `p(s) = a s + b s^3 + c s^5`.
+  X     the current iterate, `m` by `n`
+  a     the coefficient of `X`
+  b     the coefficient of `X X^T X`
+  c     the coefficient of `(X X^T)^2 X`
+  S     `X X^T`, `m` by `m`
+
+  $$ X \gets a X + b\, (X X^\top) X + c\, (X X^\top)^2 X $$
+
+ns_normalize  @00720aa4
+  what  Divide by the Frobenius norm, which puts every singular value in `(0, 1]`
+        because the Frobenius norm is at least the largest of them. No eigenvalue
+        computation is needed to start.
+  A     the matrix
+  f     its Frobenius norm; a zero matrix is returned as it is
+
+newton_schulz  @6a65b959
+  what   `steps` rounds of the iteration with the coefficients given, from the
+         matrix divided by its Frobenius norm.
+  A      the matrix, `m` by `n` with `m <= n`
+  steps  how many rounds
+  a      the coefficient of `X`
+  b      the coefficient of `X X^T X`
+  c      the coefficient of `(X X^T)^2 X`
+  X      the iterate
+  k      the round
+
+polar_factor  @18d9f856
+  what  The polar factor of `A`: the closest matrix with orthonormal rows, by the
+        classical iteration run long enough to have converged.
+
+muon_direction  @b65264ef
+  what  The direction Muon would step in, given a momentum matrix: five rounds of the
+        tuned polynomial. Not orthonormal, and not meant to be.
+  why   What the step needs is that no direction of the matrix gets a much larger
+        step than another: singular values of about the same size, not exactly
+        one. Muon's coefficients get there in fewer rounds than the classical ones.
+  G     the momentum matrix, `m` by `n` with `m <= n`
+
+polar_h  @f1fe57d6
+  what  The symmetric positive semidefinite half of the decomposition, `H = U^T A`, so
+        that `A = U H`.
+
+singular_values  @132aae47
+  what  The singular values of an `m` by `n` matrix with `m <= n`, descending, from
+        `lib/svd`. Used to check what the iteration did, never inside it.
+
+row_orthonormality  @fffd0e32
+  what  How far the rows of `U` are from orthonormal: the largest entry of `U U^T - I`.
+
+polar_test_matrix  @34b18761
+  what  A matrix with the singular values asked for, `m` by `n` with `m` the number of
+        values and `m <= n`, built from two orthogonal factors that have nothing to do
+        with the axes.

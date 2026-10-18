@@ -1,0 +1,205 @@
+###
+post: NPB IS, integer sort by bucketed counting
+agent: claude
+
+A port of NPB3.4's IS (IS/is.c, its serial path with USE_BUCKETS, the
+default). IS ranks 2^n integer keys drawn from a roughly Gaussian
+distribution (each key is the sum of four uniforms from randlc, scaled to
+[0, MAX_KEY)). Each of ten iterations changes two keys and ranks them all by
+counting: keys go to buckets by their top bits, then each bucket's keys are
+counted by value and the counts summed into ranks. Five keys per iteration
+have known ranks (the partial verification), and at the end the keys are
+placed by their ranks and checked to be in order (the full verification).
+
+Run a class with `--set CLASS='"W"'` (S, W, A).
+###
+
+from randlc import randlc
+
+CLASS = "S"
+MAX_ITERATIONS: Int = 10
+TEST_ARRAY_SIZE: Int = 5
+
+# IS/is.c: the class sets the sizes (as logs of two) and the five test keys
+# with their ranks in the first iteration.
+private def is_class(cls) {
+    if cls == "S" {
+        idx: [Int] = [48427, 17148, 23627, 62548, 4431]
+        rnk: [Int] = [0, 18, 346, 64917, 65463]
+        return 16, 11, 9, idx, rnk
+    }
+    if cls == "W" {
+        idx: [Int] = [357773, 934767, 875723, 898999, 404505]
+        rnk: [Int] = [1249, 11698, 1039987, 1043896, 1048018]
+        return 20, 16, 10, idx, rnk
+    }
+    if cls == "A" {
+        idx: [Int] = [2112377, 662041, 5336171, 3642833, 4250760]
+        rnk: [Int] = [104, 17523, 123928, 8288932, 8388264]
+        return 23, 19, 10, idx, rnk
+    }
+    stop("IS: unknown class " + cls)
+    none: [Int] = [0]
+    return 0, 0, 0, none, none
+}
+
+# the rank test key i must have in this iteration: is.c's switch on CLASS
+private def expected_rank(cls, i: Int, iteration: Int, test_rank: Int) -> Int {
+    if cls == "S" {
+        return test_rank + iteration if i <= 2 else test_rank - iteration
+    }
+    if cls == "W" {
+        return test_rank + iteration - 2 if i < 2 else test_rank - iteration
+    }
+    return test_rank + (iteration - 1) if i <= 2 else test_rank - (iteration - 1)
+}
+
+# create_seq: key i is MAX_KEY / 4 times the sum of four uniforms
+def create_seq(key_array: [Int], max_key: Int, seed: Int, a: Int) {
+    s: Int = seed
+    k: Int = max_key // 4
+    for i to len(key_array) {
+        s, x = randlc(s, a)
+        s, u = randlc(s, a)
+        x += u
+        s, u = randlc(s, a)
+        x += u
+        s, u = randlc(s, a)
+        x += u
+        key_array[i] = int(float(k) * x)
+    }
+}
+
+# rank: bucket the keys by their top bits, then count each bucket's keys by
+# value; key_buff1[v] ends as the number of keys <= v
+def rank_keys(key_array: [Int], key_buff1: [Int], key_buff2: [Int], bucket_size: [Int],
+              bucket_ptrs: [Int], shift: Int) {
+    num_buckets: Int = len(bucket_size)
+    two: Int = 2
+    num_bucket_keys: Int = two ^ shift
+    for i to num_buckets {
+        bucket_size[i] = 0
+    }
+    for i to len(key_array) {
+        bucket_size[key_array[i] // num_bucket_keys] += 1
+    }
+    bucket_ptrs[0] = 0
+    for i from 1 to num_buckets {
+        bucket_ptrs[i] = bucket_ptrs[i - 1] + bucket_size[i - 1]
+    }
+    for i to len(key_array) {
+        k = key_array[i]
+        b = k // num_bucket_keys
+        key_buff2[bucket_ptrs[b]] = k
+        bucket_ptrs[b] += 1
+    }
+    for i to num_buckets {
+        k1: Int = i * num_bucket_keys
+        k2: Int = k1 + num_bucket_keys
+        for k from k1 to k2 {
+            key_buff1[k] = 0
+        }
+        m: Int = 0
+        if i > 0 {
+            m = bucket_ptrs[i - 1]
+        }
+        for k from m to bucket_ptrs[i] {
+            key_buff1[key_buff2[k]] += 1
+        }
+        key_buff1[k1] += m
+        for k from k1 + 1 to k2 {
+            key_buff1[k] += key_buff1[k - 1]
+        }
+    }
+}
+
+# full_verify: place every key at its rank, bucket by bucket, and count the
+# keys out of order
+def full_verify(key_array: [Int], key_buff1: [Int], key_buff2: [Int], bucket_ptrs: [Int]) -> Int {
+    for j to len(bucket_ptrs) {
+        k1: Int = 0
+        if j > 0 {
+            k1 = bucket_ptrs[j - 1]
+        }
+        for i from k1 to bucket_ptrs[j] {
+            key_buff1[key_buff2[i]] -= 1
+            key_array[key_buff1[key_buff2[i]]] = key_buff2[i]
+        }
+    }
+    out_of_order: Int = 0
+    for p from 1 to len(key_array) {
+        if key_array[p - 1] > key_array[p] {
+            out_of_order += 1
+        }
+    }
+    return out_of_order
+}
+
+def is_run(cls) {
+    total_log, max_key_log, buckets_log, test_index, test_rank = is_class(cls)
+    two: Int = 2
+    num_keys: Int = two ^ int(total_log)
+    max_key: Int = two ^ int(max_key_log)
+    num_buckets: Int = two ^ int(buckets_log)
+    shift: Int = int(max_key_log) - int(buckets_log)
+
+    key_array = int_zeros(num_keys)
+    key_buff1 = int_zeros(max_key)
+    key_buff2 = int_zeros(num_keys)
+    bucket_size = int_zeros(num_buckets)
+    bucket_ptrs = int_zeros(num_buckets)
+    partial = int_zeros(TEST_ARRAY_SIZE)
+    create_seq(key_array, max_key, 314159265, 1220703125)
+
+    passed: Int = 0
+    # iteration 1 once more before the timed loop, untimed in NPB; its
+    # partial checks are discarded with the count
+    for iteration from 0 to MAX_ITERATIONS + 1 {
+        it: Int = iteration
+        if iteration == 0 {
+            it = 1
+        }
+        if iteration == 1 {
+            passed = 0
+        }
+        key_array[it] = it
+        key_array[it + MAX_ITERATIONS] = max_key - it
+        for i to TEST_ARRAY_SIZE {
+            partial[i] = key_array[test_index[i]]
+        }
+        rank_keys(key_array, key_buff1, key_buff2, bucket_size, bucket_ptrs, shift)
+        for i to TEST_ARRAY_SIZE {
+            k = partial[i]
+            if 0 < k and k <= num_keys - 1 {
+                if key_buff1[k - 1] == expected_rank(cls, i, it, test_rank[i]) {
+                    passed += 1
+                }
+                else {
+                    print(f"Failed partial verification: iteration {it}, test key {i}")
+                }
+            }
+        }
+    }
+    out_of_order = full_verify(key_array, key_buff1, key_buff2, bucket_ptrs)
+    if out_of_order == 0 {
+        passed += 1
+    }
+    else {
+        print(f"Full_verify: number of keys out of sort: {out_of_order}")
+    }
+    return num_keys, passed
+}
+
+num_keys, passed = is_run(CLASS)
+verified = passed == 5 * MAX_ITERATIONS + 1
+print(f"IS class {CLASS}: {num_keys} keys, {MAX_ITERATIONS} iterations")
+print(f"Checks passed = {passed}")
+status = "SUCCESSFUL" if verified else "UNSUCCESSFUL"
+print(f"Verification = {status}")
+
+test "IS ranks the test keys and sorts every key" {
+    assert_true(verified)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

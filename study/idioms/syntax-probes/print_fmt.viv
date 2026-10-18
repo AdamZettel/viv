@@ -1,0 +1,51 @@
+###
+`print` with text and numbers on one line, `fmt` for full precision and
+format specs, and `show a, b` (gap R4). Every line
+below must be the same bytes in the interpreter, C and wasm
+(tools/three-engines.sh study/idioms/syntax-probes print_fmt).
+###
+
+loss = 0.6931471805599453
+x = 0.1 + 0.2
+v = [1.0, 2.5, -0.0]
+M = [[1.0, 2.0], [3.0, 4.0]]
+ok = x > 0.3
+z = 1.0 + 2.0i
+
+# the arguments are written one after another, with nothing between them
+print("loss", loss)
+print("loss", fmt(loss))
+print("loss", fmt(loss, 17))
+
+# ddpm's summary line, which took six `show`s
+print("mean (", sum(v) / len(v), ", ", sum(M) / numel(M), ") error ", fmt(x - 0.3, ".3e"), sep="")
+
+# Python's f-string formats
+print("t =", fmt(1.5, ".3f"), "s")
+print("[", fmt(x, "10.4e"), "] [", fmt(12.0, "5d"), "] [", fmt(0.25, "8"), "]", sep="")
+print("repr:", fmt(-0.0), fmt(1.0e16), fmt(1.0e-5), fmt(4.9e-324), fmt(1.0 / 0.0))
+
+# arrays on one line, booleans, complex numbers
+print("v =", v, " M =", M)
+print("v =", fmt(v, ".2f"), " M =", fmt(M))
+print("ok", ok, " z", z)
+
+# one number is the `print` it always was; no arguments is an empty line
+print(x)
+print()
+print("text alone")
+
+# several labeled values on one line; `fmt` of a variable keeps its name
+show loss, x, ok
+show fmt(x), fmt(x, 17)
+show v, M
+
+test "print writes and returns 0" {
+    r = print("inside a test:", fmt(x))
+    assert_near(r, 0, 0)
+    # the shortest digits say what the six do not
+    assert_true(x != 0.3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

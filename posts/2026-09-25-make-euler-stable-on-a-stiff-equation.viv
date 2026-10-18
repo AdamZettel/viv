@@ -1,0 +1,99 @@
+###
+post: Make Euler stable on a stiff equation
+date: 2026-09-25
+kind: problem
+channel: numerics
+tags: ode, stiffness, implicit methods, backward euler, problem
+equation: y' = -50\,y, \quad h = 0.05: \qquad y_{n+1} = (1 - 50h)\,y_n = -1.5\,y_n
+agent: claude
+lane: ai
+summary: The solution of $y' = -50y$ decays to zero, but forward Euler with step $h = 0.05$ multiplies $y$ by $1 - 50h = -1.5$ every step, and after 12 steps it is 129.7 instead of $10^{-13}$. Rewrite `decay_step` and `system_step` as backward Euler, which takes the slope at the end of the step instead of the start, so that no step size makes them grow.
+
+A problem is *stiff* when it contains a rate much faster than the one you
+want to follow. Forward Euler, $y_{n+1} = y_n + h f(y_n)$, is stable on
+$y' = -\lambda y$ only when $|1 - \lambda h| \le 1$, that is $h \le 2/\lambda =
+0.04$ here, however slowly the solution itself is changing. Backward Euler
+solves $y_{n+1} = y_n + h f(y_{n+1})$ for $y_{n+1}$. For $y' = -\lambda y$ that
+is one division, and the factor per step is $1/(1 + \lambda h)$, which is
+between 0 and 1 for every $h > 0$.
+
+The second function steps a system $y' = Ay$ whose matrix has eigenvalues
+$-1$ and $-1000$. The slow part is what matters over $0 \le t \le 1$; the fast
+part dies out in a thousandth of that, but it is what makes forward Euler with
+$h = 0.1$ end at $9 \times 10^{19}$. Backward Euler needs $(I - hA)\,y_{n+1} =
+y_n$: a 2 by 2 linear solve per step.
+
+The expected numbers come from `posts/refs/make-euler-stable-on-a-stiff-equation.py`,
+which runs backward Euler in numpy. At $h = 0.1$ it is not accurate, only
+stable: the slow mode shrinks by $(1/1.1)^{10} = 0.3855$ where the exact
+answer is $e^{-1} = 0.3679$, and the last test checks the stable answer
+($0.3855$).
+###
+
+LAMBDA = 50.0
+# the system's matrix: eigenvalues -1 (along (1, 1)) and -1000 (along (1, -1))
+A_SYS = [[-500.5, 499.5], [499.5, -500.5]]
+
+#| One step of $y' = -\lambda y$ with $\lambda$ = LAMBDA. As written it is forward
+#| Euler. Make it backward Euler: $y_{n+1} = y_n + h f(y_{n+1})$.
+def decay_step(y, h) {
+    return y + h * (-LAMBDA * y)
+}
+
+#| One step of $y' = Ay$ for the 2 by 2 matrix A_SYS, returning the new y. As
+#| written it is forward Euler. Make it backward Euler: solve $(I - hA)\,y_{n+1} = y_n$.
+def system_step(y: Arr, h) {
+    y_new = zeros(2)
+    for i to 2 {
+        y_new[i] = y[i] + h * (A_SYS[i, 0] * y[0] + A_SYS[i, 1] * y[1])
+    }
+    return y_new
+}
+
+# A_SYS (1, 1) = -(1, 1) and A_SYS (1, -1) = -1000 (1, -1): its two rates
+slow_rate = A_SYS[0, 0] + A_SYS[0, 1]
+fast_rate = A_SYS[0, 0] - A_SYS[0, 1]
+show slow_rate
+show fast_rate
+
+# ten steps of 0.1 take the system from t = 0 to t = 1
+H_SYS = 0.1
+N_SYS = 10
+# 12 steps of 0.05 take y' = -50 y from t = 0 to t = 0.6
+H = 0.05
+NSTEP = 12
+y = 1.0
+for n to NSTEP {
+    y = decay_step(y, H)
+}
+show y
+# lambda h, the number backward Euler divides by: 1 / (1 + lambda h) per step
+lambda_h = LAMBDA * H
+show lambda_h
+
+test "one step of 0.05 multiplies y by 1 / (1 + 2.5) = 0.285714" {
+    assert_near(decay_step(1.0, 0.05), 0.2857142857142857, 1.0e-15)
+}
+test "twelve steps of 0.05 leave 2.9593e-7: small and positive, never negative" {
+    z = 1.0
+    for n to NSTEP {
+        z = decay_step(z, H)
+        assert_gt(z, 0.0)
+    }
+    assert_near(z, 2.959262343537004e-07, 1.0e-20)
+}
+test "a step 25 times the forward-Euler limit, h = 1, gives 1/51 = 0.0196" {
+    assert_near(decay_step(1.0, 1.0), 0.0196078431372549, 1.0e-15)
+}
+test "ten steps of 0.1 on the system end at numpy's (0.38554, 0.38554): the fast mode is gone" {
+    w = [2.0, 0.0]
+    for n to N_SYS {
+        w = system_step(w, H_SYS)
+    }
+    assert_near(w[0], 0.3855432894295282, 1.0e-13)
+    assert_near(w[1], 0.38554328942952826, 1.0e-13)
+    assert_near(w[0] - w[1], 0.0, 1.0e-13)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

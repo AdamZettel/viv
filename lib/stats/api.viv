@@ -1,0 +1,174 @@
+###
+post: The entry points vp.stats calls
+agent: claude
+
+vp.stats (python/vipyr/_stats.py) compiles this file once through vipyr's
+cache and calls these defs on flat float64 arrays; Python broadcasts the
+arguments, applies loc and scale, and names the codes.
+
+- `special_eval(code, a, b, x)`: special function number `code` (the SF_ codes
+  below) at each (a[i], b[i], x[i]), the arguments it does not take ignored.
+- `dist_eval(fam, what, x, s1, s2, s3)`: lib/stats/dist.viv's `dist_value` at
+  each point.
+- `dist_rvs(fam, s1, s2, s3, n, seed)`: n draws by inversion.
+- `describe(x, ddof, method)`: n, mean, variance (two-pass, or Welford's
+  when method is 1), skewness and excess kurtosis; `quantiles(x, p, type)`.
+- `ols_fit(X, y, method, tol, refine)`: lib/stats/linmod.viv's `lstsq` and the
+  exact residuals; `glm_fit(...)`: lib/stats/glm.viv's `glm_irls`, and
+  `glm_observed(...)` its observed-information covariance.
+
+Used with `from stats.api import ...`.
+###
+
+from stats.special import stats_erf, lgamma, digamma, erfc, erfcx, erfinv, erfcinv, ndtr, ndtri, gammainc, gammaincc, gammaincinv, gammainccinv, betainc, betaincc, betaincinv, betainccinv, lbeta, log1p, expm1
+from stats.dist import dist_value, dist_sample
+from stats.describe import mean_var, welford, moments, quantile
+from stats.linmod import lstsq, exact_residual
+from stats.glm import glm_irls, glm_newton, glm_observed_cov
+
+SF_LGAMMA = 0
+SF_DIGAMMA = 1
+SF_ERF = 2
+SF_ERFC = 3
+SF_ERFCX = 4
+SF_ERFINV = 5
+SF_ERFCINV = 6
+SF_NDTR = 7
+SF_NDTRI = 8
+SF_GAMMAINC = 9
+SF_GAMMAINCC = 10
+SF_GAMMAINCINV = 11
+SF_GAMMAINCCINV = 12
+SF_BETAINC = 13
+SF_BETAINCC = 14
+SF_BETAINCINV = 15
+SF_BETAINCCINV = 16
+SF_LBETA = 17
+SF_LOG1P = 18
+SF_EXPM1 = 19
+
+def special_one(code, a, b, x) {
+    if code == SF_LGAMMA {
+        return lgamma(x)
+    }
+    if code == SF_DIGAMMA {
+        return digamma(x)
+    }
+    if code == SF_ERF {
+        return stats_erf(x)
+    }
+    if code == SF_ERFC {
+        return erfc(x)
+    }
+    if code == SF_ERFCX {
+        return erfcx(x)
+    }
+    if code == SF_ERFINV {
+        return erfinv(x)
+    }
+    if code == SF_ERFCINV {
+        return erfcinv(x)
+    }
+    if code == SF_NDTR {
+        return ndtr(x)
+    }
+    if code == SF_NDTRI {
+        return ndtri(x)
+    }
+    if code == SF_GAMMAINC {
+        return gammainc(a, x)
+    }
+    if code == SF_GAMMAINCC {
+        return gammaincc(a, x)
+    }
+    if code == SF_GAMMAINCINV {
+        return gammaincinv(a, x)
+    }
+    if code == SF_GAMMAINCCINV {
+        return gammainccinv(a, x)
+    }
+    if code == SF_BETAINC {
+        return betainc(a, b, x)
+    }
+    if code == SF_BETAINCC {
+        return betaincc(a, b, x)
+    }
+    if code == SF_BETAINCINV {
+        return betaincinv(a, b, x)
+    }
+    if code == SF_BETAINCCINV {
+        return betainccinv(a, b, x)
+    }
+    if code == SF_LBETA {
+        return lbeta(a, b)
+    }
+    if code == SF_LOG1P {
+        return log1p(x)
+    }
+    return expm1(x)
+}
+
+#| Special function `code` at each (a[i], b[i], x[i]).
+def special_eval(code: Num, a: Arr, b: Arr, x: Arr) -> Arr {
+    return [special_one(code, a[i], b[i], x[i]) for i to len(x)]
+}
+
+#| `what` of family `fam` at each x[i] with shapes s1[i], s2[i], s3[i].
+def dist_eval(fam: Num, what: Num, x: Arr, s1: Arr, s2: Arr, s3: Arr) -> Arr {
+    return [dist_value(fam, what, x[i], s1[i], s2[i], s3[i]) for i to len(x)]
+}
+
+#| n draws of family `fam` by inversion of default_rng(seed)'s uniforms.
+def dist_rvs(fam: Num, s1: Num, s2: Num, s3: Num, n: Num, seed: Num) -> Arr {
+    return dist_sample(fam, s1, s2, s3, n, seed)
+}
+
+#| n, mean, variance (divided by n - ddof; method 0 two-pass, 1 Welford), skewness, excess kurtosis.
+def describe(x: Arr, ddof: Num, method: Num) {
+    m, v = mean_var(x, ddof)
+    if method == 1.0 {
+        m, v = welford(x, ddof)
+    }
+    m0, v0, g1, g2 = moments(x)
+    return len(x), m, v, g1, g2
+}
+
+#| Hyndman-Fan sample quantiles of type 1 to 9 at each p.
+def quantiles(x: Arr, p: Arr, type: Num) -> Arr {
+    return quantile(x, p, type)
+}
+
+#| Least squares by `method` (0 QR, 1 Cholesky, 2 SVD): coefficients, rank,
+#| pivot order, (X^T X)^-1, and the residuals y - X b summed exactly.
+def ols_fit(X: Arr, y: Arr, method: Num, tol: Num, refine: Num) {
+    b, r, piv, C = lstsq(X, y, method, tol, refine)
+    return b, r, piv, C, exact_residual(X, y, b)
+}
+
+#| Newton's method with the observed information; returns what glm_fit returns.
+def glm_fit_newton(y: Arr, X: Arr, w: Arr, offset: Arr, family: Num, link: Num, intercept: Num, epsilon: Num, maxit: Num) {
+    return glm_newton(y, X, w, offset, family, link, intercept, epsilon, maxit)
+}
+
+#| R's glm.fit: coefficients, unscaled covariance, deviance, null deviance,
+#| iterations, converged, mu, eta, working weights, rank.
+def glm_fit(y: Arr, X: Arr, w: Arr, offset: Arr, family: Num, link: Num, intercept: Num, epsilon: Num, maxit: Num) {
+    return glm_irls(y, X, w, offset, family, link, intercept, epsilon, maxit)
+}
+
+#| The inverse observed information (per unit dispersion) at eta.
+def glm_observed(y: Arr, X: Arr, w: Arr, eta: Arr, family: Num, link: Num) -> Arr {
+    return glm_observed_cov(y, X, w, eta, family, link)
+}
+
+test "the entry points give what the modules give" {
+    # R 4.3.3: quantile(c(2, 7, 1, 8, 2, 8, 1, 8), c(0.1, 0.25, 0.5, 0.9), type = 7)
+    x = [2.0, 7.0, 1.0, 8.0, 2.0, 8.0, 1.0, 8.0]
+    assert_allclose(quantiles(x, [0.1, 0.25, 0.5, 0.9], 7.0), [1.0, 1.75, 4.5, 8.0], 1e-15)
+    # erf(0.5) = 0.52049987781304653768... (mpmath)
+    v = special_eval(SF_ERF, [0.0], [0.0], [0.5])
+    assert_near(v[0], 0.5204998778130465, 2.0e-16)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

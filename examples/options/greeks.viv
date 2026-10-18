@@ -1,0 +1,168 @@
+#|| Greeks by Viv's reverse-mode autodiff (`grad`), for Black-Scholes and for
+#|| Heston. `grad` gives first derivatives; it does not yet differentiate a
+#|| gradient, so gamma is not a second `grad`:
+#||
+#|| - Black-Scholes gamma comes from the model's identity
+#||   gamma = vega / (S^2 sigma T), with vega from `grad`: no difference
+#||   quotient, and no cancellation;
+#|| - Heston gamma is a central difference of the autodiff delta.
+#||
+#|| `grad` does not take complex numbers either, so the Heston price here is
+#|| the COS series of heston.viv written out in real arithmetic, each
+#|| complex number a pair (re, im).
+
+from bs import bs_price
+
+PI = 3.141592653589793
+
+def _bs_by_S(S: Num, K: Num, T: Num, r: Num, q: Num, sigma: Num, is_call: Bool) -> Num {
+    return bs_price(S, K, T, r, q, sigma, is_call)
+}
+
+def _bs_by_sigma(sigma: Num, S: Num, K: Num, T: Num, r: Num, q: Num, is_call: Bool) -> Num {
+    return bs_price(S, K, T, r, q, sigma, is_call)
+}
+
+#| Black-Scholes delta, gamma and vega of one option. Delta and vega are
+#| `grad` of bs_price; gamma is vega / (S^2 sigma T), which holds for
+#| Black-Scholes calls and puts alike.
+def bs_greeks(S: Num, K: Num, T: Num, r: Num, q: Num, sigma: Num, is_call: Bool) {
+    delta = grad(_bs_by_S, S, K, T, r, q, sigma, is_call)
+    vega = grad(_bs_by_sigma, sigma, S, K, T, r, q, is_call)
+    return delta, vega / (S * S * sigma * T), vega
+}
+
+#| bs_greeks over arrays of options; returns delta, gamma, vega arrays.
+def bs_greeks_arr(S: Arr, K: Arr, T: Arr, r: Num, q: Num, sigma: Arr, is_call: Arr) {
+    n = len(S)
+    d = zeros(n)
+    g = zeros(n)
+    v = zeros(n)
+    for i to n {
+        a, b, c = bs_greeks(S[i], K[i], T[i], r, q, sigma[i], is_call[i] > 0.5)
+        d[i] = a
+        g[i] = b
+        v[i] = c
+    }
+    return d, g, v
+}
+
+# complex helpers on pairs: each returns (re, im)
+def _cmul(a: Num, b: Num, c: Num, d: Num) {
+    return a * c - b * d, a * d + b * c
+}
+
+def _cdiv(a: Num, b: Num, c: Num, d: Num) {
+    den = c * c + d * d
+    return (a * c + b * d) / den, (b * c - a * d) / den
+}
+
+# the principal square root; the imaginary part takes the sign of b
+def _csqrt(a: Num, b: Num) {
+    m = sqrt(a * a + b * b)
+    re = sqrt(0.5 * (m + a))
+    im = sqrt(0.5 * (m - a))
+    if b < 0.0 {
+        im = -im
+    }
+    return re, im
+}
+
+def _cexp(a: Num, b: Num) {
+    e = exp(a)
+    return e * cos(b), e * sin(b)
+}
+
+def _clog(a: Num, b: Num) {
+    return 0.5 * log(a * a + b * b), atan2(b, a)
+}
+
+# the Heston characteristic function of log(S_T / S_0) at u > 0, as heston.viv's
+# heston_cf, in pairs
+def _cf(u: Num, T: Num, r: Num, q: Num, v0: Num, kappa: Num, theta: Num, eta: Num, rho: Num) {
+    br = kappa
+    bi = -rho * eta * u
+    zr, zi = _cmul(br, bi, br, bi)
+    zr = zr + eta * eta * u * u
+    zi = zi + eta * eta * u
+    dr, di = _csqrt(zr, zi)
+    gr, gi = _cdiv(br - dr, bi - di, br + dr, bi + di)
+    er, ei = _cexp(-dr * T, -di * T)
+    ger, gei = _cmul(gr, gi, er, ei)
+    lr, li = _clog(1.0 - ger, -gei)
+    l2r, l2i = _clog(1.0 - gr, -gi)
+    lr = lr - l2r
+    li = li - l2i
+    f = kappa * theta / (eta * eta)
+    cr = f * ((br - dr) * T - 2.0 * lr)
+    ci = f * ((bi - di) * T - 2.0 * li)
+    nr, ni = _cmul(br - dr, bi - di, 1.0 - er, -ei)
+    qr, qi = _cdiv(nr, ni, 1.0 - ger, -gei)
+    return _cexp(cr + v0 * qr / (eta * eta), u * (r - q) * T + ci + v0 * qi / (eta * eta))
+}
+
+# The COS price of one Heston option (heston.viv's heston_cos for one strike);
+# the truncation half-width w is passed in, so it does not move with the
+# parameters being differentiated.
+def _heston(S: Num, v0: Num, K: Num, T: Num, r: Num, q: Num, kappa: Num, theta: Num, eta: Num, rho: Num, N: Int, w: Num, is_call: Bool) -> Num {
+    c1 = (r - q) * T + (1.0 - exp(-kappa * T)) * (theta - v0) / (2.0 * kappa) - 0.5 * theta * T
+    bma = 2.0 * w
+    x = log(S / K)
+    a = x + c1 - w
+    # k = 0: phi(0) = 1, U_0 = 2 / (b - a) (-a - chi_0), weighted 1/2
+    total = 0.5 * 2.0 / bma * (-a - (1.0 - exp(a)))
+    # a number bound: `grad` of a loop with an Int bound does not compile yet
+    # (bugs/ledger.jsonl, B295)
+    nterms = float(N)
+    for k from 1 to nterms {
+        uk = k * PI / bma
+        cd = cos(-uk * a)
+        sd = sin(-uk * a)
+        chi = (cd - exp(a) + uk * sd) / (1.0 + uk * uk)
+        Uk = 2.0 / bma * (sd / uk - chi)
+        pr, pi = _cf(uk, T, r, q, v0, kappa, theta, eta, rho)
+        ang = uk * (x - a)
+        total += (pr * cos(ang) - pi * sin(ang)) * Uk
+    }
+    put = K * exp(-r * T) * total
+    if is_call {
+        return put + S * exp(-q * T) - K * exp(-r * T)
+    }
+    return put
+}
+
+def _heston_by_S(S: Num, v0: Num, K: Num, T: Num, r: Num, q: Num, kappa: Num, theta: Num, eta: Num, rho: Num, N: Int, w: Num, is_call: Bool) -> Num {
+    return _heston(S, v0, K, T, r, q, kappa, theta, eta, rho, N, w, is_call)
+}
+
+def _heston_by_v0(v0: Num, S: Num, K: Num, T: Num, r: Num, q: Num, kappa: Num, theta: Num, eta: Num, rho: Num, N: Int, w: Num, is_call: Bool) -> Num {
+    return _heston(S, v0, K, T, r, q, kappa, theta, eta, rho, N, w, is_call)
+}
+
+#| Heston price, delta, gamma and dV/dv0 of one option by COS with N terms
+#| on a fixed half-width w (in log-price). Delta and dV/dv0 are `grad`;
+#| gamma is (delta(S + h) - delta(S - h)) / 2h with h = 1e-3 S.
+def heston_greeks(S: Num, K: Num, T: Num, r: Num, q: Num, v0: Num, kappa: Num, theta: Num, eta: Num, rho: Num, N: Int, w: Num, is_call: Bool) {
+    v = _heston(S, v0, K, T, r, q, kappa, theta, eta, rho, N, w, is_call)
+    delta = grad(_heston_by_S, S, v0, K, T, r, q, kappa, theta, eta, rho, N, w, is_call)
+    dv0 = grad(_heston_by_v0, v0, S, K, T, r, q, kappa, theta, eta, rho, N, w, is_call)
+    h = 1.0e-3 * S
+    up = grad(_heston_by_S, S + h, v0, K, T, r, q, kappa, theta, eta, rho, N, w, is_call)
+    dn = grad(_heston_by_S, S - h, v0, K, T, r, q, kappa, theta, eta, rho, N, w, is_call)
+    return v, delta, (up - dn) / (2.0 * h), dv0
+}
+
+test "Black-Scholes greeks against their closed forms (S=K=100, T=1, r=5%, sigma=20%)" {
+    d, g, v = bs_greeks(100.0, 100.0, 1.0, 0.05, 0.0, 0.2, true)
+    assert_near(d, 0.6368306511756191, 1.0e-13)
+    assert_near(g, 0.018762017345846895, 1.0e-12)
+    assert_near(v, 37.52403469169379, 1.0e-11)
+}
+
+test "the real-arithmetic Heston price is heston.viv's" {
+    v, d, g, dv = heston_greeks(100.0, 100.0, 1.0, 0.0, 0.0, 0.0175, 1.5768, 0.0398, 0.5751, -0.5711, 256, 4.0, true)
+    assert_near(v, 5.785155450, 1.0e-6)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

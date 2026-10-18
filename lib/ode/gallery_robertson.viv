@@ -1,0 +1,58 @@
+###
+post: Robertson's stiff kinetics, drawn
+agent: claude
+
+The first figure of vipyr's gallery example plot_ode_robertson.py, drawn in
+Viv: Robertson's three-species reaction (rates 0.04, 1e4 and 3e7) solved by
+Radau IIA from t = 0 to 1e11 at rtol 1e-8, through `ode_solve` in
+lib/ode/solve.viv with the Jacobian from `grad`. The middle species is drawn
+times 1e4. The end state is checked against the reference solution the IVP test
+set of Mazzia and Magherini (Bari) publishes, as vipyr's script checks it.
+###
+
+from ode.core import RADAU, JAC_GIVEN
+from ode.solve import ode_cfg, ode_solve, no_events
+from ode.problems import robertson, robertson_jac
+
+RATES = [0.04, 1e4, 3e7]
+T_END: Num = 1e11
+RTOL: Num = 1e-8
+ATOL: Num = 1e-20
+#: output at 161 times, log-spaced over 16 decades
+N_OUT: Int = 161
+LOG_T_FIRST: Num = -5.0
+LOG_T_LAST: Num = 11.0
+#: the middle species is drawn scaled up, as vipyr draws it
+Y2_SCALE: Num = 1e4
+#: the Bari IVP test set's reference at t = 1e11
+Y_REF = [0.2083340149701255e-07, 0.8333360770334713e-13, 0.9999999791665050]
+REF_REL: Num = 1e-4
+#: the first step chosen by the solver, and no cap on the step
+AUTO_FIRST: Num = 0.0
+MAX_STEPS: Int = 100000
+
+t_out = [10.0 ^ x for x in linspace(LOG_T_FIRST, LOG_T_LAST, N_OUT)]
+c = ode_cfg(RADAU, T_END, RTOL, ones(3) * ATOL, AUTO_FIRST, inf, MAX_STEPS, JAC_GIVEN)
+r = ode_solve(robertson, robertson_jac, no_events, 0.0, T_END, [1.0, 0.0, 0.0], RATES, c, t_out, zeros(0),
+              zeros(0))
+show r.nsteps
+last = r.y[len(t_out) - 1, :]
+show last
+
+figure("Robertson's kinetics (Radau IIA, rtol 1e-8)", "t", "concentration")
+xscale("log")
+plot(t_out, r.y[:, 0], "y1")
+plot(t_out, Y2_SCALE * r.y[:, 1], "1e4 y2")
+plot(t_out, r.y[:, 2], "y3")
+style("y1", "s1 nomarker")
+style("1e4 y2", "s2 nomarker")
+style("y3", "s3 nomarker")
+
+test "the end state is the reference solution's" {
+    for i to len(Y_REF) {
+        assert_lt(abs(last[i] - Y_REF[i]) / Y_REF[i], REF_REL)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,241 @@
+###
+post: Neutron pairing in a neutron-star crust
+date: 2026-09-25
+kind: demo
+channel: nuclear
+tags: nuclear physics, neutron stars, superfluidity, pairing, bogoliubov-de gennes, hartree-fock-bogoliubov
+equation: \begin{pmatrix} h - \mu & \Delta(x) \\ \Delta(x) & -(h - \mu) \end{pmatrix}\begin{pmatrix} u \\ v \end{pmatrix} = E\begin{pmatrix} u \\ v \end{pmatrix}, \qquad \Delta(x) = \frac{g}{\Delta x}\,\kappa(x)
+agent: claude
+lane: ai
+summary: One cell of the neutron-star inner crust in one dimension: a slab of nuclear matter in a gas of free neutrons, with a contact pairing force. Solving the Bogoliubov-de Gennes equations self-consistently gives a pairing gap of 0.9151 MeV in the gas and 0.1518 MeV at the middle of the slab, as a separate numpy solver finds. The same code on a uniform ring reproduces the BCS gap equation's 0.961089 MeV to $10^{-8}$.
+
+Below the outer crust of a neutron star, nuclei are so neutron-rich that
+neutrons drip out of them and fill the space between as a gas. That gas is
+expected to be a superfluid: neutrons of opposite spin pair up, as electrons
+do in a superconductor, and the energy needed to break a pair is twice the
+*pairing gap* $\Delta$. Deeper down, the nuclei are thought to flatten into
+sheets (the "lasagna" phase). This post takes one such sheet, a slab of
+nuclear matter, in one dimension: a cell 30 fm wide with the slab in the
+middle and neutron gas on either side.
+
+The method is the Hartree-Fock-Bogoliubov one, cut down to its pairing part.
+A neutron's energy in the cell is $h = -\frac{\hbar^2}{2m}\frac{d^2}{dx^2} + V(x)$,
+with $V$ a Woods-Saxon well 40 MeV deep and 10 fm wide standing for the slab.
+Pairing mixes a neutron state ($u$) with a hole state ($v$), which gives the
+Bogoliubov-de Gennes (BdG) equations above. The pairing field $\Delta(x)$
+depends on the solutions through the *anomalous density*
+$\kappa(x) = -\sum_{E<0} u(x)v(x)$, so the equations are solved over and over
+until $\Delta$ stops changing. In one dimension a contact force gives a
+finite $\kappa$ without a cutoff, so no regularization is needed.
+
+`posts/refs/pairing-in-the-neutron-star-crust.py` solves the same cell with
+numpy (the matrix in block form, not interleaved, and 100 times tighter
+convergence), and solves the uniform gas from the BCS gap equation without
+diagonalizing anything.
+###
+
+# hbar^2 / 2 m_n in MeV fm^2
+T_KIN = 20.735
+# mesh: 60 points 0.5 fm apart, one 30 fm cell
+N = 60
+DX = 0.5
+# neutron chemical potential (MeV) and contact pairing strength (MeV fm)
+MU = 3.0
+G_PAIR = 15.0
+# the slab: center, half-thickness, surface diffuseness (fm) and depth (MeV)
+X_SLAB = 15.0
+R_SLAB = 5.0
+A_SLAB = 0.6
+V_SLAB = 40.0
+# so the slab is 10 fm wide, and the gas on either side of it 10 fm wide too
+W_SLAB = 2.0 * R_SLAB
+W_GAS = X_SLAB - R_SLAB
+# the gap iteration stops when no site's Delta changes by more than this (MeV):
+# in the slab cell, and on the uniform ring, whose check is tighter
+TOL = 1.0e-6
+TOL_RING = 1.0e-9
+# the numpy twin (posts/refs) iterates the slab cell to a 100 times tighter tolerance
+TOL_TWIN = TOL / 100.0
+MIX = 0.6
+
+#| A Woods-Saxon slab centered at x0: -v0 / (1 + exp((|x - x0| - r) / a)).
+def ws_slab(x, x0, r, a, v0) {
+    return -v0 / (1.0 + exp((abs(x - x0) - r) / a))
+}
+
+#| One BdG solve: the 2N x 2N matrix with u and v interleaved site
+#| by site, diagonalized; the states with E < 0 give the normal density
+#| (the sum of their u^2) and the anomalous density kappa = -(sum of u v). `ring` = 1 adds
+#| the hop between the last site and the first.
+def bdg_densities(hd: Arr, tau, delta: Arr, rho: Arr, kappa: Arr, ring) {
+    n = len(hd)
+    H = zeros(2 * n, 2 * n)
+    for i to n {
+        H[2 * i, 2 * i] = hd[i]
+        H[2 * i + 1, 2 * i + 1] = -hd[i]
+        H[2 * i, 2 * i + 1] = delta[i]
+        H[2 * i + 1, 2 * i] = delta[i]
+    }
+    for i to n - 1 {
+        H[2 * i, 2 * i + 2] = -tau
+        H[2 * i + 2, 2 * i] = -tau
+        H[2 * i + 1, 2 * i + 3] = tau
+        H[2 * i + 3, 2 * i + 1] = tau
+    }
+    if ring > 0.5 {
+        H[0, 2 * n - 2] = -tau
+        H[2 * n - 2, 0] = -tau
+        H[1, 2 * n - 1] = tau
+        H[2 * n - 1, 1] = tau
+    }
+    w = zeros(2 * n)
+    W = zeros(2 * n, 2 * n)
+    eig_sym(H, w, W)
+    fill(rho, 0.0)
+    fill(kappa, 0.0)
+    for k to 2 * n {
+        if w[k] < 0.0 {
+            for i to n {
+                rho[i] += W[2 * i, k] * W[2 * i, k]
+                kappa[i] -= W[2 * i, k] * W[2 * i + 1, k]
+            }
+        }
+    }
+    return 0
+}
+
+#| Iterate Delta <- (g / dx) kappa[Delta] with linear mixing from
+#| Delta = 2 MeV until no site moves by more than `tol`. Returns the number of
+#| iterations; `delta`, `rho` and `kappa` hold the converged fields.
+def solve_gap(hd: Arr, tau, delta: Arr, rho: Arr, kappa: Arr, ring, tol) {
+    fill(delta, 2.0)
+    dmax = 1.0
+    it = 0
+    while dmax > tol {
+        bdg_densities(hd, tau, delta, rho, kappa, ring)
+        dmax = 0.0
+        for i to len(hd) {
+            dnew = G_PAIR / DX * kappa[i]
+            dmax = max(dmax, abs(dnew - delta[i]))
+            delta[i] = MIX * dnew + (1.0 - MIX) * delta[i]
+        }
+        it += 1
+    }
+    return it
+}
+
+###
+## The slab cell
+
+The kinetic energy is the three-point second difference, so each site
+couples to its neighbors with $\tau = \hbar^2/(2m\,\Delta x^2)$. The cell has
+hard walls at both ends. The iteration starts from $\Delta = 2$ MeV
+everywhere and stops when no site's $\Delta$ moves by more than $10^{-6}$ MeV
+in one step. With the mixing, what is left is a few $10^{-6}$ MeV: the gas
+gap comes out 0.915113 against the numpy solver's 0.915110, which ran to
+$10^{-8}$. The tests allow $10^{-5}$.
+###
+
+tau = T_KIN / (DX * DX)
+x = linspace(0.5 * DX, (N - 0.5) * DX, N)
+V = zeros(N)
+for i to N {
+    V[i] = ws_slab(x[i], X_SLAB, R_SLAB, A_SLAB, V_SLAB)
+}
+hd = V + (2.0 * tau - MU)
+rho = zeros(N)
+kappa = zeros(N)
+delta = zeros(N)
+iters = solve_gap(hd, tau, delta, rho, kappa, 0, TOL)
+show iters
+
+# site 5 is at x = 2.75 fm, in the gas; site 29 at x = 14.75 fm, the middle of the slab
+gap_gas = delta[5]
+gap_slab = delta[29]
+show gap_gas
+show gap_slab
+n_cell = sum(rho)
+show n_cell
+
+test "the gap in the neutron gas is 0.915110 MeV, as the numpy solver finds" {
+    assert_near(gap_gas, 0.91510991, 1.0e-5)
+}
+test "the gap at the middle of the slab is 0.151812 MeV" {
+    assert_near(gap_slab, 0.15181247, 1.0e-5)
+}
+test "the cell holds 6.87810 neutrons (per unit area, in this 1D model)" {
+    assert_near(n_cell, 6.87809946, 1.0e-5)
+}
+
+###
+## The BCS gap equation in the uniform gas
+
+To check the solver apart from the slab, the program sets $V = 0$ and joins
+the ends of the cell into a ring. Every site is then the same, $\Delta$ is
+uniform, and the BdG equations separate into plane waves of momentum $k$,
+each with quasiparticle energy $E_k = \sqrt{\xi_k^2 + \Delta^2}$ and
+$\xi_k = 2\tau(1 - \cos k\Delta x) - \mu$. The self-consistency condition
+becomes the BCS gap equation on this lattice,
+
+$$1 = \frac{g}{\Delta x}\,\frac{1}{N}\sum_k \frac{1}{2E_k},$$
+
+which the reference script solves with a root finder: $\Delta = 0.9610894$ MeV.
+The ring run, iterated to $10^{-9}$, lands on it to $10^{-8}$.
+
+In the slab cell the gas-side gap, 0.9151 MeV, is 5% below this uniform
+value. The gas there is 10 fm wide on each side, bounded by a hard wall and
+by the slab, not an infinite gas. The gap there peaks at 1.012 MeV about
+4 fm from the wall, falls to zero at the wall, and falls toward the slab.
+Inside the slab,
+where the neutrons are 40 MeV deeper in the well and far denser, it drops to
+0.152 MeV. The figure shows the gap and the neutron density across the cell.
+###
+
+hd_ring = zeros(N) + (2.0 * tau - MU)
+rho_ring = zeros(N)
+kappa_ring = zeros(N)
+delta_ring = zeros(N)
+iters_ring = solve_gap(hd_ring, tau, delta_ring, rho_ring, kappa_ring, 1, TOL_RING)
+show iters_ring
+gap_ring = sum(delta_ring) / N
+spread_ring = max(delta_ring) - min(delta_ring)
+show gap_ring
+# the spread itself is rounding (its last digits differ between engines), so the post shows the verdict
+ring_gap_uniform_to_1e_9 = 0
+if spread_ring < 1.0e-9 {
+    ring_gap_uniform_to_1e_9 = 1
+}
+show ring_gap_uniform_to_1e_9
+
+test "on the uniform ring the gap is uniform and solves the lattice BCS equation: 0.9610894 MeV" {
+    assert_lt(spread_ring, 1.0e-9)
+    assert_near(gap_ring, 0.9610894153, 1.0e-8)
+}
+# where the gap peaks: its distance from the nearer wall (fm)
+i_peak = 0
+for i to N {
+    if delta[i] == max(delta) {
+        i_peak = i
+    }
+}
+d_wall = min(x[i_peak], N * DX - x[i_peak])
+show d_wall
+
+test "the largest gap in the cell is 1.012293 MeV, 3 to 5 fm from a wall" {
+    assert_near(max(delta), 1.01229348, 1.0e-5)
+    assert_lt(3.0, d_wall)
+    assert_lt(d_wall, 5.0)
+}
+
+density = rho / DX
+figure("Pairing gap $\\Delta(x)$ and neutron density across one crust cell", "x (fm)", "pairing gap $\\Delta$ (MeV)")
+plot(x, delta, "pairing gap $\\Delta(x)$")
+plot(x, density, "neutron density (fm$^{-1}$)")
+yright("neutron density (fm$^{-1}$)", "neutron density (fm$^{-1}$)")
+style("neutron density (fm$^{-1}$)", "dash")
+hline("uniform-gas gap 0.961 MeV", gap_ring)
+vline("slab surface", X_SLAB - R_SLAB)
+vline("slab surface ", X_SLAB + R_SLAB)
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

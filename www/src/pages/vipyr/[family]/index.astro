@@ -1,0 +1,104 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/<family>: one family's overview and its functions, from
+// src/data/vipyr.json (python -m vipyr.docs).
+import DocPage from '../../../layouts/DocPage.astro';
+import data from '../../../data/vipyr.json';
+import gallery from '../../../data/gallery.json';
+import { vipyrTree, TOPICS, topicOfFamily } from '../../../lib/site';
+import { ALIAS_OF } from '../../../data/vipyrAliases.mjs';
+const aliasOf = (q: string): string | undefined => (ALIAS_OF as Record<string, string>)[q];
+
+export function getStaticPaths() {
+  return data.fields
+    .filter((f: any) => Object.values(data.functions).some((x: any) => x.family === f.id))
+    .map((f: any) => ({ params: { family: f.id }, props: { field: f } }));
+}
+const { field } = Astro.props as any;
+const fns = (Object.values(data.functions) as any[])
+  .filter((x) => x.family === field.id)
+  .sort((a, b) => a.name.localeCompare(b.name));
+const install = field.extra ? `pip install vipyr[${field.extra}]` : field.dist === 'vipyr' ? 'pip install vipyr' : `pip install ${field.dist}`;
+const topic = TOPICS.find((t) => t.id === topicOfFamily(field.id))!;
+// gallery entries whose code calls this family
+const examples = (gallery as any).entries.filter((e: any) => e.cells.some((c: any) => c.code.includes(`vp.${field.id}.`)));
+// An overview is a lede, then optional "- " list lines, then closing lines;
+// `code` spans become <code>.
+const inline = (t: string) =>
+  t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/`([^`]+)`/g, '<code>$1</code>');
+const ovLines = String(field.overview || field.about).split('\n');
+const ovItems = ovLines.filter((l) => l.startsWith('- ')).map((l) => inline(l.slice(2)));
+const ovPlain = ovLines.filter((l) => !l.startsWith('- ')).map(inline);
+const ovLede = ovPlain[0];
+const ovRest = ovPlain.slice(1);
+---
+
+<DocPage
+  title={`${field.title} (vp.${field.id}) · vipyr · Viv`}
+  icon="/brand/vipyr/vipyr-icon.svg"
+  image="/brand/vipyr/vipyr-icon-512.png"
+  description={`vp.${field.id}: ${field.about}`}
+  tree={vipyrTree(Astro.url.pathname)}
+  crumbs={[['/vipyr/api', 'API reference'], [`/vipyr#${topic.id}`, topic.title]]}
+  toc={[['functions', 'Functions'], ...(examples.length ? [['examples', 'Examples'] as [string, string]] : [])]}>
+  <h1>{field.title} (<code class="fam-h1">vp.{field.id}</code>)</h1>
+  <p class="lede" set:html={ovLede} />
+  {ovItems.length > 0 && <ul class="fam-points">{ovItems.map((t) => <li set:html={t} />)}</ul>}
+  {ovRest.map((t) => <p set:html={t} />)}
+  <p>
+    Part of the distribution <code>{field.dist}</code>; it runs from a <a href="/vipyr/install">checkout</a> of the
+    repository. Planned on PyPI as <code>{install}</code>.
+  </p>
+  <h2 id="functions">Functions</h2>
+  <dl class="fn-index">
+    {
+      fns.map((x) => (
+        <>
+          <dt>
+            <a href={`/vipyr/${x.family}/${x.name}`}>
+              <code>vp.{x.qualname}</code>
+            </a>
+            {x.kind === 'coming' && <span class="pill">Coming soon</span>}
+          </dt>
+          <dd>
+            {aliasOf(x.qualname) ? (
+              <>
+                Alias of{' '}
+                <a href={`/vipyr/${aliasOf(x.qualname).replace('.', '/')}`}>
+                  <code>vp.{aliasOf(x.qualname)}</code>
+                </a>
+                .
+              </>
+            ) : (
+              x.summary
+            )}
+          </dd>
+        </>
+      ))
+    }
+  </dl>
+  {
+    examples.length > 0 && (
+      <>
+        <h2 id="examples">Examples in the gallery</h2>
+        <ul>
+          {examples.map((e: any) => (
+            <li>
+              <a href={`/vipyr/gallery/${e.slug}`}>{e.title}</a>
+            </li>
+          ))}
+        </ul>
+      </>
+    )
+  }
+</DocPage>
+
+<style>
+  .fam-h1 {
+    font-size: 0.86em;
+  }
+  .pill {
+    margin-left: 8px;
+  }
+</style>

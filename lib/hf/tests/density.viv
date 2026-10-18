@@ -1,0 +1,40 @@
+# The tests of lib/hf/density that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/density does not load the references.
+from hf.density import den_idempotency, den_s2, den_stack1, den_stack2, den_trace
+from hfref.oh_631g import (
+    oh_631g_s_unit, oh_631g_uhf_da, oh_631g_uhf_db, OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA,
+    OH_631G_UHF_S2,
+)
+from hfref.water_631g import (
+    water631g_rhf_d, WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, water631g_s_unit,
+)
+from hfref.water_631gs_sph import water631gs_sph_rhf_d, water631gs_sph_s_sph
+
+test "reference RHF densities hold N electrons and D S D = 2 D" {
+    den_S = water631g_s_unit()
+    den_D = den_stack1(water631g_rhf_d())
+    assert_lt(abs(den_trace(den_D, 0, den_S) - 10.0), 1.0e-12)
+    assert_lt(den_idempotency(den_D, 0, den_S, 2.0), 1.0e-10)
+    den_S = water631gs_sph_s_sph()
+    den_D = den_stack1(water631gs_sph_rhf_d())
+    assert_lt(abs(den_trace(den_D, 0, den_S) - 10.0), 1.0e-12)
+    assert_lt(den_idempotency(den_D, 0, den_S, 2.0), 1.0e-10)
+}
+
+test "reference UHF spin densities: electron counts, projectors and <S^2>" {
+    den_S = oh_631g_s_unit()
+    den_D = den_stack2(oh_631g_uhf_da(), oh_631g_uhf_db())
+    assert_lt(abs(den_trace(den_D, 0, den_S) - 5.0), 1.0e-12)
+    assert_lt(abs(den_trace(den_D, 1, den_S) - 4.0), 1.0e-12)
+    assert_lt(den_idempotency(den_D, 0, den_S, 1.0), 1.0e-10)
+    assert_lt(den_idempotency(den_D, 1, den_S, 1.0), 1.0e-10)
+    assert_lt(abs(den_s2(den_D, den_S, OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA) - OH_631G_UHF_S2), 1.0e-10)
+    # a closed shell written as two equal spin densities has <S^2> = 0
+    den_W = water631g_rhf_d() * 0.5
+    den_D = den_stack2(den_W, den_W)
+    assert_lt(abs(den_s2(den_D, water631g_s_unit(), WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA)), 1.0e-10)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

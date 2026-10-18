@@ -1,0 +1,276 @@
+###
+post: Densities, orbital spaces and the SCF error
+agent: claude
+
+The SCF state is a density matrix. For a closed shell it is the total
+density `D = 2 C_occ C_occ^T`, the convention PySCF's `make_rdm1` uses; for
+UHF and ROHF it is one density per spin, `Da = Ca_occ Ca_occ^T` and
+`Db = Cb_occ Cb_occ^T`. The J/K stage reads them stacked as one array
+`D[ndens, n, n]`; the kernels below that work on one matrix take and return
+`[n, n]` (or `[m, m]` in the orthonormal basis).
+
+The orbitals come from the eigenvectors `V` of `F' = X^T F X`, so an
+occupied orbital is `c_k = X V[:, k]` and
+
+    D = w sum_(k occupied) (X V[:, k]) (X V[:, k])^T,       w = 2 or 1.
+
+Every kernel returns a fresh array. A loop that calls them each iteration
+runs in the memory of one iteration: a compiled loop frees what an
+iteration allocated and no variable holds.
+
+Checks a converged density must pass, with `N` electrons in it and `w` its
+occupation (2 for a closed-shell total density, 1 for a spin density):
+
+- `Tr(D S) = N`: the electron count.
+- `D S D = w D`: `D S / w` is a projector, which says the density comes from
+  orthonormal occupied orbitals.
+- `F D S - S D F = 0`: the density commutes with the Fock matrix (in the `S`
+  metric), which is the SCF stationarity condition. `den_commutator` forms
+  the same commutator in the orthonormal basis, `F' P' - P' F'` with
+  `P' = X^T S D S X`, which is what DIIS extrapolates on.
+
+The energy of a density and the Fock matrices built from it is
+
+    E = E_nuc + (1/2) sum_d Tr(D_d (H + F_d))
+
+for both conventions: with the total density and `F = H + J - K/2` it is the
+RHF energy, and with spin densities and `F_s = H + J - K_s` it is the UHF
+energy.
+
+`<S^2>` of a UHF determinant is
+
+    <S^2> = ((Na - Nb)/2)^2 + (Na + Nb)/2 - Tr(Da S Db S),
+
+where the trace counts how far the alpha and beta orbitals are from being the
+same; it is `Nb` (and `<S^2> = S(S+1)`) when every beta orbital is also an
+alpha one.
+
+Used with `import hf.density`.
+###
+
+import hf.opts
+import hf.eigen
+
+#| A `[1, n, n]` stack holding one matrix.
+def den_stack1(A: Arr) {
+    n = len(A)
+    D = zeros(1, n, n)
+    setslab(D, 0, A)
+    return D
+}
+
+#| A `[2, n, n]` stack holding two matrices.
+def den_stack2(A: Arr, B: Arr) {
+    n = len(A)
+    D = zeros(2, n, n)
+    setslab(D, 0, A)
+    setslab(D, 1, B)
+    return D
+}
+
+#| `w sum_(k = k0 .. k1-1) (X V[:, k]) (X V[:, k])^T`, `[n, n]`, with
+#| `X[n, m]` (its first m columns) and the eigenvectors `V[m, m]` as columns.
+def den_from_vectors(X: Arr, V: Arr, m, k0, k1, w) {
+    n = len(X)
+    if k1 <= k0 {
+        return zeros(n, n)
+    }
+    C = X[:, 0:m] @ V[0:m, k0:k1]
+    return (w * C) @ transpose(C)
+}
+
+#| The Fock matrices from J and K, `[nd, n, n]`: `H + J - K/2` for one total
+#| density, `H + J_a + J_b - K_s` for two spin densities.
+def den_fock(H: Arr, JK: Arr, nd) {
+    n = len(H)
+    F = zeros(nd, n, n)
+    if nd < 2 {
+        setslab(F, 0, H + slab(JK, 0) - 0.5 * slab(JK, 1))
+    }
+    else {
+        jt = slab(JK, 0) + slab(JK, 2)
+        setslab(F, 0, H + jt - slab(JK, 1))
+        setslab(F, 1, H + jt - slab(JK, 3))
+    }
+    return F
+}
+
+#| `X^T A X` over the first m columns of X: a matrix in the orthonormal basis.
+def den_orth(X: Arr, A: Arr, m) {
+    if m == shape(X)[1] {
+        return transpose(X) @ (A @ X)
+    }
+    Xm = X[:, 0:m]
+    return transpose(Xm) @ (A @ Xm)
+}
+
+#| `X^T S D S X`: the density D in the orthonormal basis.
+def den_orth_density(X: Arr, S: Arr, D: Arr, m) {
+    if m == shape(X)[1] {
+        return den_orth_density_sx(S @ X, D)
+    }
+    return den_orth_density_sx(S @ X[:, 0:m], D)
+}
+
+#| `U^T D U` with `U = S X` computed once: the density D in the orthonormal
+#| basis, for a loop that moves a new density there every iteration.
+def den_orth_density_sx(U: Arr, D: Arr) {
+    return transpose(U) @ (D @ U)
+}
+
+#| `F' P' - P' F'` for two `[m, m]` matrices: the SCF error in the
+#| orthonormal basis.
+def den_commutator(Fp: Arr, Pp: Arr) {
+    m = len(Fp)
+    E = zeros(m, m)
+    for a to m {
+        for b to m {
+            s = 0.0
+            for c to m {
+                s = s + Fp[a, c] * Pp[c, b] - Pp[a, c] * Fp[c, b]
+            }
+            E[a, b] = s
+        }
+    }
+    return E
+}
+
+#| `F' P' - P' F'` for two symmetric `[m, m]` matrices, as `A - A^T` with
+#| `A = F' P'`: one matrix product instead of two, since `(F' P')^T = P' F'`
+#| when both are symmetric. The result is antisymmetric to the bit.
+#| `den_commutator` is the definition term by term, and the test below
+#| holds the two together.
+def den_commutator_sym(Fp: Arr, Pp: Arr) {
+    A = Fp @ Pp
+    return A - transpose(A)
+}
+
+#| The largest |entry| of a matrix.
+def den_maxabs(A: Arr) {
+    return max(abs(A))
+}
+
+#| max |F D S - S D F| in the AO basis, for density d and Fock matrix f.
+def den_ao_commutator(F: Arr, f, D: Arr, d, S: Arr) {
+    # S D F = (F D S)^T for symmetric F, D, S
+    FDS = slab(F, f) @ slab(D, d) @ S
+    return max(abs(FDS - transpose(FDS)))
+}
+
+#| Tr(D[d] S).
+def den_trace(D: Arr, d, S: Arr) {
+    return sum(slab(D, d) * transpose(S))
+}
+
+#| Tr(D[a] S D[b] S).
+def den_trace2(D: Arr, a, b, S: Arr) {
+    P = slab(D, a) @ S
+    Q = slab(D, b) @ S
+    return sum(P * transpose(Q))
+}
+
+#| max |D S D - w D| for density d.
+def den_idempotency(D: Arr, d, S: Arr, w) {
+    A = slab(D, d)
+    return max(abs(A @ S @ A - w * A))
+}
+
+#| Frobenius norm of D[d].
+def den_fnorm(D: Arr, d) {
+    A = slab(D, d)
+    return sqrt(sum(A * A))
+}
+
+#| max |A[a] - B[b]| over two stacks of matrices.
+def den_gap(A: Arr, a, B: Arr, b) {
+    return max(abs(slab(A, a) - slab(B, b)))
+}
+
+#| `E_nuc + (1/2) sum_d Tr(D_d (H + F_d))` over `ndens` densities.
+def den_energy(H: Arr, F: Arr, D: Arr, ndens, enuc) {
+    n = len(H)
+    Hs = zeros(ndens, n, n)
+    for d to ndens {
+        setslab(Hs, d, H)
+    }
+    return enuc + 0.5 * sum(D * (Hs + F))
+}
+
+#| `<S^2>` of a UHF pair of spin densities D[0] (alpha), D[1] (beta).
+def den_s2(D: Arr, S: Arr, na, nb) {
+    sz = 0.5 * (na - nb)
+    return sz * sz + 0.5 * (na + nb) - den_trace2(D, 0, 1, S)
+}
+
+#| Indices of the `k` smallest entries of `v`, ascending by value; entries
+#| whose `mask` is `1` are skipped. Ties go to the lower index.
+def den_lowest(v: Arr, k, mask: Arr) {
+    m = len(v)
+    taken = zeros(m)
+    idx = []
+    for c to k {
+        best = -1
+        for a to m {
+            if mask[a] < 0.5 and taken[a] < 0.5 {
+                if best < 0 {
+                    best = a
+                }
+                else if v[a] < v[best] {
+                    best = a
+                }
+            }
+        }
+        taken[best] = 1
+        idx = append(idx, best)
+    }
+    return idx
+}
+
+test "a density built from orbitals is the projector it should be" {
+    # with X = I and V = I the density is w times the first k unit vectors
+    den_X = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    den_n = len(den_X)
+    den_D = den_stack1(den_from_vectors(den_X, den_X, den_n, 0, 2, 2.0))
+    assert_near(den_D[0, 0, 0] + den_D[0, 1, 1] + den_D[0, 2, 2], 4.0, 0.0)
+    assert_near(den_D[0, 2, 2], 0.0, 0.0)
+    assert_near(den_idempotency(den_D, 0, den_X, 2.0), 0.0, 0.0)
+    # the orthonormal-basis density of an AO density is back to diagonal form
+    den_P = den_stack1(den_orth_density(den_X, den_X, slab(den_D, 0), den_n))
+    assert_near(den_gap(den_P, 0, den_D, 0), 0.0, 0.0)
+    # and a density commutes with itself
+    assert_near(den_maxabs(den_commutator(slab(den_P, 0), slab(den_P, 0))), 0.0, 0.0)
+}
+
+test "the one-product commutator is the term-by-term one on symmetric matrices" {
+    den_m = 7
+    den_F = zeros(den_m, den_m)
+    den_Q = zeros(den_m, den_m)
+    for den_a to den_m {
+        for den_b to den_m {
+            den_F[den_a, den_b] = sin(1.0 + den_a + den_b) + 0.1 * (den_a * den_b)
+            den_Q[den_a, den_b] = cos(0.5 * den_a * den_b) - 0.3 * (den_a + den_b)
+        }
+    }
+    den_E0 = den_commutator(den_F, den_Q)
+    den_E1 = den_commutator_sym(den_F, den_Q)
+    # same matrix to rounding, relative to its size; exactly antisymmetric
+    assert_lt(max(abs(den_E1 - den_E0)), 1.0e-14 * max(abs(den_E0)))
+    assert_lt(1.0, max(abs(den_E0)))
+    assert_near(max(abs(den_E1 + transpose(den_E1))), 0.0, 0.0)
+}
+
+test "the lowest-k picker skips masked entries and breaks ties low" {
+    den_v = [0.5, -1.0, 0.5, -3.0, 2.0]
+    den_mask = [0, 0, 0, 1, 0]
+    den_k = 3
+    den_idx = den_lowest(den_v, den_k, den_mask)
+    den_last = den_v[den_idx[den_k - 1]]
+
+    assert_near(den_idx[0], 1, 0.0)
+    assert_near(den_idx[1], 0, 0.0)
+    assert_near(den_idx[2], 2, 0.0)
+    assert_near(den_last, 0.5, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

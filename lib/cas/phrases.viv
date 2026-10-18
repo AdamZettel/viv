@@ -1,0 +1,382 @@
+###
+post: Phrases as the CAS's first client, each closed form a check
+agent: claude
+
+A phrase asks for a quantity, not an algorithm: `integrate x^2 from 1 to 2`
+asks for $\int_1^2 x^2\,dx$, and Gauss-Legendre is one way to get it. When the
+CAS has the quantity in closed form, the phrase's number can be held to it.
+`viv check --phrases prog.viv` writes a program that calls the defs below,
+one per phrase, and runs it (lang/viv/src/cas_check.rs). Each check prints
+what the CAS found, the phrase's own number, the difference and the tolerance,
+and one `__cas__` line of JSON for the tools:
+
+- `cas_check_integral`: the antiderivative (checked by differentiating it),
+  the exact value $F(b) - F(a)$, and the method's tolerance. For a rule with a
+  fixed number of intervals (Simpson's, the trapezoid rule) the tolerance is
+  the error the Euler-Maclaurin formula predicts from the CAS's own
+  derivatives at the ends: $\frac{h^2}{12}\left(f'(b) - f'(a)\right) - \frac{h^4}{720}\left(f'''(b) - f'''(a)\right)$
+  for the trapezoid rule and $\frac{h^4}{180}\left(f'''(b) - f'''(a)\right) - \frac{h^6}{1512}\left(f^{(5)}(b) - f^{(5)}(a)\right)$
+  for Simpson's, twice that plus rounding. The check prints the predicted
+  error beside the observed one.
+- `cas_check_root`: every real root of the polynomial in closed form; the
+  phrase's root must be one of them (inside the bracket, for a bracketing
+  method).
+- `cas_check_deriv`: the exact derivative, evaluated at the point.
+- `cas_check_value`: a closed form the compiler wrote out (the trace of a
+  literal matrix, the norm of a literal vector).
+
+A phrase the CAS has no closed form for is **refused**, with the reason,
+never passed. Two warnings come from the CAS knowing the problem: a
+bracketing method given an interval where the function does not change sign,
+and Newton's method at a multiple root, where it converges linearly and stops
+about $\sqrt{\epsilon}$ away; there the tolerance is $10^{-7}$ relative and the
+warning says why.
+
+`cas_deriv_at` is what `differentiate F at X using the symbolic derivative`
+lowers to: the CAS differentiates `F` once (the result is kept by its text)
+and evaluates the derivative at `X` with the program's values for the other
+names.
+
+Used with `import cas.phrases`.
+###
+from cas.calculus import (
+    cas_certify_zero, cas_definite, cas_diff, cas_diffn, cas_roots, cas_subst, cert_name,
+    Verdict,
+)
+from cas.parse import cas
+from cas.store import C_ZERO, cas_isfail, cas_name_of, cas_sym
+from cas.eval import cas_eval, cas_value, cas_value_at
+from cas.show import cas_tex, cas_text
+
+# a check's outcome
+CHECK_AGREE = 1
+CHECK_REFUSED = 0
+CHECK_DISAGREE = -1
+# tolerances, relative to 1 + |exact|, of the methods with a stopping rule of their own
+TOL_GAUSS = 1.0e-12
+TOL_ROMBERG = 1.0e-12
+TOL_ADAPTIVE = 1.0e-10
+TOL_SWEEP = 1.0e-8
+TOL_ROOT = 1.0e-12
+TOL_MULTIPLE_ROOT = 1.0e-7
+TOL_DERIV = 1.0e-12
+TOL_VALUE = 1.0e-13
+# the rounding allowance added to a predicted quadrature error
+TOL_ROUNDING = 1.0e-13
+
+# each check's outcome, by its number
+CAS_CHECK = map()
+# how many checks agreed, were refused and disagreed
+CHECK_OUTCOMES = 3
+CAS_TALLY = zeros(CHECK_OUTCOMES)
+# each check's warning, by its number
+CAS_WARN = map()
+# the symbolic derivatives `cas_deriv_at` made, by text and variable
+CAS_DERIV_MEMO = map()
+
+#| `s` as a JSON string.
+def json_q(s) {
+    return "\"" + replace(replace(replace(s, "\\", "\\\\"), "\"", "\\\""), "\n", "\\n") + "\""
+}
+
+def json_num(v) {
+    if v != v {
+        return "null"
+    }
+    return fmt(v, ".17g")
+}
+
+#| Record and print a check's outcome; returns it. `exact` is the CAS's
+#| exact value (unused when the check is refused).
+def cas_report(id, line, phrase: Str, outcome, exact, got, diff, tol, method: Str, how: Str, warn: Str) {
+    if outcome == CHECK_REFUSED {
+        return cas_report_val(id, line, phrase, outcome, "", "", 0.0 / 0.0, got, diff, tol, method, how, warn)
+    }
+    return cas_report_val(id, line, phrase, outcome, cas_text(exact), cas_tex(exact), cas_value(exact), got, diff, tol, method, how, warn)
+}
+
+#| `cas_report` with the exact value given as its text, its LaTeX and its double.
+def cas_report_val(id, line, phrase: Str, outcome, ex: Str, tex: Str, val, got, diff, tol, method: Str, how: Str, warn: Str) {
+    CAS_CHECK[id] = outcome
+    CAS_WARN[id] = warn
+    if outcome == CHECK_AGREE {
+        CAS_TALLY[0] = CAS_TALLY[0] + 1
+    } else if outcome == CHECK_REFUSED {
+        CAS_TALLY[1] = CAS_TALLY[1] + 1
+    } else {
+        CAS_TALLY[2] = CAS_TALLY[2] + 1
+    }
+    verdicts = ["disagrees", "refused", "agrees"]
+    print(f"line {line:.0f}: {phrase}")
+    if outcome == CHECK_REFUSED {
+        print("  refused: " + how)
+    } else {
+        print("  exact:   " + ex + " = " + fmt(val, ".17g"))
+        print("  how:     " + how)
+        print("  " + method + ": " + fmt(got, ".17g"))
+        print("  " + verdicts[outcome + 1] + ": |difference| " + fmt(diff, ".2e") + ", tolerance " + fmt(tol, ".2e"))
+    }
+    if warn != "" {
+        print("  warning: " + warn)
+    }
+    print("__cas__ {\"id\":" + fmt(id, "d") + ",\"line\":" + fmt(line, "d") + ",\"phrase\":" + json_q(phrase) + ",\"outcome\":" + json_q(verdicts[outcome + 1]) + ",\"exact\":" + json_q(ex) + ",\"tex\":" + json_q(tex) + ",\"value\":" + json_num(val) + ",\"numeric\":" + json_num(got) + ",\"difference\":" + json_num(diff) + ",\"tolerance\":" + json_num(tol) + ",\"method\":" + json_q(method) + ",\"how\":" + json_q(how) + ",\"warning\":" + json_q(warn) + "}")
+    return outcome
+}
+
+#| The outcome of holding `got` to `exact` within `tol`.
+def cas_judge(exact, got, tol) {
+    d = abs(got - cas_value(exact))
+    if d <= tol {
+        return CHECK_AGREE, d
+    }
+    return CHECK_DISAGREE, d
+}
+
+#| The integral phrase `id` at `line`: `text` in `var` from `a_text` to
+#| `b_text`, which the program computed as `got` with `method` (`n`
+#| intervals for simpson and trapezoid, else 0).
+def cas_check_integral(id, line, phrase: Str, text: Str, var: Str, a_text: Str, b_text: Str, got, method: Str, n) {
+    f = cas(text)
+    x = cas_sym(var)
+    a = cas(a_text)
+    b = cas(b_text)
+    if cas_isfail(f) or cas_isfail(a) or cas_isfail(b) {
+        why = cas_name_of(f)
+        if cas_isfail(a) {
+            why = cas_name_of(a)
+        }
+        if cas_isfail(b) {
+            why = cas_name_of(b)
+        }
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, why, "")
+    }
+    big, val, v, why = cas_definite(f, x, a, b)
+    if cas_isfail(big) {
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, cas_name_of(big), "")
+    }
+    how = "antiderivative " + cas_text(big) + ", its derivative checked against the integrand: " + cert_name(v) + " (" + why + ")"
+    # F(b) - F(a) exactly; when that needs integers past 2^53 (stage 1), F at
+    # the two ends in doubles
+    exact_t = cas_text(val)
+    exact_x = cas_tex(val)
+    exact_v = cas_value(val)
+    if cas_isfail(val) {
+        exact_t = "F(" + b_text + ") - F(" + a_text + ")"
+        exact_x = ""
+        exact_v = cas_value_at(big, x, cas_value(b)) - cas_value_at(big, x, cas_value(a))
+        how = how + "; F(b) - F(a) evaluated in doubles, since " + cas_name_of(val)
+    }
+    tol = 0.0
+    warn = ""
+    if method == "simpson" or method == "trapezoid" {
+        nn = n
+        if method == "simpson" and n % 2 != 0 {
+            nn = n + 1
+        }
+        h = (cas_value(b) - cas_value(a)) / nn
+        if method == "trapezoid" {
+            t1 = h * h / 12 * cas_ends(f, x, a, b, 1)
+            t2 = -pow(h, 4) / 720 * cas_ends(f, x, a, b, 3)
+        } else {
+            t1 = pow(h, 4) / 180 * cas_ends(f, x, a, b, 3)
+            t2 = -pow(h, 6) / 1512 * cas_ends(f, x, a, b, 5)
+        }
+        tol = 2.0 * (abs(t1) + abs(t2)) + TOL_ROUNDING * (1.0 + abs(exact_v))
+        how = how + "; predicted error of " + fmt(nn, "g") + " intervals " + fmt(t1 + t2, ".3e") + ", observed " + fmt(got - exact_v, ".3e")
+    } else if method == "q_gauss" {
+        tol = TOL_GAUSS * (1.0 + abs(exact_v))
+    } else if method == "q_romberg" {
+        tol = TOL_ROMBERG * (1.0 + abs(exact_v))
+    } else if method == "q_adaptive" {
+        tol = TOL_ADAPTIVE * (1.0 + abs(exact_v))
+    } else {
+        tol = TOL_SWEEP * (1.0 + abs(exact_v))
+    }
+    d = abs(got - exact_v)
+    outcome = CHECK_DISAGREE
+    if d <= tol {
+        outcome = CHECK_AGREE
+    }
+    return cas_report_val(id, line, phrase, outcome, exact_t, exact_x, exact_v, got, d, tol, method, how, warn)
+}
+
+#| `g(b) - g(a)` for `g` the k-th derivative of `f`, in doubles.
+def cas_ends(f, x, a, b, k) {
+    g = cas_diffn(f, x, k)
+    return cas_value(cas_subst(g, x, b)) - cas_value(cas_subst(g, x, a))
+}
+
+#| The root phrase `id`: the root of `text` in `var` the program found as `got`
+#| with `method`, in [a_text, b_text] for a bracketing method (`a_text` the
+#| starting point and `b_text` empty for Newton).
+def cas_check_root(id, line, phrase: Str, text: Str, var: Str, a_text: Str, b_text: Str, got, method: Str) {
+    f = cas(text)
+    x = cas_sym(var)
+    if cas_isfail(f) {
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, cas_name_of(f), "")
+    }
+    roots, how = cas_roots(f, x)
+    if len(roots) > 0 and cas_isfail(roots[0]) {
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, cas_name_of(roots[0]), "")
+    }
+    warn = ""
+    bracket = b_text != ""
+    lo = 0.0
+    hi = 0.0
+    if bracket {
+        a = cas(a_text)
+        b = cas(b_text)
+        fa = cas_subst(f, x, a)
+        fb = cas_subst(f, x, b)
+        sa = cas_value(fa)
+        sb = cas_value(fb)
+        if sa * sb > 0 {
+            warn = f"f({a_text}) = {cas_text(fa)} and f({b_text}) = {cas_text(fb)} have the same sign: the interval does not bracket a root, and {method} assumes it does"
+        }
+        lo = min(cas_value(a), cas_value(b))
+        hi = max(cas_value(a), cas_value(b))
+    }
+    if len(roots) == 0 {
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, "the polynomial has no real root (" + how + ")", warn)
+    }
+    # the exact root nearest the phrase's
+    best = roots[0]
+    for i to len(roots) {
+        if abs(cas_value(roots[i]) - got) < abs(cas_value(best) - got) {
+            best = roots[i]
+        }
+    }
+    r = cas_value(best)
+    tol = TOL_ROOT * (1.0 + abs(r))
+    dv, dwhy = cas_certify_zero(cas_subst(cas_diff(f, x), x, best))
+    if dv == Verdict.Proved or dv == Verdict.Modular {
+        tol = TOL_MULTIPLE_ROOT * (1.0 + abs(r))
+        mw = f"x = {cas_text(best)} is a multiple root (f' is 0 there too): Newton's method and the secant steps converge linearly to it and stop about sqrt(eps) away, so the tolerance is {TOL_MULTIPLE_ROOT:.0e}"
+        if warn == "" {
+            warn = mw
+        } else {
+            warn = warn + "; " + mw
+        }
+    }
+    how = f"{len(roots):.0f} real root(s) by {how}; the nearest is {cas_text(best)}"
+    if bracket and (r < lo or r > hi) {
+        how = how + f", outside [{a_text}, {b_text}]"
+        return cas_report(id, line, phrase, CHECK_DISAGREE, best, got, abs(got - r), tol, method, how, warn)
+    }
+    outcome, d = cas_judge(best, got, tol)
+    return cas_report(id, line, phrase, outcome, best, got, d, tol, method, how, warn)
+}
+
+#| The derivative phrase `id`: d/d`var` of `text` at `at_text`, which the program found as `got`.
+def cas_check_deriv(id, line, phrase: Str, text: Str, var: Str, at_text: Str, got, method: Str) {
+    f = cas(text)
+    x = cas_sym(var)
+    at = cas(at_text)
+    if cas_isfail(f) or cas_isfail(at) {
+        why = cas_name_of(f)
+        if cas_isfail(at) {
+            why = cas_name_of(at)
+        }
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, why, "")
+    }
+    d = cas_diff(f, x)
+    if cas_isfail(d) {
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, cas_name_of(d), "")
+    }
+    val = cas_subst(d, x, at)
+    how = f"d/d{var} = {cas_text(d)}, at {var} = {at_text}"
+    if cas_isfail(val) {
+        # the exact value at the point needs integers past 2^53 (stage 1): the
+        # exact derivative evaluated in doubles there
+        dv = cas_value_at(d, x, cas_value(at))
+        tol = TOL_DERIV * (1.0 + abs(dv))
+        dd = abs(got - dv)
+        outcome = CHECK_DISAGREE
+        if dd <= tol {
+            outcome = CHECK_AGREE
+        }
+        return cas_report_val(id, line, phrase, outcome, f"d/d{var} at {at_text}, in doubles", "", dv, got, dd, tol, method, how + "; the derivative evaluated in doubles, since its exact value there " + cas_name_of(val), "")
+    }
+    outcome, dd = cas_judge(val, got, TOL_DERIV * (1.0 + abs(cas_value(val))))
+    return cas_report(id, line, phrase, outcome, val, got, dd, TOL_DERIV * (1.0 + abs(cas_value(val))), method, how, "")
+}
+
+#| A closed form the compiler wrote out for phrase `id` (`text`), against the program's `got`.
+def cas_check_value(id, line, phrase: Str, text: Str, got, method: Str, how: Str) {
+    v = cas(text)
+    if cas_isfail(v) {
+        return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, got, 0, 0, method, cas_name_of(v), "")
+    }
+    tol = TOL_VALUE * (1.0 + abs(cas_value(v)))
+    outcome, d = cas_judge(v, got, tol)
+    return cas_report(id, line, phrase, outcome, v, got, d, tol, method, how + ": " + text, "")
+}
+
+#| A phrase the compiler could not hand to the CAS, with its reason.
+def cas_check_refused(id, line, phrase: Str, why: Str) {
+    return cas_report(id, line, phrase, CHECK_REFUSED, C_ZERO, 0.0 / 0.0, 0, 0, "", why, "")
+}
+
+#| One line with the counts.
+def cas_check_summary() {
+    n = CAS_TALLY[0] + CAS_TALLY[1] + CAS_TALLY[2]
+    print(f"{n:.0f} phrases: {CAS_TALLY[0]:.0f} agree with the CAS's exact value, {CAS_TALLY[1]:.0f} refused, {CAS_TALLY[2]:.0f} disagree")
+}
+
+#| Whether check `id` did not disagree (it agreed, or the CAS refused it).
+def cas_check_holds(id) {
+    return CAS_CHECK[id] != CHECK_DISAGREE
+}
+
+#| d `text` / d `var` at `at`, the CAS's exact derivative evaluated in doubles.
+#| `names` are the other names `text` reads, separated by commas, and `vals`
+#| their values. Stops the run when the CAS cannot differentiate `text`.
+def cas_deriv_at(text: Str, var: Str, at, names: Str, vals: Arr) {
+    key = text + "|" + var
+    if not has(CAS_DERIV_MEMO, key) {
+        CAS_DERIV_MEMO[key] = cas_diff(cas(text), cas_sym(var))
+    }
+    d = CAS_DERIV_MEMO[key]
+    if cas_isfail(d) {
+        stop("the symbolic derivative of " + text + ": " + cas_name_of(d))
+    }
+    env = map()
+    env[cas_sym(var)] = at
+    if names != "" {
+        ns = split(names, ",")
+        for i to len(ns) {
+            env[cas_sym(ns[i])] = vals[i]
+        }
+    }
+    return cas_eval(d, env)
+}
+
+test "integrate x^2 from 1 to 2: exact 7/3 against Gauss-Legendre" {
+    got = integrate x^2 from 1 to 2
+    assert_near(cas_check_integral(0, 1, "integrate x^2 from 1 to 2", "x^2", "x", "1", "2", got, "q_gauss", 0), CHECK_AGREE, 0)
+}
+
+test "the trapezoid rule's error is the one Euler-Maclaurin predicts" {
+    got = integrate exp(x) from 0 to 1 using the trapezoid rule with 100 intervals
+    assert_near(cas_check_integral(1, 2, "integrate exp(x) from 0 to 1 using the trapezoid rule with 100 intervals", "exp(x)", "x", "0", "1", got, "trapezoid", 100), CHECK_AGREE, 0)
+    # a wrong number is caught
+    assert_near(cas_check_integral(2, 3, "a wrong integral", "x^2", "x", "1", "2", 2.3334, "q_gauss", 0), CHECK_DISAGREE, 0)
+}
+
+test "a root, a multiple root, a missing sign change, and a refusal" {
+    assert_near(cas_check_root(3, 4, "solve x^2 - 2 between 0 and 2", "x^2 - 2", "x", "0", "2", solve x^2 - 2 between 0 and 2, "r_safe"), CHECK_AGREE, 0)
+    assert_near(cas_check_root(4, 5, "a double root", "x^2 - 2*x + 1", "x", "3", "", solve x^2 - 2*x + 1 starting at 3, "r_newton"), CHECK_AGREE, 0)
+    assert_near(cas_check_root(5, 6, "no root in reach", "x^4 - 2", "x", "0", "2", 1.189, "r_safe"), CHECK_REFUSED, 0)
+    # [2, 3] does not bracket sqrt(2): bisection returns an end, and the CAS says why
+    got = solve x^2 - 2 between 2 and 3 using bisection
+    assert_near(cas_check_root(6, 7, "solve x^2 - 2 between 2 and 3 using bisection", "x^2 - 2", "x", "2", "3", got, "r_bisect"), CHECK_DISAGREE, 0)
+    assert_true(startswith(CAS_WARN[6], "f(2) = 2 and f(3) = 7 have the same sign"))
+}
+
+test "the symbolic derivative at a point" {
+    assert_near(cas_deriv_at("x^3 + c*x", "x", 2, "c", [5]), 17, 1.0e-15)
+    assert_near(cas_deriv_at("sin(x)", "x", 0, "", zeros(0)), 1, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

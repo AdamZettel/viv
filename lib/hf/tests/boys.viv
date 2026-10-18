@@ -1,0 +1,197 @@
+# The tests of lib/hf/boys that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/boys does not load the references.
+from hf.boys import (
+    boys_grid_eval, boys_grid_new, boys_methods, boys_switch, BOYS_T_GRID_XMAX, boys_values,
+)
+from hfref.boys import BOYS_REF_NMAX, BOYS_REF_NX, boys_ref_switch, boys_ref_table, boys_ref_x
+
+#| The largest relative error of registry member `k` against the mpmath table,
+#| over every tabulated `x` and every order up to `nmax`, evaluated at top order
+#| `nmax`, and where it happened: the `x` index and the order.
+def boys_worst_member(k, nmax) {
+    ms = boys_methods()
+    T = boys_ref_table()
+    X = boys_ref_x()
+    worst = 0.0
+    wx = 0
+    wn = 0
+    for ix to BOYS_REF_NX {
+        F = apply(ms[k], nmax, X[ix])
+        for n to nmax + 1 {
+            rel = abs(F[n] - T[ix, n]) / T[ix, n]
+            if rel > worst {
+                worst = rel
+                wx = ix
+                wn = n
+            }
+        }
+    }
+    return worst, wx, wn
+}
+
+#| The same, for `boys_grid_eval` on a grid the caller built once.
+def boys_worst_grid(nmax) {
+    G = boys_grid_new(nmax, BOYS_T_GRID_XMAX)
+    T = boys_ref_table()
+    X = boys_ref_x()
+    worst = 0.0
+    for ix to BOYS_REF_NX {
+        F = boys_grid_eval(G, nmax, X[ix])
+        for n to nmax + 1 {
+            worst = max(worst, abs(F[n] - T[ix, n]) / T[ix, n])
+        }
+    }
+    return worst
+}
+
+#| The largest relative gap between `F_n(0)` and `1/(2n+1)` over every order,
+#| for member `k`. The registry is built here, not passed in: a registry
+#| parameter on a def that only this module's tests call gets no kind in a
+#| program that uses the module, and the C compile of that program fails.
+def boys_zero_gap(k) {
+    ms = boys_methods()
+    F = apply(ms[k], BOYS_REF_NMAX, 0.0)
+    worst = 0.0
+    for n to BOYS_REF_NMAX + 1 {
+        exact = 1.0 / (2.0 * n + 1.0)
+        worst = max(worst, abs(F[n] - exact) / exact)
+    }
+    return worst
+}
+
+#| The index of `x` in the table, or `-1`. The match allows `1.0e-9` because
+#| `x_n - 0.1` computed here can differ in the last bit from the double the
+#| generator rounded the exact decimal to.
+def boys_table_index(x) {
+    X = boys_ref_x()
+    found = -1
+    for ix to BOYS_REF_NX {
+        if abs(X[ix] - x) < 1.0e-9 {
+            found = ix
+        }
+    }
+    return found
+}
+
+test "boys_values matches mpmath to 1e-14 at every tabulated point and order" {
+    # at every top order, since the series runs at the top order and the rest
+    # come downward from it
+    boys_vworst = 0.0
+    for boys_vn to BOYS_REF_NMAX + 1 {
+        boys_vw, boys_vx, boys_vo = boys_worst_member(0, boys_vn)
+        boys_vworst = max(boys_vworst, boys_vw)
+    }
+    assert_lt(boys_vworst, 1.0e-14)
+}
+
+test "the points the old switch at 50 got wrong are right" {
+    boys_pt = boys_ref_table()
+    boys_px = boys_ref_x()
+    boys_p50 = boys_table_index(50.0)
+    assert_lt(0.0, boys_p50)
+    boys_pf = boys_values(BOYS_REF_NMAX, 50.0)
+
+    assert_lt(abs(boys_pf[12] - boys_pt[boys_p50, 12]) / boys_pt[boys_p50, 12], 1.0e-14)
+    assert_lt(abs(boys_pf[16] - boys_pt[boys_p50, 16]) / boys_pt[boys_p50, 16], 1.0e-14)
+    boys_pf12 = boys_values(12, 50.0)
+    assert_lt(abs(boys_pf12[12] - boys_pt[boys_p50, 12]) / boys_pt[boys_p50, 12], 1.0e-14)
+}
+
+test "each order's switch matches the generator's, and is right on both sides" {
+    boys_st = boys_ref_table()
+    boys_sx = boys_ref_x()
+    boys_sref = boys_ref_switch()
+    for boys_sn to BOYS_REF_NMAX + 1 {
+        boys_sxn = boys_switch(boys_sn)
+        assert_near(boys_sxn, boys_sref[boys_sn], 0.0)
+        # x_n - 0.1 takes the series and x_n and x_n + 0.1 the upward form;
+        # each must be in the table and right at every order up to n
+        boys_sides = [-1, 0, 1]
+        for boys_sside to len(boys_sides) {
+            boys_six = boys_table_index(boys_sxn + 0.1 * boys_sides[boys_sside])
+            assert_lt(0.0, boys_six)
+            boys_sf = boys_values(boys_sn, boys_sx[boys_six])
+            for boys_sm to boys_sn + 1 {
+                assert_lt(abs(boys_sf[boys_sm] - boys_st[boys_six, boys_sm]) / boys_st[boys_six, boys_sm], 1.0e-14)
+            }
+        }
+    }
+}
+
+test "the series, the quadrature and the Taylor step each match mpmath to 1e-13" {
+    boys_mworst = zeros(len(boys_methods()))
+
+    for boys_mn to BOYS_REF_NMAX + 1 {
+        boys_mw, boys_mx, boys_mo = boys_worst_member(1, boys_mn)
+        boys_mworst[1] = max(boys_mworst[1], boys_mw)
+        boys_mw, boys_mx, boys_mo = boys_worst_member(3, boys_mn)
+        boys_mworst[3] = max(boys_mworst[3], boys_mw)
+    }
+    # quadrature gives every order in one pass, whatever the top order
+    boys_mw, boys_mx, boys_mo = boys_worst_member(2, BOYS_REF_NMAX)
+    boys_mworst[2] = boys_mw
+    assert_lt(boys_mworst[1], 1.0e-13)
+    assert_lt(boys_mworst[2], 1.0e-13)
+    assert_lt(boys_mworst[3], 1.0e-13)
+}
+
+test "a grid built once by the caller matches mpmath to 1e-13" {
+    boys_gworst = 0.0
+    for boys_gn to BOYS_REF_NMAX + 1 {
+        boys_gworst = max(boys_gworst, boys_worst_grid(boys_gn))
+    }
+    assert_lt(boys_gworst, 1.0e-13)
+}
+
+test "the downward identity holds in the table and between top orders" {
+    boys_dt = boys_ref_table()
+    boys_dx = boys_ref_x()
+    boys_dworst = 0.0
+    boys_dcross = 0.0
+    for boys_di to BOYS_REF_NX {
+        boys_dxx = boys_dx[boys_di]
+        boys_dex = exp(-boys_dxx)
+        for boys_dn to BOYS_REF_NMAX {
+            boys_dm = boys_dn + 1
+            boys_dlhs = boys_dt[boys_di, boys_dn]
+            boys_drhs = (2.0 * boys_dxx * boys_dt[boys_di, boys_dm] + boys_dex) / (2.0 * boys_dm - 1.0)
+            boys_dworst = max(boys_dworst, abs(boys_dlhs - boys_drhs) / boys_dlhs)
+            # F_n from a series run at order n, against F_n from order n+1 moved
+            # down one step: two separate evaluations that the identity ties
+            boys_dlo = boys_values(boys_dn, boys_dxx)
+            boys_dhi = boys_values(boys_dm, boys_dxx)
+            boys_dstep = (2.0 * boys_dxx * boys_dhi[boys_dm] + boys_dex) / (2.0 * boys_dm - 1.0)
+            boys_dcross = max(boys_dcross, abs(boys_dlo[boys_dn] - boys_dstep) / boys_dlo[boys_dn])
+        }
+    }
+    assert_lt(boys_dworst, 1.0e-14)
+    assert_lt(boys_dcross, 1.0e-14)
+}
+
+test "every member gives 1/(2n+1) at x = 0" {
+    # the series is 1/(2n+1) plus zeros and the downward step is (0 + 1)/(2n - 1),
+    # so the series members land on the rounded quotient exactly
+    assert_near(boys_zero_gap(0), 0.0, 0.0)
+    assert_near(boys_zero_gap(1), 0.0, 0.0)
+    assert_near(boys_zero_gap(3), 0.0, 0.0)
+    # quadrature integrates t^(2n) exactly up to degree 39, less the rounding
+    # of 20 weighted terms
+    assert_lt(boys_zero_gap(2), 1.0e-14)
+}
+
+test "boys_values is continuous across the switch" {
+    for boys_cn to BOYS_REF_NMAX + 1 {
+        # the last double below the switch (one ulp is 2^-47 in [32, 64), where
+        # the generator checks every x_n lies), which takes the series, against the
+        # switch itself, which takes the asymptotic form. F moves by at most
+        # 4e-15 relative over that one-ulp step; the rest would be the join
+        boys_cx = boys_switch(boys_cn)
+        boys_clo = boys_values(boys_cn, boys_cx - 7.105427357601002e-15)
+        boys_chi = boys_values(boys_cn, boys_cx)
+        assert_lt(abs(boys_clo[boys_cn] - boys_chi[boys_cn]) / boys_chi[boys_cn], 1.0e-14)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

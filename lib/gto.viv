@@ -1,0 +1,471 @@
+###
+post: Gaussian-basis quantum chemistry, held against PySCF
+agent: claude
+
+Molecular electronic structure from the Gaussians up: contracted s-type basis
+functions, the four integrals a Hartree-Fock calculation needs, and the
+self-consistent field that turns them into an energy. Every number is checked
+against PySCF's own, which `tools/pyscf_reference.py` writes into `lib/qcref`
+with enough digits to round-trip. What separates PySCF's answer from this one is
+the arithmetic in between.
+
+The four integrals, for primitives `exp(-a|r-A|^2)`:
+
+- **Overlap.** Two Gaussians multiply to a third, at
+  `P = (aA + bB)/(a + b)`, scaled by `K = exp(-ab/(a+b) |A-B|^2)`. Integrating
+  that gives `K (pi/p)^(3/2)` and nothing harder.
+- **Kinetic.** The Laplacian of a Gaussian is a Gaussian, so this is the overlap
+  times `ab/p (3 - 2ab/p |A-B|^2)`.
+- **Nuclear attraction.** `1/|r-C|` is not Gaussian, and this is where the Boys
+  function `F0(x) = sqrt(pi/4x) erf(sqrt(x))` arrives. It is the one special
+  function this module calls, and it is built from `erf`.
+- **Two-electron.** Two Gaussian products, one Boys function between them. For
+  `n` basis functions there are `n^4` of these, which is why everything past a
+  small molecule is about not computing them.
+
+Then the self-consistent field: the Fock matrix depends on the density, which
+comes from the Fock matrix. Start with a zero density, solve `F C = S C e` in an
+orthonormal basis found by Cholesky, rebuild the density, repeat.
+
+Only s functions, which means hydrogen. Oxygen has p, and the recursion that
+handles angular momentum is the next rung.
+
+Used with `import gto`.
+###
+
+from linalg import inverse
+from qcref import (
+    h2_bf_atom, h2_charges, h2_coords, H2_ENUC, H2_ERHF, h2_ERI, h2_long_bf_atom,
+    h2_long_charges, h2_long_coords, H2_LONG_ENUC, H2_LONG_ERHF, H2_LONG_NATM, H2_LONG_NBF,
+    H2_LONG_NOCC, H2_NATM, H2_NBF, H2_NOCC, h2_S, h2_T, h2_V, h4_bf_atom, h4_charges, h4_coords,
+    H4_ENUC, H4_ERHF, H4_NATM, H4_NBF, H4_NOCC, h4_S, h4_T, h4_V, NPRIM, sto3g_h_coef,
+    sto3g_h_expo,
+)
+
+GTO_PI = 3.141592653589793
+
+#| Space has three dimensions: a position, and a Cartesian power, has this many
+#| components.
+GTO_DIM = 3
+
+#| How many SCF iterations `hydrogens_energy` runs; a chain of STO-3G
+#| hydrogens has settled long before.
+GTO_SCF_ITERS = 60
+
+#| A primitive s Gaussian's normalization, `(2a/pi)^(3/4)`.
+def gto_norm_s(a) {
+    return pow(2.0 * a / GTO_PI, 0.75)
+}
+
+#| The Boys function of order zero. Both the nuclear attraction and the
+#| two-electron integrals get their distance dependence from it, and it is the
+#| only thing here that is not elementary. Near zero it is taken from its series,
+#| because `erf(sqrt(x))/sqrt(x)` is 0/0 there.
+def boys0(x) {
+    if x < 1.0e-12 {
+        return 1.0 - x / 3.0
+    }
+    return 0.5 * sqrt(GTO_PI / x) * erf(sqrt(x))
+}
+
+#| The squared distance between rows `i` and `j` of a coordinate table.
+def gto_dist2(R: Arr, i, j) {
+    total = 0.0
+    for k to GTO_DIM {
+        d = R[i, k] - R[j, k]
+        total = total + d * d
+    }
+    return total
+}
+
+#| The contracted coefficients: the tabulated ones times each primitive's own
+#| normalization, and then the whole contraction scaled so that it overlaps
+#| itself exactly once.
+#|
+#| That last step is not decoration. The tabulated STO-3G coefficients are
+#| rounded to eight figures, so the contraction they define is normalized only
+#| to about 1e-8. PySCF renormalizes and so must anything held against it: the
+#| overlap matrix differs in the ninth digit otherwise. The Hartree-Fock energy
+#| does not, because a common scale on every basis function cancels between the
+#| integrals and the density, which is exactly the kind of error that hides.
+def gto_contraction(expo: Arr, coef: Arr, nprim) {
+    out = zeros(nprim)
+    for i to nprim {
+        out[i] = coef[i] * gto_norm_s(expo[i])
+    }
+    self = 0.0
+    for i to nprim {
+        for j to nprim {
+            self = self + out[i] * out[j] * pow(GTO_PI / (expo[i] + expo[j]), 1.5)
+        }
+    }
+    scale = 1.0 / sqrt(self)
+    for i to nprim {
+        out[i] = out[i] * scale
+    }
+    return out
+}
+
+#| Overlap. `R` is the nuclear coordinates, `bfa[u]` says which nucleus basis
+#| function `u` sits on.
+def gto_overlap(R: Arr, bfa: Arr, expo: Arr, cn: Arr, nbf, nprim) {
+    S = zeros(nbf, nbf)
+    for u to nbf {
+        for v to nbf {
+            rab = gto_dist2(R, round(bfa[u]), round(bfa[v]))
+            total = 0.0
+            for i to nprim {
+                for j to nprim {
+                    p = expo[i] + expo[j]
+                    k = exp(-expo[i] * expo[j] / p * rab)
+                    total = total + cn[i] * cn[j] * k * pow(GTO_PI / p, 1.5)
+                }
+            }
+            S[u, v] = total
+        }
+    }
+    return S
+}
+
+#| Kinetic energy: the overlap of the pair, times a factor that falls out of
+#| differentiating a Gaussian twice.
+def gto_kinetic(R: Arr, bfa: Arr, expo: Arr, cn: Arr, nbf, nprim) {
+    T = zeros(nbf, nbf)
+    for u to nbf {
+        for v to nbf {
+            rab = gto_dist2(R, round(bfa[u]), round(bfa[v]))
+            total = 0.0
+            for i to nprim {
+                for j to nprim {
+                    a = expo[i]
+                    b = expo[j]
+                    p = a + b
+                    k = exp(-a * b / p * rab)
+                    s = k * pow(GTO_PI / p, 1.5)
+                    total = total + cn[i] * cn[j] * a * b / p * (3.0 - 2.0 * a * b / p * rab) * s
+                }
+            }
+            T[u, v] = total
+        }
+    }
+    return T
+}
+
+#| Attraction to every nucleus, summed with its charge.
+def gto_nuclear(R: Arr, Z: Arr, bfa: Arr, expo: Arr, cn: Arr, nbf, nprim, natm) {
+    V = zeros(nbf, nbf)
+    for u to nbf {
+        for v to nbf {
+            ia = round(bfa[u])
+            ib = round(bfa[v])
+            rab = gto_dist2(R, ia, ib)
+            total = 0.0
+            for i to nprim {
+                for j to nprim {
+                    a = expo[i]
+                    b = expo[j]
+                    p = a + b
+                    k = exp(-a * b / p * rab)
+                    for c to natm {
+                        rpc = 0.0
+                        for d to GTO_DIM {
+                            pc = (a * R[ia, d] + b * R[ib, d]) / p - R[c, d]
+                            rpc = rpc + pc * pc
+                        }
+                        total = total - cn[i] * cn[j] * Z[c] * 2.0 * GTO_PI / p * k * boys0(p * rpc)
+                    }
+                }
+            }
+            V[u, v] = total
+        }
+    }
+    return V
+}
+
+#| The two-electron integrals `(uv|ls)` in chemist's notation, all `nbf^4` of
+#| them. This is the expensive one and it is computed here the obvious way.
+def gto_eri(R: Arr, bfa: Arr, expo: Arr, cn: Arr, nbf, nprim) {
+    G = zeros(nbf, nbf, nbf, nbf)
+    for u to nbf {
+        for v to nbf {
+            for l to nbf {
+                for t to nbf {
+                    ia = round(bfa[u])
+                    ib = round(bfa[v])
+                    ic = round(bfa[l])
+                    id = round(bfa[t])
+                    rab = gto_dist2(R, ia, ib)
+                    rcd = gto_dist2(R, ic, id)
+                    total = 0.0
+                    for i to nprim {
+                        for j to nprim {
+                            a = expo[i]
+                            b = expo[j]
+                            p = a + b
+                            kab = exp(-a * b / p * rab)
+                            for m to nprim {
+                                for n to nprim {
+                                    c = expo[m]
+                                    d = expo[n]
+                                    q = c + d
+                                    kcd = exp(-c * d / q * rcd)
+                                    rpq = 0.0
+                                    for e to GTO_DIM {
+                                        pq = (a * R[ia, e] + b * R[ib, e]) / p - (c * R[ic, e] + d * R[id, e]) / q
+                                        rpq = rpq + pq * pq
+                                    }
+                                    w = 2.0 * pow(GTO_PI, 2.5) / (p * q * sqrt(p + q)) * kab * kcd
+                                    total = total + cn[i] * cn[j] * cn[m] * cn[n] * w * boys0(p * q / (p + q) * rpq)
+                                }
+                            }
+                        }
+                    }
+                    G[u, v, l, t] = total
+                }
+            }
+        }
+    }
+    return G
+}
+
+#| The orthonormalizing transform: `S = L L^T` by Cholesky, and `X = L^-T`
+#| satisfies `X^T S X = I`. Symmetric orthogonalization would need the square
+#| root of `S`; this needs one triangular inverse.
+def gto_orthogonalizer(S: Arr, nbf) {
+    L = zeros(nbf, nbf)
+    cholesky(S, L)
+    return transpose(inverse(L))
+}
+
+#| Restricted Hartree-Fock. The Fock matrix depends on the density and the
+#| density comes from the Fock matrix, so this starts from no density at all and
+#| goes round until the energy stops moving.
+def gto_rhf_full(H: Arr, S: Arr, G: Arr, nbf, nocc, enuc, iters, Pout: Arr) {
+    X = gto_orthogonalizer(S, nbf)
+    P = zeros(nbf, nbf)
+    energy = 0.0
+    for it to iters {
+        J = zeros(nbf, nbf)
+        for u to nbf {
+            for v to nbf {
+                g = 0.0
+                for l to nbf {
+                    for t to nbf {
+                        g = g + P[l, t] * (G[u, v, t, l] - 0.5 * G[u, l, t, v])
+                    }
+                }
+                J[u, v] = g
+            }
+        }
+        F = H + J
+        Fp = transpose(X) @ F @ X
+        ev = zeros(nbf)
+        Cp = zeros(nbf, nbf)
+        eig_sym(Fp, ev, Cp)
+        C = X @ Cp
+        P = zeros(nbf, nbf)
+        for u to nbf {
+            for v to nbf {
+                acc = 0.0
+                for i to nocc {
+                    acc = acc + C[u, i] * C[v, i]
+                }
+                P[u, v] = 2.0 * acc
+            }
+        }
+        e = 0.0
+        for u to nbf {
+            for v to nbf {
+                e = e + 0.5 * P[u, v] * (H[u, v] + F[u, v])
+            }
+        }
+        energy = e + enuc
+    }
+    for u to nbf {
+        for v to nbf {
+            Pout[u, v] = P[u, v]
+        }
+    }
+    return energy
+}
+
+#| The same, when the density is not wanted back.
+def gto_rhf(H: Arr, S: Arr, G: Arr, nbf, nocc, enuc, iters) {
+    P = zeros(nbf, nbf)
+    return gto_rhf_full(H, S, G, nbf, nocc, enuc, iters, P)
+}
+
+#| The largest gap between a computed matrix and PySCF's, which arrives
+#| flattened row-major.
+def gto_worst(M: Arr, flat: Arr, n) {
+    worst = 0.0
+    for i to n {
+        for j to n {
+            worst = max(worst, abs(M[i, j] - flat[i * n + j]))
+        }
+    }
+    return worst
+}
+
+test "the Boys function is what it is supposed to be at both ends" {
+    # F0(0) = 1 exactly, and the series and the closed form agree across the join
+    assert_near(boys0(0.0), 1.0, 1.0e-15)
+    assert_near(boys0(1.0e-13), 1.0 - 1.0e-13 / 3.0, 1.0e-15)
+    # F0(x) -> sqrt(pi/4x) for large x, since erf goes to 1
+    assert_near(boys0(100.0), 0.5 * sqrt(GTO_PI / 100.0), 1.0e-15)
+    # and it decreases
+    assert_lt(boys0(2.0), boys0(1.0))
+}
+
+test "H2 one-electron integrals match PySCF to twelve digits" {
+    nbf = H2_NBF
+    R = h2_coords()
+    bfa = h2_bf_atom()
+    Z = h2_charges()
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    S = gto_overlap(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    T = gto_kinetic(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    V = gto_nuclear(R, Z, bfa, sto3g_h_expo(), cn, nbf, NPRIM, H2_NATM)
+    assert_lt(gto_worst(S, h2_S(), nbf), 1.0e-12)
+    assert_lt(gto_worst(T, h2_T(), nbf), 1.0e-12)
+    assert_lt(gto_worst(V, h2_V(), nbf), 1.0e-12)
+    # the contracted functions came out normalized without being told to
+    assert_near(S[0, 0], 1.0, 1.0e-12)
+}
+
+test "H2 two-electron integrals match PySCF, and have the symmetries they must" {
+    nbf = H2_NBF
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    G = gto_eri(h2_coords(), h2_bf_atom(), sto3g_h_expo(), cn, nbf, NPRIM)
+    ref = h2_ERI()
+    worst = 0.0
+    for u to nbf {
+        for v to nbf {
+            for l to nbf {
+                for t to nbf {
+                    idx = ((u * nbf + v) * nbf + l) * nbf + t
+                    worst = max(worst, abs(G[u, v, l, t] - ref[idx]))
+                    # (uv|ls) = (vu|ls) = (uv|sl) = (ls|uv)
+                    assert_near(G[u, v, l, t], G[v, u, l, t], 1.0e-14)
+                    assert_near(G[u, v, l, t], G[u, v, t, l], 1.0e-14)
+                    assert_near(G[u, v, l, t], G[l, t, u, v], 1.0e-14)
+                }
+            }
+        }
+    }
+    assert_lt(worst, 1.0e-12)
+}
+
+test "the H2 Hartree-Fock energy is PySCF's, to twelve digits" {
+    nbf = H2_NBF
+    R = h2_coords()
+    bfa = h2_bf_atom()
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    S = gto_overlap(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    H = gto_kinetic(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM) + gto_nuclear(R, h2_charges(), bfa, sto3g_h_expo(), cn, nbf, NPRIM, H2_NATM)
+    G = gto_eri(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    iters = 30
+    e = gto_rhf(H, S, G, nbf, H2_NOCC, H2_ENUC, iters)
+    assert_lt(abs(e - H2_ERHF), 1.0e-12)
+}
+
+test "a stretched H2 is a different molecule and PySCF agrees about that too" {
+    nbf = H2_LONG_NBF
+    R = h2_long_coords()
+    bfa = h2_long_bf_atom()
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    S = gto_overlap(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    H = gto_kinetic(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM) + gto_nuclear(R, h2_long_charges(), bfa, sto3g_h_expo(), cn, nbf, NPRIM, H2_LONG_NATM)
+    G = gto_eri(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    iters = 30
+    e = gto_rhf(H, S, G, nbf, H2_LONG_NOCC, H2_LONG_ENUC, iters)
+    assert_lt(abs(e - H2_LONG_ERHF), 1.0e-12)
+    # stretched is higher in energy, which is what a bond being a bond means
+    assert_lt(H2_ERHF, H2_LONG_ERHF)
+}
+
+test "four hydrogens off the axis, in three dimensions, give integrals and an RHF energy that match to 1e-12" {
+    nbf = H4_NBF
+    R = h4_coords()
+    bfa = h4_bf_atom()
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    S = gto_overlap(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    T = gto_kinetic(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    V = gto_nuclear(R, h4_charges(), bfa, sto3g_h_expo(), cn, nbf, NPRIM, H4_NATM)
+    assert_lt(gto_worst(S, h4_S(), nbf), 1.0e-12)
+    assert_lt(gto_worst(T, h4_T(), nbf), 1.0e-12)
+    assert_lt(gto_worst(V, h4_V(), nbf), 1.0e-12)
+    G = gto_eri(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    iters = 40
+    e = gto_rhf(T + V, S, G, nbf, H4_NOCC, H4_ENUC, iters)
+    assert_lt(abs(e - H4_ERHF), 1.0e-12)
+}
+
+#| The Hartree-Fock energy of hydrogens at the coordinates given, one atom per
+#| row of `R`, in the STO-3G basis: one s function per atom.
+def hydrogens_energy(R: Arr) {
+    natm = len(R)
+    # one electron per hydrogen, two to an orbital
+    nocc = natm / 2
+    nbf = natm
+    Z = zeros(natm)
+    bfa = zeros(nbf)
+    for i to natm {
+        Z[i] = 1.0
+        bfa[i] = 1.0 * i
+    }
+    cn = gto_contraction(sto3g_h_expo(), sto3g_h_coef(), NPRIM)
+    S = gto_overlap(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    T = gto_kinetic(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    V = gto_nuclear(R, Z, bfa, sto3g_h_expo(), cn, nbf, NPRIM, natm)
+    G = gto_eri(R, bfa, sto3g_h_expo(), cn, nbf, NPRIM)
+    enuc = 0.0
+    for i to natm {
+        for j to i {
+            d = 0.0
+            for k to GTO_DIM {
+                dd = R[i, k] - R[j, k]
+                d = d + dd * dd
+            }
+            enuc = enuc + Z[i] * Z[j] / sqrt(d)
+        }
+    }
+    return gto_rhf(T + V, S, G, nbf, nocc, enuc, GTO_SCF_ITERS)
+}
+
+test "two molecules far apart cost exactly what the two of them cost" {
+    # Size consistency. No reference is needed for this one: the same code
+    # answers both halves, and if the two answers do not add up then something
+    # in the two-electron term is coupling things that do not touch.
+    bond = 1.3983973333366122
+    one = zeros(2, GTO_DIM)
+    one[1, 2] = bond
+    e1 = hydrogens_energy(one)
+    assert_lt(abs(e1 - H2_ERHF), 1.0e-10)
+
+    far = 400.0
+    two = zeros(2 * len(one), GTO_DIM)
+    two[1, 2] = bond
+    two[2, 2] = far
+    two[3, 2] = far + bond
+    e2 = hydrogens_energy(two)
+    assert_lt(abs(e2 - 2.0 * e1), 1.0e-9)
+}
+
+test "pulling a bond apart costs energy, and squeezing it does too" {
+    # The minimum is a minimum: a check on the whole chain at once, and one that
+    # no transcription error can pass.
+    bond = 1.3983973333366122
+    mid = zeros(2, GTO_DIM)
+    mid[1, 2] = bond
+    e_mid = hydrogens_energy(mid)
+    short = zeros(2, GTO_DIM)
+    short[1, 2] = bond * 0.75
+    long = zeros(2, GTO_DIM)
+    long[1, 2] = bond * 1.35
+    assert_lt(e_mid, hydrogens_energy(short))
+    assert_lt(e_mid, hydrogens_energy(long))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

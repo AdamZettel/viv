@@ -1,0 +1,363 @@
+###
+post: Variable-order BDF in quasi-constant-step form (orders 1 to 5)
+agent: claude
+
+The backward differentiation formula of order k takes y_{n+1} to be the
+point where the polynomial through the last k+1 solution values has slope
+f(t_{n+1}, y_{n+1}). The solution history is kept as backward differences
+D^j y_n, j = 0..k+2, of the interpolating polynomial on an equally spaced
+grid; a change of step rescales the differences to the new grid (the R and
+U matrices of Shampine and Reichelt, section 3.1) instead of keeping
+unequally spaced points, which is what "quasi-constant step" means.
+
+In this form the implicit equation is
+
+    (I - h / alpha_k J) d = h / alpha_k f(t_{n+1}, y_p + d) - psi - d
+
+for the correction d to the predictor y_p = sum_j D^j y_n, solved by at
+most four simplified Newton iterations with one LU of I - (h/alpha_k) J.
+The LU is kept from step to step and refactored when an accepted step
+changes h or k, when Newton fails, and when the step is cut to reach t1; a
+step retried after a failed error test keeps it (SciPy's policy: the
+iteration converged, so the old matrix still serves). The formulas are the NDFs (numerical
+differentiation formulas) of Klopfenstein and Shampine-Reichelt, with
+kappa = (-0.185, -1/9, -0.0823, -0.0415, 0): BDFs with a modified leading
+coefficient that are more accurate at the same stability (order 5 is the
+plain BDF). The local error is C_k d; after k+1 steps of one size the
+errors the neighboring orders would have made are compared and the order
+moves to the one that allows the largest step. The constants and logic are
+those of SciPy's BDF (scipy/integrate/_ivp/bdf.py) and MATLAB's ode15s.
+
+L. F. Shampine and M. W. Reichelt, The MATLAB ODE Suite, SIAM J. Sci.
+Comput. 18, 1-22 (1997), doi:10.1137/S1064827594276424.
+###
+
+from ode.core import (
+    Dense, OdeCfg, OdeState, BDF, MAX_FACTOR, MIN_FACTOR, NOT_FINITE, STEP_TOO_SMALL,
+    all_finite, jacobian, min_step_at, rms,
+)
+from ode.lu import lu_factor, lu_solve
+
+MAX_ORDER: Int = 5
+NEWTON_MAXITER: Int = 4
+# rows of the difference array: orders 0..MAX_ORDER and two more for the error estimates
+D_ROWS: Int = MAX_ORDER + 3
+# the NDF modifications kappa_k, k = 0..MAX_ORDER (Shampine and Reichelt, table 1)
+KAPPA = [0.0, -0.1850, -1.0 / 9.0, -0.0823, -0.0415, 0.0]
+
+#| gamma_k = sum_{j=1}^{k} 1/j, k = 0..MAX_ORDER.
+def bdf_gamma() -> Arr {
+    g = zeros(MAX_ORDER + 1)
+    for k from 1 to MAX_ORDER + 1 {
+        g[k] = g[k - 1] + 1.0 / k
+    }
+    return g
+}
+
+#| alpha_k = (1 - kappa_k) gamma_k, the NDF's leading coefficient.
+def bdf_alpha() -> Arr {
+    return (1.0 - KAPPA) * bdf_gamma()
+}
+
+#| C_k = kappa_k gamma_k + 1/(k+1), the error constant of order k.
+def bdf_error_const() -> Arr {
+    c = zeros(MAX_ORDER + 2)
+    g = bdf_gamma()
+    for k to MAX_ORDER + 2 {
+        if k <= MAX_ORDER {
+            c[k] = KAPPA[k] * g[k] + 1.0 / (k + 1.0)
+        }
+        else {
+            c[k] = 1.0 / (k + 1.0)
+        }
+    }
+    return c
+}
+
+#| The matrix that rescales differences of order `order` to a grid of
+#| spacing `factor` times the old (Shampine and Reichelt, eq. 3.3):
+#| R[i, j] = prod_{m=1}^{i} (m - 1 - factor j) / m.
+def compute_R(order: Int, factor: Num) -> Arr {
+    k = order + 1
+    R = zeros(k, k)
+    for j to k {
+        R[0, j] = 1.0
+    }
+    for i from 1 to k {
+        for j to k {
+            mij = 0.0
+            if j >= 1 {
+                mij = (i - 1.0 - factor * j) / i
+            }
+            R[i, j] = R[i - 1, j] * mij
+        }
+    }
+    return R
+}
+
+#| Rescale the first order+1 rows of the differences D in place for a step
+#| `factor` times the current one.
+def change_D(D: Arr, order: Int, factor: Num) {
+    k = order + 1
+    RU = compute_R(order, factor) @ compute_R(order, 1.0)
+    Dn = transpose(RU) @ D[0:k, :]
+    for i to k {
+        D[i, :] = Dn[i, :]
+    }
+}
+
+#| Simplified Newton for the correction d. Returns whether it converged,
+#| the iterations, the new y, d, and the rhs evaluations.
+def bdf_newton(f, s: OdeState, t_new: Num, y_pred: Arr, cc: Num, psi: Arr, scale: Arr, tol: Num, p: Arr) {
+    n = len(y_pred)
+    d = zeros(n)
+    y = copy(y_pred)
+    norm_old = -1.0
+    rate = -1.0
+    converged = false
+    iters: Int = 0
+    nfev: Int = 0
+    going = true
+    r = zeros(n)
+    while going and iters < NEWTON_MAXITER {
+        fy = f(t_new, y, p)
+        nfev += 1
+        iters += 1
+        if not all_finite(fy) {
+            going = false
+        }
+        else {
+            for i to n {
+                r[i] = cc * fy[i] - psi[i] - d[i]
+            }
+            dy = lu_solve(s.LU1, s.piv1, r)
+            acc = 0.0
+            for i to n {
+                u = dy[i] / scale[i]
+                acc += u * u
+            }
+            dnorm = sqrt(acc / n)
+            if norm_old >= 0.0 {
+                rate = dnorm / norm_old
+            }
+            if rate >= 0.0 and (rate >= 1.0 or pow(rate, NEWTON_MAXITER - iters + 1) / (1.0 - rate) * dnorm > tol) {
+                going = false
+            }
+            else {
+                for i to n {
+                    y[i] += dy[i]
+                    d[i] += dy[i]
+                }
+                if dnorm == 0.0 or (rate >= 0.0 and rate / (1.0 - rate) * dnorm < tol) {
+                    converged = true
+                    going = false
+                }
+                norm_old = dnorm
+            }
+        }
+    }
+    return converged, iters, y, d, nfev
+}
+
+#| The state a BDF integration starts from: order 1, the differences y0 and
+#| h f0, and the Jacobian at the start.
+def bdf_start(f, jac, s0: OdeState, c: OdeCfg, p: Arr) -> OdeState {
+    s = s0
+    n = len(s.y)
+    s.D = zeros(D_ROWS, n)
+    s.D[0, :] = s.y
+    s.D[1, :] = s.fy * s.h_abs * s.dir
+    s.order = 1
+    s.n_equal = 0
+    s.have_lu = false
+    Jn, nj = jacobian(f, jac, s.t, s.y, s.fy, p, c)
+    s.J = Jn
+    s.nfev += nj
+    s.njev += 1
+    s.jac_current = true
+    return s
+}
+
+#| One accepted BDF step from s, then the order and step for the next one.
+def bdf_step(f, jac, s0: OdeState, c: OdeCfg, p: Arr) -> OdeState {
+    s = s0
+    t = s.t
+    n = len(s.y)
+    alpha = bdf_alpha()
+    gamma = bdf_gamma()
+    econst = bdf_error_const()
+    min_step = min_step_at(t)
+    h_abs = s.h_abs
+    if h_abs > c.max_step {
+        change_D(s.D, s.order, c.max_step / h_abs)
+        h_abs = c.max_step
+        s.n_equal = 0
+        s.have_lu = false
+    }
+    else {
+        if h_abs < min_step {
+            change_D(s.D, s.order, min_step / h_abs)
+            h_abs = min_step
+            s.n_equal = 0
+            s.have_lu = false
+        }
+    }
+    order = s.order
+    accepted = false
+    t_new = t
+    y_new = s.y
+    d = zeros(n)
+    err_norm = 0.0
+    safety = 0.0
+    scale = c.atol
+    while not accepted {
+        if h_abs < min_step {
+            s.status = STEP_TOO_SMALL
+            return s
+        }
+        t_new = t + h_abs * s.dir
+        if s.dir * (t_new - c.t_bound) > 0.0 {
+            t_new = c.t_bound
+            change_D(s.D, order, abs(t_new - t) / h_abs)
+            s.n_equal = 0
+            s.have_lu = false
+        }
+        h = t_new - t
+        h_abs = abs(h)
+        #: the predictor and the history term of the NDF
+        y_pred = zeros(n)
+        psi = zeros(n)
+        scale = zeros(n)
+        for i to n {
+            acc = 0.0
+            for k to order + 1 {
+                acc += s.D[k, i]
+            }
+            y_pred[i] = acc
+            scale[i] = c.atol[i] + c.rtol * abs(acc)
+            acc = 0.0
+            for k from 1 to order + 1 {
+                acc += gamma[k] * s.D[k, i]
+            }
+            psi[i] = acc / alpha[order]
+        }
+        cc = h / alpha[order]
+        converged = false
+        iters: Int = 0
+        trying = true
+        while trying {
+            if not s.have_lu {
+                s.LU1 = eye(n) - cc * s.J
+                ok = lu_factor(s.LU1, s.piv1)
+                s.have_lu = true
+                s.nlu += 1
+            }
+            converged, iters, y_new, d, nf = bdf_newton(f, s, t_new, y_pred, cc, psi, scale, c.newton_tol, p)
+            s.nfev += nf
+            if converged or s.jac_current {
+                trying = false
+            }
+            else {
+                fp = f(t_new, y_pred, p)
+                s.nfev += 1
+                Jn, nj = jacobian(f, jac, t_new, y_pred, fp, p, c)
+                s.J = Jn
+                s.nfev += nj
+                s.njev += 1
+                s.jac_current = true
+                s.have_lu = false
+            }
+        }
+        if not converged {
+            change_D(s.D, order, 0.5)
+            h_abs = 0.5 * h_abs
+            s.n_equal = 0
+            s.have_lu = false
+            s.nreject += 1
+        }
+        else {
+            safety = 0.9 * (2.0 * NEWTON_MAXITER + 1.0) / (2.0 * NEWTON_MAXITER + iters)
+            scale = c.atol + c.rtol * abs(y_new)
+            err_norm = rms(econst[order] * d / scale)
+            if err_norm > 1.0 {
+                factor = max(MIN_FACTOR, safety * pow(err_norm, -1.0 / (order + 1.0)))
+                change_D(s.D, order, factor)
+                h_abs = h_abs * factor
+                s.n_equal = 0
+                s.nreject += 1
+            }
+            else {
+                accepted = true
+            }
+        }
+    }
+    if not all_finite(y_new) {
+        s.status = NOT_FINITE
+        return s
+    }
+    s.n_equal += 1
+    s.naccept += 1
+    s.jac_current = false
+    #: update the differences: D^{j+1} y_n = D^j y_n - D^j y_{n-1}, and d = D^{k+1} y_n
+    for j to n {
+        s.D[order + 2, j] = d[j] - s.D[order + 1, j]
+        s.D[order + 1, j] = d[j]
+        for i to order + 1 reversed {
+            s.D[i, j] += s.D[i + 1, j]
+        }
+    }
+    #: the dense output, before any change of order or step rescales D
+    Q = zeros(order + 1, n)
+    for k to order + 1 {
+        Q[k, :] = s.D[k, :]
+    }
+    s.dense = Dense { kind: BDF, t_old: t, t_new: t_new, h: t_new - t, Q: Q, y_old: s.y, order: order }
+    s.has_dense = true
+    s.t = t_new
+    s.y = y_new
+    s.h_abs = h_abs
+    if s.n_equal < order + 1 {
+        return s
+    }
+    #: after order+1 equal steps: compare the errors orders k-1, k, k+1 would make
+    em = inf
+    if order > 1 {
+        em = rms(econst[order - 1] * s.D[order, :] / scale)
+    }
+    ep = inf
+    if order < MAX_ORDER {
+        ep = rms(econst[order + 1] * s.D[order + 2, :] / scale)
+    }
+    norms = [em, err_norm, ep]
+    best = -1.0
+    delta = 0
+    for j to len(norms) {
+        fj = inf
+        if norms[j] > 0.0 {
+            fj = pow(norms[j], -1.0 / (order + j))
+        }
+        if fj > best {
+            best = fj
+            delta = j - 1
+        }
+    }
+    s.order = order + int(delta)
+    factor = min(MAX_FACTOR, safety * best)
+    s.h_abs = h_abs * factor
+    change_D(s.D, s.order, factor)
+    s.n_equal = 0
+    s.have_lu = false
+    return s
+}
+
+test "the NDF constants, and rescaling by 1 changes nothing" {
+    assert_allclose(bdf_gamma(), [0.0, 1.0, 1.5, 11.0 / 6.0, 25.0 / 12.0, 137.0 / 60.0], 1.0e-15)
+    # order 5 is the plain BDF: error constant 1/6
+    assert_near(bdf_error_const()[MAX_ORDER], 1.0 / 6.0, 1.0e-16)
+    # R(order, 1) is its own inverse, so U U = I (Shampine and Reichelt, section 3.1)
+    U = compute_R(3, 1.0)
+    assert_allclose(U @ U, eye(4), 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

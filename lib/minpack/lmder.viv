@@ -1,0 +1,534 @@
+###
+post: MINPACK's lmder, Levenberg-Marquardt least squares with a trust region
+agent: claude
+
+A port of `lmder.f` and `lmder1.f` from netlib MINPACK (lib/minpack/ref),
+with the Fortran's arithmetic in the Fortran's order, so that the iterates
+match a gfortran build of the original to the last bit where the problem's
+own functions do. The explanation is in lib/minpack/lmder.intent; the checks
+are in lib/minpack/mgh_check.viv and lib/minpack/check.sh.
+
+**The function.** `fcn(data, x, fvec, fjac, iflag)` is a def: for `iflag` 1
+it writes the m residuals at x into fvec, for 2 the m x n Jacobian into fjac,
+for 0 it may print; it returns iflag, or a negative number to stop lmder.
+`data` is any array the function needs (a problem number, measurements).
+
+**Differences from the Fortran**, none of which changes an operation:
+
+- indices count from 0, and `ipvt` holds 0-based column numbers;
+- `fjac` is an `m x n` array instead of a leading-dimension array;
+- the work arrays wa1 ... wa4 are allocated here instead of passed in;
+- `info` is returned, and nfev and njev are written into `counts[0]` and
+  `counts[1]`;
+- every trial step writes one row into `hist` (the Fortran has no such
+  record; it is what lets a test compare iterates, and a plot draw them).
+  The columns are the H_ constants below. A `hist` with fewer rows than
+  trial steps keeps the first rows; pass `zeros(1, H_X + n)` to keep none
+  worth reading.
+
+Used with `import minpack.lmder`.
+###
+
+from minpack.lmpar import lmpar
+from minpack.qrfac import qrfac
+from minpack.enorm import enorm, EPSMCH
+
+# The columns of one row of hist: one row per trial step.
+H_ITER = 0
+H_NFEV = 1
+H_DELTA_IN = 2
+H_PAR_LM = 3
+H_PNORM = 4
+H_FNORM1 = 5
+H_ACTRED = 6
+H_PRERED = 7
+H_RATIO = 8
+H_DELTA = 9
+H_PAR = 10
+H_ACCEPT = 11
+H_FNORM = 12
+H_GNORM = 13
+H_X = 14
+
+# The thresholds of the trust region, from the data statement of lmder.f
+# (the Fortran's names in parentheses). The halves (p5 there: `temp = 0.5`,
+# `delta = pnorm / 0.5`, `par = 0.5 * par`, `/ 0.5` in prered and
+# `0.5 * ratio`) stay written as 0.5, as the formulas they are part of.
+#
+# A trial step whose ratio of actual to predicted reduction is at most this
+# shrinks the radius (p25).
+LM_RATIO_SHRINK = 0.25
+# A ratio at least this expands it to twice the step's length (p75).
+LM_RATIO_EXPAND = 0.75
+# A ratio at least this accepts the step: x moves to x + p (p0001).
+LM_RATIO_ACCEPT = 0.0001
+# The smallest factor t a shrink multiplies the radius by; the shrunk
+# radius is t * min(delta, pnorm / LM_SHRINK_MIN), so it is also at most 10 t
+# times the step's length (p1).
+LM_SHRINK_MIN = 0.1
+# A trial norm fnorm1 at least 1 / LM_RISE_LIMIT = 10 times fnorm counts as
+# actred = -1 without squaring the quotient (which could overflow), and
+# shrinks the radius by the full LM_SHRINK_MIN (p1).
+LM_RISE_LIMIT = 0.1
+# lmder1's settings (lmder1.f): the evaluations of f allowed per variable,
+# plus one, and the initial radius as a multiple of |D x| (factor).
+LMDER1_MAXFEV_PER = 100.0
+LMDER1_FACTOR = 100.0
+
+def lmder(fcn, data: Arr, x: Arr, fvec: Arr, fjac: Arr, ftol, xtol, gtol, maxfev, diag: Arr, mode, factor, nprint, ipvt: Arr, qtf: Arr, counts: Arr, hist: Arr) {
+    m = len(fvec)
+    n = len(x)
+    step setup {
+        wa1 = zeros(n)
+        wa2 = zeros(n)
+        wa3 = zeros(n)
+        wa4 = zeros(m)
+        epsmch = EPSMCH
+        info = 0
+        iflag = 0
+        nfev = 0
+        njev = 0
+        nrow = 0
+        par = 0.0
+        iter = 1
+        fnorm = 0.0
+        fnorm1 = 0.0
+        xnorm = 0.0
+        delta = 0.0
+        gnorm = 0.0
+        pnorm = 0.0
+        actred = 0.0
+        prered = 0.0
+        ratio = 0.0
+        # what lmpar was given and returned, for hist
+        delta_in = 0.0
+        par_lm = 0.0
+    }
+    step check_input {
+        ok = n > 0 and m >= n and ftol >= 0.0 and xtol >= 0.0 and gtol >= 0.0 and maxfev > 0 and factor > 0.0
+        if ok and mode == 2 {
+            for j to n {
+                if diag[j] <= 0.0 {
+                    ok = false
+                }
+            }
+        }
+    }
+    if ok {
+        step start {
+            iflag = fcn(data, x, fvec, fjac, 1.0)
+            nfev = 1
+            fnorm = enorm(m, fvec)
+        }
+    }
+    quit = not ok or iflag < 0
+    while not quit {
+        step jacobian {
+            iflag = fcn(data, x, fvec, fjac, 2.0)
+            njev = njev + 1
+        }
+        if iflag < 0 {
+            break
+        }
+        if nprint > 0 {
+            iflag = 0.0
+            if mod(iter - 1.0, nprint) == 0.0 {
+                iflag = fcn(data, x, fvec, fjac, 0.0)
+            }
+            if iflag < 0 {
+                break
+            }
+        }
+        step qr {
+            qrfac(m, n, fjac, true, ipvt, wa1, wa2, wa3)
+        }
+        if iter == 1 {
+            step scale {
+                if mode != 2 {
+                    for j to n {
+                        diag[j] = wa2[j]
+                        if wa2[j] == 0.0 {
+                            diag[j] = 1.0
+                        }
+                    }
+                }
+            }
+            step first_radius {
+                for j to n {
+                    wa3[j] = diag[j] * x[j]
+                }
+                xnorm = enorm(n, wa3)
+                delta = factor * xnorm
+                if delta == 0.0 {
+                    delta = factor
+                }
+            }
+        }
+        step qtf {
+            for i to m {
+                wa4[i] = fvec[i]
+            }
+            for j to n {
+                if fjac[j, j] != 0.0 {
+                    sum = 0.0
+                    for ii to m - j {
+                        sum = sum + fjac[j + ii, j] * wa4[j + ii]
+                    }
+                    temp = -sum / fjac[j, j]
+                    for ii to m - j {
+                        wa4[j + ii] = wa4[j + ii] + fjac[j + ii, j] * temp
+                    }
+                }
+                fjac[j, j] = wa1[j]
+                qtf[j] = wa4[j]
+            }
+        }
+        step gradient {
+            gnorm = 0.0
+            if fnorm != 0.0 {
+                for j to n {
+                    l = ipvt[j]
+                    if wa2[l] != 0.0 {
+                        sum = 0.0
+                        for i to j + 1 {
+                            sum = sum + fjac[i, j] * (qtf[i] / fnorm)
+                        }
+                        gnorm = max(gnorm, abs(sum / wa2[l]))
+                    }
+                }
+            }
+            if gnorm <= gtol {
+                info = 4
+            }
+        }
+        if info != 0 {
+            break
+        }
+        if mode != 2 {
+            step rescale {
+                for j to n {
+                    diag[j] = max(diag[j], wa2[j])
+                }
+            }
+        }
+        while true {
+            step lm_parameter {
+                delta_in = delta
+                par = lmpar(n, fjac, ipvt, diag, qtf, delta, par, wa1, wa2, wa3, wa4)
+                par_lm = par
+            }
+            step trial {
+                for j to n {
+                    wa1[j] = -wa1[j]
+                    wa2[j] = x[j] + wa1[j]
+                    wa3[j] = diag[j] * wa1[j]
+                }
+                pnorm = enorm(n, wa3)
+                if iter == 1 {
+                    delta = min(delta, pnorm)
+                }
+            }
+            step evaluate {
+                iflag = fcn(data, wa2, wa4, fjac, 1.0)
+                nfev = nfev + 1
+            }
+            if iflag < 0 {
+                quit = true
+                break
+            }
+            step reductions {
+                step actual {
+                    fnorm1 = enorm(m, wa4)
+                    actred = -1.0
+                    if LM_RISE_LIMIT * fnorm1 < fnorm {
+                        q = fnorm1 / fnorm
+                        actred = 1.0 - q * q
+                    }
+                }
+                step predicted {
+                    for j to n {
+                        wa3[j] = 0.0
+                        l = ipvt[j]
+                        temp = wa1[l]
+                        for i to j + 1 {
+                            wa3[i] = wa3[i] + fjac[i, j] * temp
+                        }
+                    }
+                    temp1 = enorm(n, wa3) / fnorm
+                    temp2 = (sqrt(par) * pnorm) / fnorm
+                    prered = temp1 * temp1 + (temp2 * temp2) / 0.5
+                    dirder = -(temp1 * temp1 + temp2 * temp2)
+                }
+                step quotient {
+                    ratio = 0.0
+                    if prered != 0.0 {
+                        ratio = actred / prered
+                    }
+                }
+            }
+            step radius {
+                if ratio <= LM_RATIO_SHRINK {
+                    step shrink {
+                        if actred >= 0.0 {
+                            temp = 0.5
+                        }
+                        if actred < 0.0 {
+                            temp = 0.5 * dirder / (dirder + 0.5 * actred)
+                        }
+                        if LM_RISE_LIMIT * fnorm1 >= fnorm or temp < LM_SHRINK_MIN {
+                            temp = LM_SHRINK_MIN
+                        }
+                        delta = temp * min(delta, pnorm / LM_SHRINK_MIN)
+                        par = par / temp
+                    }
+                } else if par == 0.0 or ratio >= LM_RATIO_EXPAND {
+                    step expand {
+                        delta = pnorm / 0.5
+                        par = 0.5 * par
+                    }
+                }
+            }
+            if ratio >= LM_RATIO_ACCEPT {
+                step accept {
+                    for j to n {
+                        x[j] = wa2[j]
+                        wa2[j] = diag[j] * x[j]
+                    }
+                    for i to m {
+                        fvec[i] = wa4[i]
+                    }
+                    xnorm = enorm(n, wa2)
+                    fnorm = fnorm1
+                    iter = iter + 1
+                }
+            }
+            step history {
+                if nrow < len(hist) {
+                    hist[nrow, H_ITER] = iter
+                    hist[nrow, H_NFEV] = nfev
+                    hist[nrow, H_DELTA_IN] = delta_in
+                    hist[nrow, H_PAR_LM] = par_lm
+                    hist[nrow, H_PNORM] = pnorm
+                    hist[nrow, H_FNORM1] = fnorm1
+                    hist[nrow, H_ACTRED] = actred
+                    hist[nrow, H_PRERED] = prered
+                    hist[nrow, H_RATIO] = ratio
+                    hist[nrow, H_DELTA] = delta
+                    hist[nrow, H_PAR] = par
+                    hist[nrow, H_ACCEPT] = 0.0
+                    if ratio >= LM_RATIO_ACCEPT {
+                        hist[nrow, H_ACCEPT] = 1.0
+                    }
+                    hist[nrow, H_FNORM] = fnorm
+                    hist[nrow, H_GNORM] = gnorm
+                    for j to n {
+                        hist[nrow, H_X + j] = x[j]
+                    }
+                }
+                nrow = nrow + 1
+            }
+            step converged {
+                if abs(actred) <= ftol and prered <= ftol and 0.5 * ratio <= 1.0 {
+                    info = 1
+                }
+                if delta <= xtol * xnorm {
+                    info = 2
+                }
+                if abs(actred) <= ftol and prered <= ftol and 0.5 * ratio <= 1.0 and info == 2 {
+                    info = 3
+                }
+            }
+            if info != 0 {
+                quit = true
+                break
+            }
+            step stringent {
+                if nfev >= maxfev {
+                    info = 5
+                }
+                if abs(actred) <= epsmch and prered <= epsmch and 0.5 * ratio <= 1.0 {
+                    info = 6
+                }
+                if delta <= epsmch * xnorm {
+                    info = 7
+                }
+                if gnorm <= epsmch {
+                    info = 8
+                }
+            }
+            if info != 0 {
+                quit = true
+                break
+            }
+            if ratio >= LM_RATIO_ACCEPT {
+                break
+            }
+        }
+    }
+    step finish {
+        if iflag < 0 {
+            info = iflag
+        }
+        iflag = 0.0
+        if nprint > 0 {
+            fcn(data, x, fvec, fjac, 0.0)
+        }
+        counts[0] = nfev
+        counts[1] = njev
+    }
+    return info
+}
+
+# The evaluations of f lmder1 allows for n variables (maxfev in lmder1.f).
+def lmder1_maxfev(n) {
+    return LMDER1_MAXFEV_PER * (n + 1.0)
+}
+
+def lmder1(fcn, data: Arr, x: Arr, fvec: Arr, fjac: Arr, tol, ipvt: Arr, counts: Arr, hist: Arr) {
+    n = len(x)
+    m = len(fvec)
+    info = 0
+    if n > 0 and m >= n and tol >= 0.0 {
+        diag = zeros(n)
+        qtf = zeros(n)
+        maxfev = lmder1_maxfev(n)
+        info = lmder(fcn, data, x, fvec, fjac, tol, tol, 0.0, maxfev, diag, 1.0, LMDER1_FACTOR, 0.0, ipvt, qtf, counts, hist)
+        if info == 8 {
+            info = 4
+        }
+    }
+    return info
+}
+
+# ---- tests --------------------------------------------------------------
+
+# Rosenbrock's function as residuals, f1 = 10 (x2 - x1^2) and f2 = 1 - x1,
+# written as MINPACK's test driver writes it.
+#~ test
+def lm_rosenbrock(data: Arr, x: Arr, fvec: Arr, fjac: Arr, iflag) {
+    if iflag == 1 {
+        fvec[0] = 10.0 * (x[1] - x[0] * x[0])
+        fvec[1] = 1.0 - x[0]
+    }
+    if iflag == 2 {
+        fjac[0, 0] = -(20.0 * x[0])
+        fjac[0, 1] = 10.0
+        fjac[1, 0] = -1.0
+        fjac[1, 1] = 0.0
+    }
+    # data[0] > 0: stop (return -1) at that many residual evaluations
+    if iflag == 1 and data[0] > 0.0 {
+        data[1] = data[1] + 1.0
+        if data[1] >= data[0] {
+            return -1.0
+        }
+    }
+    return iflag
+}
+
+# The trial steps of netlib lmder1 on Rosenbrock from (-1.2, 1), as the
+# gfortran oracle (lib/minpack/oracle/build.sh) records them, in the columns
+# of hist.
+#~ test
+def lm_rosenbrock_oracle() {
+    return [[1.0, 2.0, 3051.032612083981, 0.0, 71.66058888957025, 48.4, -95.79999999999998, 0.9999999999999989, -95.80000000000008, 7.166058888957025, 0.0, 0.0, 4.919349550499537, 0.9122695335844622, -1.2, 1.0],
+            [2.0, 3.0, 7.166058888957025, 0.007817379978371017, 7.802692813898861, 2.097176084900439, 0.8182583664843663, 0.851208012652027, 0.9612907236798646, 15.605385627797721, 0.003908689989185509, 1.0, 2.097176084900439, 0.9122695335844622, -0.8974386536961758, 0.7160723392810321],
+            [2.0, 4.0, 15.605385627797721, 0.002907002041484804, 15.609197801054531, 3.1776767931146606, -1.2958824664582704, 0.5798505970655154, -2.2348557939172955, 3.063360342437337, 0.014808864386509425, 0.0, 2.097176084900439, 0.47559444133369044, -0.8974386536961758, 0.7160723392810321],
+            [3.0, 5.0, 3.063360342437337, 0.01934730951438625, 3.149892249819666, 1.7810964730020376, 0.27871800031170946, 0.2819161027514528, 0.988655836227408, 6.299784499639332, 0.009673654757193124, 1.0, 1.7810964730020376, 0.47559444133369044, -0.7769802872810423, 0.591596422865899],
+            [4.0, 6.0, 6.299784499639332, 0.009673654757193124, 5.693040724602528, 1.6199818305011093, 0.1727335726262207, 0.21758661915725394, 0.7938611909833614, 11.386081449205056, 0.004836827378596562, 1.0, 1.6199818305011093, 0.1318767938894673, -0.5751886579582595, 0.2930105472551132],
+            [4.0, 7.0, 11.386081449205056, 0.0037655967430222353, 11.386917553672808, 2.1857928967800224, -0.8205295534554273, 0.5034244969134927, -1.6298959595453006, 2.483141339443673, 0.017266593141459407, 0.0, 1.6199818305011093, 0.31685954469195404, -0.5751886579582595, 0.2930105472551132],
+            [5.0, 8.0, 2.483141339443673, 0.022312047938397934, 2.5085018148708467, 1.4778557149162248, 0.1677692018833008, 0.17025686153573263, 0.9853887847456313, 5.017003629741693, 0.011156023969198967, 1.0, 1.4778557149162248, 0.31685954469195404, -0.4755501221152563, 0.21789603932079737],
+            [6.0, 9.0, 5.017003629741693, 0.009876726085785957, 5.017039835512749, 1.331031252799444, 0.18882896421784168, 0.24973796150483202, 0.7561083748743106, 10.034079671025498, 0.0049383630428929785, 1.0, 1.331031252799444, 0.159932623106742, -0.2799660820635965, 0.04186648606363544],
+            [6.0, 10.0, 10.034079671025498, 0.0035166564653609936, 10.035848025220899, 1.887093333575724, -1.010065710603294, 0.5728238646693863, -1.763309409579624, 2.1309809644577493, 0.016558764126754243, 0.0, 1.331031252799444, 0.4391257823161697, -0.2799660820635965, 0.04186648606363544],
+            [7.0, 11.0, 2.1309809644577493, 0.02264734633588234, 2.160659388743073, 1.192714862842882, 0.197034739077236, 0.20042406711400454, 0.9830892163522427, 4.321318777486146, 0.01132367316794117, 1.0, 1.192714862842882, 0.4391257823161697, -0.19019107029298876, 0.028417670465439582],
+            [8.0, 12.0, 4.321318777486146, 0.009630998052814112, 4.32137651700405, 1.0589427788693258, 0.21173594343853985, 0.28005036854893356, 0.7560637914373712, 8.6427530340081, 0.004815499026407056, 1.0, 1.0589427788693258, 0.31659895694231593, -0.012000522198219343, -0.03103526776495337],
+            [8.0, 13.0, 8.6427530340081, 0.0031426344144772386, 8.645141732251975, 1.450082864398253, -0.8751700363218677, 0.6206465844601295, -1.4100940184551822, 2.0934967992070783, 0.012973993144287961, 0.0, 1.0589427788693258, 0.9979964424355289, -0.012000522198219343, -0.03103526776495337],
+            [9.0, 14.0, 2.0934967992070783, 0.01839245607437668, 2.1153408537243483, 0.9283188241293076, 0.23149034558033355, 0.23737311628053426, 0.975217199014027, 4.230681707448697, 0.00919622803718834, 1.0, 0.9283188241293076, 0.9979964424355289, 0.07525595742251953, -0.002475518050345467],
+            [10.0, 15.0, 4.230681707448697, 0.007358858880444522, 4.230780131731985, 0.8110657473874575, 0.23666037426763575, 0.3486720548272093, 0.6787477544907263, 4.230681707448697, 0.007358858880444522, 1.0, 0.8110657473874575, 0.4782351912401764, 0.2508055577684767, 0.03183329193489405],
+            [11.0, 16.0, 4.230681707448697, 0.005594669764415606, 4.232761598090083, 0.64989725857667, 0.3579375252803648, 0.4891470584675476, 0.7317585153261473, 4.230681707448697, 0.005594669764415606, 1.0, 0.64989725857667, 0.3830778943968893, 0.4203350447890555, 0.1472953309298538],
+            [12.0, 17.0, 4.230681707448697, 0.0038817406552956644, 4.233709839552617, 0.49697571590466644, 0.41523559902667706, 0.587450016396653, 0.7068441355635358, 4.230681707448697, 0.0038817406552956644, 1.0, 0.49697571590466644, 0.45216714734759433, 0.5826198828714076, 0.31246840022742517],
+            [13.0, 18.0, 4.230681707448697, 0.0023328177605544684, 4.234933808461055, 0.357709143902265, 0.48192844495782095, 0.7191301081751461, 0.6701547320564222, 4.230681707448697, 0.0023328177605544684, 1.0, 0.357709143902265, 0.5428339217854787, 0.7366608278829668, 0.5184600216841043],
+            [14.0, 19.0, 4.230681707448697, 0.0009884474989286713, 4.232655448242824, 0.24452031222252257, 0.5327279552081129, 0.8915846198939162, 0.5975068920227657, 4.230681707448697, 0.0009884474989286713, 1.0, 0.24452031222252257, 0.6767831928760607, 0.8822425190005216, 0.7569221262728685],
+            [15.0, 20.0, 4.230681707448697, 0.0, 3.64073181595356, 0.13866824331342564, 0.6783939986455659, 1.0000000000000009, 0.6783939986455654, 7.28146363190712, 0.0, 1.0, 0.13866824331342564, 0.8763990142469391, 1.0, 0.9861331756686574],
+            [16.0, 21.0, 7.28146363190712, 0.0, 0.13866824331342564, 0.0, 1.0, 0.9999999999999996, 1.0000000000000004, 0.2773364866268513, 0.0, 1.0, 0.0, 0.9999999999999997, 1.0, 1.0]]
+}
+
+test "Rosenbrock from (-1.2, 1): info 4 at x = (1, 1) after 21 evaluations of f and 16 of J, as in the Fortran" {
+    x = [-1.2, 1.0]
+    counts = zeros(2)
+    hist = zeros(lmder1_maxfev(len(x)), H_X + len(x))
+    info = lmder1(lm_rosenbrock, [0.0, 0.0], x, zeros(2), zeros(2, 2), sqrt(EPSMCH), zeros(2), counts, hist)
+    assert_near(info, 4.0, 0.0)
+    assert_near(counts[0], 21.0, 0.0)
+    assert_near(counts[1], 16.0, 0.0)
+    assert_near(x[0], 1.0, 0.0)
+    assert_near(x[1], 1.0, 0.0)
+}
+
+test "all 20 trial steps on Rosenbrock equal the Fortran's, every recorded number to the last bit" {
+    x = [-1.2, 1.0]
+    hist = zeros(lmder1_maxfev(len(x)), H_X + len(x))
+    lmder1(lm_rosenbrock, [0.0, 0.0], x, zeros(2), zeros(2, 2), sqrt(EPSMCH), zeros(2), zeros(2), hist)
+    ref = lm_rosenbrock_oracle()
+    for r to len(ref) {
+        for c to H_X + len(x) {
+            assert_near(hist[r, c], ref[r, c], 0.0)
+        }
+    }
+    # and no trial step after the Fortran's last
+    assert_near(hist[len(ref), H_NFEV], 0.0, 0.0)
+}
+
+test "5 of the 20 trial steps on Rosenbrock are rejected, and fnorm never rises" {
+    x = [-1.2, 1.0]
+    hist = zeros(lmder1_maxfev(len(x)), H_X + len(x))
+    counts = zeros(2)
+    lmder1(lm_rosenbrock, [0.0, 0.0], x, zeros(2), zeros(2, 2), sqrt(EPSMCH), zeros(2), counts, hist)
+    rejected = 0.0
+    prev = 4.919349550499537
+    # every evaluation of f after the first is one trial step
+    for r to counts[0] - 1.0 {
+        if hist[r, H_ACCEPT] == 0.0 {
+            rejected = rejected + 1.0
+        }
+        assert_true(hist[r, H_FNORM] <= prev)
+        prev = hist[r, H_FNORM]
+    }
+    assert_near(rejected, 5.0, 0.0)
+}
+
+test "a function that returns -1 stops lmder, and info is -1" {
+    x = [-1.2, 1.0]
+    counts = zeros(2)
+    info = lmder1(lm_rosenbrock, [5.0, 0.0], x, zeros(2), zeros(2, 2), sqrt(EPSMCH), zeros(2), counts, zeros(1, H_X + 2))
+    assert_near(info, -1.0, 0.0)
+    assert_near(counts[0], 5.0, 0.0)
+}
+
+test "improper input gives info 0 without evaluating anything" {
+    counts = zeros(2)
+    info = lmder1(lm_rosenbrock, [0.0, 0.0], [-1.2, 1.0], zeros(2), zeros(2, 2), -1.0, zeros(2), counts, zeros(1, H_X + 2))
+    assert_near(info, 0.0, 0.0)
+    assert_near(counts[0], 0.0, 0.0)
+}
+
+test "Rosenbrock's first trial is the Gauss-Newton step, 71.7 long in a radius of 3051; f grows from 4.92 to 48.4, ratio -95.8, and the radius drops to 7.17" {
+    x = [-1.2, 1.0]
+    hist = zeros(lmder1_maxfev(len(x)), H_X + len(x))
+    lmder1(lm_rosenbrock, [0.0, 0.0], x, zeros(2), zeros(2, 2), sqrt(EPSMCH), zeros(2), zeros(2), hist)
+    assert_near(hist[0, H_DELTA_IN], 3051.03, 0.01)
+    assert_near(hist[0, H_PAR_LM], 0.0, 0.0)
+    assert_near(hist[0, H_PNORM], 71.66, 0.01)
+    assert_near(hist[0, H_FNORM], 4.919, 0.001)
+    assert_near(hist[0, H_FNORM1], 48.4, 1.0e-9)
+    assert_near(hist[0, H_RATIO], -95.8, 1.0e-9)
+    assert_near(hist[0, H_DELTA], 7.166, 0.001)
+    assert_near(hist[0, H_ACCEPT], 0.0, 0.0)
+    # the second trial, with par = 0.0078, is accepted
+    assert_near(hist[1, H_PAR_LM], 0.0078, 0.0001)
+    assert_near(hist[1, H_ACCEPT], 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: LicenseRef-Minpack
+# SPDX-FileCopyrightText: 1999 University of Chicago (Argonne National Laboratory, MINPACK)
+# SPDX-FileCopyrightText: 2026 The Viv authors

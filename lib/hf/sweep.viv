@@ -1,0 +1,746 @@
+###
+post: Sweeping array-valued strategies, and blaming the one that dissents
+agent: claude
+
+Every stage of the Hartree-Fock code has more than one implementation:
+McMurchie-Davidson, Obara-Saika and Rys for the electron repulsion integrals,
+in-core and direct J/K builds, several orthogonalizers. In debug mode a stage
+runs all of them on the same input and requires them to agree. Agreement
+between algorithms that share no code is strong evidence each one is right,
+and a disagreement names the one that is wrong.
+
+The drivers here do that for strategies that return arrays. Each member of a
+registry runs, its result is flattened into one row of a table, and the
+consensus is the **elementwise median** of the rows. The member farthest
+from the median at any entry is blamed, together with the flat (row-major)
+index of that entry. The median matters: if the consensus were member 0's
+result, a bad member 0 would put the blame on every good member instead.
+
+Deviation is relative, `abs(v - median) / (1 + abs(median))`, so a tolerance
+reads as relative for large values and absolute for small ones.
+
+Only the first `ncmp` entries are compared. An SCF result vector carries the
+energy and densities first and then the iteration count; two correct
+accelerators converge in different numbers of iterations, and comparing that
+tail would fail on correct code. Past `ncmp` the result carries member 0's
+values.
+
+`release_mode()` runs member 0 only. The `sw_check*` variants never assert:
+they return 1 when the members agree and 0 when they do not, so a test can
+check that a planted bug is caught.
+
+A Viv def is typed by the one registry signature it is called with (finding
+F4 of the contracts), so there is one driver per signature:
+
+    sweep3_arr   members (Arr, Arr, Arr) -> Arr            integrals, transforms, eigen
+    sweep5_arr   members (Arr, Arr, Arr, Arr, Arr) -> Arr  J/K
+    sweep3_num   members (Arr, Arr, Arr) -> number
+    sweepnx_arr  members (nmax, x) -> Arr                   Boys
+
+`N` is the number of entries a member returns; Viv has no element-count
+builtin. `rep` receives `[strategy, flat index, worst, nstrat, lo, hi]`; lo
+and hi are reserved for the interval wave and stay 0.
+
+The coverage counters at the end record which integral classes, Boys
+regions and SCF regimes each strategy has actually been exercised on, so a
+build can fail when a class was only ever checked by one strategy.
+
+Used with `import hf.sweep`.
+###
+
+SW_REP_STRAT = 0
+SW_REP_INDEX = 1
+SW_REP_WORST = 2
+SW_REP_NSTRAT = 3
+SW_REP_LO = 4
+SW_REP_HI = 5
+SW_REP_LEN = 6
+
+SW_COV_NSTRAT = 16
+SW_LMAX1 = 5
+SW_NCLS_ERI = 625
+SW_NXBIN = 8
+SW_NCLS_BOYS = 136
+SW_NCLS_SCF = 16
+
+# the test tensor: SW_T_DIM^4 entries, standing in for an ERI block
+SW_T_DIM = 3
+SW_T_LEN = SW_T_DIM * SW_T_DIM * SW_T_DIM * SW_T_DIM
+# the J/K test members take an options vector of lib/hf/opts's length (OPT_LEN),
+# which this module does not use
+SW_T_OPT_LEN = 32
+
+#| A fresh report vector.
+def sw_rep_new() {
+    return zeros(SW_REP_LEN)
+}
+
+#| The flat indices `0 .. N-1`, for `take` and `put`.
+def sw_flat_index(N) {
+    ix = zeros(N)
+    for i to N {
+        ix[i] = i
+    }
+    return ix
+}
+
+#| Elementwise median of the rows of `T` (`nstrat` by `N`) into `C`, over the
+#| first `ncmp` columns; later columns copy row `0` and are never compared.
+#| Returns the worst relative deviation and records the member and flat index
+#| that produced it in `rep`. With an even count the upper middle value is
+#| the median, the same choice `sweep` in lang/viv/std/contracts.viv makes.
+def sw_table_median(T: Arr, nstrat, N, ncmp, C: Arr, rep: Arr) {
+    col = zeros(nstrat)
+    worst = 0.0
+    rep[SW_REP_STRAT] = 0
+    rep[SW_REP_INDEX] = 0
+    for i to N {
+        if i < ncmp {
+            for m to nstrat {
+                col[m] = T[m, i]
+            }
+            sort(col)
+            C[i] = col[floor(nstrat / 2.0)]
+            for m to nstrat {
+                dev = abs(T[m, i] - C[i]) / (1.0 + abs(C[i]))
+                if dev > worst {
+                    worst = dev
+                    rep[SW_REP_STRAT] = m
+                    rep[SW_REP_INDEX] = i
+                }
+            }
+        }
+        else {
+            C[i] = T[0, i]
+        }
+    }
+    rep[SW_REP_WORST] = worst
+    rep[SW_REP_NSTRAT] = nstrat
+    rep[SW_REP_LO] = 0
+    rep[SW_REP_HI] = 0
+    return worst
+}
+
+#| The report a release run leaves: member `0` ran alone, nothing was compared.
+def sw_rep_release(rep: Arr) {
+    rep[:] = 0
+    rep[SW_REP_NSTRAT] = 1
+    return 0
+}
+
+#| `1` when the report's worst deviation is under `tol`, else `0`.
+def sw_verdict(rep: Arr, tol) {
+    if rep[SW_REP_WORST] < tol {
+        return 1
+    }
+    return 0
+}
+
+# ---- members (Arr, Arr, Arr) -> Arr ---------------------------------------------
+
+#| Run the registry (or member `0` alone when `release` is `1`) and return the
+#| consensus in the members' shape. Every member gets its own copy of the
+#| inputs, so one that writes into an input cannot corrupt the next.
+def sw_run3_arr(ms, x1: Arr, x2: Arr, x3: Arr, N, ncmp, rep: Arr, release) -> Arr {
+    if release > 0.5 {
+        sw_rep_release(rep)
+        return apply(ms[0], x1, x2, x3)
+    }
+    nstrat = len(ms)
+    ix = sw_flat_index(N)
+    T = zeros(nstrat, N)
+    out = apply(ms[0], x1 + 0.0, x2 + 0.0, x3 + 0.0)
+    setslab(T, 0, take(out, ix))
+    for m to nstrat {
+        if m > 0 {
+            cur = apply(ms[m], x1 + 0.0, x2 + 0.0, x3 + 0.0)
+            setslab(T, m, take(cur, ix))
+        }
+    }
+    C = zeros(N)
+    sw_table_median(T, nstrat, N, ncmp, C, rep)
+    put(out, ix, C)
+    return out
+}
+
+#| Debug: run every member, assert agreement to `tol`, return the consensus.
+#| Release: return member 0's result.
+def sweep3_arr(ms, x1: Arr, x2: Arr, x3: Arr, N, ncmp, tol, rep: Arr) -> Arr {
+    release = 0
+    if release_mode() {
+        release = 1
+    }
+    R = sw_run3_arr(ms, x1, x2, x3, N, ncmp, rep, release)
+    if release < 0.5 {
+        assert_lt(rep[SW_REP_WORST], tol)
+    }
+    return R
+}
+
+#| Like `sweep3_arr` without the assertion: the consensus goes into `out`
+#| (any array with `N` entries) and the return value is the verdict.
+def sw_check3_arr(ms, x1: Arr, x2: Arr, x3: Arr, N, ncmp, tol, rep: Arr, out: Arr) {
+    R = sw_run3_arr(ms, x1, x2, x3, N, ncmp, rep, 0)
+    ix = sw_flat_index(N)
+    put(out, ix, take(R, ix))
+    return sw_verdict(rep, tol)
+}
+
+# ---- members (Arr, Arr, Arr, Arr, Arr) -> Arr -----------------------------------
+
+def sw_run5_arr(ms, x1: Arr, x2: Arr, x3: Arr, x4: Arr, x5: Arr, N, ncmp, rep: Arr, release) -> Arr {
+    if release > 0.5 {
+        sw_rep_release(rep)
+        return apply(ms[0], x1, x2, x3, x4, x5)
+    }
+    nstrat = len(ms)
+    ix = sw_flat_index(N)
+    T = zeros(nstrat, N)
+    out = apply(ms[0], x1 + 0.0, x2 + 0.0, x3 + 0.0, x4 + 0.0, x5 + 0.0)
+    setslab(T, 0, take(out, ix))
+    for m to nstrat {
+        if m > 0 {
+            cur = apply(ms[m], x1 + 0.0, x2 + 0.0, x3 + 0.0, x4 + 0.0, x5 + 0.0)
+            setslab(T, m, take(cur, ix))
+        }
+    }
+    C = zeros(N)
+    sw_table_median(T, nstrat, N, ncmp, C, rep)
+    put(out, ix, C)
+    return out
+}
+
+def sweep5_arr(ms, x1: Arr, x2: Arr, x3: Arr, x4: Arr, x5: Arr, N, ncmp, tol, rep: Arr) -> Arr {
+    release = 0
+    if release_mode() {
+        release = 1
+    }
+    R = sw_run5_arr(ms, x1, x2, x3, x4, x5, N, ncmp, rep, release)
+    if release < 0.5 {
+        assert_lt(rep[SW_REP_WORST], tol)
+    }
+    return R
+}
+
+def sw_check5_arr(ms, x1: Arr, x2: Arr, x3: Arr, x4: Arr, x5: Arr, N, ncmp, tol, rep: Arr, out: Arr) {
+    R = sw_run5_arr(ms, x1, x2, x3, x4, x5, N, ncmp, rep, 0)
+    ix = sw_flat_index(N)
+    put(out, ix, take(R, ix))
+    return sw_verdict(rep, tol)
+}
+
+# ---- members (Arr, Arr, Arr) -> number ------------------------------------------
+
+def sw_run3_num(ms, x1: Arr, x2: Arr, x3: Arr, rep: Arr, release) {
+    if release > 0.5 {
+        sw_rep_release(rep)
+        return apply(ms[0], x1, x2, x3)
+    }
+    nstrat = len(ms)
+    T = zeros(nstrat, 1)
+    for m to nstrat {
+        T[m, 0] = apply(ms[m], x1 + 0.0, x2 + 0.0, x3 + 0.0)
+    }
+    C = zeros(1)
+    sw_table_median(T, nstrat, 1, 1, C, rep)
+    return C[0]
+}
+
+def sweep3_num(ms, x1: Arr, x2: Arr, x3: Arr, tol, rep: Arr) {
+    release = 0
+    if release_mode() {
+        release = 1
+    }
+    v = sw_run3_num(ms, x1, x2, x3, rep, release)
+    if release < 0.5 {
+        assert_lt(rep[SW_REP_WORST], tol)
+    }
+    return v
+}
+
+#| The consensus goes into `out[0]`; the return value is the verdict.
+def sw_check3_num(ms, x1: Arr, x2: Arr, x3: Arr, tol, rep: Arr, out: Arr) {
+    out[0] = sw_run3_num(ms, x1, x2, x3, rep, 0)
+    return sw_verdict(rep, tol)
+}
+
+# ---- members (nmax, x) -> Arr ---------------------------------------------------
+
+def sw_runnx_arr(ms, nmax, x, N, ncmp, rep: Arr, release) -> Arr {
+    if release > 0.5 {
+        sw_rep_release(rep)
+        return apply(ms[0], nmax, x)
+    }
+    nstrat = len(ms)
+    ix = sw_flat_index(N)
+    T = zeros(nstrat, N)
+    out = apply(ms[0], nmax, x)
+    setslab(T, 0, take(out, ix))
+    for m to nstrat {
+        if m > 0 {
+            cur = apply(ms[m], nmax, x)
+            setslab(T, m, take(cur, ix))
+        }
+    }
+    C = zeros(N)
+    sw_table_median(T, nstrat, N, ncmp, C, rep)
+    put(out, ix, C)
+    return out
+}
+
+def sweepnx_arr(ms, nmax, x, N, ncmp, tol, rep: Arr) -> Arr {
+    release = 0
+    if release_mode() {
+        release = 1
+    }
+    R = sw_runnx_arr(ms, nmax, x, N, ncmp, rep, release)
+    if release < 0.5 {
+        assert_lt(rep[SW_REP_WORST], tol)
+    }
+    return R
+}
+
+def sw_checknx_arr(ms, nmax, x, N, ncmp, tol, rep: Arr, out: Arr) {
+    R = sw_runnx_arr(ms, nmax, x, N, ncmp, rep, 0)
+    ix = sw_flat_index(N)
+    put(out, ix, take(R, ix))
+    return sw_verdict(rep, tol)
+}
+
+# ---- anchors --------------------------------------------------------------------
+# The compiler types a driver's registry parameter from its call sites. A
+# program that uses sweep3_arr but never sweep5_arr would leave sweep5_arr
+# with no call site, and its `ms` would default to a number. sw_anchor calls
+# every driver once with a one-member registry of the right signature; it is
+# never run.
+
+def sw_id3(a: Arr, b: Arr, c: Arr) -> Arr {
+    return a
+}
+def sw_id5(a: Arr, b: Arr, c: Arr, d: Arr, e: Arr) -> Arr {
+    return a
+}
+def sw_idn(a: Arr, b: Arr, c: Arr) {
+    return a[0]
+}
+def sw_idnx(nmax, x) -> Arr {
+    r = zeros(nmax + 1)
+    r[0] = x
+    return r
+}
+#~ entry
+def sw_anchor(x: Arr) {
+    rep = sw_rep_new()
+    out = zeros(1)
+    a = sweep3_arr([sw_id3], x, x, x, 1, 1, 1.0, rep)
+    b = sweep5_arr([sw_id5], x, x, x, x, x, 1, 1, 1.0, rep)
+    c = sweepnx_arr([sw_idnx], 0, 1.0, 1, 1, 1.0, rep)
+    v = sweep3_num([sw_idn], x, x, x, 1.0, rep)
+    v = v + sw_check3_arr([sw_id3], x, x, x, 1, 1, 1.0, rep, out)
+    v = v + sw_check5_arr([sw_id5], x, x, x, x, x, 1, 1, 1.0, rep, out)
+    v = v + sw_checknx_arr([sw_idnx], 0, 1.0, 1, 1, 1.0, rep, out)
+    v = v + sw_check3_num([sw_idn], x, x, x, 1.0, rep, out)
+    return v + a[0] + b[0] + c[0]
+}
+
+# ---- coverage counters ----------------------------------------------------------
+
+#| A `[nclass, SW_COV_NSTRAT]` table of hit counts, one column per strategy.
+def sw_cov_new(nclass) {
+    return zeros(nclass, SW_COV_NSTRAT)
+}
+
+#| Count one check of class `cls` by strategy `strat` (below SW_COV_NSTRAT).
+def sw_cov_hit(cov: Arr, cls, strat) {
+    cov[cls, strat] = cov[cls, strat] + 1
+    return 0
+}
+
+#| Distinct strategies that have checked class `cls`.
+def sw_cov_nstrat(cov: Arr, cls) {
+    n = 0
+    for s to SW_COV_NSTRAT {
+        if cov[cls, s] > 0.5 {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+#| Classes that at least one strategy has checked.
+def sw_cov_covered(cov: Arr) {
+    n = 0
+    for c to len(cov) {
+        if sw_cov_nstrat(cov, c) > 0.5 {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+#| The fewest strategies behind any covered class; `0` when nothing is covered.
+def sw_cov_min_strat(cov: Arr) {
+    best = SW_COV_NSTRAT + 1
+    for c to len(cov) {
+        k = sw_cov_nstrat(cov, c)
+        if k > 0.5 and k < best {
+            best = k
+        }
+    }
+    if best > SW_COV_NSTRAT {
+        return 0
+    }
+    return best
+}
+
+#| The build gate: every covered class was checked by at least two strategies.
+def sw_cov_gate(cov: Arr) {
+    assert_gt(sw_cov_min_strat(cov), 1.5)
+    return 0
+}
+
+#| One line per covered class: [class, strategies, total hits].
+def sw_cov_report(cov: Arr) {
+    for c to len(cov) {
+        k = sw_cov_nstrat(cov, c)
+        if k > 0.5 {
+            hits = 0
+            for s to SW_COV_NSTRAT {
+                hits = hits + cov[c, s]
+            }
+            coverage = [c, k, hits]
+            show coverage
+        }
+    }
+    return 0
+}
+
+#| The ERI class of (la lb|lc ld), canonical under the 8-fold symmetry: the
+#| larger l first within each pair, then the larger pair first. `l <= 4`.
+def sw_cls_eri(la, lb, lc, ld) {
+    a = max(la, lb)
+    b = min(la, lb)
+    c = max(lc, ld)
+    d = min(lc, ld)
+    bra = a * SW_LMAX1 + b
+    ket = c * SW_LMAX1 + d
+    if ket > bra {
+        return ket * SW_LMAX1 * SW_LMAX1 + bra
+    }
+    return bra * SW_LMAX1 * SW_LMAX1 + ket
+}
+
+#| The Boys class of order `n <= 16` at argument `x`: `SW_NXBIN` x-bins with
+#| edges `0.1, 1, 5, 15, 30, 50, 100`.
+def sw_cls_boys(n, x) {
+    # the bin's upper edges; past the last is the last bin
+    edges = [0.1, 1.0, 5.0, 15.0, 30.0, 50.0, 100.0]
+    bin = 0
+    while bin < len(edges) and x >= edges[bin] {
+        bin = bin + 1
+    }
+    return n * SW_NXBIN + bin
+}
+
+# ---- test members ---------------------------------------------------------------
+
+#| A `SW_T_DIM^4` tensor with entry `[1,0,1,0] = 2`, standing in for an ERI block.
+def sw_t_tensor() {
+    G = zeros(SW_T_DIM, SW_T_DIM, SW_T_DIM, SW_T_DIM)
+    for i to SW_T_DIM {
+        for j to SW_T_DIM {
+            for k to SW_T_DIM {
+                for l to SW_T_DIM {
+                    G[i, j, k, l] = 1.0 + 0.5 * (i + k) + 0.25 * (j + l)
+                }
+            }
+        }
+    }
+    return G
+}
+def sw_t_good(a: Arr, b: Arr, c: Arr) -> Arr {
+    return sw_t_tensor()
+}
+#| The same tensor, filled in the opposite loop order.
+def sw_t_good2(a: Arr, b: Arr, c: Arr) -> Arr {
+    G = zeros(SW_T_DIM, SW_T_DIM, SW_T_DIM, SW_T_DIM)
+    for l to SW_T_DIM {
+        for k to SW_T_DIM {
+            for j to SW_T_DIM {
+                for i to SW_T_DIM {
+                    G[i, j, k, l] = 1.0 + 0.25 * (l + j) + 0.5 * (k + i)
+                }
+            }
+        }
+    }
+    return G
+}
+#| The planted bug: one entry off by `1e-9`.
+def sw_t_bad(a: Arr, b: Arr, c: Arr) -> Arr {
+    G = sw_t_tensor()
+    G[1, 0, 1, 0] = G[1, 0, 1, 0] + 1.0e-9
+    return G
+}
+#| Wrong only in the last entry, flat index `SW_T_LEN - 1`, which a window
+#| of `SW_T_LEN - 1` entries excludes.
+def sw_t_tailbad(a: Arr, b: Arr, c: Arr) -> Arr {
+    G = sw_t_tensor()
+    G[2, 2, 2, 2] = G[2, 2, 2, 2] + 1.0
+    return G
+}
+#| A member that must never run: it fails the enclosing test if it does.
+def sw_t_never(a: Arr, b: Arr, c: Arr) -> Arr {
+    assert_lt(1.0, 0.0)
+    return sw_t_tensor()
+}
+#| A member that writes into its first input.
+def sw_t_clobber(a: Arr, b: Arr, c: Arr) -> Arr {
+    a[0] = 99.0
+    return sw_t_tensor()
+}
+def sw_t_first(a: Arr, b: Arr, c: Arr) -> Arr {
+    G = sw_t_tensor()
+    G[0, 0, 0, 0] = a[0]
+    return G
+}
+#| J/K-shaped members: `(X1, X2, X3, D, opts) -> [2, n, n]` with `J = 2D`, `K = D`.
+def sw_t_jk(a: Arr, b: Arr, c: Arr, D: Arr, o: Arr) -> Arr {
+    n = len(D)
+    R = zeros(2, n, n)
+    for i to n {
+        for j to n {
+            R[0, i, j] = 2.0 * D[i, j]
+            R[1, i, j] = D[i, j]
+        }
+    }
+    return R
+}
+def sw_t_jk2(a: Arr, b: Arr, c: Arr, D: Arr, o: Arr) -> Arr {
+    n = len(D)
+    R = zeros(2, n, n)
+    for i to n {
+        for j to n {
+            R[1, i, j] = D[i, j]
+            R[0, i, j] = R[1, i, j] + D[i, j]
+        }
+    }
+    return R
+}
+def sw_t_jkbad(a: Arr, b: Arr, c: Arr, D: Arr, o: Arr) -> Arr {
+    R = sw_t_jk(a, b, c, D, o)
+    R[1, 1, 0] = R[1, 1, 0] * (1.0 + 1.0e-6)
+    return R
+}
+#| Scalar members: the sum of a's entries three ways.
+def sw_t_sum(a: Arr, b: Arr, c: Arr) {
+    s = 0.0
+    for i to len(a) {
+        s = s + a[i]
+    }
+    return s
+}
+def sw_t_sumrev(a: Arr, b: Arr, c: Arr) {
+    s = 0.0
+    for i to len(a) {
+        s = s + a[len(a) - 1 - i]
+    }
+    return s
+}
+def sw_t_sumoff(a: Arr, b: Arr, c: Arr) {
+    return sw_t_sum(a, b, c) + 1.0e-3
+}
+#| (nmax, x) members: x^k / k! for k = 0..nmax, by recurrence and by pow.
+def sw_t_powrec(nmax, x) -> Arr {
+    r = zeros(nmax + 1)
+    r[0] = 1.0
+    for k to nmax {
+        r[k + 1] = r[k] * x / (k + 1)
+    }
+    return r
+}
+def sw_t_powdir(nmax, x) -> Arr {
+    r = zeros(nmax + 1)
+    f = 1.0
+    for k to nmax + 1 {
+        if k > 0 {
+            f = f * k
+        }
+        r[k] = pow(x, k) / f
+    }
+    return r
+}
+
+test "a bad member listed first is blamed, at flat index 30, and the median is 2" {
+    sw_x = zeros(1)
+    sw_rep = sw_rep_new()
+    sw_out = zeros(SW_T_LEN)
+    sw_ok = sw_check3_arr([sw_t_bad, sw_t_good, sw_t_good2], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, 1.0e-12, sw_rep, sw_out)
+    assert_near(sw_ok, 0.0, 0.0)
+    assert_near(sw_rep[SW_REP_STRAT], 0.0, 0.0)
+    assert_near(sw_rep[SW_REP_INDEX], 30.0, 0.0)
+    assert_near(sw_rep[SW_REP_NSTRAT], 3.0, 0.0)
+    assert_near(sw_rep[SW_REP_WORST], 1.0e-9 / 3.0, 1.0e-16)
+    assert_near(sw_out[30], 2.0, 0.0)
+    # lo and hi are reserved and stay 0
+    assert_near(sw_rep[SW_REP_LO] + sw_rep[SW_REP_HI], 0.0, 0.0)
+    assert_near(len(sw_rep), 6, 0.0)
+}
+
+test "the same bug is blamed wherever it sits in the registry" {
+    sw_x = zeros(1)
+    sw_rep = sw_rep_new()
+    sw_out = zeros(SW_T_LEN)
+    sw_ok = sw_check3_arr([sw_t_good, sw_t_good2, sw_t_bad], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, 1.0e-12, sw_rep, sw_out)
+    assert_near(sw_ok, 0.0, 0.0)
+    assert_near(sw_rep[SW_REP_STRAT], 2.0, 0.0)
+    assert_near(sw_rep[SW_REP_INDEX], 30.0, 0.0)
+    sw_ok = sw_check3_arr([sw_t_good, sw_t_bad, sw_t_good2], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, 1.0e-12, sw_rep, sw_out)
+    assert_near(sw_rep[SW_REP_STRAT], 1.0, 0.0)
+    # a tolerance above the planted error lets it through
+    sw_ok = sw_check3_arr([sw_t_good, sw_t_bad, sw_t_good2], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, 1.0e-9, sw_rep, sw_out)
+    assert_near(sw_ok, 1.0, 0.0)
+}
+
+test "an entry past ncmp is never compared and carries member 0's value" {
+    sw_x = zeros(1)
+    sw_rep = sw_rep_new()
+    sw_out = zeros(SW_T_LEN)
+    sw_ok = sw_check3_arr([sw_t_good, sw_t_tailbad, sw_t_tailbad], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN - 1, 1.0e-14, sw_rep, sw_out)
+    assert_near(sw_ok, 1.0, 0.0)
+    assert_near(sw_rep[SW_REP_WORST], 0.0, 0.0)
+    # two of three members say 5 at index 80, but member 0 says 4 and wins
+    assert_near(sw_out[80], 4.0, 0.0)
+    # widen the window by one and the same registry dissents at index 80
+    sw_ok = sw_check3_arr([sw_t_good, sw_t_tailbad, sw_t_tailbad], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, 1.0e-14, sw_rep, sw_out)
+    assert_near(sw_ok, 0.0, 0.0)
+    assert_near(sw_rep[SW_REP_INDEX], 80.0, 0.0)
+    assert_near(sw_rep[SW_REP_STRAT], 0.0, 0.0)
+}
+
+test "release mode runs member 0 alone and returns it unchanged" {
+    sw_x = zeros(1)
+    sw_rep = sw_rep_new()
+    sw_rel = sw_run3_arr([sw_t_bad, sw_t_never, sw_t_never], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, sw_rep, 1)
+    # member 0's planted value survives: no median was taken
+    assert_near(sw_rel[1, 0, 1, 0], 2.0 + 1.0e-9, 0.0)
+    assert_near(sw_rep[SW_REP_NSTRAT], 1.0, 0.0)
+    assert_near(sw_rep[SW_REP_WORST], 0.0, 0.0)
+}
+
+test "the asserting driver returns the consensus in the members' shape" {
+    sw_x = zeros(1)
+    sw_rep = sw_rep_new()
+    sw_g = sweep3_arr([sw_t_good, sw_t_good2], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, 1.0e-14, sw_rep)
+    assert_near(sw_g[1, 0, 1, 0], 2.0, 0.0)
+    assert_near(sw_g[2, 1, 0, 2], 2.75, 0.0)
+    assert_near(sw_rep[SW_REP_NSTRAT], 2.0, 0.0)
+}
+
+test "a member that writes into its input cannot corrupt the next one" {
+    sw_x = zeros(1)
+    sw_x[0] = 3.0
+    sw_rep = sw_rep_new()
+    sw_out = zeros(SW_T_LEN)
+    sw_ok = sw_check3_arr([sw_t_clobber, sw_t_first, sw_t_first], sw_x, sw_x, sw_x, SW_T_LEN, SW_T_LEN, 1.0e-14, sw_rep, sw_out)
+    # both sw_t_first members saw 3, and the caller's array is untouched
+    assert_near(sw_out[0], 3.0, 0.0)
+    assert_near(sw_x[0], 3.0, 0.0)
+    assert_near(sw_rep[SW_REP_STRAT], 0.0, 0.0)
+}
+
+test "the J/K driver compares [2, n, n] results and blames the bad K" {
+    sw_dm = [[1.0, 0.5, 0.2], [0.5, 2.0, 0.1], [0.2, 0.1, 3.0]]
+    sw_x = zeros(1)
+    sw_o = zeros(SW_T_OPT_LEN)
+    sw_rep = sw_rep_new()
+    # J and K, each n x n
+    sw_njk = 2 * len(sw_dm) * len(sw_dm)
+    sw_jk = sweep5_arr([sw_t_jk, sw_t_jk2], sw_x, sw_x, sw_x, sw_dm, sw_o, sw_njk, sw_njk, 1.0e-15, sw_rep)
+    assert_near(sw_jk[0, 1, 1], 4.0, 0.0)
+    sw_out = zeros(sw_njk)
+    sw_ok = sw_check5_arr([sw_t_jk, sw_t_jkbad, sw_t_jk2], sw_x, sw_x, sw_x, sw_dm, sw_o, sw_njk, sw_njk, 1.0e-12, sw_rep, sw_out)
+    assert_near(sw_ok, 0.0, 0.0)
+    assert_near(sw_rep[SW_REP_STRAT], 1.0, 0.0)
+    # K[1,0] is flat index 9 + 3 + 0 = 12
+    assert_near(sw_rep[SW_REP_INDEX], 12.0, 0.0)
+}
+
+test "the scalar and (nmax, x) drivers take medians too" {
+    sw_v = [0.1, 0.2, 0.3, 0.4]
+    sw_rep = sw_rep_new()
+    sw_s = sweep3_num([sw_t_sum, sw_t_sumrev], sw_v, sw_v, sw_v, 1.0e-15, sw_rep)
+    assert_near(sw_s, 1.0, 1.0e-15)
+    sw_out = zeros(1)
+    sw_ok = sw_check3_num([sw_t_sumoff, sw_t_sum, sw_t_sumrev], sw_v, sw_v, sw_v, 1.0e-8, sw_rep, sw_out)
+    assert_near(sw_ok, 0.0, 0.0)
+    assert_near(sw_rep[SW_REP_STRAT], 0.0, 0.0)
+    # orders 0 .. sw_nmax
+    sw_nmax = 12
+    sw_t = sweepnx_arr([sw_t_powrec, sw_t_powdir], sw_nmax, 3.5, sw_nmax + 1, sw_nmax + 1, 1.0e-14, sw_rep)
+    assert_near(sw_t[sw_nmax], pow(3.5, 12) / 479001600.0, 1.0e-12)
+    sw_out13 = zeros(sw_nmax + 1)
+    sw_ok = sw_checknx_arr([sw_t_powrec, sw_t_powdir], sw_nmax, 3.5, sw_nmax + 1, sw_nmax + 1, 1.0e-14, sw_rep, sw_out13)
+    assert_near(sw_ok, 1.0, 0.0)
+}
+
+test "ERI classes are canonical under the 8-fold symmetry" {
+    sw_c = sw_cls_eri(1, 0, 0, 0)
+    assert_near(sw_cls_eri(0, 1, 0, 0), sw_c, 0.0)
+    assert_near(sw_cls_eri(0, 0, 1, 0), sw_c, 0.0)
+    assert_near(sw_cls_eri(0, 0, 0, 1), sw_c, 0.0)
+    assert_near(sw_cls_eri(2, 1, 3, 0), sw_cls_eri(0, 3, 1, 2), 0.0)
+    # (ss|ss) is class 0 and (gg|gg) is the last one
+    assert_near(sw_cls_eri(0, 0, 0, 0), 0.0, 0.0)
+    assert_near(sw_cls_eri(4, 4, 4, 4), SW_NCLS_ERI - 1, 0.0)
+    # every canonical quartet lands on a distinct class
+    sw_seen = zeros(SW_NCLS_ERI)
+    for sw_a to SW_LMAX1 {
+        for sw_b to sw_a + 1 {
+            for sw_cc to SW_LMAX1 {
+                for sw_d to sw_cc + 1 {
+                    if sw_cc * SW_LMAX1 + sw_d <= sw_a * SW_LMAX1 + sw_b {
+                        sw_k = sw_cls_eri(sw_a, sw_b, sw_cc, sw_d)
+                        sw_seen[sw_k] = sw_seen[sw_k] + 1
+                    }
+                }
+            }
+        }
+    }
+    sw_most = 0.0
+    sw_classes = 0
+    for sw_i to SW_NCLS_ERI {
+        sw_most = max(sw_most, sw_seen[sw_i])
+        if sw_seen[sw_i] > 0.5 {
+            sw_classes = sw_classes + 1
+        }
+    }
+    assert_near(sw_most, 1.0, 0.0)
+    # 15 pairs with l <= 4, so 15 * 16 / 2 = 120 unique quartet classes
+    assert_near(sw_classes, 120, 0.0)
+    assert_near(sw_cls_boys(0, 0.0), 0.0, 0.0)
+    assert_near(sw_cls_boys(16, 150.0), SW_NCLS_BOYS - 1, 0.0)
+    assert_near(sw_cls_boys(3, 49.9), 3 * SW_NXBIN + 5, 0.0)
+    assert_near(sw_cls_boys(3, 50.0), 3 * SW_NXBIN + 6, 0.0)
+}
+
+test "coverage counts strategies per class and gates on at least two" {
+    sw_cov = sw_cov_new(SW_NCLS_ERI)
+    assert_near(sw_cov_min_strat(sw_cov), 0.0, 0.0)
+    sw_ps = sw_cls_eri(1, 0, 0, 0)
+    sw_dd = sw_cls_eri(2, 2, 2, 2)
+    sw_cov_hit(sw_cov, sw_ps, 0)
+    sw_cov_hit(sw_cov, sw_ps, 1)
+    sw_cov_hit(sw_cov, sw_ps, 1)
+    sw_cov_hit(sw_cov, sw_dd, 0)
+    assert_near(sw_cov_covered(sw_cov), 2, 0.0)
+    assert_near(sw_cov_nstrat(sw_cov, sw_ps), 2, 0.0)
+    # (dd|dd) was checked by one strategy only, so the minimum is 1
+    assert_near(sw_cov_min_strat(sw_cov), 1, 0.0)
+    sw_cov_hit(sw_cov, sw_dd, 2)
+    assert_near(sw_cov_min_strat(sw_cov), 2, 0.0)
+    sw_cov_gate(sw_cov)
+    sw_cov_report(sw_cov)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

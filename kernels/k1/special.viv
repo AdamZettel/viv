@@ -1,0 +1,68 @@
+# Kernel collection K1: special functions.
+#
+# Adapter defs with NumPy-style signatures over library code that is not
+# changed here: lib/hf/boys.viv (the Boys function) and lib/zfunc.viv
+# (Weideman's Faddeeva function and the plasma dispersion function). The
+# manifest is k1.export.toml beside this file; references and tolerances
+# are stated there.
+#
+# Used with `import special` from this directory.
+
+from hf.boys import boys_values
+import zfunc
+
+# lib/hf/boys tabulates its asymptotic switch for orders 0 to 16
+K1_BOYS_NMAX = 16
+
+#| The Boys functions F_0(T) .. F_nmax(T), as an array of nmax + 1 values,
+#| with F_n(T) = int_0^1 t^(2n) exp(-T t^2) dt. Orders 0 to 16, T >= 0.
+def boys(n_max: Int, T: Num) -> Arr {
+    if n_max < 0 or n_max > K1_BOYS_NMAX {
+        stop(f"boys: n_max = {n_max} is outside 0 .. {K1_BOYS_NMAX}")
+    }
+    if not (T >= 0.0) {
+        stop(f"boys: T = {T} must be a number >= 0")
+    }
+    return boys_values(float(n_max), T)
+}
+
+#| The plasma dispersion function Z(zeta) = i sqrt(pi) w(zeta) and its
+#| derivative Z'(zeta) = -2 (1 + zeta Z(zeta)), anywhere in the plane.
+def plasma_z(zeta: Complex) {
+    return zfunc.zf_z(zeta), zfunc.zf_zprime(zeta)
+}
+
+#| The Faddeeva function w(z) = exp(-z^2) erfc(-i z).
+def faddeeva_w(z: Complex) {
+    return zfunc.zf_w(z)
+}
+
+test "F_n(0) = 1 / (2n + 1) for every order" {
+    F = boys(16, 0.0)
+    for n to len(F) {
+        assert_near(F[n], 1.0 / (2.0 * n + 1.0), 1.0e-16)
+    }
+}
+
+test "the downward step F_(n-1) = (2T F_n + e^-T) / (2n - 1) holds across the switch" {
+    for T in [0.5, 12.0, 34.3, 34.5, 120.0] {
+        F = boys(8, T)
+        for n from 1 to len(F) {
+            back = (2.0 * T * F[n] + exp(-T)) / (2.0 * n - 1.0)
+            assert_near(back / F[n - 1], 1.0, 4.0e-15)
+        }
+    }
+}
+
+test "Z = i sqrt(pi) w and Z' = -2 (1 + zeta Z) at one point" {
+    zeta = 0.7 + 0.4i
+    zv, zpv = plasma_z(zeta)
+    wv = faddeeva_w(zeta)
+    zw = (0.0 + 1.7724538509055159i) * wv
+    zp = -2.0 * (1.0 + zeta * zv)
+    assert_lt(abs(zv - zw), 1.0e-15 * abs(zw))
+    assert_lt(abs(zpv - zp), 1.0e-15 * abs(zp))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

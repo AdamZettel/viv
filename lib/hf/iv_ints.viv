@@ -1,0 +1,1119 @@
+###
+post: Integrals with guaranteed bounds, two ways
+agent: claude
+
+lib/hf computes every integral by more than one algorithm and requires the
+results to agree. Agreement to 1e-12 says the algorithms are probably right;
+it does not say the common answer is the integral. This module computes
+intervals that are guaranteed to contain the exact integral, given the
+basis as data (exponents, raw coefficients and centers, each an exact
+double), using only the outward-rounded arithmetic of lib/hf/interval and
+the Boys enclosures of lib/hf/iv_boys.
+
+It does this for s and p primitives, by two algorithms that share only the
+Boys enclosure:
+
+- **McMurchie-Davidson** (`iv_md_*`): Hermite expansion coefficients
+  `E(i, j, t)` per axis and the Hermite Coulomb integrals `R(t, u, v)`, as in
+  lib/hf/hermite, lib/hf/md_onebody and lib/hf/md_eri.
+- **Obara-Saika** (`iv_os_*`): one-dimensional overlap and kinetic
+  recursions, the vertical recursion on auxiliary integrals `[a|b]^(m)` for
+  nuclear attraction and `[e0|f0]^(m)` for electron repulsion, and the
+  horizontal transfer `(a, b+1_i| = (a+1_i, b| + (A - B)_i (a, b|`, as in
+  lib/hf/os_onebody and lib/hf/hgp_eri.
+
+Two enclosures of the same number must overlap. If they do not, one of the
+two algorithms is wrong, or the arithmetic under them is. Where they
+overlap, the exact value is in the common part.
+
+**What is enclosed.** The unit-normalized Cartesian integral of
+lib/hf. The contracted coefficients are enclosed
+too (`iv_cn`): `Nr(a, l) = (2a/pi)^(3/4) (4a)^(l/2)` from square roots, and
+the unit-self-overlap rescale from the interval self-overlap. The point codes
+round those coefficients once; this module does not.
+
+**Width.** For water STO-3G, measured in the tests below and in
+scf/iv_bridge: most enclosures of S, T, V and the sampled ERIs are about
+2e-14 wide relative to their larger end, and the widest is 5.0e-12, at the
+kinetic energy between O 1s and an H 1s (-0.00256), a sum whose terms
+cancel. An integral that is 0 by symmetry gets an enclosure around 0 at most
+4e-15 wide. Interval arithmetic treats a quantity used twice as two
+independent ones, and that costs little here because the recursions are
+short at l <= 1.
+
+**PySCF.** The enclosures exclude some of PySCF's values: V between O pz
+and O 2s is 8.3e-15 from the 40-digit value, which both enclosures hold and
+PySCF's does not. So PySCF 2.5.0 is off there by more than these widths.
+
+**Layout.** An interval table is flat: entry `k` is `[T[2k], T[2k+1]]`.
+One-electron members return `[n, n, 2]`; ERI members return `[m, 2]` for a
+list of packed-8 indices. The sampled members use `IV_ERI_NSAMPLE` distinct
+indices drawn from `IV_ERI_SEED`.
+
+Used with `import hf.iv_ints`.
+###
+
+from hf.iv_boys import iv_boys
+from hf.interval import (
+    iv_add, iv_contains, iv_div, iv_exp, iv_get, iv_mul, iv_neg, iv_outside, iv_overlaps, iv_pi,
+    iv_powi, iv_pt, iv_put, iv_relw, iv_scale, iv_sqr, iv_sqrt, iv_sub, iv_width,
+)
+from hf.basis import (
+    AO_ATOM, AO_LX, AO_LY, AO_LZ, AO_SH, AT_CHG, AT_X, AT_Y, AT_Z, bas_ao_table, bas_contract,
+    bas_nao_cart, BAS_NDIM, bas_odfact, PR_COEF, PR_EXP, SH_ATOM, SH_L, SH_NPRIM, SH_P0,
+)
+from hf.eri_store import es_index8, es_len8, es_pair, es_rng
+from hfref.water_sto3g import (
+    watersto3g_atoms, watersto3g_eri8_cart, WATERSTO3G_ERI8_CART_LEN, WATERSTO3G_NAO_CART,
+    WATERSTO3G_NPRIMTOT, watersto3g_prims, watersto3g_shells, watersto3g_v_unit,
+)
+
+IV_S = 0
+IV_T = 1
+IV_V = 2
+IV_ERI_SEED = 20260923
+IV_ERI_NSAMPLE = 100
+# S, T and V: the integrals one AO pair gives, in the slots above
+IV_ONE_LEN = 3
+# where the E tables start in a row of iv_pair_data: after p, P, the
+# coefficient, A - B and K_AB, 11 intervals of 2 doubles
+IV_PD_E0 = 22
+
+# ---- basis data as intervals --------------------------------------------------------
+
+#| The contracted coefficients as intervals, flat over primitives: the raw
+#| coefficient times `Nr(a, l)`, rescaled so each contracted shell has unit
+#| self-overlap.
+def iv_cn(shells: Arr, prims: Arr) {
+    CN = zeros(2 * len(prims))
+    for s to len(shells) {
+        l = shells[s, SH_L]
+        p0 = round(shells[s, SH_P0])
+        np = round(shells[s, SH_NPRIM])
+        ss = [0.0, 0.0]
+        for i to np {
+            for j to np {
+                a = prims[p0 + i, PR_EXP]
+                b = prims[p0 + j, PR_EXP]
+                # overlap of two unit primitives: q^(l + 3/2), q = 2 sqrt(ab) / (a + b)
+                q = iv_div(iv_scale(iv_sqrt(iv_mul(iv_pt(a), iv_pt(b))), 2.0), iv_add(iv_pt(a), iv_pt(b)))
+                ov = iv_mul(iv_powi(q, l + 1), iv_sqrt(q))
+                ss = iv_add(ss, iv_scale(iv_scale(ov, prims[p0 + i, PR_COEF]), prims[p0 + j, PR_COEF]))
+            }
+        }
+        scale = iv_div([1.0, 1.0], iv_sqrt(ss))
+        for i to np {
+            a = prims[p0 + i, PR_EXP]
+            y = iv_div(iv_pt(2.0 * a), iv_pi())
+            nr = iv_mul(iv_mul(iv_sqrt(y), iv_sqrt(iv_sqrt(y))), iv_powi(iv_sqrt(iv_pt(4.0 * a)), l))
+            iv_put(CN, p0 + i, iv_scale(iv_mul(scale, nr), prims[p0 + i, PR_COEF]))
+        }
+    }
+    return CN
+}
+
+#| The component factor `Nc = 1 / sqrt((2lx-1)!! (2ly-1)!! (2lz-1)!!)`.
+def iv_nc(lx, ly, lz) {
+    return iv_div([1.0, 1.0], iv_sqrt(iv_pt(bas_odfact(lx) * bas_odfact(ly) * bas_odfact(lz))))
+}
+
+#| The coordinate `d` of atom `at` as a point interval.
+def iv_coord(atoms: Arr, at, d) {
+    return iv_pt(atoms[at, 1 + d])
+}
+
+#| `(a A + b B) / p` on one axis.
+def iv_center(a, Ad, b, Bd, p: Arr) {
+    return iv_div(iv_add(iv_mul(iv_pt(a), iv_pt(Ad)), iv_mul(iv_pt(b), iv_pt(Bd))), p)
+}
+
+# ---- McMurchie-Davidson ---------------------------------------------------------
+
+#| The Hermite coefficients `E(i, j, t)` on one axis, `i <= la`, `j <= lb`, as
+#| a flat interval table at `(i (lb+1) + j) (la+lb+1) + t`. `X = A - B` and
+#| `p = a + b` are intervals.
+def iv_herm_e(la, lb, a, b, X: Arr, p: Arr) {
+    nt = la + lb + 1
+    ld = lb + 1
+    E = zeros(2 * (la + 1) * ld * nt)
+    mu = iv_div(iv_mul(iv_pt(a), iv_pt(b)), p)
+    iv_put(E, 0, iv_exp(iv_neg(iv_mul(mu, iv_sqr(X)))))
+    o2p = iv_div([0.5, 0.5], p)
+    xpa = iv_div(iv_scale(X, -b), p)
+    xpb = iv_div(iv_scale(X, a), p)
+    # raise i along j = 0, then j for every i; E(i, j, t) is 0 outside t <= i + j
+    for i to la {
+        src = (i * ld) * nt
+        dst = ((i + 1) * ld) * nt
+        for t to i + 2 {
+            v = [0.0, 0.0]
+            if t > 0 {
+                v = iv_mul(o2p, iv_get(E, src + t - 1))
+            }
+            if t <= i {
+                v = iv_add(v, iv_mul(xpa, iv_get(E, src + t)))
+            }
+            if t + 1 <= i {
+                v = iv_add(v, iv_scale(iv_get(E, src + t + 1), t + 1))
+            }
+            iv_put(E, dst + t, v)
+        }
+    }
+    for j to lb {
+        for i to la + 1 {
+            src = (i * ld + j) * nt
+            dst = (i * ld + j + 1) * nt
+            for t to i + j + 2 {
+                v = [0.0, 0.0]
+                if t > 0 {
+                    v = iv_mul(o2p, iv_get(E, src + t - 1))
+                }
+                if t <= i + j {
+                    v = iv_add(v, iv_mul(xpb, iv_get(E, src + t)))
+                }
+                if t + 1 <= i + j {
+                    v = iv_add(v, iv_scale(iv_get(E, src + t + 1), t + 1))
+                }
+                iv_put(E, dst + t, v)
+            }
+        }
+    }
+    return E
+}
+
+#| The Hermite Coulomb integrals `R(n; t, u, v)` for `t + u + v <= L - n`,
+#| flat at `((n D + t) D + u) D + v` with `D = L + 1`, from exponent `alpha`,
+#| the vector `PC` (flat, 3 intervals) and Boys enclosures `F` (flat,
+#| orders 0 .. L). `R(0; t, u, v)` is the block at `n = 0`.
+def iv_herm_r(L, alpha: Arr, PC: Arr, F: Arr) {
+    D = L + 1
+    R = zeros(2 * D * D * D * D)
+    m2a = iv_scale(alpha, -2.0)
+    pw = [1.0, 1.0]
+    for n to D {
+        iv_put(R, ((n * D) * D) * D, iv_mul(pw, iv_get(F, n)))
+        pw = iv_mul(pw, m2a)
+    }
+    for k to L {
+        n = L - 1 - k
+        for tot to L - n {
+            s = tot + 1
+            for t to s + 1 {
+                for u to s - t + 1 {
+                    v = s - t - u
+                    o = ((n * D + t) * D + u) * D + v
+                    up = D * D * D
+                    # lower the first nonzero index, reading level n + 1
+                    if t > 0 {
+                        w = iv_mul(iv_get(PC, 0), iv_get(R, o + up - D * D))
+                        if t > 1 {
+                            w = iv_add(w, iv_scale(iv_get(R, o + up - 2 * D * D), t - 1))
+                        }
+                        iv_put(R, o, w)
+                    }
+                    if t == 0 and u > 0 {
+                        w = iv_mul(iv_get(PC, 1), iv_get(R, o + up - D))
+                        if u > 1 {
+                            w = iv_add(w, iv_scale(iv_get(R, o + up - 2 * D), u - 1))
+                        }
+                        iv_put(R, o, w)
+                    }
+                    if t == 0 and u == 0 {
+                        w = iv_mul(iv_get(PC, 2), iv_get(R, o + up - 1))
+                        if v > 1 {
+                            w = iv_add(w, iv_scale(iv_get(R, o + up - 2), v - 1))
+                        }
+                        iv_put(R, o, w)
+                    }
+                }
+            }
+        }
+    }
+    return R
+}
+
+#| `|V|^2 * scale` for a flat 3-vector of intervals, with `scale` an interval.
+def iv_norm2(V: Arr, scale: Arr) {
+    s = iv_add(iv_add(iv_sqr(iv_get(V, 0)), iv_sqr(iv_get(V, 1))), iv_sqr(iv_get(V, 2)))
+    return iv_mul(s, scale)
+}
+
+#| S, T and V, flat `[3 intervals]`, for one primitive pair of the Cartesian
+#| components `ca` (powers) on atom `A` and `cb` on atom `B`, before the
+#| contraction coefficients.
+def iv_md1_prim(atoms: Arr, a, b, ia, ib, ca: Arr, cb: Arr) {
+    p = iv_add(iv_pt(a), iv_pt(b))
+    sq = iv_sqrt(iv_div(iv_pi(), p))
+    sd = zeros(2 * BAS_NDIM)
+    td = zeros(2 * BAS_NDIM)
+    P = zeros(2 * BAS_NDIM)
+    EX = zeros(2)
+    EY = zeros(2)
+    EZ = zeros(2)
+    for d to BAS_NDIM {
+        i = ca[d]
+        j = cb[d]
+        X = iv_sub(iv_coord(atoms, ia, d), iv_coord(atoms, ib, d))
+        E = iv_herm_e(i, j + 2, a, b, X, p)
+        nt = i + j + 3
+        ld = j + 3
+        s0 = iv_mul(iv_get(E, (i * ld + j) * nt), sq)
+        s2 = iv_mul(iv_get(E, (i * ld + j + 2) * nt), sq)
+        # -1/2 d^2/dx^2 on x^j e^(-b x^2): powers j-2, j, j+2
+        tk = iv_add(iv_scale(iv_scale(s2, b), -2.0 * b), iv_scale(iv_scale(s0, b), 2.0 * j + 1.0))
+        if j > 1 {
+            tk = iv_sub(tk, iv_scale(iv_mul(iv_get(E, (i * ld + j - 2) * nt), sq), 0.5 * j * (j - 1)))
+        }
+        iv_put(sd, d, s0)
+        iv_put(td, d, tk)
+        iv_put(P, d, iv_center(a, atoms[ia, 1 + d], b, atoms[ib, 1 + d], p))
+        if d == 0 {
+            EX = E
+        }
+        if d == 1 {
+            EY = E
+        }
+        if d == 2 {
+            EZ = E
+        }
+    }
+    out = zeros(2 * IV_ONE_LEN)
+    sx = iv_get(sd, 0)
+    sy = iv_get(sd, 1)
+    sz = iv_get(sd, 2)
+    iv_put(out, IV_S, iv_mul(iv_mul(sx, sy), sz))
+    tt = iv_mul(iv_mul(iv_get(td, 0), sy), sz)
+    tt = iv_add(tt, iv_mul(iv_mul(sx, iv_get(td, 1)), sz))
+    tt = iv_add(tt, iv_mul(iv_mul(sx, sy), iv_get(td, 2)))
+    iv_put(out, IV_T, tt)
+    # nuclear attraction: -Z (2 pi / p) sum_tuv E_t E_u E_v R(t, u, v)
+    L = ca[0] + cb[0] + ca[1] + cb[1] + ca[2] + cb[2]
+    D = L + 1
+    vv = [0.0, 0.0]
+    for at to len(atoms) {
+        Zc = atoms[at, AT_CHG]
+        if Zc == 0.0 {
+            continue
+        }
+        PC = zeros(2 * BAS_NDIM)
+        for d to BAS_NDIM {
+            iv_put(PC, d, iv_sub(iv_get(P, d), iv_coord(atoms, at, d)))
+        }
+        F = iv_boys(L, iv_norm2(PC, p))
+        R = iv_herm_r(L, p, PC, F)
+        acc = [0.0, 0.0]
+        for t to ca[0] + cb[0] + 1 {
+            ex = iv_get(EX, (ca[0] * (cb[0] + 3) + cb[0]) * (ca[0] + cb[0] + 3) + t)
+            for u to ca[1] + cb[1] + 1 {
+                ey = iv_get(EY, (ca[1] * (cb[1] + 3) + cb[1]) * (ca[1] + cb[1] + 3) + u)
+                exy = iv_mul(ex, ey)
+                for v to ca[2] + cb[2] + 1 {
+                    ez = iv_get(EZ, (ca[2] * (cb[2] + 3) + cb[2]) * (ca[2] + cb[2] + 3) + v)
+                    acc = iv_add(acc, iv_mul(iv_mul(exy, ez), iv_get(R, (t * D + u) * D + v)))
+                }
+            }
+        }
+        vv = iv_add(vv, iv_mul(iv_div(iv_scale(iv_pi(), -2.0 * Zc), p), acc))
+    }
+    iv_put(out, IV_V, vv)
+    return out
+}
+
+#| The powers of AO `k` from the AO table, as a 3-array.
+def iv_powers(AOT: Arr, k) {
+    return [AOT[k, AO_LX], AOT[k, AO_LY], AOT[k, AO_LZ]]
+}
+
+#| S, T, V for the AO pair `(i, j)`, flat `[3 intervals]`, by `method`
+#| (0 McMurchie-Davidson, 1 Obara-Saika).
+def iv_one_ao(atoms: Arr, shells: Arr, prims: Arr, CN: Arr, AOT: Arr, i, j, method) {
+    sa = round(AOT[i, AO_SH])
+    sb = round(AOT[j, AO_SH])
+    assert_true(shells[sa, SH_L] <= 1 and shells[sb, SH_L] <= 1)
+    ca = iv_powers(AOT, i)
+    cb = iv_powers(AOT, j)
+    ia = round(shells[sa, SH_ATOM])
+    ib = round(shells[sb, SH_ATOM])
+    nc = iv_mul(iv_nc(ca[0], ca[1], ca[2]), iv_nc(cb[0], cb[1], cb[2]))
+    pa0 = round(shells[sa, SH_P0])
+    pb0 = round(shells[sb, SH_P0])
+    out = zeros(2 * IV_ONE_LEN)
+    for ip to shells[sa, SH_NPRIM] {
+        for jp to shells[sb, SH_NPRIM] {
+            a = prims[pa0 + ip, PR_EXP]
+            b = prims[pb0 + jp, PR_EXP]
+            V = iv_md1_prim(atoms, a, b, ia, ib, ca, cb)
+            if method == 1 {
+                V = iv_os1_prim(atoms, a, b, ia, ib, ca, cb)
+            }
+            w = iv_mul(iv_mul(iv_get(CN, pa0 + ip), iv_get(CN, pb0 + jp)), nc)
+            for k to IV_ONE_LEN {
+                iv_put(out, k, iv_add(iv_get(out, k), iv_mul(w, iv_get(V, k))))
+            }
+        }
+    }
+    return out
+}
+
+#| S, T and V for the whole basis, `[3, n, n, 2]`, by `method`. Each pair is
+#| computed once, for `i >= j`, and mirrored.
+def iv_one_all(atoms: Arr, shells: Arr, prims: Arr, method) {
+    n = bas_nao_cart(shells)
+    CN = iv_cn(shells, prims)
+    AOT = bas_ao_table(shells)
+    M = zeros(IV_ONE_LEN, n, n, 2)
+    for i to n {
+        for j to i + 1 {
+            B = iv_one_ao(atoms, shells, prims, CN, AOT, i, j, method)
+            for k to IV_ONE_LEN {
+                for e to 2 {
+                    M[k, i, j, e] = B[2 * k + e]
+                    M[k, j, i, e] = B[2 * k + e]
+                }
+            }
+        }
+    }
+    return M
+}
+
+#| One of S, T, V from `iv_one_all`, `[n, n, 2]`.
+def iv_one_pick(atoms: Arr, shells: Arr, prims: Arr, method, which) {
+    return slab(iv_one_all(atoms, shells, prims, method), which)
+}
+
+#| Interval stage members `(atoms, shells, prims) -> [n, n, 2]`.
+def iv_md_s(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_one_pick(atoms, shells, prims, 0, IV_S)
+}
+def iv_md_t(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_one_pick(atoms, shells, prims, 0, IV_T)
+}
+def iv_md_v(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_one_pick(atoms, shells, prims, 0, IV_V)
+}
+def iv_os_s(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_one_pick(atoms, shells, prims, 1, IV_S)
+}
+def iv_os_t(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_one_pick(atoms, shells, prims, 1, IV_T)
+}
+def iv_os_v(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_one_pick(atoms, shells, prims, 1, IV_V)
+}
+
+# ---- Obara-Saika, one electron ------------------------------------------------------
+
+#| The 1-D overlap and kinetic recursions for powers up to `i <= la`,
+#| `j <= lb` on one axis, flat interval tables at `i (lb+1) + j`; returns
+#| `[S table, T table]` concatenated (the T table starts at entry
+#| `(la+1)(lb+1)`).
+def iv_os_1d(a, b, X: Arr, p: Arr, sq: Arr, la, lb) {
+    ld = lb + 1
+    nst = (la + 1) * ld
+    # the S and the T table, nst intervals of 2 doubles each
+    ST = zeros(2 * 2 * nst)
+    mu = iv_div(iv_mul(iv_pt(a), iv_pt(b)), p)
+    X2 = iv_sqr(X)
+    o2p = iv_div([0.5, 0.5], p)
+    xpa = iv_div(iv_scale(X, -b), p)
+    xpb = iv_div(iv_scale(X, a), p)
+    s00 = iv_mul(sq, iv_exp(iv_neg(iv_mul(mu, X2))))
+    iv_put(ST, 0, s00)
+    # T_00 = (mu - 2 mu^2 X^2) S_00
+    iv_put(ST, nst, iv_mul(iv_sub(mu, iv_scale(iv_mul(iv_sqr(mu), X2), 2.0)), s00))
+    bp = iv_div(iv_pt(b), p)
+    ap = iv_div(iv_pt(a), p)
+    for i to la + 1 {
+        for j to lb + 1 {
+            if i + j > 0 {
+                k = i * ld + j
+                if i > 0 {
+                    # raise i from (i-1, j)
+                    im = i - 1
+                    s = iv_mul(xpa, iv_get(ST, im * ld + j))
+                    t = iv_mul(xpa, iv_get(ST, nst + im * ld + j))
+                    if im > 0 {
+                        s = iv_add(s, iv_scale(iv_mul(o2p, iv_get(ST, (im - 1) * ld + j)), im))
+                        t = iv_add(t, iv_scale(iv_mul(o2p, iv_get(ST, nst + (im - 1) * ld + j)), im))
+                    }
+                    if j > 0 {
+                        s = iv_add(s, iv_scale(iv_mul(o2p, iv_get(ST, im * ld + j - 1)), j))
+                        t = iv_add(t, iv_scale(iv_mul(o2p, iv_get(ST, nst + im * ld + j - 1)), j))
+                    }
+                    # + b/p (2a S(i, j) - (i-1) S(i-2, j))
+                    g = iv_scale(s, 2.0 * a)
+                    if im > 0 {
+                        g = iv_sub(g, iv_scale(iv_get(ST, (im - 1) * ld + j), im))
+                    }
+                    t = iv_add(t, iv_mul(bp, g))
+                    iv_put(ST, k, s)
+                    iv_put(ST, nst + k, t)
+                }
+                else {
+                    # raise j from (0, j-1)
+                    jm = j - 1
+                    s = iv_mul(xpb, iv_get(ST, jm))
+                    t = iv_mul(xpb, iv_get(ST, nst + jm))
+                    if jm > 0 {
+                        s = iv_add(s, iv_scale(iv_mul(o2p, iv_get(ST, jm - 1)), jm))
+                        t = iv_add(t, iv_scale(iv_mul(o2p, iv_get(ST, nst + jm - 1)), jm))
+                    }
+                    g = iv_scale(s, 2.0 * b)
+                    if jm > 0 {
+                        g = iv_sub(g, iv_scale(iv_get(ST, jm - 1), jm))
+                    }
+                    t = iv_add(t, iv_mul(ap, g))
+                    iv_put(ST, k, s)
+                    iv_put(ST, nst + k, t)
+                }
+            }
+        }
+    }
+    return ST
+}
+
+#| The dense index of 3-D powers `(x, y, z)` in a box with `(Dy, Dz)` the
+#| extents of the last two axes.
+def iv_bidx(x, y, z, Dy, Dz) {
+    return (x * Dy + y) * Dz + z
+}
+
+#| The first axis with a nonzero power, or -1.
+def iv_first_axis(e: Arr) {
+    if e[0] > 0 {
+        return 0
+    }
+    if e[1] > 0 {
+        return 1
+    }
+    if e[2] > 0 {
+        return 2
+    }
+    return -1
+}
+
+#| S, T, V for one primitive pair by Obara-Saika, flat `[3 intervals]`.
+#| The nuclear attraction runs the vertical recursion on `[a|0]^(m)` for
+#| `a` up to `ca + cb` on each axis, then moves one power to the right-hand
+#| side with the horizontal transfer, which is enough for p functions.
+def iv_os1_prim(atoms: Arr, a, b, ia, ib, ca: Arr, cb: Arr) {
+    p = iv_add(iv_pt(a), iv_pt(b))
+    sq = iv_sqrt(iv_div(iv_pi(), p))
+    sd = zeros(2 * BAS_NDIM)
+    td = zeros(2 * BAS_NDIM)
+    P = zeros(2 * BAS_NDIM)
+    PA = zeros(2 * BAS_NDIM)
+    AB = zeros(2 * BAS_NDIM)
+    for d to BAS_NDIM {
+        X = iv_sub(iv_coord(atoms, ia, d), iv_coord(atoms, ib, d))
+        ST = iv_os_1d(a, b, X, p, sq, ca[d], cb[d])
+        nst = (ca[d] + 1) * (cb[d] + 1)
+        k = ca[d] * (cb[d] + 1) + cb[d]
+        iv_put(sd, d, iv_get(ST, k))
+        iv_put(td, d, iv_get(ST, nst + k))
+        iv_put(P, d, iv_center(a, atoms[ia, 1 + d], b, atoms[ib, 1 + d], p))
+        iv_put(PA, d, iv_sub(iv_get(P, d), iv_coord(atoms, ia, d)))
+        iv_put(AB, d, X)
+    }
+    out = zeros(2 * IV_ONE_LEN)
+    sx = iv_get(sd, 0)
+    sy = iv_get(sd, 1)
+    sz = iv_get(sd, 2)
+    iv_put(out, IV_S, iv_mul(iv_mul(sx, sy), sz))
+    tt = iv_mul(iv_mul(iv_get(td, 0), sy), sz)
+    tt = iv_add(tt, iv_mul(iv_mul(sx, iv_get(td, 1)), sz))
+    tt = iv_add(tt, iv_mul(iv_mul(sx, sy), iv_get(td, 2)))
+    iv_put(out, IV_T, tt)
+    # K_AB 2 pi / p, the [0|0]^(m) prefactor
+    mu = iv_div(iv_mul(iv_pt(a), iv_pt(b)), p)
+    kab = iv_exp(iv_neg(iv_norm2(AB, mu)))
+    pre = iv_mul(kab, iv_div(iv_scale(iv_pi(), 2.0), p))
+    o2p = iv_div([0.5, 0.5], p)
+    Dx = ca[0] + cb[0] + 1
+    Dy = ca[1] + cb[1] + 1
+    Dz = ca[2] + cb[2] + 1
+    L = Dx + Dy + Dz - 3
+    nbox = Dx * Dy * Dz
+    vv = [0.0, 0.0]
+    for at to len(atoms) {
+        Zc = atoms[at, AT_CHG]
+        if Zc == 0.0 {
+            continue
+        }
+        PC = zeros(2 * BAS_NDIM)
+        for d to BAS_NDIM {
+            iv_put(PC, d, iv_sub(iv_get(P, d), iv_coord(atoms, at, d)))
+        }
+        F = iv_boys(L, iv_norm2(PC, p))
+        # A[(box index) (L+1) + m] = [e|0]^(m), for m <= L - |e|
+        A = zeros(2 * nbox * (L + 1))
+        for m to L + 1 {
+            iv_put(A, m, iv_mul(pre, iv_get(F, m)))
+        }
+        for tot to L {
+            s = tot + 1
+            for x to min(s, Dx - 1) + 1 {
+                for y to min(s - x, Dy - 1) + 1 {
+                    z = s - x - y
+                    if z < Dz {
+                        e = [x, y, z]
+                        i = iv_first_axis(e)
+                        e1 = [x, y, z]
+                        e1[i] = e1[i] - 1
+                        o1 = iv_bidx(e1[0], e1[1], e1[2], Dy, Dz) * (L + 1)
+                        o = iv_bidx(x, y, z, Dy, Dz) * (L + 1)
+                        for m to L - s + 1 {
+                            w = iv_sub(iv_mul(iv_get(PA, i), iv_get(A, o1 + m)), iv_mul(iv_get(PC, i), iv_get(A, o1 + m + 1)))
+                            if e1[i] > 0 {
+                                e2 = [e1[0], e1[1], e1[2]]
+                                e2[i] = e2[i] - 1
+                                o2 = iv_bidx(e2[0], e2[1], e2[2], Dy, Dz) * (L + 1)
+                                w = iv_add(w, iv_scale(iv_mul(o2p, iv_sub(iv_get(A, o2 + m), iv_get(A, o2 + m + 1))), e1[i]))
+                            }
+                            iv_put(A, o + m, w)
+                        }
+                    }
+                }
+            }
+        }
+        # (a | b) with b at most one power: (a | 1_i) = (a + 1_i | 0) + AB_i (a | 0)
+        oa = iv_bidx(ca[0], ca[1], ca[2], Dy, Dz) * (L + 1)
+        val = iv_get(A, oa)
+        j = iv_first_axis(cb)
+        if j >= 0 {
+            up = [ca[0], ca[1], ca[2]]
+            up[j] = up[j] + 1
+            val = iv_add(iv_get(A, iv_bidx(up[0], up[1], up[2], Dy, Dz) * (L + 1)), iv_mul(iv_get(AB, j), val))
+        }
+        vv = iv_add(vv, iv_scale(val, -Zc))
+    }
+    iv_put(out, IV_V, vv)
+    return out
+}
+
+# ---- electron repulsion ---------------------------------------------------------------
+
+#| `[i, j, k, l]` of packed-8 index `ijkl` (i >= j, k >= l, ij >= kl).
+def iv_unpack8(ijkl) {
+    ij = 0
+    while (ij + 1) * (ij + 2) / 2 <= ijkl {
+        ij = ij + 1
+    }
+    kl = ijkl - ij * (ij + 1) / 2
+    i = 0
+    while (i + 1) * (i + 2) / 2 <= ij {
+        i = i + 1
+    }
+    k = 0
+    while (k + 1) * (k + 2) / 2 <= kl {
+        k = k + 1
+    }
+    return [i, ij - i * (i + 1) / 2, k, kl - k * (k + 1) / 2]
+}
+
+#| `m` distinct packed-8 indices below `len8`, drawn with the Park-Miller
+#| weights of `seed` (duplicates are skipped), in the order drawn.
+def iv_sample8(len8, seed, m) {
+    st = zeros(1)
+    st[0] = seed
+    idx = zeros(m)
+    seen = zeros(len8)
+    k = 0
+    while k < m {
+        c = floor(es_rng(st) * len8)
+        if seen[c] < 0.5 {
+            seen[c] = 1
+            idx[k] = c
+            k = k + 1
+        }
+    }
+    return idx
+}
+
+#| The sample the ERI members use.
+def iv_eri_sample_idx(shells: Arr) {
+    n = bas_nao_cart(shells)
+    return iv_sample8(es_len8(n), IV_ERI_SEED, min(IV_ERI_NSAMPLE, es_len8(n)))
+}
+
+#| Primitive-pair data for the AO pair `(i, j)`: one row per primitive pair,
+#| flat, `IV_PD_W(ca, cb)` wide:
+#|   0 p, 2 P (3 intervals), 8 coefficient (cn cn Nc Nc), 14 A - B,
+#|   20 K_AB, 22 (IV_PD_E0) E tables for x, y, z (McMurchie-Davidson).
+def iv_pair_data(atoms: Arr, shells: Arr, prims: Arr, CN: Arr, AOT: Arr, i, j) {
+    sa = round(AOT[i, AO_SH])
+    sb = round(AOT[j, AO_SH])
+    assert_true(shells[sa, SH_L] <= 1 and shells[sb, SH_L] <= 1)
+    ca = iv_powers(AOT, i)
+    cb = iv_powers(AOT, j)
+    ia = round(shells[sa, SH_ATOM])
+    ib = round(shells[sb, SH_ATOM])
+    nc = iv_mul(iv_nc(ca[0], ca[1], ca[2]), iv_nc(cb[0], cb[1], cb[2]))
+    na = round(shells[sa, SH_NPRIM])
+    nb = round(shells[sb, SH_NPRIM])
+    W = iv_pd_w(ca, cb)
+    PD = zeros(na * nb * W)
+    pa0 = round(shells[sa, SH_P0])
+    pb0 = round(shells[sb, SH_P0])
+    for ip to na {
+        for jp to nb {
+            a = prims[pa0 + ip, PR_EXP]
+            b = prims[pb0 + jp, PR_EXP]
+            r = (ip * nb + jp) * W
+            p = iv_add(iv_pt(a), iv_pt(b))
+            iv_put(PD, r / 2, p)
+            AB = zeros(2 * BAS_NDIM)
+            eo = IV_PD_E0
+            for d to BAS_NDIM {
+                X = iv_sub(iv_coord(atoms, ia, d), iv_coord(atoms, ib, d))
+                iv_put(AB, d, X)
+                iv_put(PD, r / 2 + 1 + d, iv_center(a, atoms[ia, 1 + d], b, atoms[ib, 1 + d], p))
+                iv_put(PD, r / 2 + 7 + d, X)
+                E = iv_herm_e(ca[d], cb[d], a, b, X, p)
+                ne = len(E)
+                for q to ne {
+                    PD[r + eo + q] = E[q]
+                }
+                eo = eo + ne
+            }
+            w = iv_mul(iv_mul(iv_get(CN, pa0 + ip), iv_get(CN, pb0 + jp)), nc)
+            iv_put(PD, r / 2 + 4, w)
+            mu = iv_div(iv_mul(iv_pt(a), iv_pt(b)), p)
+            iv_put(PD, r / 2 + 10, iv_exp(iv_neg(iv_norm2(AB, mu))))
+        }
+    }
+    return PD
+}
+
+#| Row width of `iv_pair_data` for component powers `ca`, `cb`.
+def iv_pd_w(ca: Arr, cb: Arr) {
+    w = IV_PD_E0
+    for d to BAS_NDIM {
+        w = w + 2 * (ca[d] + 1) * (cb[d] + 1) * (ca[d] + cb[d] + 1)
+    }
+    return w
+}
+
+#| `E(i, j, t)` on axis `d` from row `r` of pair data for powers `ca`, `cb`.
+def iv_pd_e(PD: Arr, r, ca: Arr, cb: Arr, d, t) {
+    eo = IV_PD_E0
+    for k to d {
+        eo = eo + 2 * (ca[k] + 1) * (cb[k] + 1) * (ca[k] + cb[k] + 1)
+    }
+    nt = ca[d] + cb[d] + 1
+    q = (ca[d] * (cb[d] + 1) + cb[d]) * nt + t
+    return [PD[r + eo + 2 * q], PD[r + eo + 2 * q + 1]]
+}
+
+#| One primitive quartet by McMurchie-Davidson, rows `r1` of `P1` and `r2`
+#| of `P2`, with the coefficients included.
+def iv_md_eri_prim(P1: Arr, r1, ca: Arr, cb: Arr, P2: Arr, r2, cc: Arr, cd: Arr) {
+    p = iv_get(P1, r1 / 2)
+    q = iv_get(P2, r2 / 2)
+    pq = iv_add(p, q)
+    alpha = iv_div(iv_mul(p, q), pq)
+    PQ = zeros(2 * BAS_NDIM)
+    for d to BAS_NDIM {
+        iv_put(PQ, d, iv_sub(iv_get(P1, r1 / 2 + 1 + d), iv_get(P2, r2 / 2 + 1 + d)))
+    }
+    T1 = [ca[0] + cb[0], ca[1] + cb[1], ca[2] + cb[2]]
+    T2 = [cc[0] + cd[0], cc[1] + cd[1], cc[2] + cd[2]]
+    L = T1[0] + T1[1] + T1[2] + T2[0] + T2[1] + T2[2]
+    D = L + 1
+    F = iv_boys(L, iv_norm2(PQ, alpha))
+    R = iv_herm_r(L, alpha, PQ, F)
+    # the ket's Hermite coefficients, signed (-1)^(tau + nu + phi)
+    K = zeros(2 * (T2[0] + 1) * (T2[1] + 1) * (T2[2] + 1))
+    for tau to T2[0] + 1 {
+        for nu to T2[1] + 1 {
+            for ph to T2[2] + 1 {
+                e = iv_mul(iv_mul(iv_pd_e(P2, r2, cc, cd, 0, tau), iv_pd_e(P2, r2, cc, cd, 1, nu)), iv_pd_e(P2, r2, cc, cd, 2, ph))
+                if mod(tau + nu + ph, 2) == 1 {
+                    e = iv_neg(e)
+                }
+                iv_put(K, (tau * (T2[1] + 1) + nu) * (T2[2] + 1) + ph, e)
+            }
+        }
+    }
+    acc = [0.0, 0.0]
+    for t to T1[0] + 1 {
+        for u to T1[1] + 1 {
+            for v to T1[2] + 1 {
+                inner = [0.0, 0.0]
+                for tau to T2[0] + 1 {
+                    for nu to T2[1] + 1 {
+                        for ph to T2[2] + 1 {
+                            kk = iv_get(K, (tau * (T2[1] + 1) + nu) * (T2[2] + 1) + ph)
+                            inner = iv_add(inner, iv_mul(kk, iv_get(R, ((t + tau) * D + u + nu) * D + v + ph)))
+                        }
+                    }
+                }
+                eb = iv_mul(iv_mul(iv_pd_e(P1, r1, ca, cb, 0, t), iv_pd_e(P1, r1, ca, cb, 1, u)), iv_pd_e(P1, r1, ca, cb, 2, v))
+                acc = iv_add(acc, iv_mul(eb, inner))
+            }
+        }
+    }
+    return iv_mul(iv_mul(acc, iv_eri_pref(p, q, pq)), iv_mul(iv_get(P1, r1 / 2 + 4), iv_get(P2, r2 / 2 + 4)))
+}
+
+#| `2 pi^(5/2) / (p q sqrt(p + q))`.
+def iv_eri_pref(p: Arr, q: Arr, pq: Arr) {
+    pi = iv_pi()
+    num = iv_scale(iv_mul(iv_sqr(pi), iv_sqrt(pi)), 2.0)
+    return iv_div(num, iv_mul(iv_mul(p, q), iv_sqrt(pq)))
+}
+
+#| One primitive quartet by Obara-Saika: the vertical recursion builds
+#| `[e0|f0]^(m)` for `e <= ca + cb` and `f <= cc + cd` on each axis, and the
+#| horizontal transfer moves at most one power to `b` and one to `d`.
+def iv_os_eri_prim(P1: Arr, r1, ca: Arr, cb: Arr, A: Arr, P2: Arr, r2, cc: Arr, cd: Arr, C: Arr) {
+    p = iv_get(P1, r1 / 2)
+    q = iv_get(P2, r2 / 2)
+    pq = iv_add(p, q)
+    alpha = iv_div(iv_mul(p, q), pq)
+    PQ = zeros(2 * BAS_NDIM)
+    PA = zeros(2 * BAS_NDIM)
+    QC = zeros(2 * BAS_NDIM)
+    WP = zeros(2 * BAS_NDIM)
+    WQ = zeros(2 * BAS_NDIM)
+    for d to BAS_NDIM {
+        Pd = iv_get(P1, r1 / 2 + 1 + d)
+        Qd = iv_get(P2, r2 / 2 + 1 + d)
+        iv_put(PQ, d, iv_sub(Pd, Qd))
+        iv_put(PA, d, iv_sub(Pd, iv_pt(A[d])))
+        iv_put(QC, d, iv_sub(Qd, iv_pt(C[d])))
+        # W - P = -q (P - Q) / (p + q) and W - Q = p (P - Q) / (p + q)
+        iv_put(WP, d, iv_div(iv_neg(iv_mul(q, iv_get(PQ, d))), pq))
+        iv_put(WQ, d, iv_div(iv_mul(p, iv_get(PQ, d)), pq))
+    }
+    o2p = iv_div([0.5, 0.5], p)
+    o2q = iv_div([0.5, 0.5], q)
+    o2pq = iv_div([0.5, 0.5], pq)
+    ap = iv_div(alpha, p)
+    aq = iv_div(alpha, q)
+    Ex = ca[0] + cb[0] + 1
+    Ey = ca[1] + cb[1] + 1
+    Ez = ca[2] + cb[2] + 1
+    Fx = cc[0] + cd[0] + 1
+    Fy = cc[1] + cd[1] + 1
+    Fz = cc[2] + cd[2] + 1
+    LE = Ex + Ey + Ez - 3
+    LF = Fx + Fy + Fz - 3
+    L = LE + LF
+    M1 = L + 1
+    nf = Fx * Fy * Fz
+    F = iv_boys(L, iv_norm2(PQ, alpha))
+    base = iv_mul(iv_eri_pref(p, q, pq), iv_mul(iv_get(P1, r1 / 2 + 10), iv_get(P2, r2 / 2 + 10)))
+    # V[(e nf + f) (L+1) + m] = [e0|f0]^(m)
+    V = zeros(2 * Ex * Ey * Ez * nf * M1)
+    for m to M1 {
+        iv_put(V, m, iv_mul(base, iv_get(F, m)))
+    }
+    # bra, with f = 0
+    for tot to LE {
+        s = tot + 1
+        for x to min(s, Ex - 1) + 1 {
+            for y to min(s - x, Ey - 1) + 1 {
+                z = s - x - y
+                if z < Ez {
+                    e1 = [x, y, z]
+                    i = iv_first_axis(e1)
+                    e1[i] = e1[i] - 1
+                    o = (iv_bidx(x, y, z, Ey, Ez) * nf) * M1
+                    o1 = (iv_bidx(e1[0], e1[1], e1[2], Ey, Ez) * nf) * M1
+                    for m to L - s + 1 {
+                        w = iv_add(iv_mul(iv_get(PA, i), iv_get(V, o1 + m)), iv_mul(iv_get(WP, i), iv_get(V, o1 + m + 1)))
+                        if e1[i] > 0 {
+                            e2 = [e1[0], e1[1], e1[2]]
+                            e2[i] = e2[i] - 1
+                            o2 = (iv_bidx(e2[0], e2[1], e2[2], Ey, Ez) * nf) * M1
+                            w = iv_add(w, iv_scale(iv_mul(o2p, iv_sub(iv_get(V, o2 + m), iv_mul(ap, iv_get(V, o2 + m + 1)))), e1[i]))
+                        }
+                        iv_put(V, o + m, w)
+                    }
+                }
+            }
+        }
+    }
+    # ket, for every e in the box
+    for ftot to LF {
+        fs = ftot + 1
+        for fx to min(fs, Fx - 1) + 1 {
+            for fy to min(fs - fx, Fy - 1) + 1 {
+                fz = fs - fx - fy
+                if fz < Fz {
+                    f1 = [fx, fy, fz]
+                    k = iv_first_axis(f1)
+                    f1[k] = f1[k] - 1
+                    fo = iv_bidx(fx, fy, fz, Fy, Fz)
+                    fo1 = iv_bidx(f1[0], f1[1], f1[2], Fy, Fz)
+                    for ex to Ex {
+                        for ey to Ey {
+                            for ez to Ez {
+                                eb = iv_bidx(ex, ey, ez, Ey, Ez)
+                                ee = [ex, ey, ez]
+                                for m to L - fs - ex - ey - ez + 1 {
+                                    o1 = (eb * nf + fo1) * M1
+                                    w = iv_add(iv_mul(iv_get(QC, k), iv_get(V, o1 + m)), iv_mul(iv_get(WQ, k), iv_get(V, o1 + m + 1)))
+                                    if f1[k] > 0 {
+                                        f2 = [f1[0], f1[1], f1[2]]
+                                        f2[k] = f2[k] - 1
+                                        o2 = (eb * nf + iv_bidx(f2[0], f2[1], f2[2], Fy, Fz)) * M1
+                                        w = iv_add(w, iv_scale(iv_mul(o2q, iv_sub(iv_get(V, o2 + m), iv_mul(aq, iv_get(V, o2 + m + 1)))), f1[k]))
+                                    }
+                                    if ee[k] > 0 {
+                                        em = [ex, ey, ez]
+                                        em[k] = em[k] - 1
+                                        o3 = (iv_bidx(em[0], em[1], em[2], Ey, Ez) * nf + fo1) * M1
+                                        w = iv_add(w, iv_scale(iv_mul(o2pq, iv_get(V, o3 + m + 1)), ee[k]))
+                                    }
+                                    iv_put(V, (eb * nf + fo) * M1 + m, w)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    # horizontal transfer: (a, 1_i | c, 1_k) from (e | f) with m = 0
+    ib = iv_first_axis(cb)
+    kd = iv_first_axis(cd)
+    AB = iv_get(P1, r1 / 2 + 7 + max(ib, 0))
+    CD = iv_get(P2, r2 / 2 + 7 + max(kd, 0))
+    a1 = [ca[0], ca[1], ca[2]]
+    c1 = [cc[0], cc[1], cc[2]]
+    if ib >= 0 {
+        a1[ib] = a1[ib] + 1
+    }
+    if kd >= 0 {
+        c1[kd] = c1[kd] + 1
+    }
+    g00 = iv_get(V, (iv_bidx(ca[0], ca[1], ca[2], Ey, Ez) * nf + iv_bidx(cc[0], cc[1], cc[2], Fy, Fz)) * M1)
+    val = g00
+    if ib >= 0 and kd < 0 {
+        g10 = iv_get(V, (iv_bidx(a1[0], a1[1], a1[2], Ey, Ez) * nf + iv_bidx(cc[0], cc[1], cc[2], Fy, Fz)) * M1)
+        val = iv_add(g10, iv_mul(AB, g00))
+    }
+    if ib < 0 and kd >= 0 {
+        g01 = iv_get(V, (iv_bidx(ca[0], ca[1], ca[2], Ey, Ez) * nf + iv_bidx(c1[0], c1[1], c1[2], Fy, Fz)) * M1)
+        val = iv_add(g01, iv_mul(CD, g00))
+    }
+    if ib >= 0 and kd >= 0 {
+        g10 = iv_get(V, (iv_bidx(a1[0], a1[1], a1[2], Ey, Ez) * nf + iv_bidx(cc[0], cc[1], cc[2], Fy, Fz)) * M1)
+        g01 = iv_get(V, (iv_bidx(ca[0], ca[1], ca[2], Ey, Ez) * nf + iv_bidx(c1[0], c1[1], c1[2], Fy, Fz)) * M1)
+        g11 = iv_get(V, (iv_bidx(a1[0], a1[1], a1[2], Ey, Ez) * nf + iv_bidx(c1[0], c1[1], c1[2], Fy, Fz)) * M1)
+        # (a+1|c+1) + CD (a+1|c) + AB (a|c+1) + AB CD (a|c)
+        val = iv_add(iv_add(g11, iv_mul(CD, g10)), iv_add(iv_mul(AB, g01), iv_mul(iv_mul(AB, CD), g00)))
+    }
+    return iv_mul(val, iv_mul(iv_get(P1, r1 / 2 + 4), iv_get(P2, r2 / 2 + 4)))
+}
+
+#| `(ij|kl)` for AOs `i, j, k, l` by `method` (0 McMurchie-Davidson,
+#| 1 Obara-Saika), summed over primitive quartets.
+def iv_eri_ao(atoms: Arr, shells: Arr, prims: Arr, CN: Arr, AOT: Arr, i, j, k, l, method) {
+    P1 = iv_pair_data(atoms, shells, prims, CN, AOT, i, j)
+    P2 = iv_pair_data(atoms, shells, prims, CN, AOT, k, l)
+    ca = iv_powers(AOT, i)
+    cb = iv_powers(AOT, j)
+    cc = iv_powers(AOT, k)
+    cd = iv_powers(AOT, l)
+    W1 = iv_pd_w(ca, cb)
+    W2 = iv_pd_w(cc, cd)
+    A = [atoms[round(AOT[i, AO_ATOM]), AT_X], atoms[round(AOT[i, AO_ATOM]), AT_Y], atoms[round(AOT[i, AO_ATOM]), AT_Z]]
+    C = [atoms[round(AOT[k, AO_ATOM]), AT_X], atoms[round(AOT[k, AO_ATOM]), AT_Y], atoms[round(AOT[k, AO_ATOM]), AT_Z]]
+    acc = [0.0, 0.0]
+    for r1 to len(P1) / W1 {
+        for r2 to len(P2) / W2 {
+            g = iv_md_eri_prim(P1, r1 * W1, ca, cb, P2, r2 * W2, cc, cd)
+            if method == 1 {
+                g = iv_os_eri_prim(P1, r1 * W1, ca, cb, A, P2, r2 * W2, cc, cd, C)
+            }
+            acc = iv_add(acc, g)
+        }
+    }
+    return acc
+}
+
+#| Enclosures of the packed-8 ERIs at the indices `idx`, `[m, 2]`, by `method`.
+def iv_eri_at(atoms: Arr, shells: Arr, prims: Arr, idx: Arr, method) {
+    CN = iv_cn(shells, prims)
+    AOT = bas_ao_table(shells)
+    m = len(idx)
+    out = zeros(m, 2)
+    for s to m {
+        q = iv_unpack8(idx[s])
+        g = iv_eri_ao(atoms, shells, prims, CN, AOT, q[0], q[1], q[2], q[3], method)
+        out[s, 0] = g[0]
+        out[s, 1] = g[1]
+    }
+    return out
+}
+
+#| Interval stage members `(atoms, shells, prims) -> [m, 2]` over the ERI sample.
+def iv_md_eri_sample(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_eri_at(atoms, shells, prims, iv_eri_sample_idx(shells), 0)
+}
+def iv_os_eri_sample(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return iv_eri_at(atoms, shells, prims, iv_eri_sample_idx(shells), 1)
+}
+
+# ---- tests --------------------------------------------------------------------------
+
+#| The first `N` entries of any array, flat (row-major).
+def iv_flat(A: Arr, N) {
+    ix = zeros(N)
+    for i to N {
+        ix[i] = i
+    }
+    return take(A, ix)
+}
+
+#| Test helper: for flat interval tables `A`, `B` (N entries each) and point
+#| values `R`: `[entries where A and B do not overlap, entries of R outside
+#| A or B, widest relative width]`.
+def iv_t_compare(A: Arr, B: Arr, R: Arr, N) {
+    Af = iv_flat(A, 2 * N)
+    Bf = iv_flat(B, 2 * N)
+    Rf = iv_flat(R, N)
+    disjoint = 0
+    outside = 0
+    worst = 0.0
+    for k to N {
+        IA = iv_get(Af, k)
+        IB = iv_get(Bf, k)
+        disjoint = disjoint + 1 - iv_overlaps(IA, IB)
+        outside = outside + 2 - iv_contains(IA, Rf[k]) - iv_contains(IB, Rf[k])
+        worst = max(worst, max(iv_relw(IA), iv_relw(IB)))
+    }
+    return [disjoint, outside, worst]
+}
+
+test "packed-8 indices unpack to the pair they were packed from" {
+    iv_ubad = 0
+    iv_un = 7
+    for iv_ui to iv_un {
+        for iv_uj to iv_ui + 1 {
+            for iv_uk to iv_un {
+                for iv_ul to iv_uk + 1 {
+                    if es_pair(iv_ui, iv_uj) >= es_pair(iv_uk, iv_ul) {
+                        iv_uq = iv_unpack8(es_index8(iv_ui, iv_uj, iv_uk, iv_ul))
+                        iv_ubad = iv_ubad + abs(iv_uq[0] - iv_ui) + abs(iv_uq[1] - iv_uj) + abs(iv_uq[2] - iv_uk) + abs(iv_uq[3] - iv_ul)
+                    }
+                }
+            }
+        }
+    }
+    assert_near(iv_ubad, 0, 0)
+    iv_us = iv_sample8(es_len8(iv_un), IV_ERI_SEED, IV_ERI_NSAMPLE)
+    iv_usum = 0
+    for iv_ua to len(iv_us) {
+        for iv_ub to iv_ua {
+            if iv_us[iv_ua] == iv_us[iv_ub] {
+                iv_usum = iv_usum + 1
+            }
+        }
+    }
+    assert_near(iv_usum, 0, 0)
+}
+
+test "the interval coefficients hold bas_contract's and give unit self-overlap" {
+    iv_csh = watersto3g_shells()
+    iv_cpr = watersto3g_prims()
+    iv_cCN = iv_cn(iv_csh, iv_cpr)
+    iv_ccn = bas_contract(iv_csh, iv_cpr)
+    for iv_cp to WATERSTO3G_NPRIMTOT {
+        iv_cI = iv_get(iv_cCN, iv_cp)
+        # the point coefficient is rounded once at the end, so it may sit one
+        # ulp outside; it must be within 4e-16 of the enclosure
+        assert_lt(iv_outside(iv_cI, iv_ccn[iv_cp]), 4.0e-16 * abs(iv_ccn[iv_cp]))
+        assert_lt(iv_relw(iv_cI), 1.0e-14)
+    }
+    # the diagonal of S encloses 1 for every AO
+    iv_cS = iv_md_s(watersto3g_atoms(), iv_csh, iv_cpr)
+    for iv_ci to WATERSTO3G_NAO_CART {
+        assert_near(iv_contains([iv_cS[iv_ci, iv_ci, 0], iv_cS[iv_ci, iv_ci, 1]], 1.0), 1, 0)
+    }
+}
+
+test "water STO-3G S, T, V by MD and OS overlap everywhere and stay narrow" {
+    iv_wat = watersto3g_atoms()
+    iv_wsh = watersto3g_shells()
+    iv_wpr = watersto3g_prims()
+    iv_wn = WATERSTO3G_NAO_CART
+    iv_wmd = iv_flat(iv_one_all(iv_wat, iv_wsh, iv_wpr, 0), 2 * IV_ONE_LEN * iv_wn * iv_wn)
+    iv_wos = iv_flat(iv_one_all(iv_wat, iv_wsh, iv_wpr, 1), 2 * IV_ONE_LEN * iv_wn * iv_wn)
+    iv_wdis = 0
+    iv_wrel = 0.0
+    iv_wabs = 0.0
+    for iv_wk to IV_ONE_LEN * iv_wn * iv_wn {
+        iv_wA = iv_get(iv_wmd, iv_wk)
+        iv_wB = iv_get(iv_wos, iv_wk)
+        iv_wdis = iv_wdis + 1 - iv_overlaps(iv_wA, iv_wB)
+        if iv_wA[0] > 0.0 or iv_wA[1] < 0.0 {
+            iv_wrel = max(iv_wrel, max(iv_relw(iv_wA), iv_relw(iv_wB)))
+        }
+        else {
+            # zero by symmetry: an enclosure around 0
+            iv_wabs = max(iv_wabs, max(iv_width(iv_wA), iv_width(iv_wB)))
+        }
+    }
+    assert_near(iv_wdis, 0, 0)
+    # measured 5.0e-12, at T between O 1s and an H 1s (-0.00256, a sum
+    # that cancels); most entries are near 2e-14
+    assert_lt(iv_wrel, 1.0e-11)
+    # measured 3.9e-15 absolute
+    assert_lt(iv_wabs, 1.0e-14)
+}
+
+test "the enclosures hold 40-digit values and exclude PySCF's where PySCF rounds off" {
+    iv_xat = watersto3g_atoms()
+    iv_xsh = watersto3g_shells()
+    iv_xpr = watersto3g_prims()
+    iv_xV = iv_one_all(iv_xat, iv_xsh, iv_xpr, 0)
+    iv_xW = iv_one_all(iv_xat, iv_xsh, iv_xpr, 1)
+    iv_xA = [iv_xV[IV_V, 4, 1, 0], iv_xV[IV_V, 4, 1, 1]]
+    iv_xB = [iv_xW[IV_V, 4, 1, 0], iv_xW[IV_V, 4, 1, 1]]
+    # V(O pz, O 2s) by McMurchie-Davidson in mpmath at 40 digits (scratch
+    # script, not committed): -0.2235045224420866896094334
+    assert_near(iv_contains(iv_xA, -0.22350452244208668), 1, 0)
+    assert_near(iv_contains(iv_xB, -0.22350452244208668), 1, 0)
+    # PySCF's value is 8.3e-15 from it, outside both enclosures
+    iv_xref = watersto3g_v_unit()
+    assert_near(iv_contains(iv_xA, iv_xref[4, 1]), 0, 0)
+    assert_near(iv_contains(iv_xB, iv_xref[4, 1]), 0, 0)
+    assert_lt(abs(iv_xref[4, 1] + 0.22350452244208668), 1.0e-14)
+    # the same for two ERIs, packed 362 and 389, where PySCF is 6.4e-16 and
+    # 1.3e-15 from the 40-digit values
+    iv_xidx = [362, 389]
+    iv_xmd = iv_eri_at(iv_xat, iv_xsh, iv_xpr, iv_xidx, 0)
+    iv_xos = iv_eri_at(iv_xat, iv_xsh, iv_xpr, iv_xidx, 1)
+    iv_xmp = [0.024242314322332415, 0.0787293857862046]
+    iv_xG = watersto3g_eri8_cart()
+    iv_xout = 0
+    for iv_xs to len(iv_xidx) {
+        assert_near(iv_contains([iv_xmd[iv_xs, 0], iv_xmd[iv_xs, 1]], iv_xmp[iv_xs]), 1, 0)
+        assert_near(iv_contains([iv_xos[iv_xs, 0], iv_xos[iv_xs, 1]], iv_xmp[iv_xs]), 1, 0)
+        iv_xout = iv_xout + 2 - iv_contains([iv_xmd[iv_xs, 0], iv_xmd[iv_xs, 1]], iv_xG[iv_xidx[iv_xs]]) - iv_contains([iv_xos[iv_xs, 0], iv_xos[iv_xs, 1]], iv_xG[iv_xidx[iv_xs]])
+        assert_lt(abs(iv_xG[iv_xidx[iv_xs]] - iv_xmp[iv_xs]), 5.0e-15)
+    }
+    # measured: PySCF is outside at least one of the two at each
+    assert_true(iv_xout >= 2)
+}
+
+test "water STO-3G: 20 sampled ERIs by MD and OS overlap and stay narrow" {
+    iv_eat = watersto3g_atoms()
+    iv_esh = watersto3g_shells()
+    iv_epr = watersto3g_prims()
+    iv_en = 20
+    iv_eidx = iv_sample8(WATERSTO3G_ERI8_CART_LEN, 17, iv_en)
+    iv_emd = iv_eri_at(iv_eat, iv_esh, iv_epr, iv_eidx, 0)
+    iv_eos = iv_eri_at(iv_eat, iv_esh, iv_epr, iv_eidx, 1)
+    iv_eref = take(watersto3g_eri8_cart(), iv_eidx)
+    iv_ec = iv_t_compare(iv_emd, iv_eos, iv_eref, len(iv_eidx))
+    assert_near(iv_ec[0], 0, 0)
+    assert_lt(iv_ec[2], 1.0e-11)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

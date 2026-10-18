@@ -1,0 +1,159 @@
+# Self-consistent field solution of the nonlinear Poisson-Boltzmann equation for
+# Debye screening of a charged wall in a plasma: the classical mean-field cousin of
+# the Hartree-Fock SCF (scf_sto3g.viv).
+#
+# Electrons Boltzmann-distribute in the potential, n_e = n0 exp(e phi / kT); the
+# ions are a fixed neutralizing background n0. Poisson then closes on phi alone.
+# In normalized units (length in Debye lengths lambda_D, psi = e phi / kT):
+#
+#     psi''(x) = exp(psi) - 1                        nonlinear Poisson-Boltzmann
+#     psi(0) = psi_w  (wall),   psi(L) = 0  (bulk)
+#
+# Solved by a self-consistent loop, exactly like an SCF: from the current potential
+# build the charge density, solve Poisson for a new potential, repeat to a fixed
+# point. The linear (Debye) part of the density is folded into the operator, so the
+# source is only the small nonlinear remainder g(psi) = exp(psi) - 1 - psi -- this
+# is the "preconditioning" that makes the fixed point contract (alpha = 1, no damping).
+#
+#     ( d^2/dx^2 - 1 ) psi_new = g(psi_old),     g = exp(psi) - 1 - psi
+#
+# Validation:
+#   * The FIRST iterate (from psi = 0) has g = 0, so it solves the *linear* Debye
+#     equation psi'' = psi. Its exact solution is psi_w exp(-x): pure screening,
+#     decay length = one lambda_D. The numeric first iterate matches it to O(h^2).
+#   * The CONVERGED profile solves the full nonlinear equation; its 1/e decay length
+#     is still ~1 lambda_D, and the SCF residual falls monotonically to ~1e-10.
+
+def absf(x) {
+    if x < 0.0 {
+        return -x
+    }
+    return x
+}
+
+# Solve a tridiagonal system (sub a, diag d, super c, rhs r) of size m into x (Thomas).
+def thomas(a, d, c, r, x, m) {
+    cp = zeros(m)
+    dp = zeros(m)
+    cp[0] = c[0] / d[0]
+    dp[0] = r[0] / d[0]
+    for i to m {
+        if i > 0 {
+            denom = d[i] - a[i] * cp[i - 1.0]
+            cp[i] = c[i] / denom
+            dp[i] = (r[i] - a[i] * dp[i - 1.0]) / denom
+        }
+    }
+    x[m - 1.0] = dp[m - 1.0]
+    for k to m {
+        i = m - 2.0 - k
+        if i >= 0.0 {
+            x[i] = dp[i] - cp[i] * x[i + 1.0]
+        }
+    }
+}
+
+# --- discretization + physical setup ---
+N = 120           # grid intervals over the domain
+L = 12.0          # domain length in Debye lengths
+psi_w = -1.0      # wall potential in units of kT/e (a probe biased below the plasma)
+h = L / N
+m = N - 1.0       # interior unknowns (nodes 1 .. N-1); psi[0], psi[N] are fixed
+
+psi = zeros(N + 1.0)
+psi[0] = psi_w    # Dirichlet wall; psi[N] stays 0 (bulk, quasineutral)
+
+# Preconditioned tridiagonal operator h^2 (d^2/dx^2 - 1): sub = super = 1,
+# diag = -(2 + h^2). Strictly diagonally dominant, so Thomas is stable.
+a = zeros(m)
+d = zeros(m)
+c = zeros(m)
+r = zeros(m)
+xint = zeros(m)
+for j to m {
+    a[j] = 1.0
+    c[j] = 1.0
+    d[j] = -(2.0 + h * h)
+}
+
+psi_lin = zeros(N + 1.0)   # snapshot of the first (linear-Debye) iterate
+
+# --- the self-consistent loop ---
+tol = 1.0e-10
+iters = 0.0
+for it to 200 {
+    # 1. nonlinear source from the CURRENT potential: g = exp(psi) - 1 - psi
+    for j to m {
+        node = j + 1.0
+        g = exp(psi[node]) - 1.0 - psi[node]
+        r[j] = h * h * g
+    }
+    r[0] = r[0] - psi_w        # psi[0] known: its coefficient moves to the RHS
+    # 2. solve the field equation for the new interior potential
+    thomas(a, d, c, r, xint, m)
+    # 3. update and measure the change (the SCF residual)
+    resid = 0.0
+    for j to m {
+        node = j + 1.0
+        diff = absf(xint[j] - psi[node])
+        if diff > resid {
+            resid = diff
+        }
+        psi[node] = xint[j]
+    }
+    # snapshot the first iterate: it solved the LINEAR Debye equation exactly
+    if it == 0.0 {
+        for i to N + 1.0 {
+            psi_lin[i] = psi[i]
+        }
+    }
+    iters = it + 1.0
+    show resid
+    if resid < tol {
+        break
+    }
+}
+
+# --- validation 1: first iterate vs the analytic linear solution psi_w exp(-x) ---
+err2 = 0.0
+for i to N + 1.0 {
+    xe = i * h
+    ana = psi_w * exp(-xe)
+    dlt = psi_lin[i] - ana
+    err2 += dlt * dlt
+}
+rms_linear = sqrt(err2 / (N + 1.0))
+
+# --- validation 2: 1/e decay length of the converged profile (should be ~1) ---
+euler = 2.718281828459045
+target = psi_w / euler
+xdecay = 0.0
+found = false
+for i to N + 1.0 {
+    if not found {
+        if psi[i] >= target {
+            x0 = (i - 1.0) * h
+            p0 = psi[i - 1.0]
+            p1 = psi[i]
+            xdecay = x0 + h * (target - p0) / (p1 - p0)
+            found = true
+        }
+    }
+}
+
+# --- how far the nonlinear solution departs from linear screening ---
+maxdev = 0.0
+for i to N + 1.0 {
+    dv = absf(psi[i] - psi_lin[i])
+    if dv > maxdev {
+        maxdev = dv
+    }
+}
+
+show iters       # SCF iterations to converge
+show rms_linear  # first-iterate vs analytic Debye  (should be ~1e-4, O(h^2))
+show xdecay      # converged 1/e screening length in lambda_D  (should be ~1)
+show maxdev      # nonlinear correction to the potential (visible, since psi_w = -1)
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

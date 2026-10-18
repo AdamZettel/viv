@@ -1,0 +1,377 @@
+# Restricted Hartree-Fock with a general McMurchie-Davidson integral engine,
+# supporting s AND p Cartesian Gaussians (extends to higher angular momentum).
+#
+# The molecule/basis below is H2 (all s) for engine validation against the
+# known s-only result -1.11671 hartree; swap the "MOLECULE / BASIS" block for
+# water to do a real p-orbital calculation.
+
+pi = 3.141592653589793
+n_prim = 3
+
+# =====================================================================
+# McMurchie-Davidson integral engine (molecule-independent).
+# =====================================================================
+
+# Boys function F_n(T) = integral_0^1 t^(2n) exp(-T t^2) dt.
+def boys_n(nn, T) {
+    if T < 1.0e-12 {
+        return 1.0 / (2.0 * nn + 1.0)
+    }
+    return simpson(fn(t) -> pow(t, 2.0 * nn) * exp(-T * t * t), 0.0, 1.0, 100)
+}
+
+# Hermite expansion coefficient E_t^{ij} (1D), exponents a,b, Qx = Ax - Bx.
+def hermite_E(i, j, t, Qx, a, b) {
+    if i < 0.0 { return 0.0 }
+    if j < 0.0 { return 0.0 }
+    if t < 0.0 { return 0.0 }
+    if t > i + j { return 0.0 }
+    p = a + b
+    if i == 0.0 {
+        if j == 0.0 {
+            mu = a * b / p
+            return exp(-mu * Qx * Qx)
+        }
+        xpb = a / p * Qx
+        return (0.5 / p * hermite_E(i, j - 1.0, t - 1.0, Qx, a, b)
+             + xpb * hermite_E(i, j - 1.0, t, Qx, a, b)
+             + (t + 1.0) * hermite_E(i, j - 1.0, t + 1.0, Qx, a, b))
+    }
+    xpa = -b / p * Qx
+    return (0.5 / p * hermite_E(i - 1.0, j, t - 1.0, Qx, a, b)
+         + xpa * hermite_E(i - 1.0, j, t, Qx, a, b)
+         + (t + 1.0) * hermite_E(i - 1.0, j, t + 1.0, Qx, a, b))
+}
+
+# Hermite Coulomb integral R_{tuv}^n.
+def hermite_R(t, u, v, nn, p, PCx, PCy, PCz, RPC2) {
+    if t == 0.0 {
+        if u == 0.0 {
+            if v == 0.0 {
+                return pow(-2.0 * p, nn) * boys_n(nn, p * RPC2)
+            }
+            res = PCz * hermite_R(t, u, v - 1.0, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+            if v > 1.0 {
+                res += (v - 1.0) * hermite_R(t, u, v - 2.0, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+            }
+            return res
+        }
+        res = PCy * hermite_R(t, u - 1.0, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+        if u > 1.0 {
+            res += (u - 1.0) * hermite_R(t, u - 2.0, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+        }
+        return res
+    }
+    res = PCx * hermite_R(t - 1.0, u, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+    if t > 1.0 {
+        res += (t - 1.0) * hermite_R(t - 2.0, u, v, nn + 1.0, p, PCx, PCy, PCz, RPC2)
+    }
+    return res
+}
+
+def overlap_1d(i, j, Qx, a, b) {
+    return hermite_E(i, j, 0.0, Qx, a, b) * sqrt(pi / (a + b))
+}
+
+# 1D kinetic energy matrix element (differentiate the ket twice).
+def kinetic_1d(i, j, Qx, a, b) {
+    term = b * (2.0 * j + 1.0) * overlap_1d(i, j, Qx, a, b)
+    term += -2.0 * b * b * overlap_1d(i, j + 2.0, Qx, a, b)
+    term += -0.5 * j * (j - 1.0) * overlap_1d(i, j - 2.0, Qx, a, b)
+    return term
+}
+
+# =====================================================================
+# Primitive integrals over two/four basis functions (reading bf data
+# by index from the globals defined in the MOLECULE/BASIS block).
+# =====================================================================
+
+def prim_overlap(a, b, mu, nu) {
+    sx = overlap_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    sy = overlap_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    sz = overlap_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    return sx * sy * sz
+}
+
+def prim_kinetic(a, b, mu, nu) {
+    sx = overlap_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    sy = overlap_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    sz = overlap_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    tx = kinetic_1d(bfL[mu], bfL[nu], bfCx[mu] - bfCx[nu], a, b)
+    ty = kinetic_1d(bfM[mu], bfM[nu], bfCy[mu] - bfCy[nu], a, b)
+    tz = kinetic_1d(bfN[mu], bfN[nu], bfCz[mu] - bfCz[nu], a, b)
+    return tx * sy * sz + sx * ty * sz + sx * sy * tz
+}
+
+def prim_nuclear(a, b, mu, nu, Cx, Cy, Cz) {
+    la = bfL[mu]
+    ma = bfM[mu]
+    na = bfN[mu]
+    lb = bfL[nu]
+    mb = bfM[nu]
+    nb = bfN[nu]
+    p = a + b
+    Px = (a * bfCx[mu] + b * bfCx[nu]) / p
+    Py = (a * bfCy[mu] + b * bfCy[nu]) / p
+    Pz = (a * bfCz[mu] + b * bfCz[nu]) / p
+    PCx = Px - Cx
+    PCy = Py - Cy
+    PCz = Pz - Cz
+    RPC2 = PCx * PCx + PCy * PCy + PCz * PCz
+    qx = bfCx[mu] - bfCx[nu]
+    qy = bfCy[mu] - bfCy[nu]
+    qz = bfCz[mu] - bfCz[nu]
+    val = 0.0
+    for t to la + lb + 1.0 {
+        for u to ma + mb + 1.0 {
+            for v to na + nb + 1.0 {
+                e = hermite_E(la, lb, t, qx, a, b) * hermite_E(ma, mb, u, qy, a, b) * hermite_E(na, nb, v, qz, a, b)
+                val += e * hermite_R(t, u, v, 0.0, p, PCx, PCy, PCz, RPC2)
+            }
+        }
+    }
+    return 2.0 * pi / p * val
+}
+
+def prim_eri(a, b, c, d, mu, nu, lam, sig) {
+    p = a + b
+    q = c + d
+    Px = (a * bfCx[mu] + b * bfCx[nu]) / p
+    Py = (a * bfCy[mu] + b * bfCy[nu]) / p
+    Pz = (a * bfCz[mu] + b * bfCz[nu]) / p
+    Qx = (c * bfCx[lam] + d * bfCx[sig]) / q
+    Qy = (c * bfCy[lam] + d * bfCy[sig]) / q
+    Qz = (c * bfCz[lam] + d * bfCz[sig]) / q
+    alpha = p * q / (p + q)
+    PQx = Px - Qx
+    PQy = Py - Qy
+    PQz = Pz - Qz
+    RPQ2 = PQx * PQx + PQy * PQy + PQz * PQz
+    qx1 = bfCx[mu] - bfCx[nu]
+    qy1 = bfCy[mu] - bfCy[nu]
+    qz1 = bfCz[mu] - bfCz[nu]
+    qx2 = bfCx[lam] - bfCx[sig]
+    qy2 = bfCy[lam] - bfCy[sig]
+    qz2 = bfCz[lam] - bfCz[sig]
+    val = 0.0
+    for t1 to bfL[mu] + bfL[nu] + 1.0 {
+        for u1 to bfM[mu] + bfM[nu] + 1.0 {
+            for v1 to bfN[mu] + bfN[nu] + 1.0 {
+                e1 = hermite_E(bfL[mu], bfL[nu], t1, qx1, a, b) * hermite_E(bfM[mu], bfM[nu], u1, qy1, a, b) * hermite_E(bfN[mu], bfN[nu], v1, qz1, a, b)
+                for t2 to bfL[lam] + bfL[sig] + 1.0 {
+                    for u2 to bfM[lam] + bfM[sig] + 1.0 {
+                        for v2 to bfN[lam] + bfN[sig] + 1.0 {
+                            e2 = hermite_E(bfL[lam], bfL[sig], t2, qx2, c, d) * hermite_E(bfM[lam], bfM[sig], u2, qy2, c, d) * hermite_E(bfN[lam], bfN[sig], v2, qz2, c, d)
+                            sign = pow(-1.0, t2 + u2 + v2)
+                            val += e1 * e2 * sign * hermite_R(t1 + t2, u1 + u2, v1 + v2, 0.0, alpha, PQx, PQy, PQz, RPQ2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 2.0 * pow(pi, 2.5) / (p * q * sqrt(p + q)) * val
+}
+
+# Contracted integrals: sum primitive integrals weighted by contraction coeffs.
+def cont_overlap(mu, nu) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            s += bfC[mu, ka] * bfC[nu, kb] * prim_overlap(bfA[mu, ka], bfA[nu, kb], mu, nu)
+        }
+    }
+    return s
+}
+
+def cont_kinetic(mu, nu) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            s += bfC[mu, ka] * bfC[nu, kb] * prim_kinetic(bfA[mu, ka], bfA[nu, kb], mu, nu)
+        }
+    }
+    return s
+}
+
+def cont_nuclear(mu, nu, Cx, Cy, Cz) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            s += bfC[mu, ka] * bfC[nu, kb] * prim_nuclear(bfA[mu, ka], bfA[nu, kb], mu, nu, Cx, Cy, Cz)
+        }
+    }
+    return s
+}
+
+def cont_eri(mu, nu, lam, sig) {
+    s = 0.0
+    for ka to n_prim {
+        for kb to n_prim {
+            for kc to n_prim {
+                for kd to n_prim {
+                    coef = bfC[mu, ka] * bfC[nu, kb] * bfC[lam, kc] * bfC[sig, kd]
+                    s += coef * prim_eri(bfA[mu, ka], bfA[nu, kb], bfA[lam, kc], bfA[sig, kd], mu, nu, lam, sig)
+                }
+            }
+        }
+    }
+    return s
+}
+
+# =====================================================================
+# MOLECULE / BASIS: H2 in STO-3G (all s).  Validation target: -1.11671.
+# =====================================================================
+n_atoms = 2
+n_basis = 2
+n_occ = 1
+R_HH = 1.4
+
+atom_x = zeros(n_atoms)
+atom_y = zeros(n_atoms)
+atom_z = zeros(n_atoms)
+atom_Z = zeros(n_atoms)
+atom_z[1] = R_HH
+atom_Z[0] = 1.0
+atom_Z[1] = 1.0
+
+bfL = zeros(n_basis)
+bfM = zeros(n_basis)
+bfN = zeros(n_basis)
+bfCx = zeros(n_basis)
+bfCy = zeros(n_basis)
+bfCz = zeros(n_basis)
+bfCz[1] = R_HH
+bfA = zeros(n_basis, n_prim)
+bfC = zeros(n_basis, n_prim)
+
+h_a0 = 3.42525091
+h_a1 = 0.62391373
+h_a2 = 0.16885540
+h_c0 = 0.15432897
+h_c1 = 0.53532814
+h_c2 = 0.44463454
+
+for i to n_basis {
+    bfA[i, 0] = h_a0
+    bfA[i, 1] = h_a1
+    bfA[i, 2] = h_a2
+    # s primitive normalization (2a/pi)^{3/4}, folded into the coefficient.
+    bfC[i, 0] = h_c0 * pow(2.0 * h_a0 / pi, 0.75)
+    bfC[i, 1] = h_c1 * pow(2.0 * h_a1 / pi, 0.75)
+    bfC[i, 2] = h_c2 * pow(2.0 * h_a2 / pi, 0.75)
+}
+
+# Normalize each contracted basis function so <mu|mu> = 1.
+for i to n_basis {
+    nrm = 1.0 / sqrt(cont_overlap(i, i))
+    for k to n_prim {
+        bfC[i, k] = bfC[i, k] * nrm
+    }
+}
+
+# =====================================================================
+# Build integrals and run the SCF.
+# =====================================================================
+S = zeros(n_basis, n_basis)
+H_core = zeros(n_basis, n_basis)
+for mu to n_basis {
+    for nu to n_basis {
+        S[mu, nu] = cont_overlap(mu, nu)
+        v = 0.0
+        for atom to n_atoms {
+            v += -atom_Z[atom] * cont_nuclear(mu, nu, atom_x[atom], atom_y[atom], atom_z[atom])
+        }
+        H_core[mu, nu] = cont_kinetic(mu, nu) + v
+    }
+}
+
+eri = zeros(n_basis, n_basis, n_basis, n_basis)
+parallel for mu to n_basis {
+    for nu to n_basis {
+        for lam to n_basis {
+            for sig to n_basis {
+                eri[mu, nu, lam, sig] = cont_eri(mu, nu, lam, sig)
+            }
+        }
+    }
+}
+
+# Symmetric orthogonalization X = S^{-1/2}.
+s_vals = zeros(n_basis)
+s_vecs = zeros(n_basis, n_basis)
+eig_sym(S, s_vals, s_vecs)
+D_inv_sqrt = zeros(n_basis, n_basis)
+for i to n_basis {
+    D_inv_sqrt[i, i] = 1.0 / sqrt(s_vals[i])
+}
+X = s_vecs @ D_inv_sqrt @ transpose(s_vecs)
+
+# Nuclear repulsion.
+E_nuc = 0.0
+for i to n_atoms {
+    for j to n_atoms {
+        if j > i {
+            dx = atom_x[i] - atom_x[j]
+            dy = atom_y[i] - atom_y[j]
+            dz = atom_z[i] - atom_z[j]
+            E_nuc += atom_Z[i] * atom_Z[j] / sqrt(dx * dx + dy * dy + dz * dz)
+        }
+    }
+}
+
+# SCF.
+P = zeros(n_basis, n_basis)
+E_total = 0.0
+for iter to 100 {
+    G = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            g = 0.0
+            for lam to n_basis {
+                for sig to n_basis {
+                    g += P[lam, sig] * (eri[mu, nu, lam, sig] - 0.5 * eri[mu, lam, nu, sig])
+                }
+            }
+            G[mu, nu] = g
+        }
+    }
+    F = H_core + G
+    Fp = transpose(X) @ F @ X
+    eps_vals = zeros(n_basis)
+    Cp = zeros(n_basis, n_basis)
+    eig_sym(Fp, eps_vals, Cp)
+    C = X @ Cp
+    P_new = zeros(n_basis, n_basis)
+    for mu to n_basis {
+        for nu to n_basis {
+            psum = 0.0
+            for a to n_occ {
+                psum += C[mu, a] * C[nu, a]
+            }
+            P_new[mu, nu] = 2.0 * psum
+        }
+    }
+    E_elec = 0.0
+    for mu to n_basis {
+        for nu to n_basis {
+            E_elec += 0.5 * P_new[mu, nu] * (H_core[mu, nu] + F[mu, nu])
+        }
+    }
+    E_total = E_elec + E_nuc
+    delta = 0.0
+    for mu to n_basis {
+        for nu to n_basis {
+            dd = P_new[mu, nu] - P[mu, nu]
+            if dd < 0.0 { dd = -dd }
+            if dd > delta { delta = dd }
+        }
+    }
+    P = P_new
+    if delta < 1.0e-9 { break }
+}
+
+show E_total
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

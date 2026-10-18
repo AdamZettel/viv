@@ -1,0 +1,744 @@
+# An RV32IM simulator: fetch a 32-bit word at pc, decode it into an
+# instruction, execute it, repeat.
+#
+# The machine is the 32 integer registers x0..x31, a pc and a byte-addressed
+# memory. The encodings and semantics follow "The RISC-V Instruction Set
+# Manual, Volume I: Unprivileged ISA" (version 20191213), chapter 2 (RV32I),
+# chapter 7 (M: multiply and divide) and chapter 24 (the opcode map). An `ecall` asks the environment for a
+# service: a7 = 93 exits with the code in a0 (Linux's number, which the
+# riscv-tests suites use too) and a7 = 1 prints a0 as a signed integer
+# (the print_int of the RARS and SPIM simulators).
+
+from rv32.bits import WORD, pow2, wrap, signed, bits, sext, and32, or32, xor32
+
+NUM_REGS: Int = 32
+MEM_BYTES: Int = 262144         # 256 KiB: code and data from address 0, the stack down from the top
+BYTE: Int = 256                 # values of one byte
+HALF: Int = 65536               # values of a halfword
+INSTR_BYTES: Int = 4            # every RV32I instruction is one 32-bit word
+
+# register numbers the environment uses (the standard calling convention)
+REG_RA: Int = 1
+REG_SP: Int = 2
+REG_A0: Int = 10
+REG_A7: Int = 17
+
+# ecall services
+SYS_PRINT_INT: Int = 1
+SYS_EXIT: Int = 93
+
+# the major opcodes, bits 6..0 of every instruction (manual, table 24.1)
+OPC_LOAD: Int = 0x03
+OPC_MISC_MEM: Int = 0x0f
+OPC_OP_IMM: Int = 0x13
+OPC_AUIPC: Int = 0x17
+OPC_STORE: Int = 0x23
+OPC_OP: Int = 0x33
+OPC_LUI: Int = 0x37
+OPC_BRANCH: Int = 0x63
+OPC_JALR: Int = 0x67
+OPC_JAL: Int = 0x6f
+OPC_SYSTEM: Int = 0x73
+
+F7_ALT: Int = 0x20              # funct7 of sub and sra (and imm[11:5] of srai)
+F7_MULDIV: Int = 0x01           # funct7 of the M extension
+SHAMT_BITS: Int = 5             # a shift amount is the low five bits
+
+enum Op {
+    Lui
+    Auipc
+    Jal
+    Jalr
+    Beq
+    Bne
+    Blt
+    Bge
+    Bltu
+    Bgeu
+    Lb
+    Lh
+    Lw
+    Lbu
+    Lhu
+    Sb
+    Sh
+    Sw
+    Addi
+    Slti
+    Sltiu
+    Xori
+    Ori
+    Andi
+    Slli
+    Srli
+    Srai
+    Add
+    Sub
+    Sll
+    Slt
+    Sltu
+    Xor
+    Srl
+    Sra
+    Or
+    And
+    Mul
+    Mulh
+    Mulhsu
+    Mulhu
+    Div
+    Divu
+    Rem
+    Remu
+    Fence
+    Ecall
+    Ebreak
+    Illegal
+}
+
+#| One decoded instruction: the operation, its register numbers and its
+#| immediate, already sign-extended (0 where the format has none).
+record Instr {
+    op: Op
+    rd: Int
+    rs1: Int
+    rs2: Int
+    imm: Int
+}
+
+#| The whole machine state. Registers hold 32-bit values as unsigned Ints.
+record Machine {
+    regs: [Int]
+    mem: [Int]
+    pc: Int
+    halted: Bool
+    exit_code: Int
+    output: Str
+    steps: Int
+}
+
+#| A machine with zeroed registers and memory, the program's bytes loaded at
+#| address 0, the pc at `entry` and the stack pointer at the top of memory.
+def machine(image: [Int], entry: Int) -> Machine {
+    mem = int_zeros(MEM_BYTES)
+    for k to len(image) {
+        mem[k] = image[k]
+    }
+    regs = int_zeros(NUM_REGS)
+    regs[REG_SP] = MEM_BYTES
+    return Machine { regs: regs, mem: mem, pc: entry, halted: false, exit_code: 0, output: "", steps: 0 }
+}
+
+# ---- memory: little-endian, as RISC-V is
+
+#| Stop with a message unless addr .. addr + size - 1 is inside memory.
+def check_address(addr: Int, size: Int) {
+    if addr < 0 or addr + size > MEM_BYTES {
+        stop(f"memory access at {addr} outside 0 .. {MEM_BYTES - 1}")
+    }
+}
+
+#| The unsigned value of `size` bytes at addr, the lowest byte first.
+def load(m: Machine, addr: Int, size: Int) -> Int {
+    check_address(addr, size)
+    v: Int = 0
+    for k to size reversed {
+        v = v * BYTE + m.mem[addr + k]
+    }
+    return v
+}
+
+#| Write the low `size` bytes of v at addr, the lowest byte first.
+def store(m: Machine, addr: Int, size: Int, v: Int) {
+    check_address(addr, size)
+    rest = wrap(v)
+    for k to size {
+        m.mem[addr + k] = rest % BYTE
+        rest = rest // BYTE
+    }
+}
+
+#| Fetch the 32-bit instruction word at addr.
+def load_word(m: Machine, addr: Int) -> Int {
+    return load(m, addr, INSTR_BYTES)
+}
+
+# ---- decode: the fields of a word, then the operation they name
+
+#| Which operation a word encodes, from its opcode, funct3 and funct7 fields.
+def decode_op(w: Int) -> Op {
+    opcode = bits(w, 0, 7)
+    f3 = bits(w, 12, 3)
+    f7 = bits(w, 25, 7)
+    if opcode == OPC_LUI {
+        return Op.Lui
+    }
+    if opcode == OPC_AUIPC {
+        return Op.Auipc
+    }
+    if opcode == OPC_JAL {
+        return Op.Jal
+    }
+    if opcode == OPC_JALR and f3 == 0 {
+        return Op.Jalr
+    }
+    if opcode == OPC_BRANCH {
+        return branch_op(f3)
+    }
+    if opcode == OPC_LOAD {
+        return load_op(f3)
+    }
+    if opcode == OPC_STORE {
+        return store_op(f3)
+    }
+    if opcode == OPC_OP_IMM {
+        return op_imm(f3, f7)
+    }
+    if opcode == OPC_OP {
+        return op_reg(f3, f7)
+    }
+    if opcode == OPC_MISC_MEM {
+        return Op.Fence
+    }
+    if opcode == OPC_SYSTEM and f3 == 0 {
+        if bits(w, 20, 12) == 0 {
+            return Op.Ecall
+        }
+        if bits(w, 20, 12) == 1 {
+            return Op.Ebreak
+        }
+    }
+    return Op.Illegal
+}
+
+#| The branch a B-type word's funct3 names.
+def branch_op(f3: Int) -> Op {
+    if f3 == 0 {
+        return Op.Beq
+    }
+    if f3 == 1 {
+        return Op.Bne
+    }
+    if f3 == 4 {
+        return Op.Blt
+    }
+    if f3 == 5 {
+        return Op.Bge
+    }
+    if f3 == 6 {
+        return Op.Bltu
+    }
+    if f3 == 7 {
+        return Op.Bgeu
+    }
+    return Op.Illegal
+}
+
+#| The load a load word's funct3 names.
+def load_op(f3: Int) -> Op {
+    if f3 == 0 {
+        return Op.Lb
+    }
+    if f3 == 1 {
+        return Op.Lh
+    }
+    if f3 == 2 {
+        return Op.Lw
+    }
+    if f3 == 4 {
+        return Op.Lbu
+    }
+    if f3 == 5 {
+        return Op.Lhu
+    }
+    return Op.Illegal
+}
+
+#| The store a store word's funct3 names.
+def store_op(f3: Int) -> Op {
+    if f3 == 0 {
+        return Op.Sb
+    }
+    if f3 == 1 {
+        return Op.Sh
+    }
+    if f3 == 2 {
+        return Op.Sw
+    }
+    return Op.Illegal
+}
+
+#| The register-immediate operations. The shifts keep funct7 in imm[11:5].
+def op_imm(f3: Int, f7: Int) -> Op {
+    if f3 == 0 {
+        return Op.Addi
+    }
+    if f3 == 1 and f7 == 0 {
+        return Op.Slli
+    }
+    if f3 == 2 {
+        return Op.Slti
+    }
+    if f3 == 3 {
+        return Op.Sltiu
+    }
+    if f3 == 4 {
+        return Op.Xori
+    }
+    if f3 == 5 and f7 == 0 {
+        return Op.Srli
+    }
+    if f3 == 5 and f7 == F7_ALT {
+        return Op.Srai
+    }
+    if f3 == 6 {
+        return Op.Ori
+    }
+    if f3 == 7 {
+        return Op.Andi
+    }
+    return Op.Illegal
+}
+
+#| The register-register operations: funct3 picks the operation, funct7
+#| picks between add and sub, srl and sra.
+def op_reg(f3: Int, f7: Int) -> Op {
+    if f7 == 0 {
+        if f3 == 0 {
+            return Op.Add
+        }
+        if f3 == 1 {
+            return Op.Sll
+        }
+        if f3 == 2 {
+            return Op.Slt
+        }
+        if f3 == 3 {
+            return Op.Sltu
+        }
+        if f3 == 4 {
+            return Op.Xor
+        }
+        if f3 == 5 {
+            return Op.Srl
+        }
+        if f3 == 6 {
+            return Op.Or
+        }
+        if f3 == 7 {
+            return Op.And
+        }
+    }
+    if f7 == F7_MULDIV {
+        return muldiv_op(f3)
+    }
+    if f7 == F7_ALT and f3 == 0 {
+        return Op.Sub
+    }
+    if f7 == F7_ALT and f3 == 5 {
+        return Op.Sra
+    }
+    return Op.Illegal
+}
+
+#| The M extension: funct3 picks one of the eight (manual, chapter 7).
+def muldiv_op(f3: Int) -> Op {
+    if f3 == 0 {
+        return Op.Mul
+    }
+    if f3 == 1 {
+        return Op.Mulh
+    }
+    if f3 == 2 {
+        return Op.Mulhsu
+    }
+    if f3 == 3 {
+        return Op.Mulhu
+    }
+    if f3 == 4 {
+        return Op.Div
+    }
+    if f3 == 5 {
+        return Op.Divu
+    }
+    if f3 == 6 {
+        return Op.Rem
+    }
+    return Op.Remu
+}
+
+#| The immediate of each format, sign-extended (manual, figure 2.4).
+def imm_i(w: Int) -> Int {
+    return sext(bits(w, 20, 12), 12)
+}
+
+#| The S-type immediate: stores.
+def imm_s(w: Int) -> Int {
+    return sext(bits(w, 25, 7) * pow2(5) + bits(w, 7, 5), 12)
+}
+
+#| The B-type immediate: a branch's pc-relative offset.
+def imm_b(w: Int) -> Int {
+    v = bits(w, 31, 1) * pow2(12) + bits(w, 7, 1) * pow2(11) + bits(w, 25, 6) * pow2(5) + bits(w, 8, 4) * pow2(1)
+    return sext(v, 13)
+}
+
+#| The U-type immediate: the upper 20 bits, low 12 zero.
+def imm_u(w: Int) -> Int {
+    return sext(bits(w, 12, 20), 20) * pow2(12)
+}
+
+#| The J-type immediate: jal's pc-relative offset.
+def imm_j(w: Int) -> Int {
+    v = bits(w, 31, 1) * pow2(20) + bits(w, 12, 8) * pow2(12) + bits(w, 20, 1) * pow2(11) + bits(w, 21, 10) * pow2(1)
+    return sext(v, 21)
+}
+
+#| A word decoded: the operation, the three register fields and the
+#| immediate of the operation's format.
+def decode(w: Int) -> Instr {
+    op = decode_op(w)
+    opcode = bits(w, 0, 7)
+    imm: Int = 0
+    if opcode == OPC_OP_IMM or opcode == OPC_LOAD or opcode == OPC_JALR {
+        imm = imm_i(w)
+    }
+    if opcode == OPC_STORE {
+        imm = imm_s(w)
+    }
+    if opcode == OPC_BRANCH {
+        imm = imm_b(w)
+    }
+    if opcode == OPC_LUI or opcode == OPC_AUIPC {
+        imm = imm_u(w)
+    }
+    if opcode == OPC_JAL {
+        imm = imm_j(w)
+    }
+    return Instr { op: op, rd: bits(w, 7, 5), rs1: bits(w, 15, 5), rs2: bits(w, 20, 5), imm: imm }
+}
+
+#| The mnemonic of an operation, as the assembler spells it.
+def op_name(op: Op) -> Str {
+    match op {
+        Lui => { return "lui" }
+        Auipc => { return "auipc" }
+        Jal => { return "jal" }
+        Jalr => { return "jalr" }
+        Beq => { return "beq" }
+        Bne => { return "bne" }
+        Blt => { return "blt" }
+        Bge => { return "bge" }
+        Bltu => { return "bltu" }
+        Bgeu => { return "bgeu" }
+        Lb => { return "lb" }
+        Lh => { return "lh" }
+        Lw => { return "lw" }
+        Lbu => { return "lbu" }
+        Lhu => { return "lhu" }
+        Sb => { return "sb" }
+        Sh => { return "sh" }
+        Sw => { return "sw" }
+        Addi => { return "addi" }
+        Slti => { return "slti" }
+        Sltiu => { return "sltiu" }
+        Xori => { return "xori" }
+        Ori => { return "ori" }
+        Andi => { return "andi" }
+        Slli => { return "slli" }
+        Srli => { return "srli" }
+        Srai => { return "srai" }
+        Add => { return "add" }
+        Sub => { return "sub" }
+        Sll => { return "sll" }
+        Slt => { return "slt" }
+        Sltu => { return "sltu" }
+        Xor => { return "xor" }
+        Srl => { return "srl" }
+        Sra => { return "sra" }
+        Or => { return "or" }
+        And => { return "and" }
+        Mul => { return "mul" }
+        Mulh => { return "mulh" }
+        Mulhsu => { return "mulhsu" }
+        Mulhu => { return "mulhu" }
+        Div => { return "div" }
+        Divu => { return "divu" }
+        Rem => { return "rem" }
+        Remu => { return "remu" }
+        Fence => { return "fence" }
+        Ecall => { return "ecall" }
+        Ebreak => { return "ebreak" }
+        Illegal => { return "illegal" }
+    }
+    return ""
+}
+
+#| The kind of work an operation does, for instruction-mix counts: alu,
+#| muldiv, load, store, branch, jump or system.
+def op_class(op: Op) -> Str {
+    match op {
+        Lb | Lh | Lw | Lbu | Lhu => { return "load" }
+        Sb | Sh | Sw => { return "store" }
+        Beq | Bne | Blt | Bge | Bltu | Bgeu => { return "branch" }
+        Jal | Jalr => { return "jump" }
+        Mul | Mulh | Mulhsu | Mulhu | Div | Divu | Rem | Remu => { return "muldiv" }
+        Fence | Ecall | Ebreak | Illegal => { return "system" }
+        _ => { return "alu" }
+    }
+    return ""
+}
+
+# ---- execute
+
+#| Write v into register rd; x0 stays zero.
+def set_reg(m: Machine, rd: Int, v: Int) {
+    if rd != 0 {
+        m.regs[rd] = wrap(v)
+    }
+}
+
+#| 1 when the condition holds, else 0: what slt and its kin write.
+def flag(c: Bool) -> Int {
+    if c {
+        return 1
+    }
+    return 0
+}
+
+#| a shifted left by s bits, kept to 32 bits.
+def shift_left(a: Int, s: Int) -> Int {
+    return wrap(a * pow2(s % pow2(SHAMT_BITS)))
+}
+
+#| a shifted right by s bits, zeros coming in from the top.
+def shift_right(a: Int, s: Int) -> Int {
+    return a // pow2(s % pow2(SHAMT_BITS))
+}
+
+#| a shifted right by s bits, copies of the sign bit coming in: floor
+#| division of the signed value by 2^s.
+def shift_right_arith(a: Int, s: Int) -> Int {
+    return wrap(signed(a) // pow2(s % pow2(SHAMT_BITS)))
+}
+
+#| The upper 32 bits of the 64-bit product of two unsigned words. The full
+#| product can pass 2^63, beyond Int, so a is split into 16-bit halves:
+#| a b = (a_hi 2^16 + a_lo) b, and each partial product stays under 2^48.
+def mul_high_unsigned(a: Int, b: Int) -> Int {
+    a_hi = a // pow2(16)
+    a_lo = a % pow2(16)
+    return (a_hi * b + (a_lo * b) // pow2(16)) // pow2(16)
+}
+
+#| Signed division that rounds toward zero, as C and RISC-V do; Viv's //
+#| rounds toward minus infinity.
+def div_toward_zero(a: Int, b: Int) -> Int {
+    q = abs(a) // abs(b)
+    if (a < 0) != (b < 0) {
+        return -q
+    }
+    return q
+}
+
+#| The M extension on words a and b. Division by zero does not trap: the
+#| quotient is all ones and the remainder is the dividend; the one
+#| overflow, -2^31 / -1, gives -2^31 and remainder 0 (manual, table 7.1).
+def muldiv(op: Op, a: Int, b: Int) -> Int {
+    sa = signed(a)
+    sb = signed(b)
+    match op {
+        Mul => { return wrap(sa * sb) }
+        Mulh => { return wrap((sa * sb) // WORD) }
+        Mulhsu => { return wrap((sa * b) // WORD) }
+        Mulhu => { return mul_high_unsigned(a, b) }
+        Div => {
+            if sb == 0 {
+                return WORD - 1
+            }
+            return wrap(div_toward_zero(sa, sb))
+        }
+        Divu => {
+            if b == 0 {
+                return WORD - 1
+            }
+            return a // b
+        }
+        Rem => {
+            if sb == 0 {
+                return a
+            }
+            return wrap(sa - sb * div_toward_zero(sa, sb))
+        }
+        Remu => {
+            if b == 0 {
+                return a
+            }
+            return a % b
+        }
+        _ => { stop("muldiv: not an M-extension operation") }
+    }
+    return 0
+}
+
+#| The value of an arithmetic or logic operation on a and b (b is rs2's
+#| value or the immediate); the register-immediate forms share the code of
+#| their register-register twins.
+def alu(op: Op, a: Int, b: Int) -> Int {
+    match op {
+        Add | Addi => { return wrap(a + b) }
+        Sub => { return wrap(a - b) }
+        Sll | Slli => { return shift_left(a, b) }
+        Slt | Slti => { return flag(signed(a) < signed(b)) }
+        Sltu | Sltiu => { return flag(a < b) }
+        Xor | Xori => { return xor32(a, b) }
+        Srl | Srli => { return shift_right(a, b) }
+        Sra | Srai => { return shift_right_arith(a, b) }
+        Or | Ori => { return or32(a, b) }
+        And | Andi => { return and32(a, b) }
+        _ => { stop("alu: not an arithmetic operation") }
+    }
+    return 0
+}
+
+#| Does the branch op jump, for register values a and b?
+def branch_taken(op: Op, a: Int, b: Int) -> Bool {
+    match op {
+        Beq => { return a == b }
+        Bne => { return a != b }
+        Blt => { return signed(a) < signed(b) }
+        Bge => { return signed(a) >= signed(b) }
+        Bltu => { return a < b }
+        Bgeu => { return a >= b }
+        _ => { stop("branch_taken: not a branch") }
+    }
+    return false
+}
+
+#| The environment call: a7 names the service, a0 is its argument.
+def environment_call(m: Machine) -> Machine {
+    mine = m
+    service = m.regs[REG_A7]
+    if service == SYS_EXIT {
+        mine.halted = true
+        mine.exit_code = signed(m.regs[REG_A0])
+    }
+    else if service == SYS_PRINT_INT {
+        mine.output = m.output + str(signed(m.regs[REG_A0])) + "\n"
+    }
+    else {
+        stop(f"ecall: unknown service {service} in a7")
+    }
+    return mine
+}
+
+#| Execute one decoded instruction on the machine; the result has pc moved
+#| on (to the next word, or to the target of a jump or a taken branch).
+def execute(m: Machine, ins: Instr) -> Machine {
+    #: the operands: the two source registers and the immediate as a 32-bit word
+    a = m.regs[ins.rs1]
+    b = m.regs[ins.rs2]
+    imm = wrap(ins.imm)
+    next_pc = wrap(m.pc + INSTR_BYTES)
+    mine = m
+
+    match ins.op {
+        Lui => { set_reg(m, ins.rd, imm) }
+        Auipc => { set_reg(m, ins.rd, m.pc + imm) }
+        Jal => {
+            set_reg(m, ins.rd, next_pc)
+            next_pc = wrap(m.pc + imm)
+        }
+        Jalr => {
+            #: the target's lowest bit is cleared; the link is written after a is read
+            target = wrap(a + imm)
+            target = target - target % 2
+            set_reg(m, ins.rd, next_pc)
+            next_pc = target
+        }
+        Beq | Bne | Blt | Bge | Bltu | Bgeu => {
+            if branch_taken(ins.op, a, b) {
+                next_pc = wrap(m.pc + imm)
+            }
+        }
+        Lb => { set_reg(m, ins.rd, sext(load(m, wrap(a + imm), 1), 8)) }
+        Lh => { set_reg(m, ins.rd, sext(load(m, wrap(a + imm), 2), 16)) }
+        Lw => { set_reg(m, ins.rd, load(m, wrap(a + imm), 4)) }
+        Lbu => { set_reg(m, ins.rd, load(m, wrap(a + imm), 1)) }
+        Lhu => { set_reg(m, ins.rd, load(m, wrap(a + imm), 2)) }
+        Sb => { store(m, wrap(a + imm), 1, b) }
+        Sh => { store(m, wrap(a + imm), 2, b) }
+        Sw => { store(m, wrap(a + imm), 4, b) }
+        Addi | Slti | Sltiu | Xori | Ori | Andi | Slli | Srli | Srai => {
+            set_reg(m, ins.rd, alu(ins.op, a, imm))
+        }
+        Add | Sub | Sll | Slt | Sltu | Xor | Srl | Sra | Or | And => {
+            set_reg(m, ins.rd, alu(ins.op, a, b))
+        }
+        Mul | Mulh | Mulhsu | Mulhu | Div | Divu | Rem | Remu => {
+            set_reg(m, ins.rd, muldiv(ins.op, a, b))
+        }
+        Fence => { next_pc = next_pc }
+        Ecall => { mine = environment_call(m) }
+        Ebreak => { mine.halted = true }
+        Illegal => { stop(f"illegal instruction {load_word(m, m.pc)} at pc {m.pc}") }
+    }
+
+    mine.pc = next_pc
+    mine.steps = m.steps + 1
+    return mine
+}
+
+#| One instruction: fetch the word at pc, decode it, execute it.
+def step(m: Machine) -> Machine {
+    word = load_word(m, m.pc)
+    return execute(m, decode(word))
+}
+
+#| Run until the program exits or `limit` instructions have run.
+def run(m: Machine, limit: Int) -> Machine {
+    while not m.halted and m.steps < limit {
+        m = step(m)
+    }
+    return m
+}
+
+test "addi, add and an exit through ecall" {
+    #: addi a0, x0, 5 / addi a1, x0, 37 / add a0, a0, a1 / addi a7, x0, 93 / ecall
+    words: [Int] = [0x00500513, 0x02500593, 0x00b50533, 0x05d00893, 0x00000073]
+    image = int_zeros(len(words) * INSTR_BYTES)
+    for k to len(words) {
+        for j to INSTR_BYTES {
+            image[k * INSTR_BYTES + j] = bits(words[k], 8 * j, 8)
+        }
+    }
+    m = run(machine(image, 0), 100)
+    assert_true(m.halted)
+    assert_true(m.exit_code == 42)
+    assert_true(m.steps == 5)
+}
+
+test "multiply and divide, edge cases from the manual's table 7.1" {
+    big = WORD - 1                  # -1 as a word
+    min_int = pow2(31)              # -2^31 as a word
+    assert_true(muldiv(Op.Mulhu, big, big) == WORD - 2)         # (2^32-1)^2 = 2^64 - 2^33 + 1
+    assert_true(muldiv(Op.Mulh, big, big) == 0)                 # (-1)(-1) = 1
+    assert_true(muldiv(Op.Mulhsu, big, big) == big)             # (-1)(2^32-1) < 0
+    assert_true(muldiv(Op.Div, wrap(-7), 2) == wrap(-3))        # toward zero, not -4
+    assert_true(muldiv(Op.Rem, wrap(-7), 2) == wrap(-1))
+    assert_true(muldiv(Op.Div, 5, 0) == big)
+    assert_true(muldiv(Op.Rem, 5, 0) == 5)
+    assert_true(muldiv(Op.Div, min_int, big) == min_int)
+    assert_true(muldiv(Op.Rem, min_int, big) == 0)
+}
+
+test "decoding the immediates of each format" {
+    assert_true(imm_i(0xfff00513) == -1)            # addi a0, x0, -1
+    assert_true(imm_s(0xfe112e23) == -4)            # sw x1, -4(x2)
+    assert_true(imm_b(0xfe000ee3) == -4)            # beq x0, x0, -4
+    assert_true(imm_j(0xffdff06f) == -4)            # jal x0, -4
+    assert_true(imm_u(0x12345537) == 0x12345000)    # lui a0, 0x12345
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

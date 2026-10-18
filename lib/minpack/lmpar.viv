@@ -1,0 +1,364 @@
+###
+post: MINPACK's lmpar, the Levenberg-Marquardt parameter for a trust radius
+agent: claude
+
+A port of `lmpar.f` from netlib MINPACK (lib/minpack/ref). The explanation
+is in lib/minpack/lmpar.intent. Indices count from 0 (`ipvt` holds 0-based
+column numbers); the Fortran's `par` is an in-out argument, and here the new
+value is returned instead.
+
+Used with `import minpack.lmpar`.
+###
+
+from minpack.qrsolv import qrsolv
+from minpack.enorm import DWARF, enorm
+
+# The constants of lmpar.f's data statement (the Fortran's names in
+# parentheses).
+#
+# A step whose scaled length |D p| is within this fraction of delta is
+# accepted: lmpar solves the secular equation only this loosely (p1).
+LMPAR_TOL = 0.1
+# When the gradient J^T f is zero, the upper bound is DWARF / min(delta,
+# LMPAR_PARU_DELTA): a positive number, finite for any delta (p1).
+LMPAR_PARU_DELTA = 0.1
+# A par of 0 in the iteration restarts at max(DWARF, LMPAR_PAR_RESTART *
+# paru), a small fraction of the upper bound (p001).
+LMPAR_PAR_RESTART = 0.001
+# The most par values lmpar tries before it returns the last (the literal
+# 10 in lmpar.f).
+LMPAR_MAXITER = 10
+
+def lmpar(n, r: Arr, ipvt: Arr, diag: Arr, qtb: Arr, delta, par, x: Arr, sdiag: Arr, wa1: Arr, wa2: Arr) {
+    step gauss_newton {
+        nsing = n
+        for j to n {
+            wa1[j] = qtb[j]
+            if r[j, j] == 0.0 and nsing == n {
+                nsing = j
+            }
+            if nsing < n {
+                wa1[j] = 0.0
+            }
+        }
+        for kk to nsing {
+            j = nsing - 1 - kk
+            wa1[j] = wa1[j] / r[j, j]
+            temp = wa1[j]
+            for i to j {
+                wa1[i] = wa1[i] - r[i, j] * temp
+            }
+        }
+        for j to n {
+            l = ipvt[j]
+            x[l] = wa1[j]
+        }
+    }
+    iter = 0
+    step gn_length {
+        for j to n {
+            wa2[j] = diag[j] * x[j]
+        }
+        dxnorm = enorm(n, wa2)
+        fp = dxnorm - delta
+    }
+    # read by the debug lens (lmpar.debug)
+    parl = 0.0
+    paru = 0.0
+    if fp > LMPAR_TOL * delta {
+        step lower {
+            parl = 0.0
+            if nsing >= n {
+                for j to n {
+                    l = ipvt[j]
+                    wa1[j] = diag[l] * (wa2[l] / dxnorm)
+                }
+                for j to n {
+                    sum = 0.0
+                    for i to j {
+                        sum = sum + r[i, j] * wa1[i]
+                    }
+                    wa1[j] = (wa1[j] - sum) / r[j, j]
+                }
+                temp = enorm(n, wa1)
+                parl = ((fp / delta) / temp) / temp
+            }
+        }
+        step upper {
+            for j to n {
+                sum = 0.0
+                for i to j + 1 {
+                    sum = sum + r[i, j] * qtb[i]
+                }
+                l = ipvt[j]
+                wa1[j] = sum / diag[l]
+            }
+            gnorm = enorm(n, wa1)
+            paru = gnorm / delta
+            if paru == 0.0 {
+                paru = DWARF / min(delta, LMPAR_PARU_DELTA)
+            }
+        }
+        step start {
+            par = max(par, parl)
+            par = min(par, paru)
+            if par == 0.0 {
+                par = gnorm / dxnorm
+            }
+        }
+        while true {
+            iter = iter + 1
+            step evaluate {
+                if par == 0.0 {
+                    par = max(DWARF, LMPAR_PAR_RESTART * paru)
+                }
+                temp = sqrt(par)
+                for j to n {
+                    wa1[j] = temp * diag[j]
+                }
+                qrsolv(n, r, ipvt, wa1, qtb, x, sdiag, wa2)
+                for j to n {
+                    wa2[j] = diag[j] * x[j]
+                }
+                dxnorm = enorm(n, wa2)
+                temp = fp
+                fp = dxnorm - delta
+            }
+            if abs(fp) <= LMPAR_TOL * delta or (parl == 0.0 and fp <= temp and temp < 0.0) or iter == LMPAR_MAXITER {
+                break
+            }
+            step newton {
+                for j to n {
+                    l = ipvt[j]
+                    wa1[j] = diag[l] * (wa2[l] / dxnorm)
+                }
+                for j to n {
+                    wa1[j] = wa1[j] / sdiag[j]
+                    temp = wa1[j]
+                    for ii to n - j - 1 {
+                        i = j + 1 + ii
+                        wa1[i] = wa1[i] - r[i, j] * temp
+                    }
+                }
+                temp = enorm(n, wa1)
+                parc = ((fp / delta) / temp) / temp
+            }
+            step bracket {
+                if fp > 0.0 {
+                    parl = max(parl, par)
+                }
+                if fp < 0.0 {
+                    paru = min(paru, par)
+                }
+            }
+            step improve {
+                par = max(parl, par + parc)
+            }
+        }
+    }
+    step finish {
+        if iter == 0 {
+            par = 0.0
+        }
+    }
+    return par
+}
+
+# ---- tests --------------------------------------------------------------
+
+# The 3 x 3 example of the tests: an upper triangle R, no pivoting, unit
+# scaling, and Q^T f.
+#~ test
+def lp_r() {
+    return [[2.0, 1.0, 0.5], [0.0, 1.0, 0.3], [0.0, 0.0, 0.25]]
+}
+
+#~ test
+def lp_qtb() {
+    return [1.0, 2.0, 3.0]
+}
+
+# lmpar on the example, with R in the top of an (n + 1) x n array, as lmder
+# hands it over; lmpar's step for trust radius delta goes into x and its par
+# is returned.
+#~ test
+def lp_case(delta, x: Arr) {
+    R = lp_r()
+    n = len(R)
+    r = zeros(n + 1, n)
+    for i to n {
+        for j to n {
+            r[i, j] = R[i, j]
+        }
+    }
+    ipvt = zeros(n)
+    diag = zeros(n)
+    for j to n {
+        ipvt[j] = j
+        diag[j] = 1.0
+    }
+    sdiag = zeros(n)
+    wa1 = zeros(n)
+    wa2 = zeros(n)
+    return lmpar(n, r, ipvt, diag, lp_qtb(), delta, 0.0, x, sdiag, wa1, wa2)
+}
+
+test "a trust radius longer than the Gauss-Newton step gives par = 0 and that step" {
+    x = zeros(len(lp_qtb()))
+    par = lp_case(100.0, x)
+    assert_near(par, 0.0, 0.0)
+    # R x = Q^T f by back substitution: x3 = 3 / 0.25 = 12, x2 = 2 - 0.3 x3, x1 = (1 - x2 - 0.5 x3) / 2
+    assert_near(x[2], 12.0, 1.0e-14)
+    assert_near(x[1], 2.0 - 0.3 * 12.0, 1.0e-14)
+    assert_near(x[0], (1.0 - x[1] - 0.5 * 12.0) / 2.0, 1.0e-14)
+}
+
+test "a short trust radius gives par > 0 and a step within 10% of the radius" {
+    x = zeros(len(lp_qtb()))
+    par = lp_case(1.0, x)
+    assert_gt(par, 0.0)
+    plen = sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2])
+    assert_lt(abs(plen - 1.0), 0.1)
+}
+
+# The step for the example at par = lam from the normal equations
+# (R^T R + lam I) p = R^T qtb, independently of lmpar, into p.
+#~ test
+def lp_normal_step(lam, p: Arr) {
+    R = lp_r()
+    N = transpose(R) @ R
+    for i to len(R) {
+        N[i, i] = N[i, i] + lam
+    }
+    rhs = transpose(R) @ lp_qtb()
+    lin_solve(N, rhs, p)
+    return 0
+}
+
+test "the step lmpar returns solves (R^T R + par I) x = R^T Q^T f" {
+    x = zeros(len(lp_qtb()))
+    par = lp_case(1.0, x)
+    y = zeros(len(x))
+    lp_normal_step(par, y)
+    for j to len(x) {
+        assert_near(x[j], y[j], 1.0e-13)
+    }
+}
+
+# ||D p(lambda)|| for the example (D = I), from the normal equations.
+#~ test
+def lp_length(lam) {
+    p = zeros(len(lp_qtb()))
+    lp_normal_step(lam, p)
+    return sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2])
+}
+
+test "3 x 3 example, delta 1: Gauss-Newton length 12.2, lower bound 0.65 < root 1.47 < upper bound, lmpar stops at par 1.34" {
+    delta = 1.0
+    # the root, by bisection: the length falls as par grows; 200 halvings
+    # of [0, 100] go far past double precision
+    nbisect = 200
+    lo = 0.0
+    hi = 100.0
+    for it to nbisect {
+        mid = 0.5 * (lo + hi)
+        if lp_length(mid) > delta {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    root = 0.5 * (lo + hi)
+    # the upper bound: ||R^T qtb|| / delta
+    g = transpose(lp_r()) @ lp_qtb()
+    upper = sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]) / delta
+    # the lower bound: one Newton step for 1/||D p|| = 1/delta from par = 0,
+    # with the derivative taken by a central difference
+    h = 1.0e-6
+    len0 = lp_length(0.0)
+    slope = (1.0 / lp_length(h) - 1.0 / lp_length(0.0 - h)) / (2.0 * h)
+    lower = (1.0 / delta - 1.0 / len0) / slope
+    assert_lt(lower, root)
+    assert_lt(root, upper)
+    assert_near(len0, 12.225, 0.001)
+    assert_near(lower, 0.655, 0.001)
+    assert_near(root, 1.4675, 0.0001)
+    # lmpar lands within 10% of delta, near the root
+    x = zeros(len(lp_qtb()))
+    par = lp_case(delta, x)
+    assert_near(par, 1.338, 0.001)
+    assert_lt(abs(lp_length(par) - delta), LMPAR_TOL * delta)
+}
+
+# The example again with its columns permuted and scaled: ipvt and D as lmder
+# hands them over. J P = Q R with P from ipvt, so for A = R P^T,
+# J^T J = A^T A and J^T f = A^T Q^T f.
+#~ test
+def lp_perm() {
+    return [2.0, 0.0, 1.0]
+}
+
+#~ test
+def lp_diag() {
+    return [1.5, 0.5, 2.0]
+}
+
+# lmpar on the permuted, scaled example for trust radius delta; its step goes into x.
+#~ test
+def lp_case_scaled(delta, x: Arr) {
+    R = lp_r()
+    n = len(R)
+    r = zeros(n + 1, n)
+    for i to n {
+        for j to n {
+            r[i, j] = R[i, j]
+        }
+    }
+    return lmpar(n, r, lp_perm(), lp_diag(), lp_qtb(), delta, 0.0, x, zeros(n), zeros(n), zeros(n))
+}
+
+# The solution y of (J^T J + lam D^T D) y = J^T f for the permuted, scaled
+# example, from the normal equations by lin_solve, independently of lmpar.
+#~ test
+def lp_normal_step_scaled(lam, y: Arr) {
+    R = lp_r()
+    n = len(R)
+    ipvt = lp_perm()
+    d = lp_diag()
+    A = zeros(n, n)
+    for i to n {
+        for j to n {
+            A[i, ipvt[j]] = R[i, j]
+        }
+    }
+    N = transpose(A) @ A
+    for i to n {
+        N[i, i] = N[i, i] + lam * d[i] * d[i]
+    }
+    rhs = transpose(A) @ lp_qtb()
+    lin_solve(N, rhs, y)
+    return 0
+}
+
+test "with pivoting and scaling, the step lmpar returns solves (J^T J + par D^T D) x = J^T f to rounding for every radius tried" {
+    radii = [100.0, 3.0, 1.0, 0.3, 0.01]
+    npos = 0.0
+    for k to len(radii) {
+        x = zeros(len(lp_qtb()))
+        par = lp_case_scaled(radii[k], x)
+        if par > 0.0 {
+            npos = npos + 1.0
+        }
+        y = zeros(len(x))
+        lp_normal_step_scaled(par, y)
+        for j to len(x) {
+            assert_lt(abs(x[j] - y[j]), 1.0e-12 * (1.0 + abs(y[j])))
+        }
+    }
+    # the largest radius takes the Gauss-Newton step; the others need par > 0
+    assert_near(npos, len(radii) - 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: LicenseRef-Minpack
+# SPDX-FileCopyrightText: 1999 University of Chicago (Argonne National Laboratory, MINPACK)
+# SPDX-FileCopyrightText: 2026 The Viv authors

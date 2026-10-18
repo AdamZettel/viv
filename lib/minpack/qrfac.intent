@@ -1,0 +1,94 @@
+module lib/minpack/qrfac  documents every variable
+  QR factorization with column pivoting, $A P = Q R$: $Q$ orthogonal (its
+  columns are perpendicular unit vectors, so it changes no lengths), $R$ upper
+  triangular, $P$ a permutation of the columns. lmder factors each Jacobian
+  with it; $R$ and $Q^\top f$ are all the rest of the algorithm needs.
+
+  Column pivoting means: at stage j, of the columns not yet used, bring the
+  one with the most norm left (outside the rows already fixed) to position
+  j. Columns that are nearly combinations of earlier ones end up last, with
+  small diagonal entries, which is how lmpar detects a rank-deficient
+  Jacobian.
+
+  The Householder loop is the hot part and has no steps inside it, so the
+  story shows qrfac as one call with two phases. The lines of that loop are
+  explained under `how` below.
+
+qrfac  @7cfa59a5
+  what  Factor the m x n matrix a in place as $A P = Q R$. Afterwards the
+        strict upper triangle of a holds $R$'s off-diagonal entries, rdiag
+        holds $R$'s diagonal, the lower trapezoid holds the Householder
+        vectors that define $Q$, ipvt holds $P$ (column j of $A P$ is column
+        ipvt[j] of $A$), and acnorm holds the norms of $A$'s columns.
+  how   For each column j in turn: (pivot) swap in the remaining column with
+        the largest norm below row j; (reflect) turn that column into the
+        Householder vector $u$ of the reflection that sends it to a multiple
+        of $e_j$; (apply) apply the same reflection to every later column;
+        (downdate) shrink each later column's norm estimate by the entry
+        just moved into row j. The estimate loses accuracy once most of the
+        column's norm has been removed, so it is then recomputed from the
+        column. Each of those is a loop without steps, explained below as
+        one line.
+  why   Householder reflections keep the factorization backward stable, and
+        R carries the scaling information lmder uses: the diagonal of R
+        comes out in decreasing size here
+        [test "pivoting puts the diagonal of R in order of decreasing size"],
+        and Q R rebuilt from the output reproduces the permuted matrix to
+        rounding [test "Q R reproduces the matrix with its columns permuted by ipvt"].
+  a       $A$  the matrix, factored in place; below the diagonal, column j
+          ends up holding the Householder vector $u$ of stage j
+  ipvt    $\pi$  the column order: column j of $A P$ is column $\pi_j$ of $A$
+  rdiag   $\nu$  during the loop, the norm of each unused column below the rows
+          already reduced (an estimate, kept up to date by the downdate);
+          afterwards $R$'s diagonal
+  acnorm  $c$  the norm of each column of $A$, before any reduction
+  wa      $w$  the norm of each column when $\nu_k$ was last computed from
+          scratch, the reference the downdate is judged against
+  ajnorm  $\alpha$  the norm of column j from row j down, given the sign of
+          its diagonal entry
+  col     $v$  a copy of the part of a column enorm is asked for: Viv has no
+          view of part of a column, where the Fortran passes a(j,j)
+  m       $m$  the number of rows of $A$
+  n       $n$  the number of columns of $A$
+  pivot   whether to pivot columns; lmder always asks for pivoting
+  minmn   the number of reflections, $\min(m, n)$
+  j       the stage: the column being reduced, 0 to minmn - 1
+  i       a row index
+  ii      how far down column j a loop has gone, from row j
+  kk      how far past column j a loop has gone
+  kmax    the column with the most norm left, among those seen so far
+  k       a column after j: first a candidate for the pivot
+  k@reduce#2  the old ipvt[j], held while the two entries of ipvt swap
+  k@reduce#3  a column after j, which the reflection is applied to
+  temp    an entry of column j, held while two columns swap
+  temp@reduce#2  $u^\top a_k / u_j$  how much of $u$ to subtract from column k
+  temp@reduce#3  $A_{jk} / \nu_k$  the share of column k's remaining norm that the
+          reflection moved into row j
+  sum     $u^\top a_k$  the Householder vector dotted with column k, from row j down
+  q       $\nu_k / w_k$  how much of column k's norm is left, compared with when it
+          was last computed from the column
+
+  norms          the norm of every column of A (acnorm), the starting estimates rdiag and wa, and ipvt = the identity order
+    why            Pivoting needs each column's norm, and lmder uses these norms as its scaling $D$ on the first pass.
+    run            In the first factorization the column norms are {acnorm}.
+  reduce         for each column j: pivot the largest remaining column in, build its Householder reflection, apply it to the later columns and downdate their norms
+    why            A Householder reflection maps one vector onto a multiple of a coordinate axis while changing no lengths. Applied to column j from row j down, it zeroes that column below the diagonal; after n of them, what is left above the diagonal is $R$, and the product of the reflections is $Q^\top$.
+    $$ \begin{gathered} u = \frac{a}{\pm \lVert a \rVert} + e_j, \qquad H = I - \frac{u\, u^\top}{u_j}, \\ H a = \mp \lVert a \rVert\, e_j \end{gathered} $$  [test "Q R reproduces the matrix with its columns permuted by ipvt"]
+    how            The sign is chosen so that $u_j \ge 1$: adding two numbers of the same sign loses nothing to cancellation. $H$ is its own inverse, and the column stores $u$ in place of the zeros it made.
+    run            In the first factorization the pivot order is {ipvt} and $R$ has diagonal {rdiag}.
+    = kmax#2       pivot: of the columns not used yet, the one with the most norm left below row j
+      > Swapping it into place first puts the largest remaining piece of $A$ on the diagonal, so the diagonal of $R$ comes out in decreasing size and a nearly dependent column ends up last, with a small diagonal entry.
+    = ajnorm       the length of column j from row j down, the part the reflection acts on
+    = ajnorm#2     give it the sign of the diagonal entry, so that the next line adds two numbers of the same sign
+    = a#3          divide the column by $\alpha$: it now has length 1 and a positive entry in row j
+    = a#4          add 1 to that entry: the column is now the Householder vector $u$, with $u_j \ge 1$
+      $$ u = \frac{a}{\alpha} + e_j $$
+    = sum#2        the dot product of $u$ with a later column k, down from row j: one line, however long the column
+    = a#5          apply the reflection to column k: subtract its component along $u$, scaled by $u_j$
+      $$ a_k \gets a_k - \frac{u^\top a_k}{u_j}\, u $$  [test "Q R reproduces the matrix with its columns permuted by ipvt"]
+    = rdiag#2      downdate column k's norm: the reflection moved $A_{jk}$ into row j, and lengths are preserved, so what is left below row j is the rest by Pythagoras
+      $$ \nu_k \gets \nu_k \sqrt{1 - \left( A_{jk} / \nu_k \right)^2} $$
+    = rdiag#3      recompute the norm from the column when the downdate has cancelled away most of it
+      > The test $0.05\, (\nu_k / w_k)^2 \le \varepsilon$ fires once the estimate has fallen below about $\sqrt{20 \varepsilon} \approx 7 \times 10^{-8}$ of the norm it was last computed from; by then the subtraction under the square root has lost most of its digits.
+    = rdiag#4      the diagonal entry of $R$: the reflection sends the column to $-\alpha\, e_j$
+      $$ r_{jj} = -\alpha $$  [hold "the first diagonal entry of R is as large as the norm of the column pivoted first"]

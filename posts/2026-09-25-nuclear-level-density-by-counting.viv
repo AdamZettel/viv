@@ -1,0 +1,258 @@
+###
+post: Nuclear level density, by counting the states
+date: 2026-09-25
+kind: demo
+channel: nuclear
+tags: level density, fermi gas, partitions, combinatorics
+lane: ai
+equation: \rho(E) = p(E) \sim \frac{e^{2\sqrt{aE}}}{4\sqrt3\,E}, \qquad a = \frac{\pi^2}{6}
+summary: Put 100 fermions in equally spaced levels and count, one by one, the states with excitation energy $E$. The counts are the partition numbers $1, 1, 2, 3, 5, 7, 11, \dots$, exactly, up to $p(100) = 190569292$. They grow like Bethe's $e^{2\sqrt{aE}}$; at $E = 100$ the count is 4.4% below the leading Hardy-Ramanujan term, and the next term of the series, $-0.4433/\sqrt E$, accounts for all but 0.06% of that.
+
+The exact integers the test compares against come from Euler's
+pentagonal-number recurrence, a different computation from this program's
+state count; `posts/refs/nuclear-level-density-by-counting.py` also enumerates the states of 12
+fermions by brute force and finds the same numbers. The asymptotic ratios are
+evaluated there in 30-digit arithmetic.
+###
+
+###
+## What a level density is for
+
+A heavy nucleus hit by a neutron is left with a few MeV of excitation energy,
+and at that energy it has an enormous number of states. How many states lie
+near a given energy, the *level density* $\rho(E)$, decides how likely it is
+to capture the neutron, and what it emits as it cools down. It enters
+reaction rates in reactors and in the formation of the heavy elements in
+stars.
+
+The simplest model that gives the right trend is a *Fermi gas*: nucleons that
+do not interact with each other, sitting in single-particle levels. Here the
+levels are equally spaced, at energies $0, 1, 2, \dots$ in units of the
+spacing, and there is one kind of fermion, so each level holds at most one
+particle (the Pauli principle). With $N$ particles the lowest state fills
+levels $0$ to $N - 1$. An excited state is any other choice of $N$ occupied
+levels, and its *excitation energy* $E$ is its total energy minus the lowest
+one. The program counts the choices at each $E$.
+
+## Counting without listing
+
+Listing every choice of 100 levels out of 200 is out of the question, so the
+program counts with a table: after deciding about levels $0$ to $k$, entry
+$A[n, x]$ is the number of ways to have placed $n$ particles in them with
+energy $x$ above the least possible for $n$ particles, $n(n-1)/2$. Level $k$
+is either empty, which changes nothing, or holds the $n$-th particle, which
+adds $k$ to the energy and $k - (n - 1)$ to $x$. Going through $n$ from the
+top down uses each level at most once. Energies above $E_\text{max}$ are never
+needed, and no level above $N - 1 + E_\text{max}$ can be occupied at those
+energies, so the table is small.
+###
+
+# the number of fermions, and the highest excitation energy counted
+N = 100
+E_MAX = 100
+
+#| The number of states of n_part fermions in equally spaced levels, one
+#| per level, at each excitation energy 0 to e_max: a table over (particles
+#| placed, energy above the minimum), updated level by level.
+def count_states(n_part, e_max) {
+    levels = n_part + e_max
+    A = zeros(n_part + 1.0, e_max + 1.0)
+    A[0, 0] = 1.0
+    for k to levels {
+        top = min(k + 1.0, n_part)
+        for i to top {
+            n = top - i
+            shift = k - (n - 1.0)
+            for x to e_max + 1.0 - shift {
+                A[n, x + shift] = A[n, x + shift] + A[n - 1.0, x]
+            }
+        }
+    }
+    rho = zeros(e_max + 1.0)
+    for x to e_max + 1.0 {
+        rho[x] = A[n_part, x]
+    }
+    return rho
+}
+
+rho = count_states(N, E_MAX)
+# the levels the table goes through: 0 to N - 1 + E_MAX, the highest one a particle can reach
+N_LEVELS = N + E_MAX
+show N_LEVELS
+show rho[0]
+show rho[1]
+show rho[2]
+show rho[3]
+show rho[4]
+show rho[E_MAX]
+
+###
+The first counts can be checked by hand. $E = 0$: one state, the ground
+state. $E = 1$: one, the top particle up one level. $E = 2$: two, the top
+particle up two, or the top two particles up one each. $E = 3$: three. The
+pattern $1, 1, 2, 3, 5, \dots$ is the sequence of *partition numbers*
+$p(E)$, the number of ways to write $E$ as a sum of positive integers without
+regard to order ($4 = 3 + 1 = 2 + 2 = 2 + 1 + 1 = 1 + 1 + 1 + 1$).
+
+The reason: number the particles from the top, and let $\lambda_i$ be how
+far the $i$-th one moved up. The Pauli principle keeps them in order, which
+forces $\lambda_1 \ge \lambda_2 \ge \dots \ge 0$, and the $\lambda_i$ add up
+to $E$. So an excited state is a partition of $E$ into at most $N$ parts, and
+for $E \le N$ the limit on the number of parts never binds.
+###
+
+# p(0) to p(100), from Euler's pentagonal-number recurrence (posts/refs/nuclear-level-density-by-counting.out)
+P_EULER = [1, 1, 2, 3, 5, 7, 11, 15, 22, 30, 42, 56, 77, 101, 135, 176, 231, 297, 385, 490, 627, 792, 1002, 1255, 1575, 1958, 2436, 3010, 3718, 4565, 5604, 6842, 8349, 10143, 12310, 14883, 17977, 21637, 26015, 31185, 37338, 44583, 53174, 63261, 75175, 89134, 105558, 124754, 147273, 173525, 204226, 239943, 281589, 329931, 386155, 451276, 526823, 614154, 715220, 831820, 966467, 1121505, 1300156, 1505499, 1741630, 2012558, 2323520, 2679689, 3087735, 3554345, 4087968, 4697205, 5392783, 6185689, 7089500, 8118264, 9289091, 10619863, 12132164, 13848650, 15796476, 18004327, 20506255, 23338469, 26543660, 30167357, 34262962, 38887673, 44108109, 49995925, 56634173, 64112359, 72533807, 82010177, 92669720, 104651419, 118114304, 133230930, 150198136, 169229875, 190569292]
+
+test "every count from E = 0 to 100 is the partition number p(E), exactly" {
+    assert_near(len(P_EULER), E_MAX + 1.0, 0.0)
+    for e to E_MAX + 1.0 {
+        assert_near(rho[e], P_EULER[e], 0.0)
+    }
+}
+
+###
+## Bethe's formula
+
+Hans Bethe worked out in 1936 how a Fermi gas's level density grows:
+$\rho(E) \propto e^{2\sqrt{aE}}$, where the *level density parameter* $a$ is
+$\pi^2/6$ times the number of single-particle levels per unit energy, which
+is 1 here. Hardy and Ramanujan had found the growth of the partition numbers
+in 1918, with the prefactor:
+
+$$p(E) \approx \frac{1}{4\sqrt3\,E}\,e^{\pi\sqrt{2E/3}},$$
+
+and $\pi\sqrt{2E/3} = 2\sqrt{\pi^2 E/6}$ is Bethe's exponent with
+$a = \pi^2/6$. The two results are the same count.
+
+Before looking: the formula is only the leading term of a series. Is it
+closer at $E = 100$ or at $E = 25$, and by how much?
+###
+
+PI = 3.141592653589793
+A_LEVEL = PI * PI / 6.0
+
+#| The Hardy-Ramanujan leading term for p(E): Bethe's exp(2·√(a·E)) with
+#| a = A_LEVEL = π²/6, over 4·√3·E.
+def hardy_ramanujan(e) {
+    return exp(2.0 * sqrt(A_LEVEL * e)) / (4.0 * sqrt(3.0) * e)
+}
+
+#| The coefficient c of the next term, p(E) = HR(E)·(1 − c/√E + O(1/E)),
+#| from expanding the first term of Rademacher's series:
+#| c = √6/(2π) + π/(24·√6).
+C_NEXT = sqrt(6.0) / (2.0 * PI) + PI / (24.0 * sqrt(6.0))
+show C_NEXT
+
+E_axis = linspace(0.0, E_MAX, E_MAX + 1.0)
+hr = zeros(E_MAX + 1.0)
+ratio = zeros(E_MAX + 1.0)
+correction = zeros(E_MAX + 1.0)
+# no value at E = 0, where the formula divides by E: a gap in the figures
+gap = 0.0 / 0.0
+hr[0] = gap
+ratio[0] = gap
+correction[0] = gap
+for e to E_MAX {
+    E = e + 1.0
+    hr[E] = hardy_ramanujan(E)
+    ratio[E] = rho[E] / hr[E]
+    correction[E] = 1.0 - C_NEXT / sqrt(E)
+}
+ratio_25 = ratio[25]
+ratio_100 = ratio[E_MAX]
+gap_times_root_e = (1.0 - ratio_100) * sqrt(E_MAX)
+# how far below the leading term the count is, as a fraction of it
+below_25 = 1.0 - ratio_25
+below_100 = 1.0 - ratio_100
+show ratio_25
+show ratio_100
+show below_25
+show below_100
+show gap_times_root_e
+
+figure("States of 100 fermions in equally spaced levels", "excitation energy E (level spacings)", "number of states $\\rho(E)$")
+yscale("log")
+scatter(E_axis, rho, "counted")
+plot(E_axis, hr, "Hardy-Ramanujan: $e^{2\\sqrt{aE}}/(4\\sqrt{3}E)$")
+style("Hardy-Ramanujan: $e^{2\\sqrt{aE}}/(4\\sqrt{3}E)$", "dash s2")
+
+figure("How close the leading term is", "excitation energy E", "counted / Hardy-Ramanujan", 0.0, E_MAX, 0.75, 1.0)
+plot(E_axis, ratio, "counted / Hardy-Ramanujan")
+plot(E_axis, correction, "$1 - 0.4433/\\sqrt{E}$")
+style("$1 - 0.4433/\\sqrt{E}$", "dash s2")
+
+test "p(100) is 4.37 percent below the leading term, and p(25) is 8.73 percent below" {
+    # 30-digit values from posts/refs/nuclear-level-density-by-counting.out
+    assert_near(ratio_100, 0.9562848138458956, 1.0e-12)
+    assert_near(ratio_25, 0.9127044642577741, 1.0e-12)
+    assert_near(below_100, 1.0 - 0.9562848138458956, 1.0e-12)
+    assert_near(below_25, 1.0 - 0.9127044642577741, 1.0e-12)
+}
+
+test "and the relative gap times sqrt(E) is 0.437 at E = 100, on its way to c = 0.4433" {
+    # posts/refs/nuclear-level-density-by-counting.out: 0.4365 at E = 25, 0.4372 at 100, 0.4402 at 400,
+    # 0.4417 at 1600, 0.4425 at 6400 (exact integers)
+    assert_near(gap_times_root_e, 0.437152, 1.0e-6)
+    assert_near(C_NEXT, 0.44328797687358239, 1.0e-15)
+}
+
+test "with the next term, 1 - c / sqrt(E), the formula is within 0.0007 of the count at E = 100" {
+    # posts/refs/nuclear-level-density-by-counting.out: the remainder is 0.00136 at E = 25, 0.00061 at 100,
+    # 0.00016 at 400, 0.00004 at 1600: it falls like 1/E
+    assert_near(ratio_100, 1.0 - C_NEXT / sqrt(E_MAX), 7.0e-4)
+}
+
+###
+At $E = 25$ the count is 8.7% below the leading term and at $E = 100$ it
+is 4.4% below (`ratio_25`, `ratio_100`): four times the energy, half the
+gap.
+The relative gap $1 - p(E)/\text{HR}(E)$ times $\sqrt E$ is $0.437$ at $E = 100$
+(`gap_times_root_e`), and `posts/refs/nuclear-level-density-by-counting.py` follows it with exact integers to
+$E = 6400$, where it is $0.4425$. The limit is the coefficient of the next
+term of the asymptotic series,
+$c = \frac{\sqrt 6}{2\pi} + \frac{\pi}{24\sqrt 6} = 0.4433$ (`C_NEXT`), and
+$1 - c/\sqrt E$ is the dashed curve in the second figure. At $E = 100$ it
+misses the count by $0.0006$, and the miss falls like $1/E$.
+
+## Reading off the level density parameter
+
+An experiment measures $\rho$, not $a$, and extracts $a$ from how fast
+$\ln\rho$ grows with $\sqrt E$. The exponent alone says the slope of
+$\ln\rho$ against $\sqrt E$ is $2\sqrt a = \pi\sqrt{2/3} = 2.565$. The
+prefactor $1/E$ subtracts $2/\sqrt E$ from it. Before running: between
+$E = 81$ and $E = 100$, where $\sqrt E$ goes from $\sqrt{81} = 9$ to $\sqrt{100} = 10$, which of the two
+will the counts show?
+###
+
+# sqrt(E) goes from 9 to 10 between these two energies
+E_LOW = 81
+slope = (log(rho[E_MAX]) - log(rho[E_LOW])) / (sqrt(E_MAX) - sqrt(E_LOW))
+slope_bare = 2.0 * sqrt(A_LEVEL)
+slope_with_prefactor = slope_bare - 2.0 / (0.5 * (sqrt(E_MAX) + sqrt(E_LOW)))
+show slope
+show slope_bare
+show slope_with_prefactor
+# the a that 2 sqrt(a) = slope would give, ignoring the prefactor
+a_from_slope = 0.25 * slope * slope
+show a_from_slope
+
+test "the slope of ln rho against sqrt(E) from 81 to 100 is 2 sqrt(a) - 2 / sqrt(E) within 0.005" {
+    # posts/refs/nuclear-level-density-by-counting.out: 2.3594037480668305 from the exact p(100) and p(81)
+    assert_near(slope, 2.3594037480668305, 1.0e-12)
+    assert_near(slope, slope_with_prefactor, 0.005)
+}
+test "read without the prefactor, the slope puts a at 1.39, 15% below pi^2/6" {
+    assert_near(a_from_slope, 0.25 * 2.3594037480668305 * 2.3594037480668305, 1.0e-11)
+    assert_near(1.0 - a_from_slope / A_LEVEL, 0.154, 0.001)
+}
+
+###
+The counts give a slope of $2.359$ (`slope`), not $2.565$: taking $2\sqrt a$
+from them without the prefactor would put $a$ at $1.39$ instead of
+$\pi^2/6 = 1.645$, 15% low. With the $-2/\sqrt E$ term the prediction is
+$2.355$, within $0.005$. The prefactor matters at energies this low.
+###
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

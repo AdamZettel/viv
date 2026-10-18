@@ -1,0 +1,124 @@
+module lib/hf/eri_store
+  Storage for the electron repulsion integrals `(ij|kl)`, one copy per
+  symmetry class. The integral does not change when i and j swap, when k and
+  l swap, or when the pair ij trades places with the pair kl, so the eight
+  index orders of one value share one slot of a packed vector ("packed-8").
+  The module numbers the pairs, the slots, and reads and writes them.
+
+es_npair  @ae57469e
+  why   The packed length and every loop over pairs start from this count.
+  n   how many orbitals (basis functions)
+
+es_len8  @f65d0767
+  why   Every ERI member allocates its result with this length, and the
+        sweep drivers compare that many numbers
+        [test "the packed lengths for 19 and 13 orbitals are 18145 and 4186"].
+  n   how many orbitals (basis functions)
+  np  how many index pairs `i >= j` there are
+
+es_pair  @8b9ba817
+  why   The pairs `i >= j` numbered in order give each unordered pair one
+        index, and the same numbering applied to two pair indices gives each
+        integral's symmetry class one slot.
+  i     one orbital index
+  j     the other
+
+es_index8  @a66dddaf
+  why   Every reader of a packed vector goes through this, so all eight orders
+        of an integral land on the same slot
+        [test "the 8 index orders share one slot, and the slots cover 0 .. len-1 once"].
+  i     the first orbital of the bra pair
+  j     the second orbital of the bra pair
+  k     the first orbital of the ket pair
+  l     the second orbital of the ket pair
+  ij    the bra pair's index
+  kl    the ket pair's index
+
+es_get  @b7256b64
+  Gp    the packed vector, `[es_len8(n)]`
+  i     the first orbital of the bra pair
+  j     the second orbital of the bra pair
+  k     the first orbital of the ket pair
+  l     the second orbital of the ket pair
+
+es_pack8  @26eaa807
+  why   Tests and reference data start from dense tensors; packing reads one
+        canonical order per class and so needs the input to be symmetric
+        [test "pack and unpack round-trip exactly on a random 8-fold-symmetric tensor, n = 7"].
+  G     the dense tensor, `[n, n, n, n]`
+  n     how many orbitals
+  Gp    the packed vector being filled
+  i     the first bra orbital, the larger of the pair
+  j     the second bra orbital
+  ij    the bra pair's index
+  k     the first ket orbital, no larger than i
+  l     the second ket orbital
+  kl    the ket pair's index; only `kl <= ij` is stored
+
+es_unpack8  @45db48b7
+  why   For comparing with dense references and for code that indexes
+        `[i, j, k, l]` directly.
+  Gp    the packed vector
+  n     how many orbitals
+  G     the dense view being filled
+  i     the first orbital
+  j     the second orbital
+  ij    the bra pair's index
+  k     the third orbital
+  l     the fourth orbital
+
+es_rng  @b1b66aac
+  why   The reference data for large bases ships as checksums and seeded
+        samples, and the weights and sample positions must be the same numbers
+        the Python generator drew; Park-Miller is exact in doubles and easy to
+        reproduce in Python
+        [test "checksums and sample indices match the Python reproduction of the generator"].
+  st    the generator's state, `st[0]`, advanced in place
+
+es_checksums  @22d0b4ac
+  Gp    the packed vector
+  seed  the generator's starting state
+  st    the generator's state
+  w     the weights, one per slot, drawn in slot order
+  k     a slot
+
+es_sample_index  @377e3ccb
+  why   The reference file holds values only at these positions, so both sides
+        must draw the same ones.
+  len8  the packed length the positions fall in
+  seed  the generator's starting state
+  m     how many positions to draw
+  st    the generator's state
+  idx   the positions, `[m]`
+  k     the draw being made
+
+es_sample_gap  @26422dd6
+  Gp     the packed vector computed here
+  idx    the sampled positions
+  vals   the reference values at those positions
+
+es_sym_tensor  @37258177
+  n     how many orbitals
+  seed  the generator's starting state
+  st    the generator's state
+  x     one random number per orbital, for the symmetric sums
+  y     another per orbital, for the symmetric products
+  i     the first orbital
+  j     the second orbital
+  p     the bra pair's value, the same for (i, j) and (j, i)
+  k     the third orbital
+  l     the fourth orbital
+  q     the ket pair's value, the same for (k, l) and (l, k)
+  G     the tensor, `[n, n, n, n]`
+
+es_sym_defect  @848b15f2
+  why   Confirms that `es_sym_tensor` is symmetric before it is used to test
+        the packing.
+  G      the dense tensor
+  n      how many orbitals
+  worst  the largest disagreement so far
+  i      the first index
+  j      the second index
+  k      the third index
+  l      the fourth index
+  v      the entry in the order `[i, j, k, l]`

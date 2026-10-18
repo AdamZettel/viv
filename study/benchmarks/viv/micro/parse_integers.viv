@@ -1,0 +1,54 @@
+# Microbenchmarks: parse_integers. Reference: upstream/Microbenchmarks/julia/perf.jl
+#   function parseintperf(t)
+#       local n
+#       for i = 1:t
+#           n = rand(UInt32)
+#           s = string(n, base=16)
+#           m = parse(UInt32, s, base=16)
+#           @assert m == n
+#       end
+#       return n
+#   end
+#   @timeit parseintperf(1000) "parse_integers"
+# Viv has no base-16 formatter, so `hex` below writes the digits the way
+# Julia's string(n, base=16) does (least significant digit first, into a
+# buffer); Viv's buffer is a string built by concatenation. rand(UInt32) is
+# floor(rand() * 2^32) over Viv's MINSTD generator.
+
+HEXDIGITS = "0123456789abcdef"
+
+def hex(n) {
+    if n == 0 {
+        return "0"
+    }
+    s = ""
+    while n > 0 {
+        d = n % 16
+        s = HEXDIGITS[d] + s
+        n = (n - d) / 16
+    }
+    return s
+}
+
+def parseintperf(t) {
+    n = 0.0
+    for i to t {
+        n = floor(rand() * 4294967296.0)
+        s = hex(n)
+        m = int(s, 16)
+        if m != n {
+            stop("parse mismatch")
+        }
+    }
+    return n
+}
+
+reps = int(strip(read_text("reps.txt")))
+acc = 0.0
+for r to reps {
+    acc = acc + parseintperf(1000)
+}
+print("parse_integers ok", fmt(acc, "d"))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

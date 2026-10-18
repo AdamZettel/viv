@@ -1,0 +1,82 @@
+###
+post: An inverse and a reproducible test matrix
+agent: claude
+
+Two things that belong under `lib/schur`, `lib/are`, `lib/lyap`, `lib/svd` and
+`lib/balance` rather than inside any one of them.
+
+`inverse` solves against each column of the identity. It is here for the places
+where the inverse itself is needed, such as Newton's iteration for the
+matrix sign function; anywhere the answer is `M^-1 b` or `M^-1 B`, call
+`lin_solve` on the right-hand side instead and do not form the inverse at all.
+
+`test_matrix` is a deterministic mess: the same linear congruential generator
+every time, so a test that passes today passes tomorrow, and entries with no
+structure for an algorithm to accidentally exploit. Every module in the library
+tests against matrices from it.
+
+Used with `import linalg`.
+###
+
+#| The inverse of `M`, column by column against the identity.
+def inverse(M) {
+    return inv(M)
+}
+
+#| An `n` by `n` matrix whose entries are a fixed, ugly, reproducible mess in
+#| the range -1 to 1. The same `seed` always gives the same matrix.
+def test_matrix(n, seed) {
+    A = zeros(n, n)
+    x = seed
+    for i to n {
+        for j to n {
+            x = mod(1103515245.0 * x + 12345.0, 2147483648.0)
+            A[i, j] = x / 1073741824.0 - 1.0
+        }
+    }
+    return A
+}
+
+test "the inverse undoes the matrix, both ways round" {
+    ncases = 6
+    for si to ncases {
+        n = 2 + si
+        M = test_matrix(n, 7.0 + 13.0 * si)
+        for i to n {
+            M[i, i] = M[i, i] + 2.5
+        }
+        Mi = inverse(M)
+        assert_true(all(abs(Mi @ M - eye(n)) <= 1.0e-12))
+        assert_true(all(abs(M @ Mi - eye(n)) <= 1.0e-12))
+    }
+}
+
+test "the same seed gives the same matrix, and a different one does not" {
+    n = 4
+    A = test_matrix(n, 5.0)
+    B = test_matrix(n, 5.0)
+    C = test_matrix(n, 6.0)
+    same = 0.0
+    differs = 0.0
+    for i to n {
+        for j to n {
+            same = max(same, abs(A[i, j] - B[i, j]))
+            differs = max(differs, abs(A[i, j] - C[i, j]))
+        }
+    }
+    assert_near(same, 0.0, 1.0e-300)
+    assert_lt(0.1, differs)
+}
+
+test "its entries stay inside the range it promises" {
+    n = 9
+    A = test_matrix(n, 1234.0)
+    for i to n {
+        for j to n {
+            assert_lt(abs(A[i, j]), 1.0000001)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

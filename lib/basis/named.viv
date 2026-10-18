@@ -1,0 +1,147 @@
+###
+post: A basis set by its name, as PySCF spells it
+agent: claude
+
+`basis_named(name)` gives the `Basis` record (lib/basis/basis) of the basis
+set PySCF would load for `name`. The name is read by PySCF's rule
+(`pyscf.gto.basis._format_basis_name`): lower case, with `-`, `_` and
+spaces taken out, so "6-31G*", "6-31g*", "631g*" and "6-31Gs" are one set.
+Then the key is looked up in the aliases PySCF 2.5.0 has for the eight sets
+here:
+
+    sto3g                STO-3G      lib/basis/sto3g
+    631g                 6-31G       lib/basis/pople631g
+    631g*, 631gs         6-31G*      lib/basis/pople631gs
+    631g**, 631gss       6-31G**     lib/basis/pople631gss
+    ccpvdz               cc-pVDZ     lib/basis/ccpvdz
+    ccpvtz               cc-pVTZ     lib/basis/ccpvtz
+    def2svp              def2-SVP    lib/basis/def2svp
+    def2tzvp             def2-TZVP   lib/basis/def2tzvp
+
+Any other name stops the run and lists the eight. PySCF knows many more
+sets; these are the ones lib/basis has tables for (H through Ar).
+
+A program that imports none of the tables gets all eight, so any of the names
+works. A program that imports one or more of them (`import basis.pople631g`)
+links those alone, and a name whose table it does not import stops the run and
+says which import line to add; the water story links one table this way.
+(The eight imports are an `#! if-none-used` block, kept only when the
+program's other imports reach none of the tables, and each branch of
+the lookup is an `#! if-used` block, kept only when the program imports that
+table: lang/viv/src/lib.rs, `expand_uses`.) `basis.all` imports all eight
+on purpose.
+
+Used with `from basis.named import basis_named`.
+###
+
+from basis.basis import Basis, BS_LEN, BS_PR_LEN
+#! if-none-used basis.sto3g basis.pople631g basis.pople631gs basis.pople631gss basis.ccpvdz basis.ccpvtz basis.def2svp basis.def2tzvp
+from basis.sto3g import basis_sto3g, BASIS_STO3G_NSHELL
+from basis.pople631g import basis_631g
+from basis.pople631gs import basis_631gs
+from basis.pople631gss import basis_631gss
+from basis.ccpvdz import basis_ccpvdz
+from basis.ccpvtz import basis_ccpvtz
+from basis.def2svp import basis_def2svp
+from basis.def2tzvp import basis_def2tzvp
+#! end-if
+
+#| The names of the sets `basis_named` knows, as PySCF writes them.
+BASIS_NAMES = ["sto-3g", "6-31g", "6-31g*", "6-31g**", "cc-pvdz", "cc-pvtz", "def2-svp", "def2-tzvp"]
+
+#| PySCF's key for a basis name: lower case, no `-`, `_` or spaces.
+def basis_key(name: Str) -> Str {
+    return name.lower().replace("-", "").replace("_", "").replace(" ", "")
+}
+
+#| The module of lib/basis whose table PySCF's key `k` names, or "" when no
+#| table here has that name.
+def basis_module(k: Str) -> Str {
+    if k == "sto3g" {
+        return "basis.sto3g"
+    }
+    if k == "631g" {
+        return "basis.pople631g"
+    }
+    if k == "631g*" or k == "631gs" {
+        return "basis.pople631gs"
+    }
+    if k == "631g**" or k == "631gss" {
+        return "basis.pople631gss"
+    }
+    if k == "ccpvdz" or k == "ccpvtz" or k == "def2svp" or k == "def2tzvp" {
+        return "basis." + k
+    }
+    return ""
+}
+
+#| The basis set PySCF names `name`, from the tables of lib/basis the
+#| program uses.
+def basis_named(name: Str) -> Basis {
+    k = basis_key(name)
+#! if-used basis.sto3g
+    if k == "sto3g" {
+        return basis_sto3g()
+    }
+#! end-if
+#! if-used basis.pople631g
+    if k == "631g" {
+        return basis_631g()
+    }
+#! end-if
+#! if-used basis.pople631gs
+    if k == "631g*" or k == "631gs" {
+        return basis_631gs()
+    }
+#! end-if
+#! if-used basis.pople631gss
+    if k == "631g**" or k == "631gss" {
+        return basis_631gss()
+    }
+#! end-if
+#! if-used basis.ccpvdz
+    if k == "ccpvdz" {
+        return basis_ccpvdz()
+    }
+#! end-if
+#! if-used basis.ccpvtz
+    if k == "ccpvtz" {
+        return basis_ccpvtz()
+    }
+#! end-if
+#! if-used basis.def2svp
+    if k == "def2svp" {
+        return basis_def2svp()
+    }
+#! end-if
+#! if-used basis.def2tzvp
+    if k == "def2tzvp" {
+        return basis_def2tzvp()
+    }
+#! end-if
+    m = basis_module(k)
+    if m == "" {
+        stop(f"unknown basis set {name!r}: the sets here are " + join(", ", BASIS_NAMES) + " (any case, with or without the hyphens)")
+    }
+    stop(f"the basis set {name!r} is in {m}, which this program does not use: add `import {m}` (or `import basis.all` for every set)")
+    # not reached: `stop` ends the run; a def that returns a record ends in a return
+    return Basis { shells: zeros(0, BS_LEN), prims: zeros(0, BS_PR_LEN) }
+}
+
+# run on its own, the module uses none of the tables, so it has all eight
+test "a basis set by PySCF's names, in any case" {
+    bn_w = basis_named("6-31G")
+    assert_true(all(bn_w.shells == basis_631g().shells) and all(bn_w.prims == basis_631g().prims))
+    assert_near(len(basis_named("STO-3G").shells), BASIS_STO3G_NSHELL, 0.0)
+    assert_true(all(basis_named("6-31g*").prims == basis_named("631Gs").prims))
+    assert_true(all(basis_named("6-31G**").shells == basis_631gss().shells))
+    assert_true(all(basis_named("cc-pVDZ").shells == basis_ccpvdz().shells))
+    assert_true(all(basis_named("cc_pvtz").shells == basis_ccpvtz().shells))
+    assert_true(all(basis_named("def2-SVP").prims == basis_def2svp().prims))
+    assert_true(all(basis_named("Def2 TZVP").prims == basis_def2tzvp().prims))
+    assert_true(basis_key("6-31G**") == "631g**" and basis_key("def2_svp") == "def2svp")
+    assert_true(basis_module(basis_key("6-31G*")) == "basis.pople631gs" and basis_module("6311g") == "")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

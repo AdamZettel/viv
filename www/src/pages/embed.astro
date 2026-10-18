@@ -1,0 +1,116 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Code from '../components/Code.astro';
+import Base from '../layouts/Base.astro';
+import facts from '../data/facts.json';
+const mb = (facts.wasmBytes / 1024 / 1024).toFixed(1);
+---
+
+<Base
+  title="Embed Viv anywhere · Viv"
+  description="One script tag puts runnable, editable Viv cells on any web page. It needs no server, framework or build step."
+  eyebrow="Embed"
+  heading="Runnable Viv on any page">
+  <p class="lede">
+    One script tag. No server, no framework, no build step — the compiler is a {mb} MB wasm module
+    that loads next to the script and runs in the reader's browser. The cells further down this page
+    are rendered by the embed itself, not by this site's components.
+  </p>
+
+  <h2 id="integration">The whole integration</h2>
+  <Code lang="html" code={`<script src="https://viv-lang.org/embed/viv-embed.js" defer></script>
+
+<viv-cell>
+total = 0.0
+for i to 10 {
+    total += i
+}
+show total
+</viv-cell>`} />
+  <p>
+    That is all of it. Each <code>&lt;viv-cell&gt;</code> becomes an editable, runnable cell with
+    syntax highlighting, output, live narration, <code>plot()</code> charts, and the call graph.
+    Markdown-rendered blocks (<code>&lt;pre&gt;&lt;code class="language-viv"&gt;</code>) upgrade
+    automatically, so it drops into a blog engine unchanged. Add the <code>run</code> attribute to
+    execute a cell on page load, and <code>light</code> for light styling.
+  </p>
+  <p>
+    Its styles live in shadow DOM, so they do not change your page's CSS and your CSS does not change them,
+    except for six colors you can set on the element: <code>--viv-cell-accent</code>, <code>--viv-cell-bg</code>
+    (the code), <code>--viv-cell-card</code>, <code>--viv-cell-border</code>, <code>--viv-cell-text</code> and
+    <code>--viv-cell-muted</code>.
+  </p>
+
+  <h2 id="live">Embedding a live cell</h2>
+  <p>The three cells below are literal <code>&lt;viv-cell&gt;</code> elements on this page:</p>
+
+  <viv-cell run is:raw>
+narrate "computing"
+def sq(x) {
+    return x * x
+}
+total = 0.0
+for i to 10 {
+    total += sq(i)
+}
+show total
+  </viv-cell>
+
+  <viv-cell is:raw>
+n = 61
+t = linspace(0.0, 6.0, n)
+y = exp(-0.5 * t) * cos(3.0 * t)
+figure("A damped cosine", "$t$", "$y$")
+plot(t, y, "damped cosine")
+  </viv-cell>
+
+  <viv-cell is:raw>
+def leaf(x) { return x + 1.0 }
+def branch(x) { return leaf(x) + leaf(x) }
+def trunk(x) { return branch(x) }
+s = 0.0
+for i to 4 {
+    s += trunk(i)
+}
+show s
+  </viv-cell>
+
+  <h2 id="notes">Notes</h2>
+  <dl class="deflist">
+    <dt>Framework-free</dt>
+    <dd>
+      <a href="/embed/demo.html">A plain HTML page</a> that uses only the script tag, with no
+      bundler or npm.
+    </dd>
+    <dt>Cross-origin</dt>
+    <dd>
+      The script and the wasm are served with <code>Access-Control-Allow-Origin: *</code>, so any
+      site can load them.
+    </dd>
+    <dt>Cells are independent</dt>
+    <dd>
+      Each runs its own source, like the <a href="/docs">doc examples</a>. The embed cannot yet chain cells
+      so that cell N runs cells 1..N; only this site's own pages, such as the <a href="/tour">tour</a>,
+      can.
+    </dd>
+    <dt>One module, many cells</dt>
+    <dd>
+      The wasm loads once per page and every cell shares it, so a second cell adds no
+      download.
+    </dd>
+  </dl>
+
+  <script src="/embed/viv-embed.js" defer is:inline></script>
+
+  <style is:global>
+    viv-cell {
+      display: block;
+      max-width: var(--measure);
+      margin: 1rem 0;
+    }
+  </style>
+  <style>
+    h2 { scroll-margin-top: 72px; }
+  </style>
+</Base>

@@ -1,0 +1,320 @@
+# Metamorphic checks on the SCF, over random molecules (seeds 1 to 32).
+#
+# Each seed builds a small O/H molecule at a random geometry (lib/hf/fuzz:
+# bond lengths 1.6 to 2.0 bohr, angles 95 to 115 degrees) in STO-3G; on
+# every fourth seed the closed-shell molecule also carries a d shell on
+# oxygen, in spherical form, so that a rotation has five d functions to
+# mix. Each asks questions whose answers need no reference energy:
+#
+# - the energy does not change when the molecule is rotated, translated or
+#   has its atoms relabeled;
+# - for a closed shell, UHF finds the RHF solution;
+# - swapping the alpha and beta counts (Na - Nb = +1 against -1) changes
+#   nothing;
+# - UHF, which has more freedom, is never above ROHF;
+# - ROHF's energy does not depend on how the coupling operator is written,
+#   and no energy depends on the orthogonalizer.
+#
+# Two size-consistency cases close the file: two He atoms 20 bohr apart and
+# two N2 molecules 200 bohr apart must have twice the monomer energy
+# (PySCF gives 8.9e-16 and 2.0e-11 for these).
+#
+# Every seeded check reports through hfz_check, so a failure prints the seed
+# and the FAIL line reads `assert_lt: <seed> >= 0`.
+#
+#     tools/both-engines.sh scf meta_scf
+from hf.hf import hf_scf, hf_setup, hf_setup_of
+from hf.molecule import Molecule, molecule_packs
+from hf.basis import (
+    AT_X, bas_nao_cart, PR_COEF, PR_EXP, PR_LEN, SH_ATOM, SH_L, SH_LEN, SH_NPRIM, SH_P0,
+)
+from hf.scf_loop import scf_setup_with, ScfResult, ScfSetup
+from hf.opts import scf_defaults, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.orthogonalize import orth_methods
+from hf.coupling import rohf_couplings
+from hf.fuzz import (
+    hfz_atoms, hfz_blob, hfz_charge, hfz_check, hfz_mol_blob, hfz_offsets, hfz_perm,
+    hfz_permute_atoms, hfz_permute_shells, hfz_prims, hfz_rotate, hfz_rotation, hfz_shells,
+    hfz_shift, hfz_translate,
+)
+from hfref.water_sto3g import watersto3g_prims, watersto3g_shells
+from hfref.he import he_sto3g_atoms, he_sto3g_prims, he_sto3g_shells
+from hfref.breadth_631gs import n2_631gs_atoms, n2_631gs_prims, n2_631gs_shells
+
+MTS_NSEED = 32
+
+#| Water STO-3G's shells, with one d shell (a single primitive, exponent
+#| 0.8, the 6-31G* oxygen value) added to oxygen when `withd` is 1.
+def mts_src_shells(withd) {
+    sh = watersto3g_shells()
+    if withd < 0.5 {
+        return sh
+    }
+    d = zeros(SH_LEN)
+    d[SH_ATOM] = 0
+    d[SH_L] = 2
+    d[SH_NPRIM] = 1
+    d[SH_P0] = len(watersto3g_prims())
+    sh = append(sh, d)
+    hfz_offsets(sh)
+    return sh
+}
+
+#| The prims to go with `mts_src_shells`.
+def mts_src_prims(withd) {
+    pr = watersto3g_prims()
+    if withd < 0.5 {
+        return pr
+    }
+    d = zeros(PR_LEN)
+    d[PR_EXP] = 0.8
+    d[PR_COEF] = 1.0
+    pr = append(pr, d)
+    return pr
+}
+
+#| The molecule of a seed: kind `kind` of hfz_mol_blob, in STO-3G, or with
+#| a d shell on oxygen when `withd` is 1.
+def mts_blob(seed, kind, withd) {
+    return hfz_mol_blob(seed, kind, mts_src_shells(withd), mts_src_prims(withd))
+}
+
+#| 1 for the seeds whose closed-shell molecule carries the d shell (every
+#| fourth seed: an SCF with 12 spherical AOs costs about ten times one with
+#| 7 in the interpreter, so the d shell goes where a rotation can test it).
+def mts_withd(seed) {
+    if mod(seed, 4) < 0.5 {
+        return 1
+    }
+    return 0
+}
+
+#| The molecule of a blob, with its charge and spin. A d shell, when there
+#| is one, is spherical (five d functions).
+def mts_mol(b: Arr, charge, spin) -> Molecule {
+    return Molecule { charge: charge, spin: spin, ..molecule_packs(hfz_atoms(b), hfz_shells(b), hfz_prims(b)) }
+}
+
+#| A closed-shell kind for a seed: H2O, H3O+ or OH-.
+def mts_closed(seed) {
+    k = mod(seed, 3)
+    if k < 0.5 {
+        return 0
+    }
+    if k < 1.5 {
+        return 3
+    }
+    return 4
+}
+
+#| An open-shell kind for a seed: OH or H2O+.
+def mts_open(seed) {
+    if mod(seed, 4) < 1.5 {
+        return 1
+    }
+    return 2
+}
+
+#| The same setup running method `m`.
+def mts_method(p: ScfSetup, m) -> ScfSetup {
+    return scf_setup_with(p, ScfOptions { method: m, ..p.options })
+}
+
+#| The SCF of a molecule, production members alone. These checks are about
+#| the SCF; the integral members are swept against each other in
+#| meta_integrals.
+def mts_energy(mol: Molecule) -> ScfResult {
+    return hf_scf(hf_setup(mol, scf_defaults()))
+}
+
+# columns of the closed-shell report
+MTS_C_ROT = 0
+MTS_C_TRANS = 1
+MTS_C_PERM = 2
+MTS_C_UHF = 3
+MTS_C_ORTH = 4
+MTS_C_CONV = 5
+
+#| The closed-shell checks of one seed: |E change| under a rotation, a
+#| translation and an atom permutation, |E_UHF - E_RHF|, the largest
+#| change over the four orthogonalizers, and the smallest converged flag
+#| over every run.
+def mts_closed_report(seed) {
+    kind = mts_closed(seed)
+    b = mts_blob(seed, kind, mts_withd(seed))
+    mol = mts_mol(b, hfz_charge(kind), 0)
+    p = hf_setup(mol, scf_defaults())
+    rep = zeros(6)
+    r0 = hf_scf(p)
+    conv = r0.converged
+    r = mts_energy(Molecule { atoms: hfz_rotate(mol.atoms, hfz_rotation(seed)), ..mol })
+    rep[MTS_C_ROT] = abs(r.energy - r0.energy)
+    conv = min(conv, r.converged)
+    r = mts_energy(Molecule { atoms: hfz_translate(mol.atoms, hfz_shift(seed)), ..mol })
+    rep[MTS_C_TRANS] = abs(r.energy - r0.energy)
+    conv = min(conv, r.converged)
+    perm = hfz_perm(seed, len(mol.atoms))
+    r = mts_energy(Molecule { atoms: hfz_permute_atoms(mol.atoms, perm), shells: hfz_permute_shells(mol.shells, perm), ..mol })
+    rep[MTS_C_PERM] = abs(r.energy - r0.energy)
+    conv = min(conv, r.converged)
+    r = hf_scf(mts_method(p, SCF_UHF))
+    rep[MTS_C_UHF] = abs(r.energy - r0.energy)
+    conv = min(conv, r.converged)
+    for k to len(orth_methods()) {
+        if k > 0 {
+            r = hf_scf(ScfSetup { options: ScfOptions { orthogonalizer: k, ..p.options }, ..p })
+            rep[MTS_C_ORTH] = max(rep[MTS_C_ORTH], abs(r.energy - r0.energy))
+            conv = min(conv, r.converged)
+        }
+    }
+    rep[MTS_C_CONV] = conv
+    return rep
+}
+
+# columns of the open-shell report
+MTS_O_UFLIP = 0
+MTS_O_RFLIP = 1
+MTS_O_ORDER = 2
+MTS_O_COUP = 3
+MTS_O_CONV = 4
+
+#| The open-shell checks of one seed: |E_UHF(+1) - E_UHF(-1)|,
+#| |E_ROHF(+1) - E_ROHF(-1)|, E_UHF - E_ROHF, the largest ROHF change over
+#| the four couplings, and the smallest converged flag.
+def mts_open_report(seed) {
+    kind = mts_open(seed)
+    b = mts_blob(seed, kind, 0)
+    up = mts_mol(b, hfz_charge(kind), 1)
+    down = Molecule { spin: -1, ..up }
+    p = hf_setup(up, scf_defaults())
+    q = hf_setup_of(down, p.h, p.s, p.eri, scf_defaults())
+    rep = zeros(5)
+    ru = hf_scf(mts_method(p, SCF_UHF))
+    r = hf_scf(mts_method(q, SCF_UHF))
+    rep[MTS_O_UFLIP] = abs(ru.energy - r.energy)
+    conv = min(ru.converged, r.converged)
+    pr = mts_method(p, SCF_ROHF)
+    rr = hf_scf(pr)
+    r = hf_scf(mts_method(q, SCF_ROHF))
+    rep[MTS_O_RFLIP] = abs(rr.energy - r.energy)
+    conv = min(conv, min(rr.converged, r.converged))
+    rep[MTS_O_ORDER] = ru.energy - rr.energy
+    for c to len(rohf_couplings()) {
+        if c > 0 {
+            r = hf_scf(ScfSetup { options: ScfOptions { rohf_coupling: c, ..pr.options }, ..pr })
+            rep[MTS_O_COUP] = max(rep[MTS_O_COUP], abs(r.energy - rr.energy))
+            conv = min(conv, r.converged)
+        }
+    }
+    rep[MTS_O_CONV] = conv
+    return rep
+}
+
+#| Two copies of a molecule's packs, the second moved by `d` bohr along x.
+def mts_dimer(at: Arr, sh: Arr, pr: Arr, d) {
+    # the second copy: moved along x, its shells on its own atoms and prims
+    at2 = copy(at)
+    at2[:, AT_X] = at[:, AT_X] + d
+    sh2 = copy(sh)
+    sh2[:, SH_ATOM] = sh[:, SH_ATOM] + len(at)
+    sh2[:, SH_P0] = sh[:, SH_P0] + len(pr)
+    s2 = vcat(sh, sh2)
+    hfz_offsets(s2)
+    return hfz_blob(vcat(at, at2), s2, vcat(pr, pr))
+}
+
+#| The shells of a pack with every shell of angular momentum above `lmax`
+#| dropped (6-31G* without its d shells is 6-31G). Prims stay as they are.
+def mts_drop_l(sh: Arr, lmax) {
+    out = []
+    for s to len(sh) {
+        if sh[s, SH_L] <= lmax {
+            out = append(out, sh[s, :])
+        }
+    }
+    hfz_offsets(out)
+    return out
+}
+
+#| E(dimer at distance d) - 2 E(monomer), RHF, Cartesian, production
+#| members alone.
+def mts_size(at: Arr, sh: Arr, pr: Arr, d) {
+    e1 = mts_energy(Molecule { cart: 1, ..molecule_packs(at, sh, pr) })
+    b = mts_dimer(at, sh, pr, d)
+    e2 = mts_energy(Molecule { cart: 1, ..molecule_packs(hfz_atoms(b), hfz_shells(b), hfz_prims(b)) })
+    assert_near(min(e1.converged, e2.converged), 1.0, 0.0)
+    return e2.energy - 2.0 * e1.energy
+}
+
+# ---- every seed, once ------------------------------------------------------------
+# Each seed's runs happen here, one def call per seed; the tests below read
+# the reports.
+
+mts_creps = zeros(MTS_NSEED, 6)
+mts_oreps = zeros(MTS_NSEED, 5)
+for mts_s to MTS_NSEED {
+    mts_creps[mts_s, :] = mts_closed_report(mts_s + 1)
+    mts_oreps[mts_s, :] = mts_open_report(mts_s + 1)
+}
+
+#| hfz_check over the seeds for one report column; returns the failures.
+def mts_col(R: Arr, col, tol) {
+    bad = 0
+    for s to MTS_NSEED {
+        bad = bad + hfz_check(s + 1, R[s, col], tol)
+    }
+    return bad
+}
+
+#| Seeds whose runs did not all converge; returns the failures.
+def mts_conv(R: Arr, col) {
+    bad = 0
+    for s to MTS_NSEED {
+        bad = bad + hfz_check(s + 1, 1.0 - R[s, col], 0.5)
+    }
+    return bad
+}
+
+test "every SCF of every seed converged (seeds 1-32)" {
+    assert_near(mts_conv(mts_creps, MTS_C_CONV) + mts_conv(mts_oreps, MTS_O_CONV), 0.0, 0.0)
+}
+
+test "rotation, translation and atom permutation leave E unchanged within 1e-10 (seeds 1-32)" {
+    mts_bad = mts_col(mts_creps, MTS_C_ROT, 1.0e-10) + mts_col(mts_creps, MTS_C_TRANS, 1.0e-10)
+    assert_near(mts_bad + mts_col(mts_creps, MTS_C_PERM, 1.0e-10), 0.0, 0.0)
+}
+
+test "on a closed shell UHF finds the RHF energy within 1e-10 (seeds 1-32)" {
+    assert_near(mts_col(mts_creps, MTS_C_UHF, 1.0e-10), 0.0, 0.0)
+}
+
+test "spin flip (Na - Nb = +1 against -1) leaves UHF and ROHF unchanged within 1e-10 (seeds 1-32)" {
+    assert_near(mts_col(mts_oreps, MTS_O_UFLIP, 1.0e-10) + mts_col(mts_oreps, MTS_O_RFLIP, 1.0e-10), 0.0, 0.0)
+}
+
+test "E_UHF <= E_ROHF on every open shell (seeds 1-32)" {
+    assert_near(mts_col(mts_oreps, MTS_O_ORDER, 1.0e-12), 0.0, 0.0)
+}
+
+test "the ROHF energy does not depend on the coupling within 1e-10 (seeds 1-32)" {
+    assert_near(mts_col(mts_oreps, MTS_O_COUP, 1.0e-10), 0.0, 0.0)
+}
+
+test "the energy does not depend on the orthogonalizer within 1e-10 (seeds 1-32)" {
+    assert_near(mts_col(mts_creps, MTS_C_ORTH, 1.0e-10), 0.0, 0.0)
+}
+
+test "size consistency: He2 at 20 bohr within 1e-12 of 2 E(He), STO-3G" {
+    mts_d = mts_size(he_sto3g_atoms(), he_sto3g_shells(), he_sto3g_prims(), 20.0)
+    assert_lt(abs(mts_d), 1.0e-12)
+}
+
+test "size consistency: N2 x N2 at 200 bohr within 1e-9 of 2 E(N2), 6-31G" {
+    mts_sh = mts_drop_l(n2_631gs_shells(), 1)
+    assert_near(bas_nao_cart(mts_sh), 18, 0.0)
+    mts_d = mts_size(n2_631gs_atoms(), mts_sh, n2_631gs_prims(), 200.0)
+    assert_lt(abs(mts_d), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

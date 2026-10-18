@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The plane-wave DFT program (the iterative engine) as one C file and a
+# Python wrapper: `viv export dft/pwdft.export.toml`.
+# Paths are under the repository root. A parameter left out of a run keeps
+# its deck's value; each parameter's meaning is the `#:` line beside it in
+# the deck.
+name = "pwdft"
+about = "dft/pwdft_it.intent"
+files = ["dft/kmesh.viv", "dft/pw_common.viv", "dft/pwdft_it.viv"]
+
+[decks]
+si = { deck = "dft/si.viv", checks = "dft/si_it_check.viv" }
+ge = { deck = "dft/ge.viv", checks = "dft/ge_it_check.viv" }
+c = { deck = "dft/c.viv", checks = "dft/c_it_check.viv" }
+gaas = { deck = "dft/gaas.viv", checks = "dft/gaas_it_check.viv" }
+al = { deck = "dft/al.viv", checks = "dft/al_it_check.viv" }
+cu = { deck = "dft/cu.viv", checks = "dft/cu_it_check.viv" }
+
+[params]
+ECUT = { type = "Num", min = 0.5 }
+NKMESH = { type = "Int", min = 1, max = 8 }
+NBANDS = { type = "Int", min = 1 }
+SMEAR = { type = "Num", min = 0.0 }
+MIX = { type = "Num", min = 0.0, max = 1.0 }
+SCF_TOL = { type = "Num", min = 0.0, doc = "the SCF stops when the density changes by less than this" }
+MAXIT = { type = "Int", min = 1, doc = "at most this many SCF iterations" }
+ALAT = { type = "Num", min = 0.0 }
+NSEG = { type = "Int", min = 1 }
+
+[results]
+ETOT = { type = "Num", doc = "total electronic energy per cell, hartree, without the ion-ion (Ewald) term: a constant for fixed atoms, so it moves no band, but the number is not the full total energy and cannot be compared between structures" }
+EFERMI = { type = "Num", doc = "Fermi level from the smearing, hartree; 0 when SMEAR is 0" }
+ITER = { type = "Int", doc = "SCF iterations" }
+DRHO = { type = "Num", doc = "the last density change" }
+EVB = { type = "Arr", doc = "band energies along the path, eV, from the valence-band top (an insulator) or the Fermi level (a metal): path points x bands" }
+PATHX = { type = "Arr", doc = "each path point's position along the path, for plotting" }
+GAP = { type = "Num", doc = "smallest gap along the band path, eV (from the check file; insulators only)" }
+
+[reference]
+program = "the dense numpy reference, dft/ref (a different algorithm as well as a different language), through each material's check file (dft/<material>_it_check.viv)"
+cases = "the six decks, each at its own settings"
+energy_tol = "1e-7 hartree, the total energy"
+band_tol = "1e-5 eV, every band at every point of the path"

@@ -1,0 +1,1340 @@
+###
+post: The whole program as a graph, drawn by Viv
+agent: claude
+
+`draw_program(g, title)` draws a `ProgramGraph` (lib/proggraph.viv) with the
+figure records of a diagram: every def
+that matters to the run as a box, the steps inside it as boxes in the order
+they run, the loops that hold steps as dashed boxes around them, the calls
+between defs as arrows from the step that makes each call, and the values
+steps hand each other as arrows labeled with the variables. A value that
+reaches the next pass of a loop is a dashed arrow back up.
+
+Which defs are drawn: `<main>`, every def with steps that the run can reach,
+and every def on a call path from `<main>` to one of them. When no def has
+steps, every def the run reaches (up to `MAX_PLAIN_DEFS`). The defs these call
+and that are not drawn are named at the foot of their caller's box.
+
+The layout is `lib/graphlayout.viv`, twice: inside each box its children,
+top to bottom; then the boxes of the defs, left to right, callers before
+callees. Each box's id is its node's id (`hf_scf`, `hf_scf/fock`), so a page
+can find the box of the def or step a reader is at.
+
+`draw_view(g, v, title)` draws what a `GraphView` says: which defs are boxes,
+how many callees each one hides (written `+3` at the right of its header, for
+a page to open) or whether its callees are open (`−`), how many times each
+call ran (written on its arrow when more than once), and where the boxes of an
+earlier drawing were, so a redrawing after a box is opened moves the others as
+little as it can. `draw_program` is `draw_view` with the defs chosen above and
+nothing hidden, counted or remembered.
+
+Every mark has an id a page can act on: a box is its node's id; an arrow is
+`call:<step or def>-><def>`, `data:<step>-><step>`, `next:<step>-><step>` (a
+value for the next pass) or `then:<step>-><step>` (the order of two steps);
+the text of a node is `<id>#head`, `#text`, `#reads`, `#foot`, its marks
+`#more` and `#less`; an arrow's text is `<arrow id>#vars` or `#count`. The
+figure's x label says which way the defs run, `across` or `down`, so a page
+that asks for a redrawing can keep it.
+
+`draw_view_mp(g, v, mp, title)` also draws a program's multi-paths:
+a stage with several implementations of one
+intent, cross-checked against each other. Open, a multi-path is a fork (a
+diamond named after the stage), one path per implementation, and a join (a
+diamond with the agreement they are held to); the call into the fork carries
+the stage's intent, the default's path is solid and the others are dashed.
+Closed, it is one box, `multi-path ×n`, with the intent, the contract and how
+many implementations are independent and were seen agreeing. An
+implementation that is a drawn function is its own box on its path. The
+marks: the closed box is `mp:<stage>@<host>`; open, `mp:<stage>@<host>/fork`,
+`/join`, `/m:<name>`, and the arrows `mp:<stage>@<host>/in`, `/to:<name>`,
+`/from:<name>`.
+
+Used with `import graphdraw`.
+###
+from proggraph import node_index, ProgramGraph, reachable
+from graphlayout import layered, layout_input, LayoutInput
+
+#| Text sizes, in the drawing's units (a unit is a pixel at full size), and
+#| the width of a character as a fraction of the size: the renderers use
+#| these sizes, and a monospace character is 0.6 of its size in every font
+#| they name. Sans text is estimated.
+FONT_SMALL = 11
+FONT_NORMAL = 13
+FONT_LARGE = 15
+MONO_EM = 0.6
+SANS_EM = 0.56
+#| Space inside a box, around its text and its children.
+PAD = 8
+#| Space between two lines of text.
+LINE_GAP = 3
+#| A step's box: least and greatest width.
+STEP_MIN_W = 96
+STEP_MAX_W = 220
+#| A def's or loop's header: the widest it is written.
+HEADER_MAX_W = 360
+#| The longest variable list written on a value's arrow, in characters.
+LABEL_MAX_CHARS = 26
+#| Inside a box: space between children, and between ranks.
+INNER_NODE_GAP = 22
+INNER_RANK_GAP = 6
+#| Between the boxes of the defs.
+OUTER_NODE_GAP = 34
+OUTER_RANK_GAP = 70
+#| How much the order of the steps wants to be a straight line.
+SEQUENCE_WEIGHT = 8
+#| How much of a child's width the arcs meeting it spread over.
+PORT_SPREAD = 0.7
+#| The most arcs (values that skip a child, or go to the next pass) a box draws.
+MAX_ARCS = 5
+#| With no steps anywhere: at most this many defs.
+MAX_PLAIN_DEFS = 40
+#| Left to right unless the drawing would be more than this many times as
+#| wide as tall; then top to bottom.
+WIDE_RATIO = 2
+#| The legend's height, above the drawing.
+LEGEND_H = 30
+#| Top to bottom, the space between the lanes that take a step's calls down
+#| the right side of its def's box.
+LANE_GAP = 7
+#| Space between a node's header and its `+3` or `−` mark.
+MARK_GAP = 10
+
+#| What `draw_view` draws of a graph.
+#: shown     per node: 1 for a def drawn as a box (its steps and loops come with it)
+#: open      per node: 1 for a def whose callees are shown; its header ends in `−`
+#: more      per node: how many callees of the def are not shown; its header ends in `+n`
+#: counts    per edge: how many times the call ran; 0 when not known
+#: hint_ids  the def boxes of an earlier drawing
+#: hint_x    the left side of each, in that drawing
+#: hint_y    its top, measured down from the drawing's top
+#: dir       0 to choose, 1 for callees to the right of callers, 2 for below them
+record GraphView {
+    shown: Arr
+    open: Arr
+    more: Arr
+    counts: Arr
+    hint_ids: [Str]
+    hint_x: Arr
+    hint_y: Arr
+    dir: Num
+}
+
+#| The multi-paths a drawing shows, one entry per stage and the def it hangs
+#| from.
+#: ids         the stage's id: `eri`
+#: titles      its intent, in a line
+#: contracts   what the members must agree on: `within 1e-12`
+#: notes       how many members are independent and were seen agreeing
+#: hosts       per entry: the node (a def) the fork hangs from
+#: host_steps  the node of the step of it that makes the call; -1 for the def's header
+#: members     the members' names, separated by spaces
+#: defaults    the member the production path runs
+#: ran         the members that ran, separated by spaces
+#: open        1 for the fork, a path per member and the join; 0 for one box
+record MultiPaths {
+    ids: [Str]
+    titles: [Str]
+    contracts: [Str]
+    notes: [Str]
+    hosts: Arr
+    host_steps: Arr
+    members: [Str]
+    defaults: [Str]
+    ran: [Str]
+    open: Arr
+}
+
+#| No multi-paths.
+#@ a2fbd5be
+def no_multipaths() -> MultiPaths {
+    return MultiPaths { ids: split(""), titles: split(""), contracts: split(""), notes: split(""), hosts: zeros(0), host_steps: zeros(0), members: split(""), defaults: split(""), ran: split(""), open: zeros(0) }
+}
+
+#| A diamond's width around a label whose widest line is `tw` wide.
+#@ a2b689c3
+def diamond_w(tw) {
+    return 2 * (tw + PAD)
+}
+
+#| A diamond's height around a label of `lines` lines.
+#@ c0d47cf6
+def diamond_h(lines) {
+    return 2 * (lines * FONT_SMALL + (lines - 1) * LINE_GAP + PAD)
+}
+
+#| The view `draw_program` draws: the chosen defs, nothing hidden, counted or remembered.
+def default_view(g: ProgramGraph) -> GraphView {
+    n = len(g.ids)
+    ne = len(g.edge_kinds)
+    return GraphView { shown: chosen_defs(g), open: zeros(n), more: zeros(n), counts: zeros(ne), hint_ids: split(""), hint_x: zeros(0), hint_y: zeros(0), dir: 0 }
+}
+
+#| A whole number written with a comma between each three digits.
+def grouped(v) -> Str {
+    s = f"{floor(v):.0f}"
+    out = ""
+    k = len(s)
+    while k > 3 {
+        out = "," + s[k - 3:k] + out
+        k -= 3
+    }
+    return s[:k] + out
+}
+
+#| The width of `s` at `size`, in monospace (`mono` 1) or sans.
+def text_w(s: Str, size, mono) {
+    em = SANS_EM
+    if mono == 1 {
+        em = MONO_EM
+    }
+    return len(s) * size * em
+}
+
+#| `s` cut to fit `maxw`, with an ellipsis when cut.
+def fit(s: Str, maxw, size, mono) -> Str {
+    if text_w(s, size, mono) <= maxw {
+        return s
+    }
+    em = SANS_EM
+    if mono == 1 {
+        em = MONO_EM
+    }
+    keep = floor(maxw / (size * em)) - 1
+    if keep < 1 {
+        return "…"
+    }
+    return s[:keep] + "…"
+}
+
+#| Text safe for a figure record: no newline, no ` ; `.
+def clean(s: Str) -> Str {
+    return replace(replace(s, "\n", " "), " ; ", "; ")
+}
+
+#| A space-separated list of names written with commas, cut to `LABEL_MAX_CHARS`.
+def names_label(vars: Str) -> Str {
+    s = join(", ", split(vars))
+    if len(s) > LABEL_MAX_CHARS {
+        s = s[:LABEL_MAX_CHARS - 1] + "…"
+    }
+    return s
+}
+
+#| Which defs to draw: 1 for each, 0 for the rest (see the module's text).
+def chosen_defs(g: ProgramGraph) -> Arr {
+    n = len(g.ids)
+    reach = reachable(g)
+    main = node_index(g, "<main>")
+    # a def with steps, and every def that calls toward one
+    leads = zeros(n)
+    for k to n {
+        if g.kinds[k] == "step" and reach[k] == 1 {
+            leads[g.owners[k]] = 1
+        }
+    }
+    grew = true
+    while grew {
+        grew = false
+        for e to len(g.edge_kinds) {
+            if g.edge_kinds[e] == "call" {
+                caller = g.owners[g.edge_from[e]]
+                if leads[g.edge_to[e]] == 1 and leads[caller] == 0 and reach[caller] == 1 {
+                    leads[caller] = 1
+                    grew = true
+                }
+            }
+        }
+    }
+    if main >= 0 {
+        leads[main] = 1
+    }
+    if sum(leads) > 1 or main < 0 {
+        return leads
+    }
+    # no steps: the defs the run reaches, nearest first
+    chosen = zeros(n)
+    chosen[main] = 1
+    frontier = [main]
+    count = 1
+    while len(frontier) > 0 and count < MAX_PLAIN_DEFS {
+        nextf = []
+        for e to len(g.edge_kinds) {
+            if g.edge_kinds[e] == "call" and count < MAX_PLAIN_DEFS {
+                caller = g.owners[g.edge_from[e]]
+                callee = g.edge_to[e]
+                if chosen[callee] == 0 and has(frontier, caller) {
+                    chosen[callee] = 1
+                    nextf = append(nextf, callee)
+                    count += 1
+                }
+            }
+        }
+        frontier = nextf
+    }
+    return chosen
+}
+
+#| Whether the number `v` is an element of `a`.
+def has(a: Arr, v) {
+    for x in a {
+        if x == v {
+            return true
+        }
+    }
+    return false
+}
+
+#| The layout of the def boxes. Left to right (`down` false), across the
+#| ranks is down the page and a call leaves its caller's side at the step that
+#| makes it; top to bottom, a def's box is widened on the right by its lanes,
+#| and a call leaves down its lane. A def of the view's earlier drawing is
+#| hinted to stay where its box was.
+def outer_input(oids: [Str], v: GraphView, defs: Arr, bw: Arr, bh: Arr, head_h: Arr, cfrom: Arr, cto: Arr, cport: Arr, cstep: Arr, clab: [Str], celen: Arr, clane: Arr, nlanes: Arr, down) -> LayoutInput {
+    nd = len(defs)
+    nc = len(cfrom)
+    w = zeros(nd)
+    h = zeros(nd)
+    lw = zeros(nd)
+    for i to nd {
+        d = defs[i]
+        if down {
+            lw[i] = nlanes[i] * LANE_GAP
+            w[i] = bw[d] + lw[i]
+            h[i] = bh[d]
+        }
+        else {
+            w[i] = bh[d]
+            h[i] = bw[d]
+        }
+    }
+    sport = zeros(nc)
+    tport = zeros(nc)
+    label_w = zeros(nc)
+    label_h = zeros(nc)
+    for q to nc {
+        a = defs[cfrom[q]]
+        b = defs[cto[q]]
+        if down {
+            sport[q] = -lw[cfrom[q]] / 2
+            if cstep[q] >= 0 {
+                sport[q] = (bw[a] - lw[cfrom[q]]) / 2 + LANE_GAP * (clane[q] + 1)
+            }
+            tport[q] = -lw[cto[q]] / 2
+        }
+        else {
+            sport[q] = cport[q]
+            tport[q] = head_h[b] / 2 - bh[b] / 2
+        }
+        if len(clab[q]) > 0 {
+            tw = text_w(clab[q], FONT_SMALL, 1)
+            if down {
+                label_w[q] = tw
+                label_h[q] = FONT_SMALL + LINE_GAP
+            }
+            else {
+                label_w[q] = FONT_SMALL + LINE_GAP
+                label_h[q] = tw + 2 * LINE_GAP
+            }
+        }
+    }
+    hint = zeros(nd)
+    hinted = zeros(nd)
+    for i to nd {
+        id = oids[i]
+        if id in v.hint_ids {
+            j = index(v.hint_ids, id)
+            hinted[i] = 1
+            if down {
+                hint[i] = v.hint_x[j] + w[i] / 2
+            }
+            else {
+                hint[i] = v.hint_y[j] - LEGEND_H + bh[defs[i]] / 2
+            }
+        }
+    }
+    inp = layout_input(w, h, cfrom, cto, OUTER_NODE_GAP, OUTER_RANK_GAP)
+    return LayoutInput { sport: sport, tport: tport, label_w: label_w, label_h: label_h, elen: celen, hint: hint, hinted: hinted, sides: 0, ..inp }
+}
+
+#| The drawing: every box, arrow and text of the graph `g`, as figure records.
+def draw_program(g: ProgramGraph, title: Str) {
+    return draw_view(g, default_view(g), title)
+}
+
+#| The drawing of what `view` shows of `g` (see the module's text).
+def draw_view(g: ProgramGraph, view: GraphView, title: Str) {
+    return draw_view_mp(g, view, no_multipaths(), title)
+}
+
+#| `draw_view`, with the multi-paths `mp` drawn where they hang.
+#@ 1ed48679
+def draw_view_mp(g: ProgramGraph, view: GraphView, mp: MultiPaths, title: Str) {
+    n = len(g.ids)
+    chosen = view.shown
+    # ---- the drawn nodes: the chosen defs and the steps and loops inside them
+    dmap = zeros(n) - 1
+    gi = []
+    for k to n {
+        keep = false
+        if g.kinds[k] == "def" {
+            keep = chosen[k] == 1
+        }
+        else if g.kinds[k] == "step" or g.kinds[k] == "loop" {
+            keep = chosen[g.owners[k]] == 1
+        }
+        if keep {
+            dmap[k] = len(gi)
+            gi = append(gi, k)
+        }
+    }
+    m = len(gi)
+    par = zeros(m) - 1
+    for d to m {
+        p = g.parents[gi[d]]
+        if p >= 0 {
+            par[d] = dmap[p]
+        }
+    }
+    depth = zeros(m)
+    changed = true
+    while changed {
+        changed = false
+        for d to m {
+            if par[d] >= 0 and depth[d] != depth[par[d]] + 1 {
+                depth[d] = depth[par[d]] + 1
+                changed = true
+            }
+        }
+    }
+    maxdepth = 0
+    if m > 0 {
+        maxdepth = max(depth)
+    }
+    nkids = zeros(m)
+    for d to m {
+        if par[d] >= 0 {
+            nkids[par[d]] += 1
+        }
+    }
+
+    # ---- what each def calls that is not drawn: the foot of its box
+    calls_out = []
+    for d to m {
+        k = gi[d]
+        others = split("")
+        for e to len(g.edge_kinds) {
+            if g.edge_kinds[e] == "call" and g.owners[g.edge_from[e]] == k {
+                name = g.labels[g.edge_to[e]]
+                if chosen[g.edge_to[e]] == 0 and name not in others {
+                    others = append(others, name)
+                }
+            }
+        }
+        text = ""
+        if g.kinds[k] == "def" and len(others) > 0 {
+            text = "calls " + join(", ", others)
+        }
+        calls_out = append(calls_out, text)
+    }
+
+    # ---- the values steps hand each other, at the box that holds both ends
+    de_lca = []
+    de_from = []
+    de_to = []
+    de_vars = []
+    de_back = []
+    for e to len(g.edge_kinds) {
+        if g.edge_kinds[e] != "data" {
+            continue
+        }
+        s = dmap[g.edge_from[e]]
+        t = dmap[g.edge_to[e]]
+        if s < 0 or t < 0 {
+            continue
+        }
+        # climb from the deeper end until the two share a parent
+        a = s
+        b = t
+        while depth[a] > depth[b] {
+            a = par[a]
+        }
+        while depth[b] > depth[a] {
+            b = par[b]
+        }
+        while par[a] != par[b] {
+            a = par[a]
+            b = par[b]
+        }
+        if a == b {
+            continue
+        }
+        de_lca = append(de_lca, par[a])
+        de_from = append(de_from, a)
+        de_to = append(de_to, b)
+        de_vars = append(de_vars, g.edge_vars[e])
+        de_back = append(de_back, g.edge_carried[e])
+    }
+    nde = len(de_lca)
+
+    # ---- which values are drawn as arrows. Between a child and the next one
+    # the arrow is short and always drawn; one that skips children, or goes
+    # back to an earlier pass, is an arc around them, and a box draws at most
+    # MAX_ARCS arcs (values for the next pass first). The values of the arcs
+    # it leaves out are written in the box they reach, as "reads ...".
+    place = zeros(m)
+    seen_kids = zeros(m)
+    for d to m {
+        if par[d] >= 0 {
+            place[d] = seen_kids[par[d]]
+            seen_kids[par[d]] += 1
+        }
+    }
+    de_keep = zeros(nde) + 1
+    for d to m {
+        # the arcs of this box, as distinct (from, to, back), carried ones first
+        arc_from = []
+        arc_to = []
+        arc_back = []
+        for pass to 2 {
+            want_back = 1 - pass
+            for j to nde {
+                if de_lca[j] != d or de_back[j] != want_back {
+                    continue
+                }
+                if de_back[j] == 0 and place[de_to[j]] == place[de_from[j]] + 1 {
+                    continue
+                }
+                known = false
+                for q to len(arc_from) {
+                    if arc_from[q] == de_from[j] and arc_to[q] == de_to[j] and arc_back[q] == de_back[j] {
+                        known = true
+                    }
+                }
+                if not known {
+                    arc_from = append(arc_from, de_from[j])
+                    arc_to = append(arc_to, de_to[j])
+                    arc_back = append(arc_back, de_back[j])
+                }
+            }
+        }
+        for q from MAX_ARCS to len(arc_from) {
+            for j to nde {
+                if de_from[j] == arc_from[q] and de_to[j] == arc_to[q] and de_back[j] == arc_back[q] {
+                    de_keep[j] = 0
+                }
+            }
+        }
+    }
+    # a value that skips a box of steps (a loop, a step with steps inside)
+    # would run down beside it, far from both ends: it is not drawn, and its
+    # variables are written in the step it reaches
+    for j to nde {
+        if de_back[j] == 1 or de_keep[j] == 0 {
+            continue
+        }
+        for c to m {
+            if par[c] == de_lca[j] and nkids[c] > 0 and place[c] > place[de_from[j]] and place[c] < place[de_to[j]] {
+                de_keep[j] = 0
+            }
+        }
+    }
+    # what each box reads from arcs not drawn
+    far = []
+    for d to m {
+        vars = split("")
+        for j to nde {
+            if de_keep[j] == 0 and de_to[j] == d {
+                for v in split(de_vars[j]) {
+                    if v not in vars {
+                        vars = append(vars, v)
+                    }
+                }
+            }
+        }
+        text = ""
+        if len(vars) > 0 {
+            text = "reads " + join(", ", vars)
+        }
+        far = append(far, text)
+    }
+
+    # ---- a def's mark: `+n` when it hides callees, `−` when they are open
+    marks = []
+    for d to m {
+        k = gi[d]
+        mk = ""
+        if g.kinds[k] == "def" and view.more[k] > 0 {
+            mk = "+" + grouped(view.more[k])
+        }
+        else if g.kinds[k] == "def" and view.open[k] == 1 {
+            mk = "−"
+        }
+        marks = append(marks, mk)
+    }
+
+    # ---- sizes, deepest boxes first; children placed inside their parent
+    bw = zeros(m)
+    bh = zeros(m)
+    head_h = zeros(m)
+    relx = zeros(m)
+    rely = zeros(m)
+    cox = zeros(m)
+    coy = zeros(m)
+    # the text of each box: its header, a step's text, a def's foot
+    head = []
+    sub = []
+    ins = []
+    foot = []
+    hw = zeros(m)
+    hh = zeros(m)
+    fw = zeros(m)
+    fh = zeros(m)
+    for d to m {
+        k = gi[d]
+        kind = g.kinds[k]
+        h1 = clean(g.labels[k])
+        h2 = ""
+        if kind == "def" {
+            h1 = clean(fit(g.labels[k] + "(" + join(", ", split(g.params[k])) + ")", HEADER_MAX_W, FONT_NORMAL, 1))
+        }
+        else if kind == "loop" {
+            h1 = clean(fit(g.labels[k], HEADER_MAX_W, FONT_SMALL, 1))
+        }
+        else {
+            h2 = clean(fit(g.texts[k], STEP_MAX_W - 2 * PAD, FONT_SMALL, 0))
+        }
+        hw[d] = text_w(h1, FONT_NORMAL, 1)
+        if kind == "def" and len(marks[d]) > 0 {
+            hw[d] += MARK_GAP + text_w(marks[d], FONT_SMALL, 1)
+        }
+        hh[d] = FONT_NORMAL + 2 * PAD
+        if kind == "loop" {
+            hw[d] = text_w(h1, FONT_SMALL, 1)
+            hh[d] = FONT_SMALL + 2 * PAD
+        }
+        h3 = ""
+        if kind == "step" and len(far[d]) > 0 {
+            h3 = clean(fit(far[d], STEP_MAX_W - 2 * PAD, FONT_SMALL, 1))
+        }
+        lines_below = 0
+        if len(h2) > 0 {
+            hw[d] = max(hw[d], text_w(h2, FONT_SMALL, 0))
+            lines_below += 1
+        }
+        if len(h3) > 0 {
+            hw[d] = max(hw[d], text_w(h3, FONT_SMALL, 1))
+            lines_below += 1
+        }
+        hh[d] = hh[d] + lines_below * (FONT_SMALL + LINE_GAP)
+        f1 = ""
+        if len(calls_out[d]) > 0 {
+            f1 = clean(fit(calls_out[d], max(hw[d], STEP_MAX_W), FONT_SMALL, 0))
+            fw[d] = text_w(f1, FONT_SMALL, 0)
+            fh[d] = FONT_SMALL + PAD
+        }
+        head = append(head, h1)
+        sub = append(sub, h2)
+        ins = append(ins, h3)
+        foot = append(foot, f1)
+    }
+    # routes inside boxes, relative to the box's children's origin
+    r_owner = []
+    r_start = []
+    r_x = []
+    r_y = []
+    r_style = []
+    r_id = []
+    r_label = []
+    r_lx = []
+    r_ly = []
+    for level from maxdepth to -1 by -1 {
+        for d to m {
+            if depth[d] != level {
+                continue
+            }
+            k = gi[d]
+            head_h[d] = hh[d]
+            if nkids[d] == 0 {
+                bw[d] = max(hw[d], fw[d]) + 2 * PAD
+                if g.kinds[k] == "step" {
+                    bw[d] = min(STEP_MAX_W, max(STEP_MIN_W, bw[d]))
+                }
+                bh[d] = hh[d] + fh[d]
+                continue
+            }
+            # the children, top to bottom in the order they run
+            kids = []
+            for c to m {
+                if par[c] == d {
+                    kids = append(kids, c)
+                }
+            }
+            nk = len(kids)
+            local = zeros(m) - 1
+            kw = zeros(nk)
+            kh = zeros(nk)
+            for i to nk {
+                local[kids[i]] = i
+                kw[i] = bw[kids[i]]
+                kh[i] = bh[kids[i]]
+            }
+            efrom = []
+            eto = []
+            eback = []
+            ew = []
+            evars = []
+            estyle = []
+            eid = []
+            # a value between two children, merged with others between the same two
+            for j to len(de_lca) {
+                if de_lca[j] != d or de_keep[j] == 0 {
+                    continue
+                }
+                a = local[de_from[j]]
+                b = local[de_to[j]]
+                found = -1
+                for q to len(efrom) {
+                    if efrom[q] == a and eto[q] == b and eback[q] == de_back[j] {
+                        found = q
+                    }
+                }
+                if found >= 0 {
+                    merged = evars[found]
+                    for v in split(de_vars[j]) {
+                        if v not in split(merged) {
+                            merged = merged + " " + v
+                        }
+                    }
+                    evars = evars[:found] + [merged] + evars[found + 1:]
+                    continue
+                }
+                efrom = append(efrom, a)
+                eto = append(eto, b)
+                eback = append(eback, de_back[j])
+                ew = append(ew, 1)
+                evars = append(evars, de_vars[j])
+                if de_back[j] == 1 {
+                    estyle = append(estyle, "s2 dash curved")
+                    eid = append(eid, "next:" + g.ids[gi[de_from[j]]] + "->" + g.ids[gi[de_to[j]]])
+                }
+                else {
+                    estyle = append(estyle, "s5 curved")
+                    eid = append(eid, "data:" + g.ids[gi[de_from[j]]] + "->" + g.ids[gi[de_to[j]]])
+                }
+            }
+            # the order they run in: from each child to the next, straight
+            for i from 1 to nk {
+                found = -1
+                for q to len(efrom) {
+                    if efrom[q] == i - 1 and eto[q] == i and eback[q] == 0 {
+                        found = q
+                    }
+                }
+                if found >= 0 {
+                    ew[found] = SEQUENCE_WEIGHT
+                }
+                else {
+                    efrom = append(efrom, i - 1)
+                    eto = append(eto, i)
+                    eback = append(eback, 0)
+                    ew = append(ew, SEQUENCE_WEIGHT)
+                    evars = append(evars, "")
+                    estyle = append(estyle, "muted thin")
+                    eid = append(eid, "then:" + g.ids[gi[kids[i - 1]]] + "->" + g.ids[gi[kids[i]]])
+                }
+            }
+            # arcs that meet at one child are spread along its side, not piled on its middle
+            ne_here = len(efrom)
+            sp = zeros(ne_here)
+            tp = zeros(ne_here)
+            for i to nk {
+                for end to 2 {
+                    count = 0
+                    for q to ne_here {
+                        if ew[q] != SEQUENCE_WEIGHT and ((end == 0 and efrom[q] == i) or (end == 1 and eto[q] == i)) {
+                            count += 1
+                        }
+                    }
+                    at = 0
+                    for q to ne_here {
+                        if ew[q] != SEQUENCE_WEIGHT and ((end == 0 and efrom[q] == i) or (end == 1 and eto[q] == i)) {
+                            at += 1
+                            off = (at / (count + 1) - 0.5) * PORT_SPREAD * kw[i]
+                            if end == 0 {
+                                sp[q] = off
+                            }
+                            else {
+                                tp[q] = off
+                            }
+                        }
+                    }
+                }
+            }
+            inp0 = layout_input(kw, kh, efrom, eto, INNER_NODE_GAP, INNER_RANK_GAP)
+            inp = LayoutInput { eback: eback, eweight: ew, elen: zeros(ne_here) + 2, sport: sp, tport: tp, ..inp0 }
+            for q to len(efrom) {
+                if len(evars[q]) > 0 {
+                    lab = names_label(evars[q])
+                    inp.label_w[q] = text_w(lab, FONT_SMALL, 1)
+                    inp.label_h[q] = FONT_SMALL + LINE_GAP
+                }
+            }
+            L = layered(inp)
+            for i to nk {
+                relx[kids[i]] = L.x[i]
+                rely[kids[i]] = L.y[i]
+            }
+            inner_w = max(L.width, max(hw[d], fw[d]))
+            bw[d] = inner_w + 2 * PAD
+            bh[d] = hh[d] + L.height + PAD + fh[d]
+            cox[d] = PAD + (inner_w - L.width) / 2
+            coy[d] = hh[d]
+            for q to len(efrom) {
+                r_owner = append(r_owner, d)
+                r_start = append(r_start, len(r_x))
+                r_x = extend(r_x, L.route_x[L.route_start[q]:L.route_start[q + 1]])
+                r_y = extend(r_y, L.route_y[L.route_start[q]:L.route_start[q + 1]])
+                r_style = append(r_style, estyle[q])
+                r_id = append(r_id, eid[q])
+                lab = ""
+                if len(evars[q]) > 0 {
+                    lab = names_label(evars[q])
+                }
+                r_label = append(r_label, lab)
+                r_lx = append(r_lx, L.label_x[q])
+                r_ly = append(r_ly, L.label_y[q])
+            }
+        }
+    }
+    nr = len(r_owner)
+    r_start = append(r_start, len(r_x))
+
+    # ---- every node's place inside its def's box (top-left corners)
+    tlx = zeros(m)
+    tly = zeros(m)
+    for level from 1 to maxdepth + 1 {
+        for d to m {
+            if depth[d] == level {
+                p = par[d]
+                tlx[d] = tlx[p] + cox[p] + relx[d] - bw[d] / 2
+                tly[d] = tly[p] + coy[p] + rely[d] - bh[d] / 2
+            }
+        }
+    }
+
+    # ---- the defs, left to right: callers before callees
+    defs = []
+    for d to m {
+        if depth[d] == 0 {
+            defs = append(defs, d)
+        }
+    }
+    nd = len(defs)
+    dlocal = zeros(m) - 1
+    for i to nd {
+        dlocal[defs[i]] = i
+    }
+    # one arrow per caller and callee: from the first step that makes the
+    # call (or the def's header), with the most times any of them ran
+    cfrom = []
+    cto = []
+    cport = []
+    cstep = []
+    csrc = []
+    ccount = []
+    cid = split("")
+    cstyle = split("")
+    cxlab = split("")
+    # the ranks each call spans: 2 for one whose label needs a rank of its own
+    celen = []
+    for e to len(g.edge_kinds) {
+        if g.edge_kinds[e] != "call" {
+            continue
+        }
+        src = dmap[g.edge_from[e]]
+        callee = dmap[g.edge_to[e]]
+        if src < 0 or callee < 0 {
+            continue
+        }
+        caller = dmap[g.owners[g.edge_from[e]]]
+        # an open multi-path takes the call from its host to a member through its fork
+        through_fork = false
+        for k to len(mp.ids) {
+            if mp.open[k] == 1 and mp.hosts[k] == gi[caller] and g.labels[gi[callee]] in split(mp.members[k]) {
+                through_fork = true
+            }
+        }
+        if through_fork {
+            continue
+        }
+        a = dlocal[caller]
+        b = dlocal[callee]
+        dup = -1
+        for q to len(cfrom) {
+            if cfrom[q] == a and cto[q] == b {
+                dup = q
+            }
+        }
+        if dup >= 0 {
+            ccount[dup] = max(ccount[dup], view.counts[e])
+            continue
+        }
+        cfrom = append(cfrom, a)
+        cto = append(cto, b)
+        ccount = append(ccount, view.counts[e])
+        csrc = append(csrc, src)
+        cid = append(cid, "call:" + g.ids[gi[src]] + "->" + g.ids[gi[callee]])
+        cstyle = append(cstyle, "ink")
+        cxlab = append(cxlab, "")
+        celen = append(celen, 1)
+        if src == caller {
+            # a call outside every step leaves at the def's header
+            cport = append(cport, head_h[caller] / 2 - bh[caller] / 2)
+            cstep = append(cstep, -1)
+        }
+        else {
+            cport = append(cport, tly[src] + bh[src] / 2 - bh[caller] / 2)
+            cstep = append(cstep, src)
+        }
+    }
+    # ---- the multi-paths: boxes of their own among the defs' boxes
+    oids = split("")
+    for i to nd {
+        oids = append(oids, g.ids[gi[defs[i]]])
+    }
+    # per synthetic box: its id, its kind (`closed`, `fork`, `join`, `member`),
+    # its lines of text and its style
+    syn_d = []
+    syn_id = split("")
+    syn_kind = split("")
+    syn_l1 = split("")
+    syn_l2 = split("")
+    syn_l3 = split("")
+    syn_l4 = split("")
+    syn_style = split("")
+    for k to len(mp.ids) {
+        if mp.hosts[k] < 0 {
+            continue
+        }
+        h = dmap[mp.hosts[k]]
+        if h < 0 or depth[h] != 0 {
+            continue
+        }
+        hs = -1
+        if mp.host_steps[k] >= 0 and dmap[mp.host_steps[k]] >= 0 {
+            hs = dmap[mp.host_steps[k]]
+        }
+        key = "mp:" + mp.ids[k] + "@" + g.ids[mp.hosts[k]]
+        ms = split(mp.members[k])
+        nm = len(ms)
+        kinds = split("")
+        ids = split("")
+        l1 = split("")
+        l2 = split("")
+        l3 = split("")
+        l4 = split("")
+        sty = split("")
+        if mp.open[k] == 0 {
+            kinds = ["closed"]
+            ids = [key]
+            l1 = [clean(fit(mp.ids[k] + " · multi-path ×" + grouped(nm), HEADER_MAX_W, FONT_NORMAL, 1))]
+            l2 = [clean(fit(mp.titles[k], HEADER_MAX_W, FONT_SMALL, 0))]
+            l3 = [clean(fit("agree " + mp.contracts[k], HEADER_MAX_W, FONT_SMALL, 0))]
+            l4 = [clean(fit(mp.notes[k], HEADER_MAX_W, FONT_SMALL, 0))]
+            sty = ["s3 tint"]
+        }
+        else {
+            kinds = ["fork"]
+            ids = [key + "/fork"]
+            l1 = [clean(mp.ids[k] + " ×" + grouped(nm))]
+            l2 = [""]
+            l3 = [""]
+            l4 = [""]
+            sty = ["s3 tint diamond"]
+            for mm in ms {
+                j = node_index(g, mm)
+                if j >= 0 and dmap[j] >= 0 and depth[dmap[j]] == 0 {
+                    continue
+                }
+                kinds = append(kinds, "member")
+                ids = append(ids, key + "/m:" + mm)
+                l1 = append(l1, clean(mm))
+                role = "cross-check"
+                style = "muted plain dash"
+                if mm == mp.defaults[k] {
+                    role = "default"
+                    style = "s1 tint"
+                }
+                if mm in split(mp.ran[k]) {
+                    role = role + ", ran"
+                }
+                l2 = append(l2, role)
+                l3 = append(l3, "")
+                l4 = append(l4, "")
+                sty = append(sty, style)
+            }
+            kinds = append(kinds, "join")
+            ids = append(ids, key + "/join")
+            l1 = append(l1, "agree")
+            l2 = append(l2, clean(fit(mp.contracts[k], 120, FONT_SMALL, 0)))
+            l3 = append(l3, "")
+            l4 = append(l4, "")
+            sty = append(sty, "s3 tint diamond")
+        }
+        # sizes, and a place among the defs' boxes
+        first = len(bw)
+        for i to len(kinds) {
+            w1 = text_w(l1[i], FONT_NORMAL, 1)
+            if kinds[i] == "fork" or kinds[i] == "join" {
+                w1 = max(text_w(l1[i], FONT_SMALL, 1), text_w(l2[i], FONT_SMALL, 0))
+                lines = 1
+                if len(l2[i]) > 0 {
+                    lines = 2
+                }
+                bw = append(bw, diamond_w(w1))
+                bh = append(bh, diamond_h(lines))
+                head_h = append(head_h, diamond_h(lines))
+            }
+            else {
+                w1 = max(w1, max(text_w(l2[i], FONT_SMALL, 0), max(text_w(l3[i], FONT_SMALL, 0), text_w(l4[i], FONT_SMALL, 0))))
+                below = 0
+                for txt in [l2[i], l3[i], l4[i]] {
+                    if len(txt) > 0 {
+                        below += 1
+                    }
+                }
+                bw = append(bw, max(w1 + 2 * PAD, STEP_MIN_W))
+                bh = append(bh, FONT_NORMAL + 2 * PAD + below * (FONT_SMALL + LINE_GAP))
+                head_h = append(head_h, FONT_NORMAL + 2 * PAD)
+            }
+            dlocal = append(dlocal, len(defs))
+            defs = append(defs, len(bw) - 1)
+            oids = append(oids, ids[i])
+            syn_d = append(syn_d, len(bw) - 1)
+            syn_id = append(syn_id, ids[i])
+            syn_kind = append(syn_kind, kinds[i])
+            syn_l1 = append(syn_l1, l1[i])
+            syn_l2 = append(syn_l2, l2[i])
+            syn_l3 = append(syn_l3, l3[i])
+            syn_l4 = append(syn_l4, l4[i])
+            syn_style = append(syn_style, sty[i])
+        }
+        # the call into the stage: from the step that makes it, or the host's header
+        into = dlocal[first]
+        cfrom = append(cfrom, dlocal[h])
+        cto = append(cto, into)
+        ccount = append(ccount, 0)
+        csrc = append(csrc, h)
+        if hs >= 0 {
+            cport = append(cport, tly[hs] + bh[hs] / 2 - bh[h] / 2)
+            cstep = append(cstep, hs)
+            csrc[len(csrc) - 1] = hs
+        }
+        else {
+            cport = append(cport, head_h[h] / 2 - bh[h] / 2)
+            cstep = append(cstep, -1)
+        }
+        cid = append(cid, key + "/in")
+        cstyle = append(cstyle, "ink")
+        inlab = ""
+        if mp.open[k] == 1 {
+            inlab = clean(fit(mp.titles[k], 2 * STEP_MAX_W, FONT_SMALL, 1))
+        }
+        cxlab = append(cxlab, inlab)
+        if len(inlab) > 0 {
+            celen = append(celen, 2)
+        }
+        else {
+            celen = append(celen, 1)
+        }
+        if mp.open[k] == 1 {
+            fk = dlocal[first]
+            jn = dlocal[len(bw) - 1]
+            for mm in ms {
+                # the member's box: a drawn def, or its own
+                j = node_index(g, mm)
+                target = -1
+                if j >= 0 and dmap[j] >= 0 and depth[dmap[j]] == 0 {
+                    target = dlocal[dmap[j]]
+                }
+                else {
+                    target = dlocal[first + index(syn_id[len(syn_id) - (len(bw) - first):], key + "/m:" + mm)]
+                }
+                style = "muted dash"
+                if mm == mp.defaults[k] {
+                    style = "ink thick"
+                }
+                for leg to 2 {
+                    a = fk
+                    b = target
+                    lid = key + "/to:" + mm
+                    if leg == 1 {
+                        a = target
+                        b = jn
+                        lid = key + "/from:" + mm
+                    }
+                    cfrom = append(cfrom, a)
+                    cto = append(cto, b)
+                    ccount = append(ccount, 0)
+                    csrc = append(csrc, -1)
+                    cstep = append(cstep, -1)
+                    src_d = defs[a]
+                    cport = append(cport, head_h[src_d] / 2 - bh[src_d] / 2)
+                    cid = append(cid, lid)
+                    cstyle = append(cstyle, style)
+                    cxlab = append(cxlab, "")
+                    celen = append(celen, 1)
+                }
+            }
+        }
+    }
+    nd = len(defs)
+    nc = len(cfrom)
+    clab = []
+    for q to nc {
+        lab = ""
+        if ccount[q] > 1 {
+            lab = "×" + grouped(ccount[q])
+        }
+        if len(cxlab[q]) > 0 {
+            lab = cxlab[q]
+        }
+        clab = append(clab, lab)
+    }
+    # top to bottom, each call from a step runs down its own lane on the right
+    # of its def's box, so it does not cross the box's other steps
+    clane = zeros(nc)
+    nlanes = zeros(nd)
+    for q to nc {
+        if cstep[q] >= 0 {
+            clane[q] = nlanes[cfrom[q]]
+            nlanes[cfrom[q]] += 1
+        }
+    }
+    down = view.dir == 2
+    O = layered(outer_input(oids, view, defs, bw, bh, head_h, cfrom, cto, cport, cstep, clab, celen, clane, nlanes, down))
+    # a drawing far wider than tall reads better top to bottom: callers above
+    # callees, a call leaving down the right side of its caller's box
+    if view.dir == 0 and O.height > WIDE_RATIO * O.width {
+        down = true
+        O = layered(outer_input(oids, view, defs, bw, bh, head_h, cfrom, cto, cport, cstep, clab, celen, clane, nlanes, true))
+    }
+    lw = zeros(nd)
+    if down {
+        lw = nlanes * LANE_GAP
+    }
+    ax = zeros(len(bw))
+    ay = zeros(len(bw))
+    for i to nd {
+        d = defs[i]
+        if down {
+            ax[d] = O.x[i] - (bw[d] + lw[i]) / 2
+            ay[d] = LEGEND_H + O.y[i] - bh[d] / 2
+        }
+        else {
+            ax[d] = O.y[i] - bw[d] / 2
+            ay[d] = LEGEND_H + O.x[i] - bh[d] / 2
+        }
+    }
+    for level from 1 to maxdepth + 1 {
+        for d to m {
+            if depth[d] == level {
+                root = d
+                while par[root] >= 0 {
+                    root = par[root]
+                }
+                ax[d] = ax[root] + tlx[d]
+                ay[d] = ay[root] + tly[d]
+            }
+        }
+    }
+    width = max(O.height, 1)
+    height = LEGEND_H + max(O.width, 1)
+    way = "across"
+    if down {
+        width = max(O.width, 1)
+        height = LEGEND_H + max(O.height, 1)
+        way = "down"
+    }
+    # the legend's line, when there are multi-paths, is as wide as the drawing at least
+    if len(syn_d) > 0 {
+        legend_w = 0
+        for lt in ["calls", "values a step hands on", "values for the next pass", "a multi-path: several implementations of one intent, held to agree"] {
+            legend_w += 26 + PAD + text_w(lt, FONT_SMALL, 0) + 2 * PAD
+        }
+        width = max(width, legend_w)
+    }
+
+    # ---- the records: boxes outside in, then arrows, then text
+    figure(title, way, "", 0, width, -height, 0, "diagram")
+    for level from 0 to maxdepth + 1 {
+        for d to m {
+            if depth[d] != level {
+                continue
+            }
+            k = gi[d]
+            style = "muted plain"
+            if g.kinds[k] == "def" {
+                style = "s1 tint"
+            }
+            else if g.kinds[k] == "loop" {
+                style = "s2 clear dash"
+            }
+            else if nkids[d] > 0 {
+                style = "muted tint"
+            }
+            box(g.ids[k], style, ax[d], -(ay[d] + bh[d]), ax[d] + bw[d], -ay[d])
+        }
+    }
+    # the multi-paths' boxes: a closed stage, a fork, a member, a join
+    for i to len(syn_d) {
+        d = syn_d[i]
+        box(syn_id[i], syn_style[i], ax[d], -(ay[d] + bh[d]), ax[d] + bw[d], -ay[d])
+    }
+    # calls between defs: from the calling step's right side to the callee's header
+    for q to nc {
+        lo = O.route_start[q]
+        hi = O.route_start[q + 1]
+        xs = []
+        ys = []
+        if cstep[q] >= 0 {
+            s = cstep[q]
+            xs = append(xs, ax[s] + bw[s])
+            ys = append(ys, -(ay[s] + bh[s] / 2))
+            if down {
+                xs = append(xs, O.route_x[lo])
+                ys = append(ys, -(ay[s] + bh[s] / 2))
+            }
+        }
+        for i from lo to hi {
+            if down {
+                xs = append(xs, O.route_x[i])
+                ys = append(ys, -(LEGEND_H + O.route_y[i]))
+            }
+            else {
+                xs = append(xs, O.route_y[i])
+                ys = append(ys, -(LEGEND_H + O.route_x[i]))
+            }
+        }
+        # straight pieces: a curve through the corners of a long route swings
+        # wide of them, across the boxes beside it
+        id = cid[q]
+        arrow(id, cstyle[q], xs, ys)
+        if len(clab[q]) > 0 {
+            if down {
+                note(id + "#count", clab[q], "muted small mono", O.label_x[q], -(LEGEND_H + O.label_y[q]))
+            }
+            else {
+                note(id + "#count", clab[q], "muted small mono", O.label_y[q], -(LEGEND_H + O.label_x[q]))
+            }
+        }
+    }
+    # values and order inside boxes
+    for q to nr {
+        d = r_owner[q]
+        ox = ax[d] + cox[d]
+        oy = ay[d] + coy[d]
+        xs = r_x[r_start[q]:r_start[q + 1]] + ox
+        ys = -(r_y[r_start[q]:r_start[q + 1]] + oy)
+        arrow(r_id[q], r_style[q], xs, ys)
+        if len(r_label[q]) > 0 {
+            color = "s5"
+            if startswith(r_style[q], "s2") {
+                color = "s2"
+            }
+            note(r_id[q] + "#vars", r_label[q], color + " small mono", ox + r_lx[q], -(oy + r_ly[q]))
+        }
+    }
+    for d to m {
+        k = gi[d]
+        x0 = ax[d] + PAD
+        y0 = ay[d] + PAD
+        if g.kinds[k] == "def" {
+            note(g.ids[k] + "#head", head[d], "ink left top mono bold", x0, -y0)
+            if len(marks[d]) > 0 {
+                which = "#more"
+                if marks[d] == "−" {
+                    which = "#less"
+                }
+                note(g.ids[k] + which, marks[d], "s1 right top mono bold small", ax[d] + bw[d] - PAD, -(y0 + (FONT_NORMAL - FONT_SMALL) / 2))
+            }
+        }
+        else if g.kinds[k] == "loop" {
+            note(g.ids[k] + "#head", head[d], "s2 left top mono small", x0, -y0)
+        }
+        else {
+            note(g.ids[k] + "#head", head[d], "ink left top mono bold", x0, -y0)
+            below = y0 + FONT_NORMAL + LINE_GAP
+            if len(sub[d]) > 0 {
+                note(g.ids[k] + "#text", sub[d], "muted left top small", x0, -below)
+                below += FONT_SMALL + LINE_GAP
+            }
+            if len(ins[d]) > 0 {
+                note(g.ids[k] + "#reads", ins[d], "s5 left top small mono", x0, -below)
+            }
+        }
+        if len(foot[d]) > 0 {
+            note(g.ids[k] + "#foot", foot[d], "muted left bottom small", x0, -(ay[d] + bh[d] - PAD / 2))
+        }
+    }
+    for i to len(syn_d) {
+        d = syn_d[i]
+        sk = syn_kind[i]
+        if sk == "fork" or sk == "join" {
+            cx = ax[d] + bw[d] / 2
+            if len(syn_l2[i]) > 0 {
+                note(syn_id[i] + "#head", syn_l1[i], "s3 small mono bold", cx, -(ay[d] + bh[d] / 2 - (FONT_SMALL + LINE_GAP) / 2))
+                note(syn_id[i] + "#text", syn_l2[i], "muted small", cx, -(ay[d] + bh[d] / 2 + (FONT_SMALL + LINE_GAP) / 2))
+            }
+            else {
+                note(syn_id[i] + "#head", syn_l1[i], "s3 small mono bold", cx, -(ay[d] + bh[d] / 2))
+            }
+            continue
+        }
+        x0 = ax[d] + PAD
+        y0 = ay[d] + PAD
+        note(syn_id[i] + "#head", syn_l1[i], "ink left top mono bold", x0, -y0)
+        below = y0 + FONT_NORMAL + LINE_GAP
+        parts = ["#text", "#contract", "#note"]
+        texts = [syn_l2[i], syn_l3[i], syn_l4[i]]
+        for t to 3 {
+            if len(texts[t]) > 0 {
+                note(syn_id[i] + parts[t], texts[t], "muted left top small", x0, -below)
+                below += FONT_SMALL + LINE_GAP
+            }
+        }
+    }
+    # the legend, above
+    lx = 0
+    ly = -LEGEND_H / 2
+    key_w = 26
+    arrow("legend:call", "ink", [lx, lx + key_w], [ly, ly])
+    note("legend:call#text", "calls", "muted left small", lx + key_w + PAD / 2, ly)
+    lx += key_w + PAD + text_w("calls", FONT_SMALL, 0) + 2 * PAD
+    arrow("legend:data", "s5", [lx, lx + key_w], [ly, ly])
+    note("legend:data#text", "values a step hands on", "muted left small", lx + key_w + PAD / 2, ly)
+    lx += key_w + PAD + text_w("values a step hands on", FONT_SMALL, 0) + 2 * PAD
+    arrow("legend:next", "s2 dash", [lx, lx + key_w], [ly, ly])
+    note("legend:next#text", "values for the next pass", "muted left small", lx + key_w + PAD / 2, ly)
+    if len(syn_d) > 0 {
+        lx += key_w + PAD + text_w("values for the next pass", FONT_SMALL, 0) + 2 * PAD
+        # a small diamond, drawn as a closed line
+        dh = FONT_SMALL / 2
+        arrow("legend:multipath", "s3 nohead", [lx, lx + dh, lx + 2 * dh, lx + dh, lx], [ly, ly + dh, ly, ly - dh, ly])
+        note("legend:multipath#text", "a multi-path: several implementations of one intent, held to agree", "muted left small", lx + 2 * dh + PAD / 2, ly)
+    }
+    return nd
+}
+
+test "a program with steps: the defs with steps are drawn, with their steps" {
+    g = graph_of_self()
+    # this module has no steps: every def the run reaches, which is none
+    assert_true(sum(chosen_defs(g)) == 1)
+    assert_true(fit("abcdefghij", 5 * FONT_SMALL * MONO_EM, FONT_SMALL, 1) == "abcd…")
+    assert_true(names_label("D F") == "D, F")
+    assert_true(clean("a ; b\nc") == "a; b c")
+    assert_true(grouped(47270) == "47,270" and grouped(3) == "3" and grouped(1234567) == "1,234,567" and grouped(100) == "100")
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

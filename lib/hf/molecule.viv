@@ -1,0 +1,225 @@
+###
+post: A molecule and its basis, built in Viv
+agent: claude
+
+A Hartree-Fock run starts from the nuclei (charges and positions) and a
+basis set (Gaussian shells on each atom). `Molecule` holds both, in the
+packs every integral routine of lib/hf reads, with the charge, the spin and the choice of Cartesian or
+spherical functions:
+
+    atoms    [natm, 4]  (Z, x, y, z) in bohr
+    shells   [nsh, 8]   (atom, l, nprim, p0, cart0, sph0, ncart, nsph)
+    prims    [nprim, 2] (exponent, coefficient)
+    charge   net charge
+    spin     alpha minus beta electrons, as PySCF's `Mole.spin`
+    cart     1 for Cartesian functions, 0 for spherical ones (PySCF's default)
+
+`molecule_from(z, xyz, basis)` builds one from atomic numbers, coordinates in
+angstrom (PySCF's default unit) and a `Basis` record from lib/basis:
+
+    from basis.pople631g import basis_631g
+    from hf.molecule import molecule_from
+    mol = molecule_from([8, 1, 1], [[0, 0, 0], [0, -0.757, 0.587], [0, 0.757, 0.587]], basis_631g())
+
+(lib/hf/mole's `molecule("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", "6-31g")`
+builds the same molecule from text and a basis name.)
+
+For each atom it copies that element's shells from the basis table, in the
+table's order, and numbers the atomic orbitals as it goes. Coordinates are
+converted with PySCF 2.5.0's bohr, 0.52917721092 angstrom, multiplying by its
+inverse as PySCF does, so the atoms pack is PySCF's to the last bit. The
+coefficients are the basis set's own; PySCF stores the same contraction
+rescaled to unit norm, and lib/hf normalizes every shell itself
+(`bas_contract`), so the integrals do not depend on the scale. Every
+molecule of the lock ladder built here (water in six basis sets, OH, O2, HF,
+NH3, CH4, N2, He and H) has PySCF's packs shell for shell, which
+scf/molecule_packs.viv checks against lib/hfref.
+
+The charge is 0 and the spin is the electron count's parity (a doublet for
+an odd count; PySCF refuses an odd count with spin 0). Change them, or ask
+for Cartesian functions, with a record update:
+
+    cation = Molecule { charge: 1, spin: 1, ..mol }
+    mol6d = Molecule { cart: 1, ..mol }
+
+`molecule_packs(atoms, shells, prims)` wraps packs made elsewhere, such as
+PySCF's in lib/hfref, which the lock ladder holds lib/hf against.
+
+Used with `import hf.molecule`.
+###
+
+from basis.basis import (
+    Basis, basis_first, basis_of, BS_L, BS_NPRIM, BS_P0, BS_PR_COEF, BS_PR_EXP, BS_Z,
+)
+from hf.basis import (
+    AT_CHG, AT_LEN, AT_X, AT_Y, AT_Z, bas_nao_cart, bas_nao_sph, bas_ncart, BAS_NDIM, bas_nsph,
+    PR_COEF, PR_EXP, PR_LEN, SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH,
+    SH_P0, SH_SPH0,
+)
+
+record Molecule {
+    atoms: Arr
+    shells: Arr
+    prims: Arr
+    charge: Num
+    spin: Num
+    cart: Num
+}
+
+# PySCF 2.5.0's bohr in angstrom (pyscf.lib.param.BOHR)
+MOL_BOHR = 0.52917721092
+
+#| The molecule of atomic numbers `z[natm]` at `xyz[natm, 3]` (bohr), with
+#| every atom's shells from basis `b`: neutral, spin from the electron
+#| count's parity, spherical functions.
+def molecule_bohr(z: Arr, xyz: Arr, b: Basis) -> Molecule {
+    natm = len(z)
+    step pack {
+        atoms = zeros(natm, AT_LEN)
+        shells = []
+        prims = []
+        cart0 = 0
+        sph0 = 0
+        for a to natm {
+            if basis_first(b, z[a]) < 0 {
+                stop(f"molecule: the basis has no shells for element {z[a]:d}")
+            }
+            atoms[a, AT_CHG] = z[a]
+            atoms[a, AT_X:AT_Z + 1] = xyz[a, 0:BAS_NDIM]
+            for s to len(b.shells) {
+                if b.shells[s, BS_Z] == z[a] {
+                    l = b.shells[s, BS_L]
+                    np = b.shells[s, BS_NPRIM]
+                    sh = zeros(SH_LEN)
+                    sh[SH_ATOM] = a
+                    sh[SH_L] = l
+                    sh[SH_NPRIM] = np
+                    sh[SH_P0] = len(prims)
+                    sh[SH_CART0] = cart0
+                    sh[SH_SPH0] = sph0
+                    sh[SH_NCART] = bas_ncart(l)
+                    sh[SH_NSPH] = bas_nsph(l)
+                    shells = append(shells, sh)
+                    for k to np {
+                        pr = zeros(PR_LEN)
+                        pr[PR_EXP] = b.prims[b.shells[s, BS_P0] + k, BS_PR_EXP]
+                        pr[PR_COEF] = b.prims[b.shells[s, BS_P0] + k, BS_PR_COEF]
+                        prims = append(prims, pr)
+                    }
+                    cart0 = cart0 + bas_ncart(l)
+                    sph0 = sph0 + bas_nsph(l)
+                }
+            }
+        }
+    }
+    return Molecule { atoms: atoms, shells: shells, prims: prims, charge: 0, spin: mod(sum(z), 2), cart: 0 }
+}
+
+#| The molecule of atomic numbers `z[natm]` at `xyz[natm, 3]` in angstrom,
+#| with every atom's shells from basis `b`.
+def molecule_from(z: Arr, xyz: Arr, b: Basis) -> Molecule {
+    return molecule_bohr(z, xyz * (1.0 / MOL_BOHR), b)
+}
+
+#| A molecule from packs made elsewhere: neutral, spin from the parity,
+#| spherical functions.
+def molecule_packs(atoms: Arr, shells: Arr, prims: Arr) -> Molecule {
+    n = sum(atoms[:, AT_CHG])
+    return Molecule { atoms: atoms, shells: shells, prims: prims, charge: 0, spin: mod(n, 2), cart: 0 }
+}
+
+#| The number of electrons.
+def mol_nelectron(mol: Molecule) {
+    return sum(mol.atoms[:, AT_CHG]) - mol.charge
+}
+
+#| Alpha electrons: `(N + spin) / 2`.
+def mol_nalpha(mol: Molecule) {
+    n = mol_nelectron(mol)
+    if mod(n + mol.spin, 2) != 0 {
+        stop(f"molecule: {n:d} electrons and spin {mol.spin:d}: the electron count and the spin must be both even or both odd")
+    }
+    return (n + mol.spin) / 2
+}
+
+#| Beta electrons: `(N - spin) / 2`.
+def mol_nbeta(mol: Molecule) {
+    return mol_nelectron(mol) - mol_nalpha(mol)
+}
+
+#| The repulsion between the nuclei, `sum over pairs Z_A Z_B / R_AB`. A
+#| ghost atom (`Z = 0`) adds nothing, as in PySCF.
+def mol_enuc(mol: Molecule) {
+    atoms = mol.atoms
+    e = 0.0
+    for a to len(atoms) {
+        for b to a {
+            dx = atoms[a, AT_X] - atoms[b, AT_X]
+            dy = atoms[a, AT_Y] - atoms[b, AT_Y]
+            dz = atoms[a, AT_Z] - atoms[b, AT_Z]
+            e = e + atoms[a, AT_CHG] * atoms[b, AT_CHG] / sqrt(dx * dx + dy * dy + dz * dz)
+        }
+    }
+    return e
+}
+
+#| The highest angular momentum of the basis.
+def mol_lmax(mol: Molecule) {
+    return max(mol.shells[:, SH_L])
+}
+
+#| `1` when the run uses spherical functions that differ from the Cartesian
+#| ones: `cart` is `0` and some shell has `l >= 2`. Up to p the two sets are the
+#| same functions in the same order, so nothing is transformed.
+def mol_spherical(mol: Molecule) {
+    if mol.cart < 0.5 and mol_lmax(mol) > 1 {
+        return 1
+    }
+    return 0
+}
+
+#| The number of basis functions the SCF sees.
+def mol_nao(mol: Molecule) {
+    if mol_spherical(mol) > 0.5 {
+        return bas_nao_sph(mol.shells)
+    }
+    return bas_nao_cart(mol.shells)
+}
+
+test "a molecule from a basis table: angstrom to bohr as PySCF converts, shells numbered in order" {
+    # hydrogen with an s and a p shell, helium with one s shell
+    mol_b = basis_of([1, 0, 2, 0, 1, 1, 1, 2, 2, 0, 1, 3], [3.0, 0.5, 0.5, 0.6, 0.8, 1.0, 1.2, 1.0])
+    mol_m = molecule_from([1, 2], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]], mol_b)
+    assert_near(mol_m.atoms[1, AT_Z], 0.74 * (1.0 / MOL_BOHR), 0.0)
+    assert_near(mol_m.atoms[1, AT_CHG], 2, 0.0)
+    # H's s and p, then He's s: AOs 0, 1..3, 4
+    assert_near(len(mol_m.shells), 3, 0.0)
+    assert_near(mol_m.shells[1, SH_CART0], 1, 0.0)
+    assert_near(mol_m.shells[2, SH_ATOM], 1, 0.0)
+    assert_near(mol_m.shells[2, SH_CART0], 4, 0.0)
+    assert_near(mol_m.shells[2, SH_P0], 3, 0.0)
+    assert_near(mol_m.prims[3, PR_EXP], 1.2, 0.0)
+    assert_near(mol_nao(mol_m), 5, 0.0)
+    # three electrons: a doublet, 2 alpha and 1 beta
+    assert_near(mol_m.spin, 1, 0.0)
+    assert_near(mol_nalpha(mol_m), 2, 0.0)
+    assert_near(mol_nbeta(mol_m), 1, 0.0)
+    assert_near(mol_enuc(mol_m), 2.0 / (0.74 * (1.0 / MOL_BOHR)), 1.0e-15)
+    # no d shell: spherical and Cartesian functions are the same
+    assert_near(mol_spherical(mol_m), 0, 0.0)
+    mol_c = Molecule { charge: -1, spin: 0, ..mol_m }
+    assert_near(mol_nalpha(mol_c), 2, 0.0)
+    assert_near(mol_nbeta(mol_c), 2, 0.0)
+}
+
+test "a d shell makes the molecule spherical unless it asks for Cartesian functions" {
+    mol_b = basis_of([1, 0, 1, 0, 1, 2, 1, 1], [1.0, 1.0, 0.8, 1.0])
+    mol_m = molecule_bohr([1], [[0.0, 0.0, 0.0]], mol_b)
+    assert_near(mol_lmax(mol_m), 2, 0.0)
+    assert_near(mol_spherical(mol_m), 1, 0.0)
+    assert_near(mol_nao(mol_m), 6, 0.0)
+    assert_near(mol_nao(Molecule { cart: 1, ..mol_m }), 7, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

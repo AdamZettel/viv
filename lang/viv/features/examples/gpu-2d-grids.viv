@@ -1,0 +1,22 @@
+#| A 2-D grid: each thread reads its column and row from x and y, with no
+#| division; `cover` is the index space, and the blocks are derived from it.
+kernel def flip(a: Arr, t: Arr, rows: Int, cols: Int) {
+    col = block_id(0) * block_size(0) + thread_id(0)
+    row = block_id(1) * block_size(1) + thread_id(1)
+    if row < rows and col < cols {
+        t[col * rows + row] = a[row * cols + col]
+    }
+}
+schedule flip(threads = [4, 2], cover = [cols, rows])
+
+ROWS: Int = 3
+COLS: Int = 5
+a = linspace(0.0, 14.0, ROWS * COLS)
+t = flip(a, zeros(ROWS * COLS), ROWS, COLS)
+show t
+test "the kernel equals transpose" {
+    assert_near(max(abs(t - ravel(transpose(reshape(a, ROWS, COLS))))), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

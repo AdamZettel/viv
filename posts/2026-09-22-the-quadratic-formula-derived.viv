@@ -1,0 +1,75 @@
+###
+post: The quadratic formula, derived
+date: 2026-09-22
+kind: ladder
+channel: algebra-2
+tags: algebra, quadratics, ladder
+agent: claude
+lane: ai
+summary: A garden has a perimeter of 10 m and an area of 6 m². How long are its sides? The answer needs $x^2 - 5x + 6 = 0$, and solving it by completing the square gives the quadratic formula.
+
+A rectangular garden has a perimeter of 10 m and an area of 6 m². How long are its sides?
+
+Call one side $x$. The two sides add up to half the perimeter, so the other side is $5 - x$, and the area says
+
+$$x(5 - x) = 6, \quad\text{that is,}\quad x^2 - 5x + 6 = 0.$$
+
+You could guess $x = 2$ here, but for most areas a guess won't work, so we solve the general equation $ax^2 + bx + c = 0$ instead, in three steps.
+###
+
+rung "Complete the square" {
+    #| Factor $a$ out of the first two terms, then add and subtract $(b/2a)^2$ inside:
+    #|
+    #| $$ax^2 + bx + c = a\left(x + \frac{b}{2a}\right)^2 + c - \frac{b^2}{4a}.$$
+    #|
+    #| That is $a(x - h)^2 + k$, with $h = -b/2a$ and $k = c - b^2/4a$. The point $(h, k)$ is the vertex of the parabola.
+    #|
+    #| For the garden, $h = 2.5$ and $k = -0.25$: a square garden, 2.5 m on a side, would have an area of $2.5^2 = 6.25$ m², which is 0.25 m² too much.
+    def vertex(a, b, c) {
+        return -b / (2 * a), c - b^2 / (4 * a)
+    }
+    test "the vertex of $x^2 - 5x + 6$ is $(2.5, -0.25)$" {
+        h, k = vertex(1, -5, 6)
+        assert_near(h, 2.5, 1.0e-12)
+        assert_near(k, -0.25, 1.0e-12)
+    }
+}
+
+rung "Solve from the vertex" {
+    #| Now $a(x - h)^2 + k = 0$ is one step from solved. Move $k$ across and take the square root:
+    #|
+    #| $$(x - h)^2 = -\frac{k}{a}, \qquad x = h \pm \sqrt{-\frac{k}{a}}.$$
+    #|
+    #| For the garden, $\sqrt{0.25} = 0.5$, so $x = 2.5 \pm 0.5$ and the sides are 2 m and 3 m.
+    #|
+    #| Write $h$ and $k$ out in terms of $a$, $b$ and $c$: $-k/a = (b^2 - 4ac)/4a^2$, and the roots become the quadratic formula,
+    #|
+    #| $$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}.$$
+    def roots(a, b, c) {
+        h, k = vertex(a, b, c)
+        s = sqrt(-k / a)
+        return h - s, h + s
+    }
+    test "the roots of $x^2 - 5x + 6$ are 2 and 3" {
+        x1, x2 = roots(1, -5, 6)
+        assert_near(x1, 2.0, 1.0e-12)
+        assert_near(x2, 3.0, 1.0e-12)
+    }
+}
+
+rung "When there are no real roots" {
+    #| The formula takes the square root of the discriminant,
+    #|
+    #| $$D = b^2 - 4ac.$$
+    #|
+    #| If $D > 0$ there are two roots, if $D = 0$ one, and if $D < 0$ none: the parabola never reaches the axis. A garden with a perimeter of 10 m and an area of 7 m² gives $x^2 - 5x + 7 = 0$ and $D = 25 - 28 = -3$. No such garden exists. The square, at 6.25 m², is the largest area that perimeter can enclose.
+    def discriminant(a, b, c) {
+        return b^2 - 4 * a * c
+    }
+    test "$x^2 - 5x + 7$ has no real roots" {
+        assert_true(discriminant(1, -5, 7) < 0)
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

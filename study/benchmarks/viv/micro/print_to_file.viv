@@ -1,0 +1,27 @@
+# Microbenchmarks: print_to_file. Reference: upstream/Microbenchmarks/julia/perf.jl
+#   function printfd(n)
+#       open("/dev/null", "w") do io
+#           for i = 1:n
+#               @printf(io, "%d %d\n", i, i + 1)
+#           end
+#       end
+#   end
+#   @timeit printfd(100000) "print_to_file"
+# Viv cannot open a file for writing line by line (write_text writes one whole
+# string), so each line is printed to stdout and the harness sends stdout to
+# /dev/null for the timed runs (and to a file for the correctness check).
+
+def printfd(n) {
+    for i from 1 to n + 1 {
+        print(fmt(i, "d"), fmt(i + 1, "d"))
+    }
+    return n
+}
+
+reps = int(strip(read_text("reps.txt")))
+for r to reps {
+    printfd(100000)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

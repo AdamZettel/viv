@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The local derivatives of Viv's one-argument builtins, read by both the
+# reverse-mode pass (lang/viv/src/grad.rs) and the computer algebra system
+# (lib/cas), so the two cannot disagree about what the derivative of `erf`
+# is.
+#
+# `adjoint` is a Viv expression in three names:
+#   g  the adjoint flowing back into the call's value,
+#   u  the argument,
+#   y  the call's value, head(u).
+# grad.rs adds `adjoint` into the adjoint of `u`. The CAS sets g = 1, so
+# `adjoint` is d head(u) / du, and multiplies it by du/dx (the chain rule).
+# `pi` in an adjoint is the constant pi, never a program's variable.
+#
+# `at` lists points where the rule is tested: the CAS's derivative of
+# head(x) there must match a central difference of head (lib/cas/derivs.viv,
+# generated from this file by `viv cas derivs`), and grad.rs's gradient of
+# head(x) must match the CAS's derivative (lang/viv/tests/cas.rs).
+#
+# A head with no row here has no derivative in the CAS, and grad.rs keeps
+# its own rule if it has one: `abs` (whose gradient at 0 grad.rs defines as
+# 0), `pow` and `atan2` (two arguments, and the CAS's own power rule), `min`,
+# `max` and the array builtins.
+
+[[rule]]
+id = "diff.exp"
+head = "exp"
+adjoint = "g * y"
+at = [-1.5, 0.25, 2.0]
+
+[[rule]]
+id = "diff.log"
+head = "log"
+adjoint = "g / u"
+at = [0.3, 1.0, 4.5]
+
+[[rule]]
+id = "diff.ln"
+head = "ln"
+adjoint = "g / u"
+at = [0.3, 1.0, 4.5]
+
+[[rule]]
+id = "diff.sqrt"
+head = "sqrt"
+adjoint = "g / (2 * y)"
+at = [0.3, 1.0, 4.5]
+
+[[rule]]
+id = "diff.sin"
+head = "sin"
+adjoint = "g * cos(u)"
+at = [-1.5, 0.25, 2.0]
+
+[[rule]]
+id = "diff.cos"
+head = "cos"
+adjoint = "-(g * sin(u))"
+at = [-1.5, 0.25, 2.0]
+
+[[rule]]
+id = "diff.tan"
+head = "tan"
+adjoint = "g * (1 + y * y)"
+at = [-1.2, 0.25, 1.0]
+
+[[rule]]
+id = "diff.tanh"
+head = "tanh"
+adjoint = "g * (1 - y * y)"
+at = [-1.5, 0.25, 2.0]
+
+[[rule]]
+id = "diff.sinh"
+head = "sinh"
+adjoint = "g * cosh(u)"
+at = [-1.5, 0.25, 2.0]
+
+[[rule]]
+id = "diff.cosh"
+head = "cosh"
+adjoint = "g * sinh(u)"
+at = [-1.5, 0.25, 2.0]
+
+[[rule]]
+id = "diff.asin"
+head = "asin"
+adjoint = "g / sqrt(1 - u * u)"
+at = [-0.7, 0.25, 0.9]
+
+[[rule]]
+id = "diff.acos"
+head = "acos"
+adjoint = "-(g / sqrt(1 - u * u))"
+at = [-0.7, 0.25, 0.9]
+
+[[rule]]
+id = "diff.atan"
+head = "atan"
+adjoint = "g / (1 + u * u)"
+at = [-1.5, 0.25, 2.0]
+
+[[rule]]
+id = "diff.erf"
+head = "erf"
+adjoint = "g * (2 / sqrt(pi) * exp(-(u * u)))"
+at = [-1.5, 0.25, 2.0]

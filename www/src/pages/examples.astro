@@ -1,0 +1,191 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import Base from '../layouts/Base.astro';
+import Toc from '../components/Toc.astro';
+import programs from '../data/programs.json';
+import { atlasHref } from '../lib/atlasLink.js';
+import { codeSpans } from '../lib/richText.js';
+
+const { groups, programs: all } = programs;
+const totalLines = all.reduce((s, p) => s + p.lines, 0);
+const totalDefs = all.reduce((s, p) => s + p.defs, 0);
+// programs without test blocks whose result a test in lang/viv/tests checks from outside
+const RUST_TESTED = new Set(['fem_poisson.viv', 'scf_sto3g.viv', 'geomopt.viv', 'geomopt_water.viv', 'md_polymer.viv', 'h2_sto3g.viv']);
+const TOC: [string, string][] = [
+  ['quantum-chemistry', 'Quantum chemistry'],
+  ['plasma', 'Plasma physics'],
+  ['nuclear-astro', 'Nuclear & astro'],
+  ['numerics', 'Numerical methods'],
+  ['differentiation', 'Autodiff'],
+  ['symbolic', 'Symbolic'],
+  ['language', 'Language features'],
+  ['basis', 'The basis-set ladder'],
+  ['convergence', 'A convergence-rate check'],
+];
+---
+
+<Base
+  title="Example programs · Viv"
+  description={`All ${all.length} Viv programs in the repo, from Hartree–Fock and plasma kinetics to neutron-star structure, finite elements, autodiff and symbolic regression, with the reference each checked program is compared against.`}
+  eyebrow="Example programs"
+  heading="Programs and the references they are checked against">
+  <div class="withtoc">
+    <div>
+  <p class="lede">
+    {all.length} programs, {totalLines.toLocaleString()} lines, {totalDefs} definitions. Beside each result is the
+    reference to compare it with: a published energy, an independent implementation, or a convergence rate set by
+    theory. A program with tests checks its result itself, and a few are checked by the compiler's own tests; for
+    the rest, marked <em>no test</em>, the comparison is the reader's.
+  </p>
+  <p>
+    Every program here is loaded into the <a href="/workbench">workbench</a> and the
+    <a href="/cli">terminal</a>, so you can run, compile, hash and diff any of them without
+    installing anything. In the repo they live in
+    <code>lang/viv/examples/</code>.
+  </p>
+
+  {
+    groups.map((g) => {
+      const items = all.filter((p) => p.group === g.slug);
+      return (
+        <section>
+          <h2 id={g.slug}>{g.title}</h2>
+          <p>{g.blurb}</p>
+          <div class="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Program</th>
+                  <th>What it computes</th>
+                  <th>Result</th>
+                  <th class="r">Lines</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((p) => (
+                  <tr>
+                    <td>
+                      <a href={`/programs/examples/${p.file}`}><code>{p.file}</code></a>
+                      <a class="ref atlas" href={atlasHref(`examples/${p.file}`)}>atlas</a>
+                    </td>
+                    <td class="blurb" set:html={codeSpans(p.blurb)} />
+                    <td>
+                      {p.result ? (
+                        <>
+                          <span class="res">{p.result}</span>
+                          <span class="ref">{p.reference}</span>
+                          {p.tests === 0 && (
+                            <span class="ref">{RUST_TESTED.has(p.file) ? 'checked by a test in lang/viv/tests' : 'no test'}</span>
+                          )}
+                        </>
+                      ) : (
+                        <span class="ref">—</span>
+                      )}
+                    </td>
+                    <td class="r num">{p.lines}</td>
+                    <td class="marks">
+                      {p.tests > 0 && <span class="pill pill-ok">{p.tests} test{p.tests === 1 ? '' : 's'}</span>}
+                      {p.plots > 0 && <span class="pill">{p.plots} fig</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      );
+    })
+  }
+
+  <h2 id="basis">The basis-set ladder for water</h2>
+  <p>
+    At one fixed water geometry, the variational principle requires each larger basis to lower the
+    Hartree–Fock energy toward the basis-set limit, and it does:
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Basis</th><th class="r">Functions</th><th class="r">E(SCF) / Eₕ</th></tr></thead>
+      <tbody>
+        <tr><td>STO-3G (s, p)</td><td class="r num">7</td><td class="r num">−74.9421</td></tr>
+        <tr><td>6-31G (split valence)</td><td class="r num">13</td><td class="r num">−75.9356</td></tr>
+        <tr><td>6-31G* (+ d on O)</td><td class="r num">19</td><td class="r num">−76.0192</td></tr>
+        <tr><td>the HF basis-set limit</td><td class="r num">—</td><td class="r num">≈ −76.067</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The STO-3G energy the program prints, −74.94208, is within about a microhartree of the value in
+    T. D. Crawford's published programming projects (−74.9420787); no test checks it. On top of the
+    converged reference, <code>scf_sto3g.viv</code> computes the MP2 correlation energy through four
+    O(N⁵) quarter-transforms: it prints −0.0491496 Eₕ for water, against the reference −0.049149636. Helium and
+    neon give exactly zero, as they should, because a minimal basis leaves them no virtual orbitals.
+  </p>
+
+  <h2 id="convergence">A convergence-rate check</h2>
+  <p>
+    <code>fem_poisson.viv</code> solves −∇²u = f on the unit square with P1 triangles against a
+    manufactured solution. P1 elements are second-order accurate, so the error has to
+    <em>quarter</em> each time the mesh halves. Measured ratios as the mesh refines: 3.45, 3.74,
+    3.87, approaching 4. The check needs only the rate, not a table of reference values.
+  </p>
+  <p class="note">
+    The program runs one mesh and prints its <code>rms</code> error. The test
+    <code>lang/viv/tests/fem_poisson.rs</code> recompiles it at N = 8, 16, 32… and checks the
+    ratios, so <code>cargo test</code> checks the rate, not the program's own output.
+  </p>
+  <p>
+    <code>fem_poisson_records.viv</code> is the same solver rewritten with records — a
+    <code>Mesh</code> value and a per-element <code>Tri</code> instead of nine loose scalar
+    arguments. It produces identical numbers. Passing a record does not copy its array fields, so passing a
+    mesh around copies no array data.
+  </p>
+
+  <div class="nextprev">
+    <span><a href="/workbench">← Run one in the workbench</a></span>
+    <span><a href="/install">Compile one natively →</a></span>
+  </div>
+</div>
+    <Toc items={TOC} />
+  </div>
+
+  <style>
+    h2 {
+      scroll-margin-top: 72px;
+    }
+    table {
+      font-size: 0.83rem;
+    }
+    .blurb {
+      color: var(--text-muted);
+      max-width: 36ch;
+    }
+    .res {
+      display: block;
+      font-family: var(--font-mono);
+      color: var(--data-text);
+      white-space: nowrap;
+    }
+    .ref {
+      display: block;
+      font-size: 0.78rem;
+      color: var(--text-faint);
+    }
+    .r {
+      text-align: right;
+      padding-right: 1.2rem;
+    }
+    .marks {
+      white-space: nowrap;
+    }
+    .marks .pill {
+      margin: 0 0 2px 3px;
+      font-size: 11px;
+    }
+    section p {
+      color: var(--text-muted);
+      font-size: 0.93rem;
+    }
+  </style>
+</Base>

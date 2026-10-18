@@ -1,0 +1,22 @@
+def f(A: Arr) {
+    s = A - mean(A, axis=1, keepdims=true)
+    return sum(amax(s, axis=0)) + sum(var(A, axis=0))
+}
+A = [[1.0, 4.0], [3.0, 2.0]]
+g = grad(f, A)
+show g
+test "the gradient through axis reductions matches central differences" {
+    h = 1.0e-6
+    for i to 2 {
+        for j to 2 {
+            Ap = copy(A)
+            Am = copy(A)
+            Ap[i, j] = A[i, j] + h
+            Am[i, j] = A[i, j] - h
+            assert_near(g[i, j], (f(Ap) - f(Am)) / (2.0 * h), 1.0e-8)
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

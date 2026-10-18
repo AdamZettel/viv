@@ -1,0 +1,55 @@
+# lib/gguf/header.viv on tests/tiny.gguf, which gguf-py's GGUFWriter wrote
+# (tools/gguf/make_fixture.py); every expected value is what gguf-py's
+# GGUFReader reads from the same file. Paths are from the repository root.
+#! file lib/gguf/tests/tiny.gguf
+from gguf.header import read_header, read_meta, find_key, meta_int, meta_str, T_ARRAY, T_INT32, T_STRING
+
+TINY = "lib/gguf/tests/tiny.gguf"
+
+h = read_header(TINY)
+print(f"version {h.version}, {h.n_tensors} tensors, {h.n_kv} keys")
+test "the header gguf-py reads" {
+    assert_true(h.version == 3)
+    assert_true(h.n_tensors == 8)
+    assert_true(h.n_kv == 27)
+}
+
+m = read_meta(TINY)
+test "every value type, as gguf-py reads it" {
+    assert_true(len(m.keys) == 27)
+    assert_true(meta_str(m, "general.architecture", "") == "tiny")
+    assert_true(meta_int(m, "general.alignment", 0) == 64)
+    assert_true(meta_int(m, "tiny.u8", 0) == 200)
+    assert_true(meta_int(m, "tiny.i8", 0) == -100)
+    assert_true(meta_int(m, "tiny.u16", 0) == 60000)
+    assert_true(meta_int(m, "tiny.i16", 0) == -30000)
+    assert_true(meta_int(m, "tiny.u32", 0) == 4000000000)
+    assert_true(meta_int(m, "tiny.i32", 0) == -2000000000)
+    assert_true(meta_int(m, "tiny.bool", 0) == 1)
+    assert_true(meta_int(m, "tiny.u64", 0) == 1099511627779)
+    assert_true(meta_int(m, "tiny.i64", 0) == -1125899906842631)
+    assert_true(meta_str(m, "tiny.str", "") == "héllo ▁world 🙂")
+    # 0.1 as a float32, and the smallest subnormal double
+    assert_near(m.values[find_key(m, "tiny.f32")].nums[0], 0.10000000149011612, 0.0)
+    assert_near(m.values[find_key(m, "tiny.f64")].nums[0], 5.0e-324, 0.0)
+    assert_true(meta_int(m, "no.such.key", -1) == -1)
+}
+test "arrays, and an array of arrays" {
+    s = m.values[find_key(m, "tiny.arr.str")]
+    assert_true(len(s.strs) == 4 and s.strs[2] == "▁the" and s.strs[1] == "")
+    i64 = m.values[find_key(m, "tiny.arr.i64")].ints
+    assert_true(len(i64) == 2 and i64[1] == 9223372036854775807)
+    f = m.values[find_key(m, "tiny.arr.f32")].nums
+    assert_near(f[2], 3.4028234663852886e38, 0.0)
+    nested = m.values[find_key(m, "tiny.arr.nested")]
+    # gguf-py: types [ARRAY, ARRAY, INT32], contents [1, 2, 3]
+    assert_true(len(nested.types) == 3 and nested.types[1] == T_ARRAY and nested.types[2] == T_INT32)
+    assert_true(len(nested.ints) == 3 and nested.ints[2] == 3)
+}
+test "the metadata ends where gguf-py's tensor table starts" {
+    # gguf-py's tensor infos for tiny.gguf start at offset 1055 (ReaderTensor.field.offset)
+    assert_true(m.end == 1055)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,269 @@
+# The Viv contract library: objective-level solve verbs backed by a sweep of
+# strategies, written entirely in Viv (compileable on both the interpreter and
+# the C backend). The design: a contract names the
+# OBJECTIVE, not a method; debug mode runs every applicable strategy and fails
+# loudly on dissent (methodological fuzzing); release mode runs the
+# auto-selected strategy only. Build mode comes from release_mode().
+#
+# Use it with:  viv run --use lang/viv/std/contracts.viv yourprogram.viv
+#
+# STRATEGIES ARE ORDINARY def's, and a contract holds them in a REGISTRY: an
+# array of function values. To add one, write the def and add its name to the
+# array. `sweep` runs whatever is in the registry and cross-checks the results,
+# so nothing else has to change -- and because the registry is read by index at
+# run time, the compiled engine dispatches through a function pointer rather
+# than specializing, which is what makes "add a line" enough.
+
+# ── quadrature strategies: three algorithm families, one objective ──────────────
+
+# composite 5-point Gauss-Legendre, panels doubled until two levels agree
+def q_gauss(f, a, b) {
+    x0 = -0.906179845938664  x1 = -0.538469310105683
+    x3 = 0.538469310105683   x4 = 0.906179845938664
+    w0 = 0.236926885056189   w1 = 0.478628670499366
+    w2 = 0.568888888888889
+    prev = 0.0
+    n = 2.0
+    first = true
+    result = 0.0
+    while n <= 512.0 {
+        h = (b - a) / n
+        s = 0.0
+        p = 0.0
+        while p < n {
+            c = a + (p + 0.5) * h
+            hh = 0.5 * h
+            s = s + w0 * f(c + hh * x0) + w1 * f(c + hh * x1) + w2 * f(c) + w1 * f(c + hh * x3) + w0 * f(c + hh * x4)
+            p = p + 1.0
+        }
+        cur = s * 0.5 * h
+        if not first and fabs(cur - prev) < 1.0e-13 * (1.0 + fabs(cur)) {
+            return cur
+        }
+        prev = cur
+        result = cur
+        first = false
+        n = n * 2.0
+    }
+    return result
+}
+
+# recursive adaptive Simpson with a Richardson error estimate
+def q_asimp(f, a, fa, m, fm, b, fb, whole, tol, depth) {
+    lm = 0.5 * (a + m)
+    rm = 0.5 * (m + b)
+    flm = f(lm)
+    frm = f(rm)
+    left = (m - a) / 6.0 * (fa + 4.0 * flm + fm)
+    right = (b - m) / 6.0 * (fm + 4.0 * frm + fb)
+    err = (left + right - whole) / 15.0
+    if fabs(err) < tol or depth > 45.0 {
+        return left + right + err
+    }
+    lsub = q_asimp(f, a, fa, lm, flm, m, fm, left, tol / 2.0, depth + 1.0)
+    rsub = q_asimp(f, m, fm, rm, frm, b, fb, right, tol / 2.0, depth + 1.0)
+    return lsub + rsub
+}
+def q_adaptive(f, a, b) {
+    m = 0.5 * (a + b)
+    fa = f(a)
+    fm = f(m)
+    fb = f(b)
+    whole = (b - a) / 6.0 * (fa + 4.0 * fm + fb)
+    return q_asimp(f, a, fa, m, fm, b, fb, whole, 1.0e-12, 0.0)
+}
+
+# Romberg: trapezoid refinements with Richardson extrapolation up the table
+def q_romberg(f, a, b) {
+    r0 = 0.5 * (b - a) * (f(a) + f(b))
+    # only the two most recent rows are needed; carry them as flat arrays
+    prev = zeros(12)
+    cur = zeros(12)
+    prev[0] = r0
+    trap = r0
+    k = 1.0
+    ans = r0
+    while k <= 10.0 {
+        n = pow(2.0, k)
+        h = (b - a) / n
+        add = 0.0
+        i = 1.0
+        while i < n {
+            add = add + f(a + i * h)
+            i = i + 2.0
+        }
+        trap = 0.5 * trap + h * add
+        cur[0] = trap
+        pw = 1.0
+        j = 1.0
+        while j <= k {
+            pw = pw * 4.0
+            cur[j] = cur[j - 1.0] + (cur[j - 1.0] - prev[j - 1.0]) / (pw - 1.0)
+            j = j + 1.0
+        }
+        ans = cur[k]
+        if k > 3.0 and fabs(cur[k] - prev[k - 1.0]) < 1.0e-13 * (1.0 + fabs(cur[k])) {
+            return ans
+        }
+        j = 0.0
+        while j <= k {
+            prev[j] = cur[j]
+            j = j + 1.0
+        }
+        k = k + 1.0
+    }
+    return ans
+}
+
+# ── the reusable sweep primitive ────────────────────────────────────────────────
+# You REGISTER methods for an objective (an array of function values) and the
+# sweep runs them all and cross-checks. The cross-check is built in, like a unit
+# test that fires whenever the registry is used: for a well-posed problem the
+# methods agree and that agreement VALIDATES the answer; a disagreement is a
+# finding (a bug, or genuine method sensitivity like stiff RK vs Adams-Bashforth).
+#
+# `methods` is an array of (f, a, b) -> num strategies; `f, a, b` the problem.
+# Writes each method's result into `out` (so the caller can inspect the spread)
+# and returns the worst pairwise deviation from the consensus (the median).
+def sweep_spread(methods, f, a, b, out) {
+    n = len(methods)
+    i = 0.0
+    while i < n {
+        out[i] = apply(methods[i], f, a, b)
+        i = i + 1.0
+    }
+    # consensus = median: copy, sort, take the middle
+    tmp = zeros(n)
+    i = 0.0
+    while i < n {
+        tmp[i] = out[i]
+        i = i + 1.0
+    }
+    sort(tmp)
+    med = tmp[floor(n / 2.0)]
+    worst = 0.0
+    i = 0.0
+    while i < n {
+        d = fabs(out[i] - med)
+        if d > worst { worst = d }
+        i = i + 1.0
+    }
+    return worst
+}
+
+# sweep(methods, f, a, b): run the registry, ASSERT the methods agree (the
+# built-in validation), and return the consensus. This is find_root/integrate
+# generalized to any registry you pass in.
+def sweep(methods, f, a, b) {
+    n = len(methods)
+    out = zeros(n)
+    worst = sweep_spread(methods, f, a, b, out)
+    tmp = zeros(n)
+    i = 0.0
+    while i < n {
+        tmp[i] = out[i]
+        i = i + 1.0
+    }
+    sort(tmp)
+    med = tmp[floor(n / 2.0)]
+    # the cross-check, built in: registered methods must agree
+    assert_lt(worst, 1.0e-8 * (1.0 + fabs(med)))
+    return med
+}
+
+# The quadrature registry: three algorithm families for one objective.
+def q_methods() {
+    return [q_gauss, q_adaptive, q_romberg]
+}
+
+# integrate(f, a, b): the CONTRACT. A call runs Gauss;
+# `integrate(f, a, b) using q_romberg` picks another method, and `using every
+# method` computes all three, stops if one is farther than the tolerance from
+# their median, and returns the median.
+contract integrate(f, a: Num, b: Num) -> value: Num {
+    intent "the integral of f from a to b"
+    methods q_gauss, q_adaptive, q_romberg
+    agree value within relative 1.0e-8
+    consensus median
+}
+
+# ── root-finding strategies: three bracketing families, one objective ───────────
+
+def r_bisect(f, a, b) {
+    fa = f(a)
+    k = 0.0
+    while k < 200.0 {
+        m = 0.5 * (a + b)
+        if fabs(b - a) < 1.0e-15 * (1.0 + fabs(m)) { return m }
+        fm = f(m)
+        if fa * fm < 0.0 { b = m }
+        else { a = m  fa = fm }
+        k = k + 1.0
+    }
+    return 0.5 * (a + b)
+}
+
+# Illinois-damped regula falsi: superlinear, keeps the bracket
+def r_illinois(f, a, b) {
+    fa = f(a)
+    fb = f(b)
+    k = 0.0
+    while k < 200.0 {
+        m = b - fb * (b - a) / (fb - fa)
+        fm = f(m)
+        if fabs(fm) < 1.0e-15 or fabs(b - a) < 1.0e-15 * (1.0 + fabs(m)) { return m }
+        if fa * fm < 0.0 {
+            b = m
+            fb = fm
+        }
+        else {
+            a = m
+            fa = fm
+            fb = fb * 0.5
+        }
+        k = k + 1.0
+    }
+    return 0.5 * (a + b)
+}
+
+# secant with a bisection safeguard (a compact Brent). Convergence is tested on
+# the CURRENT iterate m (not just b): the root can settle on the moving side,
+# so checking |f(m)| is what makes this robust on e.g. cos(x) - x.
+def r_safe(f, a, b) {
+    fa = f(a)
+    fb = f(b)
+    k = 0.0
+    while k < 200.0 {
+        m = 0.5 * (a + b)
+        if fb != fa { m = b - fb * (b - a) / (fb - fa) }
+        lo = min(a, b)
+        hi = max(a, b)
+        if m <= lo or m >= hi { m = 0.5 * (a + b) }
+        fm = f(m)
+        if fabs(fm) < 1.0e-14 or fabs(b - a) < 1.0e-15 * (1.0 + fabs(m)) { return m }
+        if fa * fm < 0.0 { b = m  fb = fm }
+        else { a = m  fa = fm }
+        k = k + 1.0
+    }
+    return 0.5 * (a + b)
+}
+
+# The root-finding registry: three bracketing families for one objective.
+def r_methods() {
+    return [r_bisect, r_illinois, r_safe]
+}
+
+# find_root(f, a, b): the CONTRACT. f must change sign on [a, b]. A call runs
+# the safeguarded secant; `using every method` computes all three, stops if
+# one is farther than the tolerance from their median, and returns the
+# median.
+contract find_root(f, a: Num, b: Num) -> root: Num {
+    intent "a root of f between a and b, where f changes sign"
+    methods r_safe, r_bisect, r_illinois
+    require f(a) * f(b) < 0.0
+    agree root within relative 1.0e-8
+    consensus median
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

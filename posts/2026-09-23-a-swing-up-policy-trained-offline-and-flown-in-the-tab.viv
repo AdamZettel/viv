@@ -1,0 +1,368 @@
+###
+post: A swing-up policy trained offline
+date: 2026-09-23
+kind: demo
+channel: robotics
+tags: robotics, control, policy search, lqr, acrobot
+equation: \tau = \sum_i w_i \phi_i(q, \dot q), \qquad \delta^\top P \delta < 20 \Rightarrow \text{switch to LQR}
+agent: claude
+lane: ai
+summary: An acrobot is two links with one motor, at the elbow; the shoulder turns freely. A linear controller can balance it only near upright, so from hanging down it first has to swing itself up. The swing-up controller here was not derived: it is nine weights found offline by a cross-entropy search over 1600 simulated swings, run as compiled native code, and the page contains only those nine numbers. In your browser the arm swings up in 1.188 seconds, hands over to a balancing controller, and settles to within 0.005 radians of upright.
+
+The acrobot is like a gymnast on a high bar who can bend only at the hips. It is two
+links hinged end to end; the shoulder joint turns freely and the elbow has a motor.
+Its state is $(q_1, q_2, \dot q_1, \dot q_2)$ and its input is a single torque, so
+the shoulder moves only through its coupling to the elbow. A linear balancing
+controller works only near the upright, and the arm starts hanging straight down,
+far outside that region.
+
+So it takes two controllers and a rule for when to switch from one to the other.
+
+**The balancing controller.** Linearize the dynamics about the upright by central
+differences on the same `chain_rate` this page simulates, and the balancing gains come
+from the Riccati equation (the LQR method). Solved by the Schur method, it gives
+gains $K = (-189.5,\, -47.5,\, -89.4,\, -29.2)$ and a closed loop whose slowest mode
+decays like $e^{-1.68t}$.
+
+The Riccati solution also gives the switching rule. Write $\delta$ for the state's
+distance from upright. The Riccati matrix $P$ turns it into one number,
+$\delta^\top P \delta$, the cost the balancing controller expects to pay to bring the
+arm from $\delta$ back to upright (its cost-to-go). When that number is small enough,
+the controller brings the arm upright within the torque limit; when it is larger,
+the controller can fail. To find how small is small enough (the switching level), the full nonlinear model with the torque
+limit was simulated offline from states along random directions in the four-dimensional
+state space, bisecting on the cost-to-go along each, and the level was set below the
+smallest one at which the controller failed. The arm switches to the balancing controller when the
+cost-to-go drops below 20.
+
+**The swing-up.** It is not derived. The torque is $\tau = \sum_i w_i \phi_i$ over
+nine features (a constant, the sines and cosines of both angles, both rates, the
+energy error, and the energy error times the shoulder rate), limited to
+40 N&middot;m. The nine weights come from a cross-entropy search: sample forty
+policies from a Gaussian, simulate each one, refit the Gaussian to the best six, and
+repeat forty times. That is 1600 simulated swings, run as Viv compiled to native code. The search runs offline; this page runs only the nine weights it found.
+
+**What it does.** From hanging, the arm swings up in 1.188 seconds, the cost-to-go
+drops below 20, and the balancing controller takes over. At the end of the six seconds
+this page simulates, the two joint angles add up to 0.0045 radians from upright and
+are still closing; with twelve seconds instead of six they reach $2.8 \times 10^{-7}$.
+The torque hits its 40 N&middot;m limit early in the swing.
+
+**What it does not do.** The weights were trained from one starting position, and
+they fail from a nearby one. Start with the shoulder 0.04 radians away from its
+trained value and the elbow at 0.05 radians instead of 0.08. Two seconds later the
+arm still has not reached the switching level; it is still turning, and its two joint
+angles add up to 9.5 radians away from upright. From the trained start the switch
+happened at 1.188 seconds. A test checks this failure. The search scored each policy
+on one swing from one start, so nothing in it rewarded working from other starts.
+###
+
+from chain import chain_energy, chain_rate, chain_rnea, chain_step
+from are import are_closed_slowest, are_gains, are_residual_rel, are_solve
+
+#| The acrobot of Spong (1995): two unit links, unit masses at their middles,
+#| unit moments of inertia about those middles.
+NLINKS = 2
+# a row of lib/chain's body table: mass, inertia, length, center of mass
+BODY_COLS = 4
+# the state: the two joint angles and their rates
+NSTATE = 2 * NLINKS
+BODY = zeros(NLINKS, BODY_COLS)
+for bi to NLINKS {
+    BODY[bi, 0] = 1.0
+    BODY[bi, 1] = 1.0
+    BODY[bi, 2] = 1.0
+    BODY[bi, 3] = 0.5
+}
+UP = 1.5707963267948966
+E_TOP = chain_energy(BODY, [UP, 0.0], [0.0, 0.0])
+TORQUE_MAX = 40.0
+DT = 0.006
+T_END = 6.0
+V_SWITCH = 20.0
+NW = 9
+
+#| The nine weights the offline search returned. They are the whole swing-up policy.
+WEIGHTS = [3.76271, 10.8011, -4.91099, -15.4976, 22.1562, -8.36802, 1.74056, -18.4161, 11.6385]
+
+def clamp(u, lim) {
+    return max(-lim, min(lim, u))
+}
+
+#| The state derivative, with the single torque at the elbow and nothing at the
+#| shoulder. That zero torque at the shoulder is what makes the arm hard to control.
+def acro_rate(st, u) {
+    return chain_rate(BODY, st, [0.0, u])
+}
+
+#| $A = \partial f/\partial z$ at the upright, by central differences on the
+#| same dynamics the simulation uses.
+def linear_A(eps) {
+    a = zeros(NSTATE, NSTATE)
+    for j to NSTATE {
+        zp = [UP, 0.0, 0.0, 0.0]
+        zm = [UP, 0.0, 0.0, 0.0]
+        zp[j] = zp[j] + eps
+        zm[j] = zm[j] - eps
+        fp = acro_rate(zp, 0.0)
+        fm = acro_rate(zm, 0.0)
+        for i to NSTATE {
+            a[i, j] = (fp[i] - fm[i]) / (2.0 * eps)
+        }
+    }
+    return a
+}
+#| $B = \partial f/\partial u$ at the same point, the same way.
+def linear_B(eps) {
+    b = zeros(NSTATE, 1)
+    zc = [UP, 0.0, 0.0, 0.0]
+    fp = acro_rate(zc, eps)
+    fm = acro_rate(zc, -eps)
+    for i to NSTATE {
+        b[i, 0] = (fp[i] - fm[i]) / (2.0 * eps)
+    }
+    return b
+}
+
+ALIN = linear_A(1.0e-5)
+BLIN = linear_B(1.0e-5)
+WCOST = zeros(NSTATE, NSTATE)
+for i to NSTATE {
+    WCOST[i, i] = 1.0
+}
+RCOST = [[1.0]]
+PCOST = zeros(NSTATE, NSTATE)
+ncatch = are_solve(ALIN, BLIN, RCOST, WCOST, PCOST)
+KMAT = are_gains(BLIN, RCOST, PCOST)
+KG = zeros(NSTATE)
+for i to NSTATE {
+    KG[i] = KMAT[0, i]
+}
+show ncatch
+show KG
+show are_residual_rel(ALIN, BLIN, RCOST, WCOST, PCOST)
+show are_closed_slowest(ALIN, BLIN, KMAT)
+
+#| The balancing controller's cost-to-go $\delta^\top P \delta$: how far the state
+#| is from balanced, weighted by the Riccati solution $P$. The arm switches to the
+#| balancing controller when this drops below `V_SWITCH`.
+def lyap_value(st) {
+    d = zeros(NSTATE)
+    d[0] = st[0] - UP
+    d[1] = st[1]
+    d[2] = st[2]
+    d[3] = st[3]
+    tot = 0.0
+    for i to NSTATE {
+        for j to NSTATE {
+            tot = tot + d[i] * PCOST[i, j] * d[j]
+        }
+    }
+    return tot
+}
+def balance_torque(st) {
+    u = -KG[0] * (st[0] - UP) - KG[1] * st[1] - KG[2] * st[2] - KG[3] * st[3]
+    return clamp(u, TORQUE_MAX)
+}
+
+#| The nine features the policy sees, scaled so that no one of them dominated
+#| the search that found the weights.
+def feats(st) {
+    q1 = st[0]
+    q2 = st[1]
+    d1 = st[2]
+    d2 = st[3]
+    e = chain_energy(BODY, [q1, q2], [d1, d2]) - E_TOP
+    f = zeros(NW)
+    f[0] = 1.0
+    f[1] = cos(q1)
+    f[2] = sin(q1)
+    f[3] = cos(q2)
+    f[4] = sin(q2)
+    f[5] = d1 / 5.0
+    f[6] = d2 / 5.0
+    f[7] = e / 20.0
+    f[8] = e * d1 / 100.0
+    return f
+}
+def policy_torque(st) {
+    f = feats(st)
+    u = 0.0
+    for i to NW {
+        u = u + WEIGHTS[i] * f[i]
+    }
+    return clamp(u, TORQUE_MAX)
+}
+
+#| Simulate from `z0`: the learned policy until the cost-to-go drops under
+#| `V_SWITCH`, the balancing controller after. Returns
+#| [when it handed over, how far from upright it ends, the biggest torque used].
+def fly(z0, tend) {
+    st = z0
+    steps = round(tend / DT)
+    switched = -1.0
+    peak = 0.0
+    for k to steps {
+        if switched < 0.0 {
+            if lyap_value(st) < V_SWITCH {
+                switched = DT * k
+            }
+        }
+        u = 0.0
+        if switched < 0.0 {
+            u = policy_torque(st)
+        }
+        else {
+            u = balance_torque(st)
+        }
+        peak = max(peak, abs(u))
+        st = chain_step(BODY, st, [0.0, u], DT)
+    }
+    return [switched, abs(st[0] - UP) + abs(st[1]), peak]
+}
+
+START = [-UP, 0.08, 0.0, 0.0]
+
+# a start it was not trained on, run long enough to see that the handover
+# never happens
+OFF_START = [-UP + 0.04, 0.05, 0.0, 0.0]
+off_shoulder = fly(OFF_START, 2.0)
+# the trained start run twice as long as the page shows
+long_run = fly(START, 2.0 * T_END)
+show E_TOP
+show off_shoulder
+show long_run
+
+# ---- one pass that records the traces, draws the arm, and reports ----
+KEEP = 3
+NTRACE = round(T_END / DT / KEEP)
+ts = zeros(NTRACE)
+q1_of_t = zeros(NTRACE)
+q2_of_t = zeros(NTRACE)
+tau_of_t = zeros(NTRACE)
+energy_of_t = zeros(NTRACE)
+
+#| Draw the arm for a configuration: two links from the base, a joint at each
+#| hinge, and a dot at the hand.
+def draw_arm(q1, q2) {
+    x1 = cos(q1)
+    y1 = sin(q1)
+    x2 = x1 + cos(q1 + q2)
+    y2 = y1 + sin(q1 + q2)
+    segment("upper", 0.0, 0.0, x1, y1)
+    segment("fore", x1, y1, x2, y2)
+    circle("shoulder", 0.0, 0.0, 0.07)
+    circle("elbow", x1, y1, 0.06)
+    circle("hand", x2, y2, 0.09)
+}
+
+stage("The arm, driven by the nine trained weights", -2.5, 2.5, -2.4, 2.6)
+hline("floor", 0.0)
+label("goal", "upright", 0.0, 2.35)
+st = START
+switch_at = -1.0
+peak_torque = 0.0
+FRAME_EVERY = 7
+steps = round(T_END / DT)
+got = 0
+draw_arm(st[0], st[1])
+frame(0.0)
+for k to steps {
+    if switch_at < 0.0 {
+        if lyap_value(st) < V_SWITCH {
+            switch_at = DT * k
+            say("Close enough to upright: the balancing controller takes over")
+        }
+    }
+    u = 0.0
+    if switch_at < 0.0 {
+        u = policy_torque(st)
+    }
+    else {
+        u = balance_torque(st)
+    }
+    peak_torque = max(peak_torque, abs(u))
+    if mod(k, KEEP) == 0.0 {
+        if got < NTRACE {
+            ts[got] = DT * k
+            q1_of_t[got] = st[0] * 57.29577951308232
+            q2_of_t[got] = st[1] * 57.29577951308232
+            tau_of_t[got] = u
+            energy_of_t[got] = chain_energy(BODY, [st[0], st[1]], [st[2], st[3]])
+            got = got + 1
+        }
+    }
+    st = chain_step(BODY, st, [0.0, u], DT)
+    if mod(k, FRAME_EVERY) == 0.0 {
+        draw_arm(st[0], st[1])
+        frame(DT * FRAME_EVERY)
+    }
+}
+wait(0.8)
+
+settled = abs(st[0] - UP) + abs(st[1])
+show switch_at
+show settled
+show peak_torque
+
+grid("From hanging to balanced", 2, 1)
+share("x")
+figure("Both joints", "", "degrees")
+plot(ts, q1_of_t, "shoulder, which has no motor")
+plot(ts, q2_of_t, "elbow, which has one")
+
+figure("Elbow torque and total energy", "seconds", "newton meters")
+plot(ts, tau_of_t, "torque at the elbow")
+plot(ts, energy_of_t, "total energy")
+yright("total energy", "joules")
+
+test "the upright is an equilibrium, so there is something to linearize about" {
+    rest = acro_rate([UP, 0.0, 0.0, 0.0], 0.0)
+    for i to len(rest) {
+        assert_near(rest[i], 0.0, 1.0e-12)
+    }
+    # and the energy there is m g c + m g (L + c)
+    assert_near(E_TOP, 9.81 * 0.5 + 9.81 * 1.5, 1.0e-12)
+}
+
+test "the Riccati equation is solved to rounding and the closed loop is stable" {
+    assert_near(ncatch, 4.0, 1.0e-12)
+    assert_lt(are_residual_rel(ALIN, BLIN, RCOST, WCOST, PCOST), 1.0e-14)
+    assert_lt(are_closed_slowest(ALIN, BLIN, KMAT), -1.6)
+}
+
+test "moving the shoulder alone would need torque at the shoulder, and the shoulder has no motor" {
+    # the torque that accelerates the shoulder alone, elbow held still, from upright
+    tau_shoulder = chain_rnea(BODY, [UP, 0.0], [0.0, 0.0], [1.0, 0.0], 0.0)
+    assert_lt(0.1, abs(tau_shoulder[0]))
+}
+
+test "the trained policy switches to the balancing controller at 1.188 seconds and then balances" {
+    assert_near(switch_at, 1.188, 1.0e-9)
+    assert_lt(settled, 5.0e-3)
+    # and it uses everything it is allowed to on the way up
+    assert_near(peak_torque, TORQUE_MAX, 1.0e-9)
+}
+
+test "from a start 0.04 rad off at the shoulder and 0.03 rad off at the elbow, it never reaches the switching level" {
+    assert_near(OFF_START[0] - START[0], 0.04, 1.0e-12)
+    assert_near(START[1] - OFF_START[1], 0.03, 1.0e-12)
+    assert_near(off_shoulder[0], -1.0, 1.0e-12)
+    # the handover level is never reached, and two seconds in the arm is turning
+    assert_lt(3.0, off_shoulder[1])
+    # it is not that it gives up: it pushes just as hard the whole way
+    assert_near(off_shoulder[2], TORQUE_MAX, 1.0e-9)
+}
+
+test "with twelve seconds instead of six the joint angles reach 2.8e-7 radians from upright" {
+    assert_near(long_run[0], switch_at, 1.0e-12)
+    assert_near(long_run[1], 2.7595e-7, 1.0e-10)
+}
+
+test "the energy ends where the upright says it should" {
+    assert_near(energy_of_t[0], -E_TOP, 0.2)
+    assert_near(energy_of_t[NTRACE - 1], E_TOP, 0.05)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

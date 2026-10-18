@@ -1,0 +1,52 @@
+# The two loops a many-core machine speeds up, on water cc-pVDZ (Cartesian,
+# 25 AOs, 12 shells, 3081 shell quartets): one packed-8 ERI build, then four
+# direct J/K builds of a seeded density, which is what four SCF iterations
+# without stored integrals would do. Both loops are `parallel for` over flat
+# lists (lib/hf/md_eri, lib/hf/md_direct). Every quartet writes its own
+# packed-8 slots, and J/K is summed per chunk and then in chunk order, so the
+# printed checksums are the same with and without OpenMP and for every
+# OMP_NUM_THREADS.
+#
+#     viv bench/hf_md_omp.viv -o /tmp/omp.c
+#     cc -O2 /tmp/omp.c -lm -o /tmp/omp                    # serial
+#     cc -O2 -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include \
+#        -L$(brew --prefix libomp)/lib /tmp/omp.c -lomp -lm -o /tmp/omp   # macOS
+#     OMP_NUM_THREADS=4 /tmp/omp
+from hf.md_direct import mdjk_direct, mdjk_rand_dens
+from hf.opts import opt_new
+from hf.md_eri import mderi_screened
+from hf.eri_store import es_checksums
+from hfref.water_ccpvdz import (
+    waterccpvdz_atoms, WATERCCPVDZ_NAO_CART, waterccpvdz_prims, WATERCCPVDZ_SEED_WSUM,
+    waterccpvdz_shells,
+)
+
+hfbo_at = waterccpvdz_atoms()
+hfbo_sh = waterccpvdz_shells()
+hfbo_pr = waterccpvdz_prims()
+hfbo_n = WATERCCPVDZ_NAO_CART
+hfbo_Gp = mderi_screened(hfbo_at, hfbo_sh, hfbo_pr)
+show es_checksums(hfbo_Gp, WATERCCPVDZ_SEED_WSUM)
+hfbo_D = mdjk_rand_dens(1, hfbo_n, 99991)
+hfbo_o = opt_new()
+for hfbo_it to 4 {
+    hfbo_JK = mdjk_direct(hfbo_at, hfbo_sh, hfbo_pr, hfbo_D, hfbo_o)
+    hfbo_ej = 0.0
+    hfbo_ek = 0.0
+    for hfbo_i to hfbo_n {
+        for hfbo_j to hfbo_n {
+            hfbo_ej = hfbo_ej + hfbo_D[0, hfbo_i, hfbo_j] * hfbo_JK[0, hfbo_i, hfbo_j]
+            hfbo_ek = hfbo_ek + hfbo_D[0, hfbo_i, hfbo_j] * hfbo_JK[1, hfbo_i, hfbo_j]
+        }
+    }
+    show [hfbo_ej, hfbo_ek]
+    # the next density: a small, deterministic change, as between SCF iterations
+    for hfbo_i to hfbo_n {
+        for hfbo_j to hfbo_n {
+            hfbo_D[0, hfbo_i, hfbo_j] = 0.9 * hfbo_D[0, hfbo_i, hfbo_j] + 0.01 * hfbo_JK[1, hfbo_i, hfbo_j]
+        }
+    }
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

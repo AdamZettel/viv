@@ -1,0 +1,39 @@
+# Rosenbrock's function from (-1.2, 1), solved by lmder1, to read as a story:
+#
+#     viv story lib/minpack/story_rosenbrock.viv
+#
+from minpack.lmder import H_DELTA_IN, H_X, lmder1, lmder1_maxfev
+from minpack.enorm import EPSMCH
+from minpack.mgh import mgh_data, mgh_fcn, mgh_start
+from minpack.rosenbrock_figures import rf_path_figure, rf_phi_figure
+
+# problem 4 of the test driver: 2 residuals in 2 unknowns
+SR_NPROB = 4.0
+SR_M = 2.0
+SR_N = 2.0
+sr_x0 = mgh_start(SR_NPROB, SR_N, 1.0)
+sr_x = mgh_start(SR_NPROB, SR_N, 1.0)
+sr_counts = zeros(2)
+# one row per trial step, for the figures
+sr_hist = zeros(lmder1_maxfev(SR_N), H_X + SR_N)
+sr_info = lmder1(mgh_fcn, mgh_data(SR_NPROB, SR_M, SR_N), sr_x, zeros(SR_M), zeros(SR_M, SR_N), sqrt(EPSMCH), zeros(SR_N), sr_counts, sr_hist)
+print(sr_info)
+print(sr_x[0])
+print(sr_x[1])
+
+# the figures: the path with its trust regions, and the secular function of
+# the second trial (row 1 of hist), where lmpar starts from lambda = 0
+sr_trials = sr_counts[0] - 1.0
+sr_accepted = rf_path_figure(sr_hist, sr_trials, sr_x0)
+sr_tried = rf_phi_figure(sr_x0, sr_hist[1, H_DELTA_IN], 0.0)
+
+test "lmder1 reaches (1, 1) with info 4 after 21 evaluations of f and 16 of J, as the Fortran does" {
+    assert_near(sr_info, 4.0, 0.0)
+    assert_near(sr_x[0], 1.0, 0.0)
+    assert_near(sr_x[1], 1.0, 0.0)
+    assert_near(sr_counts[0], 21.0, 0.0)
+    assert_near(sr_counts[1], 16.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

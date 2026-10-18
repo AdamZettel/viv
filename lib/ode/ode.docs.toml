@@ -1,0 +1,182 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The reference prose of vp.ode.solve and vp.ode.batch (python -m vipyr.docs
+# reads it into vipyr/spec.json and the /vipyr pages). The parameters and
+# results are listed in vipyr/_registry.py; the methods are lib/ode/*.viv.
+
+[solve]
+summary = "Solve an initial value problem y' = f(t, y, p), stiff or not, with the right-hand side in Viv."
+description = """
+`vp.ode.solve` is `scipy.integrate.solve_ivp` with the integrator and the
+right-hand side compiled together: Viv's Dormand-Prince, Radau IIA and BDF
+(lib/ode/) call your `rhs` directly, with no Python in the loop.
+Dormand-Prince follows SciPy's RK45 step for step. Radau and BDF take
+SciPy's number of steps to within two and its number of right-hand-side
+calls to within 2% (python/tests/test_ode.py), so tolerances carry over
+unchanged.
+
+The right-hand side is Viv because the integrator calls it at every stage
+of every step, and a call into Python there is what makes `solve_ivp` slow
+on small systems. Give it as
+
+- a problem of `lib/ode/problems.viv` by name: `"robertson"`, `"vdpol"`,
+  `"hires"`, `"oregonator"`, `"e5"`, `"kepler"`, `"lotka"`, `"ball"`,
+  `"sir"`, `"pk"`;
+- a def of your own file: `"model.viv:decay"`, or `k.decay` after
+  `k = vp.load("model.viv")`;
+- a Python function in py2viv's numeric subset (`tools/py2viv/SUBSET.md`),
+  translated to Viv once and cached.
+
+In every form the def is `def f(t: Num, y: Arr, p: Arr) -> Arr`: the
+parameters arrive in `p` (`params=`), not in variables captured from Python,
+because a compiled Viv def cannot close over Python state. An `events` def
+has the same signature and returns one g value per event. The first call for
+a problem writes a small driver .viv and compiles it (a few seconds); later
+calls, in this process or the next, load it from vipyr's cache.
+
+`method="auto"` starts with Dormand-Prince and switches to Radau IIA when
+Hairer's stiffness test (15 steps in a row with h |lambda| > 3.25) fires;
+`stiff_at` says when.
+"""
+notes = """
+**Dormand-Prince 5(4)** (`"dopri5"`) is a seven-stage explicit Runge-Kutta
+pair: a fifth-order solution $y_{n+1} = y_n + h \\sum_i b_i k_i$ and an
+embedded fourth-order one whose difference is the error estimate. The last
+stage is $f(t_{n+1}, y_{n+1})$, the next step's first ("first same as
+last"), so a step costs six evaluations. A step is accepted when
+
+$$\\mathrm{err} = \\Big(\\frac1n \\sum_i \\Big(\\frac{e_i}{\\mathrm{atol}_i + \\mathrm{rtol}\\,\\max(|y_{n,i}|, |y_{n+1,i}|)}\\Big)^2\\Big)^{1/2} \\le 1,$$
+
+and the next step is $h \\cdot \\min(10, 0.9\\,\\mathrm{err}^{-1/5})$ (at least
+$0.2h$ after a rejection). The dense output is Hairer's fifth-order
+continuous extension, built from the stages already computed.
+
+**Radau IIA** (`"radau"`) is the three-stage collocation method at the
+right Radau points $c = ((4-\\sqrt6)/10, (4+\\sqrt6)/10, 1)$, order 5,
+L-stable and stiffly accurate. The stage increments $Z$ solve
+$Z = h (A \\otimes I) F(Z)$ by simplified Newton iterations with the
+Jacobian $J$ at the start of the step. Diagonalizing
+$A^{-1} = T \\Lambda T^{-1}$ splits the $3n \\times 3n$ Newton matrix into
+one real system $(\\gamma/h)I - J$ and one complex system
+$((\\alpha + i\\beta)/h) I - J$, so a step costs one real and one complex
+LU (written here as a real $2n \\times 2n$ system). The error estimate is
+Hairer and Wanner's (IV.8, eq. 8.20),
+$((\\gamma/h)I - J)^{-1}(f(t_n, y_n) + \\sum_i e_i Z_i/h)$, and the step size
+follows Gustafsson's predictive controller. A Newton iteration that
+contracts slower than its rate test allows is stopped early; it refreshes a
+stale Jacobian first and halves the step second.
+
+**BDF** (`"bdf"`) is variable-order (1 to 5) backward differentiation in
+Shampine and Reichelt's quasi-constant-step form: the history is kept as
+backward differences $D^j y_n$ on an equally spaced grid and rescaled by
+their matrices $R$ and $U$ when the step changes. The formulas are the NDFs
+of MATLAB's ode15s, with $\\kappa = (-0.185, -1/9, -0.0823, -0.0415, 0)$:
+each order solves
+
+$$(I - \\tfrac{h}{\\alpha_k} J)\\,\\Delta d = \\tfrac{h}{\\alpha_k} f(t_{n+1}, y^{(0)} + d) - \\psi - d$$
+
+for the correction $d$ to the predictor, with one LU of $I - (h/\\alpha_k)J$
+kept while $h$ and $k$ stay put. After $k+1$ equal steps the errors of
+orders $k-1$, $k$ and $k+1$ are compared and the order moves to the one
+that allows the largest step.
+
+**Jacobians.** By default the driver writes one reverse-mode `grad` of the
+rhs per row, so $J$ is exact to rounding and costs about $n$ evaluations of
+the rhs. `jac="fd"` takes forward differences instead (n evaluations, an
+error of order $\\sqrt{\\epsilon}$); `jac="name"` calls a def of yours.
+
+**Events.** After each accepted step every event's $g$ is evaluated at the
+new point; a sign change (in the direction asked for) is located on the
+step's dense output by the Illinois variant of regula falsi to four units
+in the last place of $t$. A terminal event ends the integration at its
+root, and the outputs stop there.
+
+**Batches.** `vp.ode.batch` runs the same compiled solver over the rows of
+`params` and `y0` in one call, on one output grid. Each row is an
+independent solve with its own steps, bit for bit the solve `vp.ode.solve`
+makes with that row.
+
+**Limits.** Dense matrices only: the LU is $O(n^3)$, fine up to a few
+hundred unknowns, wrong for a large sparse system. No mass matrix or DAE
+form. BDF fails on Van der Pol with $\\mu = 10^6$ at its first relaxation
+jump (as SciPy's does); Radau solves it. E5 (Hairer's test set) is not
+reproduced by these methods or SciPy's at any rtol and atol tried: the
+reference's $y_2$ and $y_3$ differ by $10^{-25}$ at $10^{-22}$.
+"""
+see_also = ["ode.batch"]
+
+[[solve.references]]
+text = "J. R. Dormand and P. J. Prince, A family of embedded Runge-Kutta formulae, Journal of Computational and Applied Mathematics 6, 19-26 (1980)."
+doi = "10.1016/0771-050X(80)90013-3"
+
+[[solve.references]]
+text = "E. Hairer, S. P. Norsett and G. Wanner, Solving Ordinary Differential Equations I: Nonstiff Problems, 2nd ed., Springer (1993)."
+doi = "10.1007/978-3-540-78862-1"
+
+[[solve.references]]
+text = "E. Hairer and G. Wanner, Solving Ordinary Differential Equations II: Stiff and Differential-Algebraic Problems, 2nd ed., Springer (1996)."
+doi = "10.1007/978-3-642-05221-7"
+
+[[solve.references]]
+text = "L. F. Shampine and M. W. Reichelt, The MATLAB ODE Suite, SIAM J. Sci. Comput. 18, 1-22 (1997)."
+doi = "10.1137/S1064827594276424"
+
+[[solve.references]]
+text = "F. Mazzia and C. Magherini, Test Set for Initial Value Problem Solvers, release 2.4, University of Bari (2008): the reference solutions of Robertson, Van der Pol, HIRES and the Oregonator."
+url = "https://archimede.uniba.it/~testset/"
+
+[[solve.references]]
+text = "P. Virtanen et al., SciPy 1.0: fundamental algorithms for scientific computing in Python, Nat. Methods 17, 261-272 (2020): scipy.integrate.solve_ivp, whose step logic lib/ode follows."
+doi = "10.1038/s41592-019-0686-2"
+
+[[solve.examples]]
+caption = "A bouncing ball's landing as a terminal event, located on the dense output."
+code = '''import numpy as np
+import vipyr as vp
+r = vp.ode.solve("ball", (0.0, 10.0), [10.0, 0.0], method="dopri5", params=[9.81],
+                 events="ball_hits", direction=[-1], terminal=[True])
+print(r.message, r.t_events[0], np.sqrt(2 * 10.0 / 9.81))'''
+
+[[solve.examples]]
+caption = "Van der Pol with mu = 1000 (Hairer's scaled form, eps = 1e-6) by auto: it starts explicit and changes to Radau IIA."
+code = '''import vipyr as vp
+r = vp.ode.solve("vdpol", (0.0, 2.0), [2.0, 0.0], method="auto", rtol=1e-6, atol=1e-6, params=[1e-6])
+print(r.y[:, -1], r.stiff_at is not None, r.stats)'''
+
+[solve.params.rhs]
+doc = "the right-hand side f(t, y, p), a Viv def: a problem of lib/ode/problems.viv by name, 'file.viv:def', a def of a module from vp.load, or a Python function py2viv translates"
+
+[solve.params.params]
+doc = "the parameter vector p every call of rhs, events and jac receives; one compiled solver serves every p"
+
+[batch]
+summary = "Solve one initial value problem for many parameter sets and initial states in one call."
+description = """
+The case SciPy's `solve_ivp` handles worst: thousands of small systems, one
+per parameter set (a dose-response sweep, a posterior sample, an ensemble
+of epidemics). A Python loop pays solve_ivp's per-call and per-step
+overhead for each; `vp.ode.batch` runs the compiled solver over all the
+rows in one call. Each row is an independent adaptive solve with its own
+steps, reported on the common grid `t_eval`.
+"""
+notes = """
+Row b of the result is exactly what `vp.ode.solve(rhs, t_span, y0[b],
+params=params[b], t_eval=t_eval, ...)` returns, bit for bit: the batch is a
+loop in Viv over the same solver, not a vectorized approximation.
+
+The output is `y[b, i, j]`: solve b, component i, time `t_eval[j]`. A solve
+stopped by a terminal event has NaN after it; `first_event[b]` is its first
+event time. `status[b]` and the per-row `stats` say how each solve ended
+and what it cost.
+"""
+see_also = ["ode.solve"]
+
+[[batch.references]]
+text = "E. Hairer and G. Wanner, Solving Ordinary Differential Equations II: Stiff and Differential-Algebraic Problems, 2nd ed., Springer (1996)."
+doi = "10.1007/978-3-642-05221-7"
+
+[[batch.references]]
+text = "H. Bateman, The solution of a system of differential equations occurring in the theory of radio-active transformations, Proc. Cambridge Philos. Soc. 15, 423-427 (1910): the closed form the pharmacokinetic batch is checked against."
+
+[batch.params.params]
+doc = "one parameter vector per solve, shape (B, k): row b is the p of solve b"

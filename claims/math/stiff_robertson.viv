@@ -1,0 +1,79 @@
+###
+title: On a stiff problem an explicit solver takes hundreds of times the steps
+line: On Robertson's problem Dormand-Prince takes 34,537 steps, Radau IIA 78 and BDF 144, and all three end within $10^{-6}$ of the reference.
+claim: On Robertson's stiff kinetics problem over $[0, 40]$ at rtol $10^{-6}$, the explicit Dormand-Prince method needs more than 30,000 steps, between 300 and 600 times as many as Radau IIA and over 100 times as many as BDF (both under 200 steps), while all three end within $10^{-6}$ of the reference $y_1 = 0.7158270687$. Stability, and with it the step count, sets the explicit method's step at this tolerance. The ratio is far below the spread of the rate constants (0.04 to $3 \times 10^{7}$).
+topic: math
+section: differential equations
+reference: Robertson's chemical kinetics problem with rate constants 0.04, $10^{4}$ and $3 \times 10^{7}$ (Hairer and Wanner, Solving Ordinary Differential Equations II (2nd ed., 1996), section IV.1); its Jacobian's eigenvalues reach about $-10^{4}$ near $t = 0$ and stay large in magnitude, which bounds an explicit method's step by stability, not accuracy. lib/ode's Radau, BDF and Dormand-Prince take the steps SciPy's solve_ivp takes (lib/ode/bench_scipy.json).
+scope: The interval $[0, 40]$, rtol $10^{-6}$ and atol $10^{-10}$ for all three methods, with the analytic Jacobian for Radau and BDF. Over the full range to $t = 10^{11}$ the explicit method's count would be larger still; it is not run there.
+lane: ai
+by: claude
+cost: fast
+###
+
+from ode.core import BDF, DOPRI5, RADAU
+from ode.problems import robertson, robertson_jac
+from ode.solve import STAT_STEPS, no_events, ode_cfg, ode_solve, ode_stats
+
+T_END = 40.0
+RTOL = 1.0e-6
+ATOL = 1.0e-10
+MAX_STEPS: Int = 10000000
+#: no limit on the step but the interval
+MAX_STEP = 1.0e30
+JAC_ANALYTIC: Int = 1
+RATES = [0.04, 1.0e4, 3.0e7]
+Y0 = [1.0, 0.0, 0.0]
+
+#| Steps taken and the final state for one method.
+def run(method: Int) {
+    cfg = ode_cfg(method, T_END, RTOL, ATOL * ones(3), 0.0, MAX_STEP, MAX_STEPS, JAC_ANALYTIC)
+    r = ode_solve(robertson, robertson_jac, no_events, 0.0, T_END, Y0, RATES, cfg, zeros(0), zeros(0), zeros(0))
+    last: Int = int(shape(r.y)[0]) - 1
+    return ode_stats(r)[STAT_STEPS], r.y[last, :]
+}
+
+steps_radau, y_radau = run(RADAU)
+steps_bdf, y_bdf = run(BDF)
+steps_dopri, y_dopri = run(DOPRI5)
+show steps_radau
+show steps_bdf
+show steps_dopri
+show y_radau
+show y_dopri
+#: Hairer and Wanner's reference y1(40)
+Y1_REF = 0.7158270687
+step_ratio_radau = steps_dopri / steps_radau
+step_ratio_bdf = steps_dopri / steps_bdf
+show step_ratio_radau
+show step_ratio_bdf
+
+#: the figure: steps taken by each method
+figure("Steps on Robertson's problem at rtol 1e-6", "", "steps taken")
+yscale("log")
+bars([0.0, 1.0, 2.0], [steps_radau * 1.0, steps_bdf * 1.0, steps_dopri * 1.0], "steps")
+xtick("Radau IIA", 0.0)
+xtick("BDF", 1.0)
+xtick("Dormand-Prince", 2.0)
+
+test "Dormand-Prince needs more than 30,000 steps" {
+    assert_gt(steps_dopri, 30000.0)
+}
+test "between 300 and 600 times Radau's steps, over 100 times BDF's, both under 200" {
+    assert_gt(step_ratio_radau, 300.0)
+    assert_lt(step_ratio_radau, 600.0)
+    assert_gt(step_ratio_bdf, 100.0)
+    assert_lt(steps_radau, 200.0)
+    assert_lt(steps_bdf, 200.0)
+}
+test "all three end within 1e-6 of the reference y1" {
+    assert_near(y_radau[0], Y1_REF, 1.0e-6)
+    assert_near(y_bdf[0], Y1_REF, 1.0e-6)
+    assert_near(y_dopri[0], Y1_REF, 1.0e-6)
+}
+test "the rate constants span 0.04 to 3e7" {
+    assert_near(RATES[2] / RATES[0], 7.5e8, 1.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

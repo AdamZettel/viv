@@ -1,0 +1,155 @@
+###
+post: Descriptive statistics with stable sums
+agent: claude
+
+- `mean_var(x, ddof)`: the mean and the variance by the corrected two-pass
+  algorithm (Chan, Golub and LeVeque 1983): d = x - mean, then
+  (sum d^2 - (sum d)^2 / n) / (n - ddof), every sum in NumPy's pairwise
+  order. The correction term removes the error of the first pass's mean.
+- `welford(x, ddof)`: the same two numbers in one pass by Welford's update
+  (Knuth, TAOCP vol. 2, 4.2.2), for data seen once.
+- `moments(x)`: mean, variance (ddof 0), skewness g1 and excess kurtosis g2,
+  the biased estimators SciPy's `skew` and `kurtosis` return by default.
+- `quantile(x, p, type)`: Hyndman and Fan's nine sample quantiles (Amer.
+  Statist. 50 (1996) 361-365), as R's `quantile(x, p, type = type)` computes
+  them, fuzz included: type 7 by its own index rule (1 + (n - 1) p), types
+  1-3 and 4-9 by R's general rule.
+
+Used with `from stats.describe import ...`.
+###
+
+EPS = 2.220446049250313e-16
+# R's fuzz in quantile(): 4 machine epsilons
+QUANTILE_FUZZ = 4.0 * EPS
+# the continuous types' (a, b) of Hyndman and Fan, types 4 to 9
+HF_A = [0.0, 0.5, 0.0, 1.0, 1.0 / 3.0, 3.0 / 8.0]
+HF_B = [1.0, 0.5, 0.0, 1.0, 1.0 / 3.0, 3.0 / 8.0]
+FIRST_CONTINUOUS = 4
+
+#| The mean and the variance (divided by n - ddof), corrected two-pass.
+def mean_var(x: Arr, ddof) {
+    n = len(x)
+    m = sum(x) / n
+    d = x - m
+    s1 = sum(d)
+    s2 = sum(d * d)
+    return m, (s2 - s1 * s1 / n) / (n - ddof)
+}
+
+#| The mean and the variance (divided by n - ddof) in one pass, Welford's update.
+def welford(x: Arr, ddof) {
+    m = 0.0
+    m2 = 0.0
+    k = 0.0
+    for xi in x {
+        k += 1.0
+        delta = xi - m
+        m += delta / k
+        m2 += delta * (xi - m)
+    }
+    return m, m2 / (k - ddof)
+}
+
+#| Mean, variance (ddof 0), skewness g1 and excess kurtosis g2 (biased, as SciPy's defaults).
+def moments(x: Arr) {
+    n = len(x)
+    m, v = mean_var(x, 0.0)
+    d = x - m
+    d2 = d * d
+    m3 = sum(d2 * d) / n
+    m4 = sum(d2 * d2) / n
+    return m, v, m3 / pow(v, 1.5), m4 / (v * v) - 3.0
+}
+
+#| Sample quantiles of type 1 to 9 (Hyndman and Fan; R's quantile()) at each p.
+def quantile(x: Arr, p: Arr, type) {
+    s = copy(x)
+    sort(s)
+    n = len(s)
+    return [quantile_sorted(s, n, p[i], type) for i to len(p)]
+}
+
+# x padded as R pads it: x[1], x[1], x, x[n], x[n]; index j (1-based, R's) is xs(j + 1)
+def padded(s: Arr, n, k) {
+    if k <= 1.0 {
+        return s[0]
+    }
+    if k >= n {
+        return s[n - 1]
+    }
+    return s[k - 1]
+}
+
+def quantile_sorted(s: Arr, n, p, type) {
+    if type == 7.0 {
+        index = 1.0 + max(n - 1.0, 0.0) * p
+        lo = floor(index)
+        hi = ceil(index)
+        q = s[lo - 1]
+        if index > lo and s[hi - 1] != q {
+            h = index - lo
+            q = (1.0 - h) * q + h * s[hi - 1]
+        }
+        return q
+    }
+    j = 0.0
+    h = 0.0
+    if type <= 3.0 {
+        nppm = n * p - 0.5 if type == 3.0 else n * p
+        j = floor(nppm + QUANTILE_FUZZ)
+        if type == 1.0 {
+            h = 1.0 if nppm > j else 0.0
+        }
+        if type == 2.0 {
+            h = ((1.0 if nppm > j else 0.0) + 1.0) / 2.0
+        }
+        if type == 3.0 {
+            h = 1.0 if (nppm != j or j % 2.0 == 1.0) else 0.0
+        }
+    }
+    else {
+        a = HF_A[type - FIRST_CONTINUOUS]
+        b = HF_B[type - FIRST_CONTINUOUS]
+        nppm = a + p * (n + 1.0 - a - b)
+        j = floor(nppm + QUANTILE_FUZZ)
+        h = nppm - j
+        if abs(h) < QUANTILE_FUZZ {
+            h = 0.0
+        }
+    }
+    # R: x <- c(x[1], x[1], x, x[n], x[n]); qs <- x[j + 2]; x[j + 3] when h == 1
+    lo = padded(s, n, j)
+    hi = padded(s, n, j + 1.0)
+    if h == 1.0 {
+        return hi
+    }
+    if h > 0.0 and h < 1.0 and lo != hi {
+        return (1.0 - h) * lo + h * hi
+    }
+    return lo
+}
+
+test "quantile types against R 4.3.3" {
+    # x <- c(2, 7, 1, 8, 2, 8, 1, 8); quantile(x, c(0.1, 0.25, 0.5, 0.9), type = t)
+    x = [2.0, 7.0, 1.0, 8.0, 2.0, 8.0, 1.0, 8.0]
+    p = [0.1, 0.25, 0.5, 0.9]
+    assert_allclose(quantile(x, p, 1.0), [1.0, 1.0, 2.0, 8.0], 1e-15)
+    assert_allclose(quantile(x, p, 2.0), [1.0, 1.5, 4.5, 8.0], 1e-15)
+    assert_allclose(quantile(x, p, 3.0), [1.0, 1.0, 2.0, 8.0], 1e-15)
+    assert_allclose(quantile(x, p, 6.0), [1.0, 1.25, 4.5, 8.0], 1e-15)
+    assert_allclose(quantile(x, p, 7.0), [1.0, 1.75, 4.5, 8.0], 1e-15)
+    assert_allclose(quantile(x, p, 8.0), [1.0, 1.4166666666666665, 4.4999999999999956, 8.0], 0.0)
+    assert_allclose(quantile(x, p, 9.0), [1.0, 1.4375, 4.5, 8.0], 1e-15)
+}
+
+test "two-pass and Welford agree on a shifted sample" {
+    x = [1e9 + 4.0, 1e9 + 7.0, 1e9 + 13.0, 1e9 + 16.0]
+    m, v = mean_var(x, 1.0)
+    mw, vw = welford(x, 1.0)
+    assert_near(v, 30.0, 0.0)
+    assert_near(vw, 30.0, 1e-6)
+    assert_near(m, 1e9 + 10.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

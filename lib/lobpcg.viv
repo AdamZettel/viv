@@ -1,0 +1,472 @@
+###
+post: LOBPCG, the lowest eigenpairs of an operator you can only apply
+agent: claude
+
+`lobpcg(apply_h, precondition, vectors, values, max_steps, nconv, tol)` finds
+the lowest few eigenvalues and eigenvectors of a Hermitian operator `H` that is
+given as a function: `apply_h(x)` returns `H` applied to each row of `x`. The
+matrix is never formed, so `H` can be a stencil, an FFT sandwich, or anything
+else that is cheaper to apply than to store.
+
+LOBPCG is short for locally optimal block preconditioned conjugate gradient.
+Each step searches a small subspace for the vectors with the lowest Rayleigh
+quotient $x^H H x / x^H x$, and the subspace is three blocks of rows: the
+current approximations, their preconditioned residuals (the direction in which
+the quotient falls fastest), and the step each approximation took last time.
+The lowest eigenvalues of `H` restricted to that subspace (Ritz values) and the
+vectors that achieve them (Ritz vectors) become the next approximations. The
+post `lobpcg-finds-the-lowest-states` explains why this works, on a particle
+in a box.
+
+The arguments:
+
+- `vectors` is `[nb, n]` complex, one starting guess per row; it comes back
+  holding the eigenvectors, orthonormal, lowest first. A real problem is a
+  complex one whose imaginary parts are zero.
+- `values` is `[nb]`; it comes back holding the eigenvalues.
+- `precondition(r, x)` returns an approximation to $(H - \lambda)^{-1} r$ for
+  the residual `r` of the row `x`, or `r` itself when there is nothing better:
+  `no_preconditioner` is that.
+- Only the lowest `nconv` rows are held to `tol`, a bound on the norm of
+  $H x - \lambda x$ for a unit `x`. The rows above them are a buffer: the top
+  of a block converges slowest, because nothing above it in the block keeps it
+  apart from the rest of the spectrum.
+- It returns the largest residual norm among those `nconv` rows.
+
+Ask for a `tol` the arithmetic can reach. On the test problems below the
+residual stops falling near $10^{-10}$, and an iteration held at that floor
+with nothing left to find can come apart: on the 90 by 90 test matrix, asked
+for $10^{-13}$, the largest residual was back above $10^{-4}$ by step 120 and
+above 1 by step 130. The DFT engine asks for $10^{-6}$.
+
+`lobpcg_start` and `lobpcg_step` are the same iteration a step at a time, for
+a caller that wants to watch it.
+
+Used with `import lobpcg`. The plane-wave DFT engine `dft/pwdft_it` uses it
+for its bands.
+###
+
+#: LOBPCG_X, LOBPCG_HX, LOBPCG_P, LOBPCG_HP  where each block sits in a LOBPCG
+#:     state, a [4, nb, n] complex array: the current approximations x, H x,
+#:     the previous step p, and H p
+LOBPCG_X = 0
+LOBPCG_HX = 1
+LOBPCG_P = 2
+LOBPCG_HP = 3
+
+#: LOBPCG_BLOCKS  how many blocks a state holds, the four above
+LOBPCG_BLOCKS = 4
+
+#: LOBPCG_LOCK_FLOOR  a row whose residual is under max(tol, this) stops
+#:     offering search directions, however small tol is
+LOBPCG_LOCK_FLOOR = 1.0e-9
+
+#| How many entries each row of a block has.
+def row_length(a) {
+    dims = shape(a)
+    return dims[1]
+}
+
+#| The Euclidean norm of each row of `a`: one number per vector in a block.
+def row_norms(a) {
+    norms = zeros(len(a))
+    for b to len(a) {
+        v = slab(a, b)
+        norms[b] = sqrt(sum(abs(v) * abs(v)))
+    }
+    return norms
+}
+
+#| Divide each row of `a` by its entry in `norms`, in place. A zero row stays
+#| zero instead of becoming a row of NaN.
+def divide_rows(a, norms) {
+    for b to len(a) {
+        if norms[b] > 1.0e-300 {
+            setslab(a, b, slab(a, b) / norms[b])
+        }
+    }
+}
+
+#| The rows of `top` followed by the rows of `bottom`, as one block.
+def stacked(top, bottom) {
+    ntop = len(top)
+    both = czeros(ntop + len(bottom), row_length(top))
+    for b to ntop {
+        setslab(both, b, slab(top, b))
+    }
+    for b to len(bottom) {
+        setslab(both, ntop + b, slab(bottom, b))
+    }
+    return both
+}
+
+#| The Rayleigh quotient of each row, $\lambda_b = x_b^H H x_b$ for a unit row
+#| $x_b$: the best estimate of an eigenvalue that the vector alone can give.
+def rayleigh_quotients(x, hx) {
+    lam = zeros(len(x))
+    for b to len(x) {
+        lam[b] = sum(re(conj(slab(x, b)) * slab(hx, b)))
+    }
+    return lam
+}
+
+#| The residual of each row, $r_b = H x_b - \lambda_b x_b$. It is zero exactly
+#| when $x_b$ is an eigenvector, and its norm bounds the distance from
+#| $\lambda_b$ to the nearest eigenvalue.
+def residuals(x, hx, lam) {
+    r = czeros(len(x), row_length(x))
+    for b to len(x) {
+        setslab(r, b, slab(hx, b) - lam[b] * slab(x, b))
+    }
+    return r
+}
+
+#| The largest of the first `count` entries of `a` (all of them if there are
+#| fewer).
+def largest_of_first(a, count) {
+    biggest = 0.0
+    for b to min(count, len(a)) {
+        if a[b] > biggest {
+            biggest = a[b]
+        }
+    }
+    return biggest
+}
+
+#| The identity preconditioner, for an operator with nothing better.
+def no_preconditioner(r, x) {
+    return r
+}
+
+#| A matrix `m` whose rows make the rows of `m @ s` orthonormal and span what
+#| the rows of `s` span, minus the directions `s` barely has.
+#|| Canonical orthonormalization: eigendecompose the overlap $S = s^* s^T$ and
+#|| scale each eigenvector by $1/\sqrt{w}$. Directions with $w$ under $10^{-10}$
+#|| of the largest are dropped, so `m` has at most as many rows as `s`.
+#||| Rank-revealing on purpose. Near convergence the previous step p becomes
+#||| linearly dependent on the rest of the block, and keeping it poisons the
+#||| Rayleigh-Ritz step: that is the classic way LOBPCG falls over.
+def orthonormalizer(s) {
+    ns = len(s)
+    overlap = conj(s) @ transpose(s)
+    w = zeros(ns)
+    u = czeros(ns, ns)
+    eig_herm(overlap, w, u)
+    first = 0.0
+    for a to ns {
+        if w[a] <= 1.0e-10 * w[ns - 1.0] {
+            first = a + 1.0
+        }
+    }
+    m = czeros(ns - first, ns)
+    for a to ns - first {
+        scale = 1.0 / sqrt(w[first + a])
+        for c to ns {
+            m[a, c] = u[c, first + a] * scale
+        }
+    }
+    return m
+}
+
+#| Rayleigh-Ritz: of all unit vectors in the span of the orthonormal rows of
+#| `s`, the `nb` with the lowest Rayleigh quotients, as coefficients: row b of
+#| the result times `s` is the b-th lowest Ritz vector.
+#|| This is a dense eigenproblem, but a small one: `s` has at most three rows
+#|| per wanted vector.
+def lowest_ritz_coefficients(s, hs, nb) {
+    m = len(s)
+    # Hermitian in exact arithmetic, symmetrized because it is not quite in
+    # floating point: hs is carried through linear combinations rather than
+    # recomputed as H s, so s^H (hs) drifts from its adjoint by ~1e-9, which
+    # eig_herm rightly refuses to call Hermitian.
+    projected = conj(s) @ transpose(hs)
+    projected = (projected + conj(transpose(projected))) * 0.5
+    e = zeros(m)
+    c = czeros(m, m)
+    eig_herm(projected, e, c)
+    lowest = czeros(nb, m)
+    for b to nb {
+        for a to m {
+            lowest[b, a] = c[a, b]
+        }
+    }
+    return lowest
+}
+
+#| The search directions for one step: each row's residual, preconditioned.
+#| A row whose residual is under `lock` has converged and offers none (its row
+#| stays zero, and `orthonormalizer` drops it). This is soft locking: the row
+#| still takes part in Rayleigh-Ritz, so it keeps improving from the others'
+#| directions, but no work is spent pushing it further.
+def search_directions(precondition, r, x, norms, lock) {
+    w = czeros(len(r), row_length(r))
+    for b to len(r) {
+        if norms[b] >= lock {
+            setslab(w, b, precondition(slab(r, b), slab(x, b)))
+        }
+    }
+    return w
+}
+
+#| A LOBPCG state for the starting rows of `x`: orthonormalized, rotated into
+#| Ritz vectors of their own span, and with no previous step yet.
+def lobpcg_start(apply_h, x) {
+    nb = len(x)
+    hx = apply_h(x)
+    m = orthonormalizer(x)
+    x = m @ x
+    hx = m @ hx
+    c = lowest_ritz_coefficients(x, hx, nb)
+    state = czeros(LOBPCG_BLOCKS, nb, row_length(x))
+    setslab(state, LOBPCG_X, c @ x)
+    setslab(state, LOBPCG_HX, c @ hx)
+    return state
+}
+
+#| One LOBPCG step on `state`, in place. Returns the largest residual norm among
+#| the lowest `nconv` rows before the step; when that is already under `tol`
+#| the state is left alone. `step` counts from 0; step 0 has no previous step p
+#| to search along.
+def lobpcg_step(apply_h, precondition, state, step, nconv, tol) {
+    x = slab(state, LOBPCG_X)
+    hx = slab(state, LOBPCG_HX)
+    nb = len(x)
+    lam = rayleigh_quotients(x, hx)
+    r = residuals(x, hx, lam)
+    norms = row_norms(r)
+    worst = largest_of_first(norms, nconv)
+    if worst < tol {
+        return worst
+    }
+    # the new directions, made orthogonal to x (what x already spans needs no
+    # searching) and then unit length. Unit length matters: a residual's norm
+    # IS the residual, so left as it is its overlap eigenvalue would be res^2,
+    # and orthonormalizer, which drops directions 1e-10 below the largest,
+    # would throw the whole correction away at res ~ 1e-5.
+    w = search_directions(precondition, r, x, norms, max(tol, LOBPCG_LOCK_FLOOR))
+    w = w - (w @ transpose(conj(x))) @ x
+    divide_rows(w, row_norms(w))
+    hw = apply_h(w)
+    # the subspace searched: [x; w], and from step 1 on [x; w; p]
+    s = stacked(x, w)
+    hs = stacked(hx, hw)
+    if step > 0 {
+        s = stacked(s, slab(state, LOBPCG_P))
+        hs = stacked(hs, slab(state, LOBPCG_HP))
+    }
+    m = orthonormalizer(s)
+    c = lowest_ritz_coefficients(m @ s, m @ hs, nb)
+    # the new x as combinations of the rows of s itself
+    k = c @ m
+    setslab(state, LOBPCG_X, k @ s)
+    setslab(state, LOBPCG_HX, k @ hs)
+    # The step p is the part of the new x that came from w and p: the same
+    # combination with the x columns struck out.
+    #|| Built directly, never as x_new - (x_new x^H) x. That subtraction cancels
+    #|| to the size of the step and leaves p with no relative accuracy, so
+    #|| (p, H p) stops being consistent with H once p is normalized, and the
+    #|| iteration, having converged to 1e-6, then diverges by a factor of five a
+    #|| step (measured, in the DFT engine at Gamma in silicon). Formed this way,
+    #|| H p is the same combination of rows that each satisfy h = H s, so the
+    #|| pair is consistent by linearity however small it gets.
+    for b to nb {
+        for a to nb {
+            k[b, a] = 0.0
+        }
+    }
+    p = k @ s
+    hp = k @ hs
+    pnorms = row_norms(p)
+    divide_rows(p, pnorms)
+    divide_rows(hp, pnorms)
+    setslab(state, LOBPCG_P, p)
+    setslab(state, LOBPCG_HP, hp)
+    return worst
+}
+
+#| The lowest eigenpairs of the Hermitian operator `apply_h`, starting from the
+#| rows of `vectors`, which come back holding the eigenvectors; `values` gets
+#| the eigenvalues. At most `max_steps` steps; stops once the lowest `nconv`
+#| rows have residual norms under `tol`, and returns the largest of those.
+def lobpcg(apply_h, precondition, vectors, values, max_steps, nconv, tol) {
+    state = lobpcg_start(apply_h, vectors)
+    worst = 0.0
+    for step to max_steps {
+        worst = lobpcg_step(apply_h, precondition, state, step, nconv, tol)
+        if worst < tol {
+            break
+        }
+    }
+    x = slab(state, LOBPCG_X)
+    lam = rayleigh_quotients(x, slab(state, LOBPCG_HX))
+    for b to len(x) {
+        values[b] = lam[b]
+        setslab(vectors, b, slab(x, b))
+    }
+    return worst
+}
+
+# ---------------------------------------------------------------- the checks
+# Operators for the tests below. Each reads its size from the block it is
+# applied to, so one def serves every size.
+
+#| The second-difference matrix on n points with zero ends: 2 on the diagonal
+#| and -1 beside it, applied to each row. Its eigenvalues are known exactly:
+#| $2 - 2\cos(k\pi / (n + 1))$, k = 1 .. n.
+def apply_laplacian_1d(x) {
+    n = row_length(x)
+    out = czeros(len(x), n)
+    for b to len(x) {
+        v = slab(x, b)
+        hv = czeros(n)
+        for i to n {
+            hv[i] = 2.0 * v[i]
+            if i > 0 {
+                hv[i] = hv[i] - v[i - 1]
+            }
+            if i < n - 1 {
+                hv[i] = hv[i] - v[i + 1]
+            }
+        }
+        setslab(out, b, hv)
+    }
+    return out
+}
+
+#| The five-point Laplacian on an m by m grid with zero edges, each row of `x`
+#| being a grid stored row after row. Its eigenvalues are sums of two of the
+#| 1-D ones.
+def apply_laplacian_2d(x) {
+    m = round(sqrt(row_length(x)))
+    out = czeros(len(x), m * m)
+    for b to len(x) {
+        v = slab(x, b)
+        hv = czeros(m * m)
+        for i to m {
+            for j to m {
+                at = i * m + j
+                hv[at] = 4.0 * v[at]
+                if i > 0 {
+                    hv[at] = hv[at] - v[at - m]
+                }
+                if i < m - 1 {
+                    hv[at] = hv[at] - v[at + m]
+                }
+                if j > 0 {
+                    hv[at] = hv[at] - v[at - 1]
+                }
+                if j < m - 1 {
+                    hv[at] = hv[at] - v[at + 1]
+                }
+            }
+        }
+        setslab(out, b, hv)
+    }
+    return out
+}
+
+#| A real symmetric n by n matrix with no structure to exploit: 1 .. n down the
+#| diagonal, so the spectrum is spread out, and $\sin((i+1)(j+1))$ off it.
+def unstructured_matrix(n) {
+    a = zeros(n, n)
+    for i to n {
+        for j to n {
+            a[i, j] = sin((i + 1.0) * (j + 1.0))
+        }
+        a[i, i] = i + 1.0
+    }
+    return a
+}
+
+#| `unstructured_matrix` applied to each row, as a complex operator.
+def apply_unstructured(x) {
+    a = unstructured_matrix(row_length(x))
+    return x @ transpose(complex(a, a * 0.0))
+}
+
+#| nb random starting rows of length n.
+def random_rows(nb, n) {
+    x = czeros(nb, n)
+    for b to nb {
+        for i to n {
+            x[b, i] = rand() - 0.5
+        }
+    }
+    return x
+}
+
+#| The tests' budget: at most this many steps, and converged when the lowest
+#| `LOBPCG_TEST_NCONV` rows are.
+LOBPCG_TEST_MAX_STEPS = 400
+LOBPCG_TEST_NCONV = 4
+
+#| The largest residual norm $|H x_b - \lambda_b x_b|$ among the first `count`
+#| rows, with H applied afresh: a check on the solver that does not take its
+#| word for H x.
+def worst_eigen_residual(apply_h, vectors, values, count) {
+    r = residuals(vectors, apply_h(vectors), values)
+    return largest_of_first(row_norms(r), count)
+}
+
+test "agrees with eig_sym on unstructured symmetric matrices of three sizes" {
+    srand(3.0)
+    sizes = [12.0, 40.0, 90.0]
+    for t to len(sizes) {
+        n = sizes[t]
+        nb = 5
+        vectors = random_rows(nb, n)
+        values = zeros(nb)
+        worst = lobpcg(apply_unstructured, no_preconditioner, vectors, values, LOBPCG_TEST_MAX_STEPS, LOBPCG_TEST_NCONV, 1.0e-9)
+        assert_lt(worst, 1.0e-9)
+        exact = zeros(n)
+        exact_vectors = zeros(n, n)
+        eig_sym(unstructured_matrix(n), exact, exact_vectors)
+        for b to LOBPCG_TEST_NCONV {
+            assert_near(values[b], exact[b], 1.0e-13)
+        }
+        assert_lt(worst_eigen_residual(apply_unstructured, vectors, values, LOBPCG_TEST_NCONV), 1.0e-9)
+        # the rows came back orthonormal: |x_a^H x_b| is 1 on the diagonal
+        # (where x_a^H x_a is real) and 0 off it
+        overlaps = abs(conj(vectors) @ transpose(vectors))
+        for a to nb {
+            overlaps[a, a] = overlaps[a, a] - 1.0
+        }
+        assert_lt(max(abs(overlaps)), 1.0e-14)
+    }
+}
+
+test "the 1-D second difference: the lowest four, against 2 - 2 cos(k pi / (n+1))" {
+    srand(5.0)
+    pi = 4.0 * atan(1.0)
+    n = 60
+    nb = 6
+    vectors = random_rows(nb, n)
+    values = zeros(nb)
+    worst = lobpcg(apply_laplacian_1d, no_preconditioner, vectors, values, LOBPCG_TEST_MAX_STEPS, LOBPCG_TEST_NCONV, 1.0e-9)
+    assert_lt(worst, 1.0e-9)
+    for k to LOBPCG_TEST_NCONV {
+        assert_near(values[k], 2.0 - 2.0 * cos((k + 1.0) * pi / (n + 1.0)), 1.0e-14)
+    }
+}
+
+test "the 2-D five-point Laplacian: a doubly degenerate pair, found as a pair" {
+    srand(9.0)
+    pi = 4.0 * atan(1.0)
+    m = 16
+    nb = 6
+    vectors = random_rows(nb, m * m)
+    values = zeros(nb)
+    worst = lobpcg(apply_laplacian_2d, no_preconditioner, vectors, values, LOBPCG_TEST_MAX_STEPS, LOBPCG_TEST_NCONV, 1.0e-9)
+    assert_lt(worst, 1.0e-9)
+    # grid modes (1,1), (1,2) = (2,1), (2,2)
+    one = 2.0 - 2.0 * cos(pi / (m + 1.0))
+    two = 2.0 - 2.0 * cos(2.0 * pi / (m + 1.0))
+    assert_near(values[0], one + one, 1.0e-14)
+    assert_near(values[1], one + two, 1.0e-14)
+    assert_near(values[2], one + two, 1.0e-14)
+    assert_near(values[3], two + two, 1.0e-14)
+    assert_lt(worst_eigen_residual(apply_laplacian_2d, vectors, values, LOBPCG_TEST_NCONV), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,262 @@
+# The tests of lib/hf/hgp_eri that compare it with reference data (lib/hfref)
+# or run the sweep drivers (lib/hf/sweep). They live here so that a program
+# that uses lib/hf/hgp_eri does not load the references.
+from hf.hgp_eri import hgp_block, hgp_ctab, hgp_eri, hgp_quartet, HGP_T_LMAX, HGP_T_NCTR
+from hf.basis import (
+    AT_LEN, AT_X, AT_Y, AT_Z, bas_contract, bas_ncart, bas_nsph, PR_COEF, PR_EXP, PR_LEN,
+    SH_ATOM, SH_CART0, SH_L, SH_LEN, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+)
+from hf.eri_store import es_checksums, es_sample_gap
+from hfref.prims import (
+    prims_eri, prims_eri_abab, prims_eri_cdcd, PRIMS_NCASE, PRIMS_NPICK, prims_picks,
+    prims_shells,
+)
+from hfref.water_631gs_cart import (
+    water631gs_cart_atoms, water631gs_cart_eri8_cart, WATER631GS_CART_NAO_CART,
+    water631gs_cart_prims, water631gs_cart_schwarz, water631gs_cart_shells,
+)
+from hfref.water_ccpvdz import (
+    waterccpvdz_atoms, waterccpvdz_eri8_cart_idx, WATERCCPVDZ_ERI8_CART_LEN,
+    WATERCCPVDZ_ERI8_CART_SUMSQ, waterccpvdz_eri8_cart_val, WATERCCPVDZ_ERI8_CART_WSUM,
+    waterccpvdz_prims, WATERCCPVDZ_SEED_WSUM, waterccpvdz_shells,
+)
+from hfref.water_tzvp import (
+    watertzvp_atoms, watertzvp_eri8_cart_idx, WATERTZVP_ERI8_CART_LEN,
+    WATERTZVP_ERI8_CART_SUMSQ, watertzvp_eri8_cart_val, WATERTZVP_ERI8_CART_WSUM,
+    watertzvp_prims, WATERTZVP_SEED_WSUM, watertzvp_shells,
+)
+
+#| Test helper: over every pick of every prims case, the largest gap in
+#| (ab|cd) divided by its Schwarz bound sqrt((ab|ab)(cd|cd)) from the
+#| reference, the largest gap divided by the value itself, and the largest gap
+#| in (ab|ab) and (cd|cd) divided by the value.
+#|
+#| The reference is PySCF's table with three values replaced by exact ones.
+#| A 40-digit mpmath McMurchie-Davidson evaluation of all 512 picks and their
+#| 1024 diagonals (a scratch script run on the table's own double-precision
+#| inputs) finds PySCF more than 1e-12 from the exact value at exactly five
+#| entries, which hold three distinct integrals:
+#|
+#|     case 28 pick 4, (ab|cd)            1.1e-12 off
+#|     case 37 pick 6, (ab|cd)            1.8e-12 off
+#|     case 54 picks 2, 3, (cd|cd)        1.9e-12 off (one diagonal, picked twice)
+#|     case 54 pick 5, (cd|cd)            3.5e-11 off
+#|
+#| Everywhere else the table is within 1e-12 of exact, so it stays the
+#| reference. Then the number of replaced entries and the smallest gap
+#| between the table and a replacement, divided by the replacement, so the
+#| test can show that each replacement is needed.
+def hgp_t_prims_gaps() {
+    SH = prims_shells()
+    PK = prims_picks()
+    RE = prims_eri()
+    RA = prims_eri_abab()
+    RC = prims_eri_cdcd()
+    CT = hgp_ctab(2 * HGP_T_LMAX)
+    at = zeros(HGP_T_NCTR, AT_LEN)
+    sh = zeros(HGP_T_NCTR, SH_LEN)
+    pr = zeros(HGP_T_NCTR, PR_LEN)
+    wb = 0.0
+    wv = 0.0
+    wd = 0.0
+    nrep = 0
+    need = 1.0
+    for k to PRIMS_NCASE {
+        hgp_t_prims_case(SH, k, at, sh, pr)
+        cn = bas_contract(sh, pr)
+        blk = hgp_block(at, sh, pr, cn, CT, 0, 1, 2, 3)
+        bab = hgp_block(at, sh, pr, cn, CT, 0, 1, 0, 1)
+        bcd = hgp_block(at, sh, pr, cn, CT, 2, 3, 2, 3)
+        for p to PRIMS_NPICK {
+            q = PRIMS_NPICK * k + p
+            ia = PK[q, 0]
+            ib = PK[q, 1]
+            ic = PK[q, 2]
+            id = PK[q, 3]
+            re = RE[q]
+            rc = RC[q]
+            if q == PRIMS_NPICK * 28 + 4 {
+                re = -1.2831219799536010566e-4
+            }
+            if q == PRIMS_NPICK * 37 + 6 {
+                re = -1.1337852708410241984e-4
+            }
+            if q == PRIMS_NPICK * 54 + 2 or q == PRIMS_NPICK * 54 + 3 {
+                rc = 0.026055881851831326544
+            }
+            if q == PRIMS_NPICK * 54 + 5 {
+                rc = 0.0033615664361231871909
+            }
+            if re != RE[q] {
+                nrep = nrep + 1
+                need = min(need, abs(RE[q] - re) / abs(re))
+            }
+            if rc != RC[q] {
+                nrep = nrep + 1
+                need = min(need, abs(RC[q] - rc) / rc)
+            }
+            gap = abs(blk[ia, ib, ic, id] - re)
+            wb = max(wb, gap / sqrt(RA[q] * rc))
+            wv = max(wv, gap / abs(re))
+            wd = max(wd, abs(bab[ia, ib, ia, ib] - RA[q]) / RA[q])
+            wd = max(wd, abs(bcd[ic, id, ic, id] - rc) / rc)
+        }
+    }
+    return wb, wv, wd, nrep, need
+}
+
+#| Test helper: the largest gap, over all four indices, between the block of
+#| shells (0 1|2 3) and the blocks of three other index orders of the same
+#| class, divided by the largest value in the block. The recurrences put the
+#| angular momentum on different centers in each order, so this checks the
+#| vertical and horizontal steps against each other.
+def hgp_t_perm_gap(SH: Arr, k) {
+    at = zeros(HGP_T_NCTR, AT_LEN)
+    sh = zeros(HGP_T_NCTR, SH_LEN)
+    pr = zeros(HGP_T_NCTR, PR_LEN)
+    hgp_t_prims_case(SH, k, at, sh, pr)
+    cn = bas_contract(sh, pr)
+    CT = hgp_ctab(2 * HGP_T_LMAX)
+    b0 = hgp_quartet(at, sh, pr, cn, CT, 0, 1, 2, 3)
+    b1 = hgp_quartet(at, sh, pr, cn, CT, 1, 0, 2, 3)
+    b2 = hgp_quartet(at, sh, pr, cn, CT, 2, 3, 0, 1)
+    b3 = hgp_quartet(at, sh, pr, cn, CT, 3, 2, 1, 0)
+    big = 0.0
+    gap = 0.0
+    for i to len(b0) {
+        for j to len(b1) {
+            for k2 to len(b2) {
+                for l to len(b3) {
+                    v = b0[i, j, k2, l]
+                    big = max(big, abs(v))
+                    gap = max(gap, abs(b1[j, i, k2, l] - v))
+                    gap = max(gap, abs(b2[k2, l, i, j] - v))
+                    gap = max(gap, abs(b3[l, k2, j, i] - v))
+                }
+            }
+        }
+    }
+    return gap / big
+}
+
+#| Test helper: fill `atoms`, `shells` and `prims` with case `k` of
+#| lib/hfref/prims: four single-primitive shells, each on its own center.
+def hgp_t_prims_case(SH: Arr, k, atoms: Arr, shells: Arr, prims: Arr) {
+    c0 = 0
+    for r to HGP_T_NCTR {
+        row = HGP_T_NCTR * k + r
+        atoms[r, AT_X] = SH[row, 2]
+        atoms[r, AT_Y] = SH[row, 3]
+        atoms[r, AT_Z] = SH[row, 4]
+        shells[r, SH_ATOM] = r
+        shells[r, SH_L] = SH[row, 0]
+        shells[r, SH_NPRIM] = 1
+        shells[r, SH_P0] = r
+        shells[r, SH_CART0] = c0
+        shells[r, SH_NCART] = bas_ncart(SH[row, 0])
+        shells[r, SH_NSPH] = bas_nsph(SH[row, 0])
+        prims[r, PR_EXP] = SH[row, 1]
+        prims[r, PR_COEF] = 1.0
+        c0 = c0 + bas_ncart(SH[row, 0])
+    }
+    return 0.0
+}
+
+test "all 18,145 packed ERIs of water 6-31G* (Cartesian d) match PySCF within 1e-12" {
+    hgp_g = hgp_eri(water631gs_cart_atoms(), water631gs_cart_shells(), water631gs_cart_prims())
+    hgp_ref = water631gs_cart_eri8_cart()
+    assert_near(len(hgp_g), 18145, 0.0)
+    hgp_worst = 0.0
+    for hgp_i to len(hgp_ref) {
+        hgp_worst = max(hgp_worst, abs(hgp_g[hgp_i] - hgp_ref[hgp_i]))
+    }
+    # measured: 2.2e-14
+    assert_lt(hgp_worst, 1.0e-12)
+    # and the computed set obeys the Schwarz bound on its own
+    assert_lt(water631gs_cart_schwarz(hgp_g, WATER631GS_CART_NAO_CART), 1.0e-12)
+}
+
+test "water cc-pVDZ (25 Cartesian AOs) matches PySCF's checksums and samples" {
+    hgp_g = hgp_eri(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+    assert_near(len(hgp_g), WATERCCPVDZ_ERI8_CART_LEN, 0.0)
+    hgp_cs = es_checksums(hgp_g, WATERCCPVDZ_SEED_WSUM)
+    # measured: 1.3e-14 and 3.1e-15 relative, samples 5.2e-15
+    assert_near(hgp_cs[0] / WATERCCPVDZ_ERI8_CART_SUMSQ, 1.0, 1.0e-12)
+    assert_near(hgp_cs[1] / WATERCCPVDZ_ERI8_CART_WSUM, 1.0, 1.0e-12)
+    hgp_idx = waterccpvdz_eri8_cart_idx()
+    assert_lt(es_sample_gap(hgp_g, hgp_idx, waterccpvdz_eri8_cart_val()), 1.0e-12)
+}
+
+test "water def2-TZVP (48 Cartesian AOs, one f shell) matches PySCF's checksums and samples" {
+    hgp_g = hgp_eri(watertzvp_atoms(), watertzvp_shells(), watertzvp_prims())
+    assert_near(len(hgp_g), WATERTZVP_ERI8_CART_LEN, 0.0)
+    hgp_cs = es_checksums(hgp_g, WATERTZVP_SEED_WSUM)
+    # measured: 3.2e-14 and 1.2e-14 relative, samples 4.8e-15
+    assert_near(hgp_cs[0] / WATERTZVP_ERI8_CART_SUMSQ, 1.0, 1.0e-12)
+    assert_near(hgp_cs[1] / WATERTZVP_ERI8_CART_WSUM, 1.0, 1.0e-12)
+    hgp_idx = watertzvp_eri8_cart_idx()
+    assert_lt(es_sample_gap(hgp_g, hgp_idx, watertzvp_eri8_cart_val()), 1.0e-12)
+}
+
+test "single-primitive quartets from (ss|ss) to (ff|ff) match PySCF within 1e-12 relative" {
+    hgp_wb, hgp_wv, hgp_wd, hgp_nrep, hgp_need = hgp_t_prims_gaps()
+    # Relative to the Schwarz bound sqrt((ab|ab)(cd|cd)) of each value, the
+    # size of the integral this one could have been. Measured 3.6e-14.
+    assert_lt(hgp_wb, 1.0e-12)
+    # Relative to each value, and to each diagonal: measured 9.5e-13 and
+    # 5.1e-13. The first is mostly the table's own error below the 1e-12
+    # replacement line; against the exact values this module is within
+    # 2.1e-13. Against the uncorrected table these gaps are 1.9e-12 and
+    # 3.5e-11, the table's errors.
+    assert_lt(hgp_wv, 1.0e-12)
+    assert_lt(hgp_wd, 1.0e-12)
+    # five entries replaced, and each was more than 1e-12 off
+    assert_near(hgp_nrep, 5, 0.0)
+    assert_gt(hgp_need, 1.0e-12)
+}
+
+test "where the PySCF table is off, the values match mpmath to 1e-12" {
+    hgp_sh = prims_shells()
+    hgp_pk = prims_picks()
+    hgp_ct = hgp_ctab(2 * HGP_T_LMAX)
+    hgp_at = zeros(HGP_T_NCTR, AT_LEN)
+    hgp_s4 = zeros(HGP_T_NCTR, SH_LEN)
+    hgp_pr = zeros(HGP_T_NCTR, PR_LEN)
+    # exact values from the 40-digit mpmath HGP; PySCF's table is 3.5e-11,
+    # 1.8e-12, 3.7e-14 and 9.9e-15 away from them, this module 1.1e-15,
+    # 8.7e-14, 1.5e-13 and 1.2e-15
+    hgp_t_prims_case(hgp_sh, 54, hgp_at, hgp_s4, hgp_pr)
+    hgp_q = PRIMS_NPICK * 54 + 5
+    hgp_b = hgp_block(hgp_at, hgp_s4, hgp_pr, bas_contract(hgp_s4, hgp_pr), hgp_ct, 2, 3, 2, 3)
+    hgp_v = hgp_b[hgp_pk[hgp_q, 2], hgp_pk[hgp_q, 3], hgp_pk[hgp_q, 2], hgp_pk[hgp_q, 3]]
+    assert_near(hgp_v / 0.0033615664361231872, 1.0, 1.0e-12)
+    hgp_t_prims_case(hgp_sh, 37, hgp_at, hgp_s4, hgp_pr)
+    hgp_q = PRIMS_NPICK * 37 + 6
+    hgp_b = hgp_block(hgp_at, hgp_s4, hgp_pr, bas_contract(hgp_s4, hgp_pr), hgp_ct, 0, 1, 2, 3)
+    hgp_v = hgp_b[hgp_pk[hgp_q, 0], hgp_pk[hgp_q, 1], hgp_pk[hgp_q, 2], hgp_pk[hgp_q, 3]]
+    assert_near(hgp_v / -0.00011337852708410242, 1.0, 1.0e-12)
+    hgp_t_prims_case(hgp_sh, 62, hgp_at, hgp_s4, hgp_pr)
+    hgp_q = PRIMS_NPICK * 62 + 1
+    hgp_b = hgp_block(hgp_at, hgp_s4, hgp_pr, bas_contract(hgp_s4, hgp_pr), hgp_ct, 0, 1, 2, 3)
+    hgp_v = hgp_b[hgp_pk[hgp_q, 0], hgp_pk[hgp_q, 1], hgp_pk[hgp_q, 2], hgp_pk[hgp_q, 3]]
+    assert_near(hgp_v / 3.3651023969960663e-5, 1.0, 1.0e-12)
+    hgp_t_prims_case(hgp_sh, 60, hgp_at, hgp_s4, hgp_pr)
+    hgp_q = PRIMS_NPICK * 60 + 7
+    hgp_b = hgp_block(hgp_at, hgp_s4, hgp_pr, bas_contract(hgp_s4, hgp_pr), hgp_ct, 0, 1, 2, 3)
+    hgp_v = hgp_b[hgp_pk[hgp_q, 0], hgp_pk[hgp_q, 1], hgp_pk[hgp_q, 2], hgp_pk[hgp_q, 3]]
+    assert_near(hgp_v / -6.7304914071024604e-5, 1.0, 1.0e-12)
+}
+
+test "computing a quartet in four index orders gives the same block" {
+    hgp_sh = prims_shells()
+    # case 62 has l = 2, 3, 3, 3, case 63 has 3, 3, 3, 3 and case 27 has
+    # 3, 2, 1, 1. Some of these orders put the power on the diffuse center,
+    # which hgp_swap avoids, so the gate is looser than the error of the
+    # production order. Measured: 7.3e-14, 4.4e-13 and 2.9e-15.
+    assert_lt(hgp_t_perm_gap(hgp_sh, 62), 1.0e-12)
+    assert_lt(hgp_t_perm_gap(hgp_sh, 63), 1.0e-12)
+    assert_lt(hgp_t_perm_gap(hgp_sh, 27), 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

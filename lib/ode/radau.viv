@@ -1,0 +1,358 @@
+###
+post: Radau IIA of order 5, after Hairer and Wanner's RADAU5
+agent: claude
+
+The three-stage Radau IIA method is collocation at the right Radau points
+c = ((4 - sqrt 6)/10, (4 + sqrt 6)/10, 1): the step solves for the stage
+increments Z_i = y(t + c_i h) - y(t) from
+
+    Z = h (A (x) I) F(Z),        F_i = f(t + c_i h, y + Z_i)
+
+by simplified Newton iterations, all with the Jacobian J at the start of the
+step. The trick that makes it affordable is to diagonalize A^-1 = T Lambda
+T^-1: in W = (T^-1 (x) I) Z the 3n-by-3n Newton matrix splits into one real
+system (mu_1/h - J) and one complex system ((alpha + i beta)/h - J), so a
+step costs one real and one complex LU (here the complex one is written as
+its real 2n-by-2n form). The new point is y + Z_3; the method is order 5,
+L-stable, and stiffly accurate.
+
+The error estimate is the embedded formula of Hairer and Wanner (Solving
+ODEs II, IV.8, eq. 8.20): (mu_1/h - J)^-1 (f(t, y) + sum_i e_i Z_i / h),
+filtered once more through the real system after a rejection. The step
+size follows Gustafsson's predictive controller; the Newton iteration stops
+on Hairer's convergence-rate test, and a failed iteration halves the step
+after first refreshing a stale Jacobian. The constants are SciPy's
+(scipy/integrate/_ivp/radau.py), which carries Hairer's RADAU5 logic.
+
+E. Hairer and G. Wanner, Solving Ordinary Differential Equations II: Stiff
+and Differential-Algebraic Problems, 2nd ed., Springer (1996),
+doi:10.1007/978-3-642-05221-7.
+###
+
+from ode.core import (
+    Dense, OdeCfg, OdeState, MAX_FACTOR, MIN_FACTOR, NOT_FINITE, RADAU, STEP_TOO_SMALL,
+    all_finite, jacobian, dense_at, min_step_at, rms,
+)
+from ode.lu import lu_factor, lu_solve
+
+S6 = sqrt(6.0)
+# the collocation nodes
+C1 = (4.0 - S6) / 10.0
+C2 = (4.0 + S6) / 10.0
+C3 = 1.0
+# the error estimate's weights on Z
+ER1 = (-13.0 - 7.0 * S6) / 3.0
+ER2 = (-13.0 + 7.0 * S6) / 3.0
+ER3 = -1.0 / 3.0
+# the eigenvalues of A^-1: one real, one complex pair alpha -+ i beta
+MU_REAL = 3.0 + pow(3.0, 2.0 / 3.0) - pow(3.0, 1.0 / 3.0)
+MU_RE = 3.0 + 0.5 * (pow(3.0, 1.0 / 3.0) - pow(3.0, 2.0 / 3.0))
+MU_IM = -0.5 * (pow(3.0, 5.0 / 6.0) + pow(3.0, 7.0 / 6.0))
+# T and T^-1, which diagonalize A^-1 (block-diagonally for the complex pair)
+T = [[0.09443876248897524, -0.14125529502095421, 0.03002919410514742],
+     [0.25021312296533332, 0.20412935229379994, -0.38294211275726192],
+     [1.0, 1.0, 0.0]]
+TI = [[4.17871859155190428, 0.32768282076106237, 0.52337644549944951],
+      [-4.17871859155190428, -0.32768282076106237, 0.47662355450055044],
+      [0.50287263494578682, -2.57192694985560522, 0.59603920482822492]]
+# the collocation polynomial: y(t + x h) = y + sum_j (sum_i P[i, j] Z_i) x^(j+1)
+P = [[13.0 / 3.0 + 7.0 * S6 / 3.0, -23.0 / 3.0 - 22.0 * S6 / 3.0, 10.0 / 3.0 + 5.0 * S6],
+     [13.0 / 3.0 - 7.0 * S6 / 3.0, -23.0 / 3.0 + 22.0 * S6 / 3.0, 10.0 / 3.0 - 5.0 * S6],
+     [1.0 / 3.0, -8.0 / 3.0, 10.0 / 3.0]]
+NSTAGES: Int = 3
+NEWTON_MAXITER: Int = 6
+# a Jacobian is refreshed after a step whose Newton iteration converged slower than this
+JAC_RATE = 1.0e-3
+# a step is not changed by less than this factor (keeps the LU factors)
+KEEP_STEP = 1.2
+
+#| Factor the real system mu_1/h - J into LU1 and the complex system
+#| (alpha + i beta)/h - J, as the real block matrix [[aI - J, -bI], [bI, aI - J]],
+#| into LU2.
+def radau_factor(s0: OdeState, h: Num) -> OdeState {
+    s = s0
+    n = len(s.y)
+    s.LU1 = MU_REAL / h * eye(n) - s.J
+    ok1 = lu_factor(s.LU1, s.piv1)
+    a = MU_RE / h
+    b = MU_IM / h
+    M = zeros(2 * n, 2 * n)
+    for i to n {
+        for j to n {
+            M[i, j] = -s.J[i, j]
+            M[n + i, n + j] = -s.J[i, j]
+        }
+        M[i, i] += a
+        M[n + i, n + i] += a
+        M[i, n + i] = -b
+        M[n + i, i] = b
+    }
+    ok2 = lu_factor(M, s.piv2)
+    s.LU2 = M
+    s.have_lu = true
+    s.nlu += 2
+    return s
+}
+
+#| Simplified Newton on the collocation equations, in the transformed
+#| variables W = T^-1 Z. Returns whether it converged, the iterations, Z
+#| (3 by n), the last contraction rate (-1 when there was none) and the rhs
+#| evaluations it made.
+def radau_newton(f, s: OdeState, h: Num, Z0: Arr, scale: Arr, tol: Num, p: Arr) {
+    n = len(s.y)
+    a = MU_RE / h
+    b = MU_IM / h
+    mr = MU_REAL / h
+    Z = copy(Z0)
+    W = TI @ Z0
+    F = zeros(NSTAGES, n)
+    cs = [C1, C2, C3]
+    norm_old = -1.0
+    rate = -1.0
+    converged = false
+    iters: Int = 0
+    nfev: Int = 0
+    going = true
+    yt = zeros(n)
+    f_real = zeros(n)
+    rc = zeros(2 * n)
+    while going and iters < NEWTON_MAXITER {
+        finite = true
+        for i to NSTAGES {
+            for j to n {
+                yt[j] = s.y[j] + Z[i, j]
+            }
+            fi = f(s.t + cs[i] * h, yt, p)
+            for j to n {
+                F[i, j] = fi[j]
+            }
+            finite = finite and all_finite(fi)
+        }
+        nfev += NSTAGES
+        iters += 1
+        if not finite {
+            going = false
+        }
+        else {
+            #: the right sides of the real and the complex system, from G = T^-1 F
+            for j to n {
+                g0 = TI[0, 0] * F[0, j] + TI[0, 1] * F[1, j] + TI[0, 2] * F[2, j]
+                g1 = TI[1, 0] * F[0, j] + TI[1, 1] * F[1, j] + TI[1, 2] * F[2, j]
+                g2 = TI[2, 0] * F[0, j] + TI[2, 1] * F[1, j] + TI[2, 2] * F[2, j]
+                f_real[j] = g0 - mr * W[0, j]
+                rc[j] = g1 - (a * W[1, j] - b * W[2, j])
+                rc[n + j] = g2 - (a * W[2, j] + b * W[1, j])
+            }
+            dW0 = lu_solve(s.LU1, s.piv1, f_real)
+            dc = lu_solve(s.LU2, s.piv2, rc)
+            acc = 0.0
+            for j to n {
+                u0 = dW0[j] / scale[j]
+                u1 = dc[j] / scale[j]
+                u2 = dc[n + j] / scale[j]
+                acc += u0 * u0 + u1 * u1 + u2 * u2
+            }
+            dnorm = sqrt(acc / (NSTAGES * n))
+            if norm_old >= 0.0 {
+                rate = dnorm / norm_old
+            }
+            #: stop early when the contraction cannot reach tol in the iterations left
+            if rate >= 0.0 and (rate >= 1.0 or pow(rate, NEWTON_MAXITER - iters + 1) / (1.0 - rate) * dnorm > tol) {
+                going = false
+            }
+            else {
+                for j to n {
+                    W[0, j] += dW0[j]
+                    W[1, j] += dc[j]
+                    W[2, j] += dc[n + j]
+                    for i to NSTAGES {
+                        Z[i, j] = T[i, 0] * W[0, j] + T[i, 1] * W[1, j] + T[i, 2] * W[2, j]
+                    }
+                }
+                if dnorm == 0.0 or (rate >= 0.0 and rate / (1.0 - rate) * dnorm < tol) {
+                    converged = true
+                    going = false
+                }
+                norm_old = dnorm
+            }
+        }
+    }
+    return converged, iters, Z, rate, nfev
+}
+
+#| Gustafsson's predictive step factor (Hairer and Wanner II, IV.8, eq. 8.25),
+#| err^(-1/4) scaled by how the last two steps' errors moved.
+def predict_factor(h_abs: Num, h_abs_old: Num, err: Num, err_old: Num) -> Num {
+    mult = 1.0
+    if err_old > 0.0 and h_abs_old > 0.0 and err > 0.0 {
+        mult = h_abs / h_abs_old * pow(err_old / err, 0.25)
+    }
+    if err == 0.0 {
+        return MAX_FACTOR
+    }
+    return min(1.0, mult) * pow(err, -0.25)
+}
+
+#| One accepted Radau IIA step from s, with the given Jacobian source.
+def radau_step(f, jac, s0: OdeState, c: OdeCfg, p: Arr) -> OdeState {
+    s = s0
+    t = s.t
+    y = s.y
+    n = len(y)
+    min_step = min_step_at(t)
+    h_abs = s.h_abs
+    if h_abs > c.max_step {
+        h_abs = c.max_step
+        s.h_abs_old = 0.0
+        s.err_old = -1.0
+        s.have_lu = false
+    }
+    else {
+        if h_abs < min_step {
+            h_abs = min_step
+            s.h_abs_old = 0.0
+            s.err_old = -1.0
+            s.have_lu = false
+        }
+    }
+    cs = [C1, C2, C3]
+    ew = [ER1, ER2, ER3]
+    rejected = false
+    accepted = false
+    h = 0.0
+    t_new = t
+    Z = zeros(NSTAGES, n)
+    iters: Int = 0
+    rate = -1.0
+    err_norm = 0.0
+    safety = 0.0
+    y_new = y
+    while not accepted {
+        if h_abs < min_step {
+            s.status = STEP_TOO_SMALL
+            return s
+        }
+        t_new = t + h_abs * s.dir
+        if s.dir * (t_new - c.t_bound) > 0.0 {
+            t_new = c.t_bound
+        }
+        h = t_new - t
+        h_abs = abs(h)
+        #: the starting guess: the last step's collocation polynomial, extrapolated
+        Z0 = zeros(NSTAGES, n)
+        if s.has_dense and s.dense.kind == RADAU {
+            for i to NSTAGES {
+                Z0[i, :] = dense_at(s.dense, t + h * cs[i]) - y
+            }
+        }
+        scale = c.atol + abs(y) * c.rtol
+        converged = false
+        trying = true
+        while trying {
+            if not s.have_lu {
+                s = radau_factor(s, h)
+            }
+            converged, iters, Z, rate, nf = radau_newton(f, s, h, Z0, scale, c.newton_tol, p)
+            s.nfev += nf
+            if converged or s.jac_current {
+                trying = false
+            }
+            else {
+                #: a stale Jacobian may be why: refresh it and try again
+                Jn, nj = jacobian(f, jac, t, y, s.fy, p, c)
+                s.J = Jn
+                s.nfev += nj
+                s.njev += 1
+                s.jac_current = true
+                s.have_lu = false
+            }
+        }
+        if not converged {
+            h_abs = 0.5 * h_abs
+            s.have_lu = false
+            s.nreject += 1
+            rejected = true
+        }
+        else {
+            y_new = y + Z[NSTAGES - 1, :]
+            ZE = zeros(n)
+            for i to NSTAGES {
+                ZE = ZE + ew[i] * Z[i, :]
+            }
+            ZE = ZE / h
+            err = lu_solve(s.LU1, s.piv1, s.fy + ZE)
+            scale = c.atol + max(abs(y), abs(y_new)) * c.rtol
+            err_norm = rms(err / scale)
+            safety = 0.9 * (2.0 * NEWTON_MAXITER + 1.0) / (2.0 * NEWTON_MAXITER + iters)
+            if rejected and err_norm > 1.0 {
+                err = lu_solve(s.LU1, s.piv1, f(t, y + err, p) + ZE)
+                s.nfev += 1
+                err_norm = rms(err / scale)
+            }
+            if err_norm > 1.0 {
+                factor = predict_factor(h_abs, s.h_abs_old, err_norm, s.err_old)
+                h_abs = h_abs * max(MIN_FACTOR, safety * factor)
+                s.have_lu = false
+                s.nreject += 1
+                rejected = true
+            }
+            else {
+                accepted = true
+            }
+        }
+    }
+    if not all_finite(y_new) {
+        s.status = NOT_FINITE
+        return s
+    }
+    #: the next step: refresh J when Newton was slow, keep the LU when h barely changes
+    recompute_jac = iters > 2 and rate > JAC_RATE
+    factor = predict_factor(h_abs, s.h_abs_old, err_norm, s.err_old)
+    factor = min(MAX_FACTOR, safety * factor)
+    if not recompute_jac and factor < KEEP_STEP {
+        factor = 1.0
+    }
+    else {
+        s.have_lu = false
+    }
+    f_new = f(t_new, y_new, p)
+    s.nfev += 1
+    if recompute_jac {
+        Jn, nj = jacobian(f, jac, t_new, y_new, f_new, p, c)
+        s.J = Jn
+        s.nfev += nj
+        s.njev += 1
+        s.jac_current = true
+    }
+    else {
+        s.jac_current = false
+    }
+    #: the dense output: the collocation polynomial's coefficients P^T Z
+    Q = transpose(P) @ Z
+    s.dense = Dense { kind: RADAU, t_old: t, t_new: t_new, h: h, Q: Q, y_old: y, order: NSTAGES }
+    s.has_dense = true
+    s.h_abs_old = h_abs
+    s.err_old = err_norm
+    s.h_abs = h_abs * factor
+    s.t = t_new
+    s.y = y_new
+    s.fy = f_new
+    s.naccept += 1
+    return s
+}
+
+test "T and its inverse, and the collocation polynomial through the stages" {
+    assert_allclose(TI @ T, eye(NSTAGES), 1.0e-15)
+    # sum_j P[i, j] c_k^(j+1) = delta_ik: the polynomial hits Z_k at c_k
+    cs = [C1, C2, C3]
+    V = zeros(NSTAGES, NSTAGES)
+    V[:, 0] = cs
+    V[:, 1] = cs * cs
+    V[:, 2] = cs * cs * cs
+    assert_allclose(P @ transpose(V), eye(NSTAGES), 1.0e-13)
+    # the real eigenvalue of A^-1 and the complex pair's modulus: det A^-1 = 60
+    assert_near(MU_REAL * (MU_RE * MU_RE + MU_IM * MU_IM), 60.0, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

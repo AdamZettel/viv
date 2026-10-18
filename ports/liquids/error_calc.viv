@@ -1,0 +1,137 @@
+###
+How correlation between successive values changes the error of a time
+average, shown on a series whose correlation time is known exactly. The
+series is a generalized Langevin process (an Ornstein-Uhlenbeck process in
+a memory variable), integrated with a random force; its statistical
+inefficiency is exactly s = 2 / (m delta) steps. The program estimates the
+error of the series' mean four ways:
+
+- brute force, from the scatter of the means of n_repeat independent runs;
+- naively, sqrt(var / nstep), as if the values were independent;
+- from the scatter of the means of 20, 19, ..., 4 blocks;
+- by halving the series again and again (Flyvbjerg and Petersen), which
+  reaches the right answer once the blocks are longer than the correlation
+  time.
+
+Given `series`, it runs the last two on that series instead (an energy
+from a simulation, say).
+
+This is error_calc of Allen and Tildesley's examples for Computer
+Simulation of Liquids (2nd ed., Oxford University Press, 2017;
+https://github.com/Allen-Tildesley/examples), ported to Viv.
+###
+# The program behind `vp.liquids.error_calc` (error_calc.export.toml).
+#
+#     viv run ports/liquids/error_calc.viv     (in the interpreter: slow at the default size; vipyr compiles it)
+#
+# Derived from error_calc.f90 of https://github.com/Allen-Tildesley/examples
+# (commit 4818bc82), by Michael P. Allen and Dominic J. Tildesley, CC0-1.0;
+# see ports/liquids/LICENSE. `series` is this port's addition.
+from ports.liquids.setup import random_normal, normal_state, expm1
+from ports.liquids.analysis import blocking
+
+#: nstep  the length of each run of the process
+nstep: Int = 65536
+#: nequil  the steps run and discarded before each run
+nequil: Int = 10000
+#: n_repeat  the independent runs of the brute-force error
+n_repeat: Int = 50
+#: delta  the time step of the process
+delta = 0.01
+#: variance  the variance of the process's values
+variance = 1.0
+#: average  the mean of the process's values
+average = 1.0
+#: seed  the seed of the random numbers
+seed: Int = 1
+#: series  a series to analyze instead of the process (empty: run the process)
+series = zeros(0)
+
+#| the process's memory function decays as exp(-kappa t), and its
+#| correlation time is 1 / m
+M_GLE = 0.25
+KAPPA_GLE = 4.0
+
+if int(len(series)) == 0 and (nstep < 64 or n_repeat < 2 or delta <= 0.0 or variance <= 0.0) {
+    stop("nstep must be at least 64, n_repeat at least 2, delta and variance positive")
+}
+
+m = M_GLE
+kappa = KAPPA_GLE
+x = delta * kappa
+e = exp(-x)
+b = -expm1(-2.0 * x)
+d = -expm1(-x)
+b = sqrt(b)
+b = b * sqrt(kappa / 2.0)
+stddev = sqrt(2.0 * variance)
+tcor = 1.0 / m
+tcor = tcor / delta
+#: si_exact  the exact statistical inefficiency of the process, 2 tau, in steps
+si_exact = 2.0 * tcor
+#: err_exact  the exact error of a run's mean, sqrt(s var / nstep)
+err_exact = sqrt(si_exact * variance / nstep)
+
+#: err_brute  the error from the scatter of the n_repeat runs' means (0 with series)
+err_brute = 0.0
+a = copy(series)
+if len(series) == 0 {
+    srand(1.0 * seed)
+    saved = normal_state()
+    a = zeros(nstep)
+    a_avg = 0.0
+    a_var = 0.0
+    for rep to n_repeat {
+        at = 0.0
+        s = 0.0
+        for t from -nequil to nstep + 1 {
+            at = at + 0.5 * delta * s
+            s = e * s - d * m * at + b * sqrt(m) * random_normal(0.0, stddev, saved)
+            at = at + 0.5 * delta * s
+            if t > 0 {
+                a[t - 1] = average + at
+            }
+        }
+        a_run = 0.0
+        for t to nstep {
+            a_run += a[t]
+        }
+        a_run = a_run / nstep
+        a_avg = a_avg + a_run
+        a_var = a_var + a_run * a_run
+    }
+    a_avg = a_avg / n_repeat
+    a_var = a_var / n_repeat
+    a_var = a_var - a_avg * a_avg
+    a_var = a_var * n_repeat / (n_repeat - 1.0)
+    err_brute = sqrt(a_var)
+}
+
+#: mean  the mean of the (last) series
+#: var  its sample variance
+#: err_naive  the error of the mean ignoring correlation, sqrt(var / length)
+#: tblock_fixed  the block lengths of 20, 19, ..., 4 blocks
+#: err_fixed  the error from the scatter of those blocks' means
+#: si_fixed  the statistical inefficiency each gives
+#: tblock_halving  the block lengths 2, 4, 8, ... of repeated halving
+#: err_halving  the error after each halving
+#: si_halving  the statistical inefficiency each gives
+mean, var, err_naive, tblock_fixed, err_fixed, si_fixed, tblock_halving, err_halving, si_halving = blocking(a)
+
+print(f"exact s = {fmt(si_exact, '.4f')}  exact error = {fmt(err_exact, '.6f')}  brute force = {fmt(err_brute, '.6f')}  naive = {fmt(err_naive, '.6f')}")
+for k to len(tblock_halving) {
+    print(f"  tblock {fmt(tblock_halving[k], '6.0f')}  error {fmt(err_halving[k], '.6f')}  s {fmt(si_halving[k], '.4f')}")
+}
+
+#| The brute-force error is a standard deviation estimated from n_repeat
+#| values, so its own relative error is about 1 / sqrt(2 (n_repeat - 1)); the
+#| check allows three of those.
+test "the brute-force error agrees with the exact one" {
+    if len(series) == 0 {
+        assert_near(err_brute, err_exact, 3.0 * err_exact / sqrt(2.0 * (n_repeat - 1)))
+    }
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

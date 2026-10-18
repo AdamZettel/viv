@@ -1,0 +1,117 @@
+# Records, arrays of records, Ints and an enum together, in all three engines:
+# lang/viv/tests/int_enum.rs
+# runs this and holds its output to records.txt.
+#
+# A record may hold Ints and enum values beside its arrays; an array of records
+# is indexed by an Int as by a number. Arithmetic, zeros_like, for_leaves and
+# value_and_grad act on records of arrays only, so the counts and the kinds live
+# in records of their own (Layer, below), apart from the weights (Weights).
+
+enum Act {
+    Relu
+    Tanh
+    Scale(Num)
+}
+
+record Weights {
+    w: Arr
+    b: Arr
+}
+
+record Layer {
+    id: Int
+    act: Act
+    p: Weights
+}
+
+record Model {
+    layers: [Layer]
+    steps: Int
+}
+
+def layer(id: Int, n: Int, act: Act) -> Layer {
+    return Layer { id: id, act: act, p: Weights { w: zeros(n) + 0.5 * id, b: zeros(n) } }
+}
+
+def apply_act(a: Act, x) {
+    match a {
+        Relu => {
+            return max(x, 0.0)
+        }
+        Tanh => {
+            return tanh(x)
+        }
+        Scale(k) => {
+            return k * x
+        }
+    }
+}
+
+def forward(m: Model, x) {
+    y = x
+    n: Int = len(m.layers)
+    for i to n {
+        l = m.layers[i]
+        y = apply_act(l.act, sum(l.p.w) * y + sum(l.p.b))
+    }
+    return y
+}
+
+def build(widths: [Int]) -> Model {
+    ls = []
+    n: Int = len(widths)
+    for i to n {
+        act = Act.Relu
+        if i == n - 1 {
+            act = Act.Scale(2.0)
+        }
+        ls = append(ls, layer(i + 1, widths[i], act))
+    }
+    return Model { layers: ls, steps: 0 }
+}
+
+widths: [Int] = [2, 3, 1]
+m = build(widths)
+last: Int = len(m.layers) - 1
+print(len(m.layers), m.layers[last].id, m.layers[last].act, m.layers[0].act)
+print(forward(m, 1.0))
+
+# a step on the weights of each layer: arithmetic over a record of arrays, the
+# Int counter and the enum beside it untouched
+for i to len(m.layers) {
+    g = zeros_like(m.layers[i].p) + 0.25
+    m.layers[i].p = m.layers[i].p - g
+}
+m.steps = m.steps + 1
+print(m.steps, forward(m, 1.0))
+
+# an Int index into an array of records, read and written
+k: Int = 1
+m.layers[k].act = Act.Tanh
+m.layers[k].id = m.layers[k].id * 10
+print(m.layers[k].id, m.layers[k].act, m.layers[-1].id)
+
+# value_and_grad over the weights of one layer
+def loss(p: Weights) {
+    return sum(p.w * p.w) + sum(p.b)
+}
+v, g = value_and_grad(loss, m.layers[2].p)
+print(v, sum(g.w), sum(g.b))
+
+# a copy is a value: a write through one name is not seen through the other
+m2 = m
+m2.layers[0].act = Act.Scale(-1.0)
+m2.layers[0].id = 99
+print(m.layers[0].act, m.layers[0].id, m2.layers[0].act, m2.layers[0].id)
+
+test "records hold Ints and enums beside their arrays" {
+    t = build([1, 1])
+    assert_true(len(t.layers) == 2)
+    j: Int = 1
+    assert_true(t.layers[j].id == 2)
+    assert_true(str(t.layers[j].act) == "Scale(2)")
+    assert_true(forward(t, 1.0) == 1.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

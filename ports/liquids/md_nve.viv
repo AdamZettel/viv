@@ -1,0 +1,268 @@
+###
+Molecular dynamics of Lennard-Jones atoms at constant N, V and E: velocity
+Verlet in a periodic cubic box, the potential cut and shifted at r_cut.
+A run returns the block and run averages of the energy, pressure and
+temperatures (cut-and-shifted, and with long-range corrections as an
+estimate for the full potential), the heat capacity from the kinetic
+energy's fluctuations, the fluctuation of the conserved energy, the final
+configuration, and, when it samples the trajectory, g(r), the velocity
+autocorrelation function, the mean-square displacement and the diffusion
+coefficient from each.
+
+This is md_nve_lj of Allen and Tildesley's examples for Computer
+Simulation of Liquids (2nd ed., Oxford University Press, 2017;
+https://github.com/Allen-Tildesley/examples), ported to Viv. If you use
+it, cite the book.
+###
+# The program behind `vp.liquids.md_nve` (md_nve.export.toml): the
+# settings at the top level, the run, and its results in the globals below.
+#
+#     viv run ports/liquids/md_nve.viv     (in the interpreter: slow at the default size; vipyr compiles it)
+#
+# Derived from md_nve_lj.f90 (and, through `neighbors`, the md_nve_lj_ll and
+# md_nve_lj_vl builds of it) of https://github.com/Allen-Tildesley/examples
+# (commit 4818bc82), by Michael P. Allen and Dominic J. Tildesley, CC0-1.0;
+# see ports/liquids/LICENSE. The start (an fcc lattice with random
+# velocities) is upstream's initialize; upstream's run reads it from a file.
+# Reduced units: sigma = epsilon = m = k_B = 1.
+from ports.liquids.lj import Pot, VerletList, force_all, force_pairs, hessian, hessian_pairs, force_link, hessian_link, verlet_list, verlet_update, wrap, potential_lrc, pressure_lrc, sum_sq, check_box
+from ports.liquids.setup import starting_configuration, DIM
+from ports.liquids.averages import AVG, MSD, CKE, averages, blk_begin, blk_add, blk_end, run_end
+from ports.liquids.analysis import pair_histogram, pair_add, pair_g, correlations, correlations_add, correlations_result, diffusion_coefficients
+
+#: n  the number of atoms, 4 nc^3 for the fcc start (32, 108, 256, 500, 864, ...); ignored when r_start is given
+n: Int = 256
+#: density  the number density N / V; sets the box side when r_start is not given
+density = 0.75
+#: temperature  the temperature of the starting velocities (3N - 3 degrees of freedom)
+temperature = 1.0
+#: r_cut  the potential's cutoff, in sigma; at most half the box
+r_cut = 2.5
+#: dt  the time step, in units of sigma sqrt(m / epsilon)
+dt = 0.005
+#: nblock  the number of blocks the run is averaged in
+nblock: Int = 10
+#: nstep  the steps per block (upstream's default is 20000)
+nstep: Int = 1000
+#: neighbors  how pairs are found: "all" pairs, "link" lists of cells (needs a box of 3 r_cut or more), or "verlet" lists
+neighbors = "all"
+#: seed  the seed of the starting velocities' random numbers
+seed: Int = 1
+#: r_start  a starting configuration (N, 3), in sigma, instead of the fcc lattice; box_start must come with it
+r_start = zeros(0, DIM)
+#: v_start  the starting velocities (N, 3) that go with r_start
+v_start = zeros(0, DIM)
+#: box_start  the box side of r_start, in sigma
+box_start = 0.0
+#: sample  every this many steps, the configuration goes into g(r) and the correlation functions; 0: none
+sample: Int = 0
+#: gr_dr  the bin width of g(r), in sigma
+gr_dr = 0.02
+#: nt  the correlation functions run over 0 to nt samples apart
+nt: Int = 200
+#: origin_interval  a time origin every this many samples
+origin_interval: Int = 10
+
+# the averaged variables, in upstream's order
+E_CS: Int = 0
+P_CS: Int = 1
+E_FULL: Int = 2
+P_FULL: Int = 3
+T_KIN: Int = 4
+T_CONFIG: Int = 5
+CV_CS: Int = 6
+CONSERVED_MSD: Int = 7
+NVAR: Int = 8
+
+if nblock < 1 or nstep < 0 {
+    stop(f"nblock must be at least 1 and nstep at least 0; they are {nblock} and {nstep}")
+}
+if neighbors != "all" and neighbors != "link" and neighbors != "verlet" {
+    stop(f"neighbors must be \"all\", \"link\" or \"verlet\"; it is \"{neighbors}\"")
+}
+
+#: box  the box side, in sigma
+r, v, box = starting_configuration(n, density, temperature, seed, r_start, v_start, box_start)
+nat: Int = int(shape(r)[0])
+check_box(box, r_cut)
+#: rho  the number density N / V
+rho = nat / (box * box * box)
+
+f = zeros(nat, DIM)
+vl = verlet_list(nat, r_cut / box)
+
+#| One force evaluation by the chosen method, the Hessian sum over the same
+#| pairs, and the Verlet list (rebuilt if it had to be).
+def evaluate(r: Arr, f: Arr, box: Num, r_cut: Num, mode: Str, vl: VerletList) {
+    if mode == "link" {
+        t = force_link(r, f, box, r_cut)
+        return t, hessian_link(r, f, box, r_cut), vl
+    }
+    if mode == "verlet" {
+        vl2 = verlet_update(vl, r)
+        t = force_pairs(r, f, box, r_cut, vl2.pair_i, vl2.pair_j)
+        return t, hessian_pairs(r, f, box, r_cut, vl2.pair_i, vl2.pair_j), vl2
+    }
+    t = force_all(r, f, box, r_cut)
+    return t, hessian(r, f, box, r_cut), vl
+}
+
+#| The eight variables of one step: upstream's calc_variables.
+def variables(t: Pot, hes: Num, v: Arr, f: Arr, box: Num, r_cut: Num) -> Arr {
+    nat: Int = int(shape(v)[0])
+    vol = box * box * box
+    rho = nat / vol
+    kin = 0.5 * sum_sq(v)
+    tmp = 2.0 * kin / (3.0 * nat - 3.0)
+    fsq = sum_sq(f)
+    eng = kin + t.pot
+    out = zeros(NVAR)
+    out[E_CS] = eng / nat
+    out[P_CS] = rho * tmp + t.vir / vol
+    out[E_FULL] = potential_lrc(rho, r_cut) + (kin + t.cut) / nat
+    out[P_FULL] = pressure_lrc(rho, r_cut) + rho * tmp + t.vir / vol
+    out[T_KIN] = tmp
+    out[T_CONFIG] = fsq / (t.lap - (2.0 * hes / fsq))
+    out[CV_CS] = kin / sqrt(1.0 * nat)
+    out[CONSERVED_MSD] = eng / nat
+    return out
+}
+
+total, hes, vl = evaluate(r, f, box, r_cut, neighbors, vl)
+if total.ovr {
+    stop("two atoms overlap in the starting configuration")
+}
+first = variables(total, hes, v, f, box, r_cut)
+
+meth: [Int] = [AVG, AVG, AVG, AVG, AVG, AVG, CKE, MSD]
+acc = averages(meth, zeros(NVAR), nblock, T_KIN)
+#: energy_series  e_cs at every step
+energy_series = zeros(nblock * nstep)
+gr_h = pair_histogram(gr_dr, box)
+corr = correlations(nat, nt, origin_interval)
+if sample > 0 {
+    pair_add(gr_h, r * box, box)
+    correlations_add(corr, r * box, v, box)
+}
+half = 0.5 * dt
+step: Int = 0
+for blk to nblock {
+    blk_begin(acc)
+    for stp to nstep {
+        for i to nat {
+            for k to DIM {
+                v[i, k] = v[i, k] + half * f[i, k]
+            }
+        }
+        for i to nat {
+            for k to DIM {
+                r[i, k] = r[i, k] + dt * v[i, k] / box
+                r[i, k] = r[i, k] - round(r[i, k])
+            }
+        }
+        total, hes, vl = evaluate(r, f, box, r_cut, neighbors, vl)
+        if total.ovr {
+            stop(f"two atoms overlap at step {step + 1}")
+        }
+        for i to nat {
+            for k to DIM {
+                v[i, k] = v[i, k] + half * f[i, k]
+            }
+        }
+        vals = variables(total, hes, v, f, box, r_cut)
+        blk_add(acc, vals)
+        energy_series[step] = vals[E_CS]
+        step = step + 1
+        if sample > 0 and step % sample == 0 {
+            pair_add(gr_h, r * box, box)
+            correlations_add(corr, r * box, v, box)
+        }
+    }
+    blk_end(acc)
+}
+avg, err = run_end(acc)
+
+# ---- the run averages (upstream's "Run averages" line) and their errors
+#: e_cs  the energy per atom, cut-and-shifted potential, kinetic plus potential (conserved)
+e_cs = avg[E_CS]
+#: e_cs_err  its standard error from the block averages (the scatter of a conserved quantity's block means)
+e_cs_err = err[E_CS]
+#: p_cs  the pressure, cut-and-shifted potential
+p_cs = avg[P_CS]
+#: p_cs_err  its standard error from the block averages
+p_cs_err = err[P_CS]
+#: e_full  the energy per atom with the long-range correction: an estimate for the full potential
+e_full = avg[E_FULL]
+#: e_full_err  its standard error
+e_full_err = err[E_FULL]
+#: p_full  the pressure with the long-range correction
+p_full = avg[P_FULL]
+#: p_full_err  its standard error
+p_full_err = err[P_FULL]
+#: t_kin  the kinetic temperature, 2 K / (3N - 3)
+t_kin = avg[T_KIN]
+#: t_kin_err  its standard error
+t_kin_err = err[T_KIN]
+#: t_config  the configurational temperature, |F|^2 / (lap U - 2 F.H.F / |F|^2)
+t_config = avg[T_CONFIG]
+#: t_config_err  its standard error
+t_config_err = err[T_CONFIG]
+#: cv_cs  the heat capacity per atom from the fluctuations of the kinetic energy (Lebowitz, Percus and Verlet)
+cv_cs = avg[CV_CS]
+#: cv_cs_err  its standard error
+cv_cs_err = err[CV_CS]
+#: conserved_msd  the mean-square deviation of the energy per atom within a block, averaged over blocks: zero for exact dynamics, about dt^4 for velocity Verlet
+conserved_msd = avg[CONSERVED_MSD]
+#: blocks  the block averages, one row per block, columns e_cs, p_cs, e_full, p_full, t_kin, t_config, cv_cs, conserved_msd
+blocks = acc.blocks
+#: initial  the same eight variables at the start (the last two are fluctuation terms of one step)
+initial = first
+
+# ---- the final configuration
+#: r_final  the final positions (N, 3), in sigma, in the box centered on the origin
+r_final = r * box
+#: v_final  the final velocities (N, 3)
+v_final = v
+#: verlet_rebuilds  how many times the Verlet list was built (neighbors = "verlet")
+verlet_rebuilds = vl.rebuilds
+
+# ---- from the samples (sample > 0; empty otherwise)
+#: gr_r  the midpoints of the g(r) bins, in sigma
+gr_r = zeros(0)
+#: gr  g(r) at those midpoints
+gr = zeros(0)
+#: vacf  the velocity autocorrelation function <v(0) . v(t)> at corr_time
+vacf = zeros(0)
+#: rvcf  <v(0) . (r(t) - r(0))>, whose derivative is the VACF and whose limit is 3 D
+rvcf = zeros(0)
+#: msd  the mean-square displacement <|r(t) - r(0)|^2>
+msd = zeros(0)
+#: d_vacf  the diffusion coefficient, one third of the integral of the VACF over the range
+d_vacf = 0.0
+#: d_msd  the diffusion coefficient, one sixth of the slope of the MSD over the second half of the range
+d_msd = 0.0
+if sample > 0 {
+    gr_r, gr = pair_g(gr_h, nat, box)
+    vacf, rvcf, msd = correlations_result(corr, nat)
+    d_vacf, d_msd = diffusion_coefficients(vacf, msd, sample * dt)
+}
+#: corr_time  the times of the correlation functions: 0 to nt samples, sample dt apart
+corr_time = linspace(0.0, nt * sample * dt, nt + 1)
+
+print(f"N = {nat}  rho = {fmt(rho, '.6f')}  box = {fmt(box, '.6f')}  dt = {dt}  {nblock} blocks of {nstep} steps  neighbors: {neighbors}")
+print(f"E/N cs = {fmt(e_cs, '.6f')}  P cs = {fmt(p_cs, '.6f')} +- {fmt(p_cs_err, '.6f')}  T kin = {fmt(t_kin, '.6f')} +- {fmt(t_kin_err, '.6f')}")
+print(f"E/N full = {fmt(e_full, '.6f')}  P full = {fmt(p_full, '.6f')}  T config = {fmt(t_config, '.6f')}  Cv/N = {fmt(cv_cs, '.4f')} +- {fmt(cv_cs_err, '.4f')}")
+print(f"conserved MSD = {fmt(conserved_msd, '.4e')}")
+
+test "the total momentum stays zero" {
+    for k to DIM {
+        assert_near(sum(v_final[:, k]), 0.0, 1.0e-9 * nat)
+    }
+}
+test "the energy is conserved: its spread within a block is far below the kinetic energy's" {
+    assert_true(conserved_msd < 1.0e-3 * t_kin * t_kin)
+}
+
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2016-2017 Michael P. Allen and Dominic J. Tildesley
+# SPDX-FileCopyrightText: 2026 The Viv authors

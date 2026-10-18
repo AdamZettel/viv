@@ -1,0 +1,119 @@
+###
+title: Each factor of ten in the condition number costs a digit
+line: Correct digits stay within 1 below and 3 above $16 - \log_{10}\kappa$; at $n = 12$ fewer than 3 remain.
+claim: Solving the Hilbert system $Hx = H\mathbf{1}$ by LU with partial pivoting for $n = 4$ to 12, the correct digits of $x$ are between 1 below and 3 above $16 - \log_{10} \kappa_\infty(H)$ (the condition number from the exact inverse), and at $n = 12$, where $\kappa_\infty(H)$ is above $10^{16}$, fewer than 3 correct digits remain.
+topic: math
+section: linear algebra
+reference: The exact inverse of the Hilbert matrix (integer entries, the closed form of Choi, "Tricks or treats with the Hilbert matrix", Amer. Math. Monthly 90 (1983) 301-312) for the condition number; the rule of thumb digits $= 16 - \log_{10} \kappa$ from Higham, Accuracy and Stability of Numerical Algorithms, chapter 7.
+scope: One right-hand side (H times the vector of ones, itself rounded) and one solver (lib/ode/lu: unblocked, partial pivoting). The bound is the rule of thumb, observed with that margin; it is not a theorem for every right-hand side.
+lane: ai
+by: claude
+cost: fast
+###
+
+from ode.lu import lu_factor, lu_solve
+
+N_FIRST: Int = 4
+N_LAST: Int = 12
+
+#| The n x n Hilbert matrix, H[i, j] = 1 / (i + j + 1).
+def hilbert(n: Int) -> Arr {
+    h = zeros(n, n)
+    for i to n {
+        for j to n {
+            h[i, j] = 1.0 / (i + j + 1.0)
+        }
+    }
+    return h
+}
+
+#| The binomial coefficient C(n, k) as a double (exact below 2^53).
+def binom(n: Num, k: Num) -> Num {
+    r = 1.0
+    for i to int(k) {
+        r = r * (n - i) / (i + 1.0)
+    }
+    return round(r)
+}
+
+#| The exact inverse of the n x n Hilbert matrix (its entries are integers).
+def hilbert_inverse(n: Int) -> Arr {
+    g = zeros(n, n)
+    for i to n {
+        for j to n {
+            sgn = 1.0
+            if (i + j) % 2 == 1 {
+                sgn = -1.0
+            }
+            g[i, j] = sgn * (i + j + 1.0) * binom(n + i, n - j - 1.0) * binom(n + j, n - i - 1.0) * binom(i + j, i) * binom(i + j, i)
+        }
+    }
+    return g
+}
+
+#| The infinity norm: the largest row sum of |a|.
+def norm_inf(a: Arr) -> Num {
+    n: Int = int(shape(a)[0])
+    best = 0.0
+    for i to n {
+        s = 0.0
+        for j to n {
+            s = s + abs(a[i, j])
+        }
+        best = max(best, s)
+    }
+    return best
+}
+
+n_sizes: Int = N_LAST - N_FIRST + 1
+log10_cond = zeros(n_sizes)
+digits_correct = zeros(n_sizes)
+for k to n_sizes {
+    n: Int = N_FIRST + k
+    h = hilbert(n)
+    b = zeros(n)
+    for i to n {
+        for j to n {
+            b[i] = b[i] + h[i, j]
+        }
+    }
+    log10_cond[k] = log(norm_inf(h) * norm_inf(hilbert_inverse(n))) / log(10.0)
+    piv = int_zeros(n)
+    lu = copy(h)
+    ok = lu_factor(lu, piv)
+    x = lu_solve(lu, piv, b)
+    err = 0.0
+    for i to n {
+        err = max(err, abs(x[i] - 1.0))
+    }
+    digits_correct[k] = min(16.0, -log(max(err, 1.0e-17)) / log(10.0))
+}
+show log10_cond
+show digits_correct
+cond_at_12 = log10_cond[n_sizes - 1]
+digits_at_12 = digits_correct[n_sizes - 1]
+show cond_at_12
+show digits_at_12
+
+#: the figure: correct digits against log10 of the condition number, with 16 - log10 kappa
+DOUBLE_DIGITS = 16.0
+fg_x = [log10_cond[0], log10_cond[n_sizes - 1]]
+figure("Correct digits of the Hilbert solve, n = 4 to 12", "log10 of the condition number", "correct digits of x")
+plot(fg_x, DOUBLE_DIGITS - fg_x, "16 - log10 kappa")
+style("16 - log10 kappa", "dash s6 nomarker thin")
+plot(log10_cond, digits_correct, "LU with partial pivoting")
+style("LU with partial pivoting", "s1 circle")
+
+test "the correct digits are between 1 below and 3 above 16 - log10 cond for n = 4 to 12" {
+    for k to n_sizes {
+        assert_gt(digits_correct[k] - (16.0 - log10_cond[k]), -1.0)
+        assert_lt(digits_correct[k] - (16.0 - log10_cond[k]), 3.0)
+    }
+}
+test "at n = 12 cond(H) is above 1e16 and fewer than 3 digits remain" {
+    assert_gt(cond_at_12, 16.0)
+    assert_lt(digits_at_12, 3.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

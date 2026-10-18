@@ -1,0 +1,46 @@
+# The benchmark ratio figure, drawn by Viv: each benchmark's Viv time over the
+# reference's time (steady state), one point per Viv engine, on a log axis.
+# The benchmark harness writes ratios_<ref>.txt: a line per benchmark,
+# "name native release wasm interp" (nan where there is no number), and the
+# program draws one chart for each reference.
+
+def chart(path, title) {
+    lines = read_lines(path)
+    n = len(lines)
+    x = zeros(n)
+    native = zeros(n)
+    release = zeros(n)
+    wasm = zeros(n)
+    interp = zeros(n)
+    one = zeros(n) + 1
+    for k to n {
+        parts = split(lines[k])
+        x[k] = k
+        native[k] = float(parts[1])
+        release[k] = float(parts[2])
+        wasm[k] = float(parts[3])
+        interp[k] = float(parts[4])
+    }
+    figure(title, "benchmark", "Viv time / reference time")
+    yscale("log")
+    for k to n {
+        xtick(split(lines[k])[0], k)
+    }
+    plot(x, one, "same speed")
+    plot(x, native, "Viv native")
+    plot(x, release, "Viv native, release")
+    plot(x, wasm, "Viv wasm")
+    plot(x, interp, "Viv interpreter")
+    style("same speed", "dash thin nomarker")
+    style("Viv native", "noline s1 circle")
+    style("Viv native, release", "noline s4 ring")
+    style("Viv wasm", "noline s2 square")
+    style("Viv interpreter", "noline s3 cross")
+    return 0
+}
+
+chart("ratios_julia.txt", "Viv time / Julia time: Microbenchmarks (m:) and Benchmarks Game (bg:)")
+chart("ratios_numba.txt", "Viv time / Numba time: Microbenchmarks (m:) and numpy-benchmarks (np:)")
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

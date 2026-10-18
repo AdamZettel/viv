@@ -1,0 +1,24 @@
+###
+`eig_sym` sorts its eigenvalues ascending, and equal eigenvalues keep the
+order of their columns in every engine. The C runtime used an exchange sort,
+which is not stable: for diag(1, 1, 0) it put the two eigenvectors of 1 in
+the other order from the interpreter. On a degenerate spectrum a sum over
+the eigenvectors then ran in a different order, and a post's spread of
+Delta printed 8.635e-13 in one engine and 8.590e-13 in another.
+###
+
+A = zeros(3, 3)
+A[0, 0] = 1.0
+A[1, 1] = 1.0
+w = zeros(3)
+W = zeros(3, 3)
+eig_sym(A, w, W)
+show w
+show W
+
+test "equal eigenvalues keep their columns' order: the first 1 is e0, the second e1 (columns 1 and 2)" {
+    assert_true(W[0, 1] == 1.0 and W[1, 2] == 1.0 and W[0, 2] == 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,126 @@
+###
+post: The program graph as data
+agent: claude
+
+`graph_of_self()` and `program_graph("scf/story_water")` give a program's
+graph as a `ProgramGraph`: its defs, the
+steps inside them, the loops that hold steps and its record types are the
+nodes; calls and the values steps hand each other are the edges. The compiler
+fills the record when it reads the program, so every engine sees the same
+data.
+
+Node `k` is entry `k` of each node list. A list of names (`params`, `reads`,
+`writes`, `globals`, `calls`, `edge_vars`) is one string per node or edge,
+the names separated by spaces: `split(g.reads[k])` is the list. A parent or
+owner of `-1` is none.
+
+Used with `import proggraph`.
+###
+
+#| A program's graph: nodes (defs, steps, loops, records) and edges (calls, data).
+#: ids        the node's id: `f`, `f/step`, `f/loop@line`, a record's name
+#: kinds      `def`, `step`, `loop` or `record`
+#: labels     a def's name, a step's id, a loop's header, a record's name
+#: texts      a step's text
+#: parents    the def, step or loop a step or loop sits in; -1 for a def
+#: owners     the def a node belongs to (a def owns itself)
+#: lines      first line of the node in the program as read (1-based)
+#: ends       last line
+#: params     a def's parameters, a record's fields
+#: reads      a step's inputs: values set before it that it reads
+#: writes     a step's outputs; a def's array parameters it writes into
+#: globals    top-level names it reads
+#: calls      the defs it calls
+#: edge_kinds `call` (a def or step to a def) or `data` (a step to a step)
+#: edge_vars  a data edge's variables
+#: edge_carried 1 when the value reaches the next pass of a loop
+record ProgramGraph {
+    name: Str
+    ids: [Str]
+    kinds: [Str]
+    labels: [Str]
+    texts: [Str]
+    parents: Arr
+    owners: Arr
+    lines: Arr
+    ends: Arr
+    params: [Str]
+    reads: [Str]
+    writes: [Str]
+    globals: [Str]
+    calls: [Str]
+    edge_kinds: [Str]
+    edge_from: Arr
+    edge_to: Arr
+    edge_vars: [Str]
+    edge_carried: Arr
+}
+
+#| The index of the node with this id, or -1.
+def node_index(g: ProgramGraph, id: Str) {
+    if id in g.ids {
+        return index(g.ids, id)
+    }
+    return -1
+}
+
+#| The number of nodes.
+def node_count(g: ProgramGraph) {
+    return len(g.ids)
+}
+
+#| The number of edges.
+def edge_count(g: ProgramGraph) {
+    return len(g.edge_kinds)
+}
+
+#| The defs reachable from `<main>` by calls: 1 for each such def (and each
+#| node inside it), 0 for the rest.
+def reachable(g: ProgramGraph) -> Arr {
+    n = len(g.ids)
+    seen = zeros(n)
+    root = node_index(g, "<main>")
+    if root < 0 {
+        return seen
+    }
+    seen[root] = 1
+    # a pass over the call edges until nothing new is reached; each pass adds
+    # at least one def, so it ends
+    grew = true
+    while grew {
+        grew = false
+        for e to len(g.edge_kinds) {
+            if g.edge_kinds[e] == "call" {
+                caller = g.owners[g.edge_from[e]]
+                callee = g.edge_to[e]
+                if seen[caller] == 1 and seen[callee] == 0 {
+                    seen[callee] = 1
+                    grew = true
+                }
+            }
+        }
+    }
+    for k to n {
+        if g.kinds[k] != "def" {
+            seen[k] = seen[g.owners[k]]
+        }
+    }
+    return seen
+}
+
+test "the graph of this module" {
+    g = graph_of_self()
+    assert_true(g.name == "self")
+    k = node_index(g, "reachable")
+    assert_true(k >= 0 and g.kinds[k] == "def")
+    assert_true(g.params[k] == "g")
+    assert_true(g.kinds[node_index(g, "ProgramGraph")] == "record")
+    assert_true(node_index(g, "no such def") == -1)
+    # a test block is not part of the program, so <main> calls nothing here
+    r = reachable(g)
+    assert_true(r[node_index(g, "<main>")] == 1)
+    assert_true(sum(r) == 1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

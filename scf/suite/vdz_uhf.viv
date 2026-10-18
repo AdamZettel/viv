@@ -1,0 +1,68 @@
+# PySCF's closed-shell UHF rows for water cc-pVDZ (test_h2o_vdz.py and
+# test_uhf.py): UHF on a closed shell must land on the RHF state, in
+# PySCF's spherical basis through several J/K members, a level shift and a
+# zero start, with <S^2> = 0 there, and in the Cartesian basis.
+#
+# test_uhf.py's module `mf` runs at conv_tol 1e-14; rows 143, 186 and 193
+# ask about it. `symmetry=1` rows run the plain SCF (no symmetry-adapted
+# orbitals here). The direct rows are in vdz_direct_u.viv.
+#
+#     tools/both-engines.sh scf/suite vdz_uhf
+from hf.hf import hf_scf, hf_setup
+from hf.molecule import Molecule, molecule_packs
+from hf.scf_loop import scf_setup_with, ScfResult, ScfSetup
+from hf.opts import scf_checked, scf_defaults, SCF_UHF, ScfOptions
+from hf.guess import GS_ZERO
+from hf.jk import JK_PAIRS
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.pyscf_tests import (
+    PST_FILE_H2O_VDZ, PST_FILE_UHF, PST_H2O_VDZ_118, PST_H2O_VDZ_118_P, PST_H2O_VDZ_133,
+    PST_H2O_VDZ_133_P, PST_H2O_VDZ_166, PST_H2O_VDZ_166_P, PST_H2O_VDZ_66, PST_H2O_VDZ_66_P,
+    PST_UHF_143, PST_UHF_143_P, PST_UHF_175, PST_UHF_175_P, PST_UHF_183, PST_UHF_183_P,
+    PST_UHF_186, PST_UHF_186_P, PST_UHF_193, PST_UHF_193_P, PST_UHF_297, PST_UHF_297_P,
+)
+from scf.suite.ref.sts import sts_row
+
+#| One SCF; asserts convergence.
+def svu_run(p: ScfSetup) -> ScfResult {
+    r = hf_scf(p)
+    assert_near(r.converged, 1.0, 0.0)
+    return r
+}
+
+#| The setup `p` with options `o`.
+def svu_with(p: ScfSetup, o: ScfOptions) -> ScfSetup {
+    return scf_setup_with(p, o)
+}
+
+svu_m = molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+svu_o = ScfOptions { method: SCF_UHF, ..scf_checked() }
+svu_p = hf_setup(svu_m, svu_o)
+svu_r = svu_run(svu_p)
+
+test "closed-shell UHF -76.026765673119627, with <S^2> = 0 (test_h2o_vdz.py:66, 166; test_uhf.py:143, 186, 193)" {
+    svu_e = svu_r.energy
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 66, svu_e, PST_H2O_VDZ_66, PST_H2O_VDZ_66_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 166, svu_e, PST_H2O_VDZ_166, PST_H2O_VDZ_166_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 143, svu_e, PST_UHF_143, PST_UHF_143_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 193, svu_e, PST_UHF_193, PST_UHF_193_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 186, svu_r.s2, PST_UHF_186, PST_UHF_186_P), 1.0, 0.0)
+}
+
+test "without screening, with a level shift of 0.2, and from a zero density pair: the same state (test_h2o_vdz.py:118, 133; test_uhf.py:297)" {
+    svu_x = svu_run(svu_with(svu_p, ScfOptions { jk: JK_PAIRS, ..svu_o }))
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 118, svu_x.energy, PST_H2O_VDZ_118, PST_H2O_VDZ_118_P), 1.0, 0.0)
+    svu_x = svu_run(svu_with(svu_p, ScfOptions { level_shift: 0.2, ..svu_o }))
+    assert_near(sts_row(PST_FILE_H2O_VDZ, 133, svu_x.energy, PST_H2O_VDZ_133, PST_H2O_VDZ_133_P), 1.0, 0.0)
+    svu_x = svu_run(svu_with(svu_p, ScfOptions { guess: GS_ZERO, ..svu_o }))
+    assert_near(sts_row(PST_FILE_UHF, 297, svu_x.energy, PST_UHF_297, PST_UHF_297_P), 1.0, 0.0)
+}
+
+test "Cartesian cc-pVDZ (25 AOs): UHF -76.027107008870573 (test_uhf.py:175, 183)" {
+    svu_x = svu_run(hf_setup(Molecule { cart: 1, ..svu_m }, ScfOptions { method: SCF_UHF, ..scf_defaults() }))
+    assert_near(sts_row(PST_FILE_UHF, 175, svu_x.energy, PST_UHF_175, PST_UHF_175_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 183, svu_x.energy, PST_UHF_183, PST_UHF_183_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

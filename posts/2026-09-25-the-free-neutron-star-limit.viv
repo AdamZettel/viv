@@ -1,0 +1,352 @@
+###
+post: A star of free neutrons can weigh at most 0.71 suns
+date: 2026-09-25
+kind: demo
+channel: nuclear
+tags: neutron stars, general relativity, tov equations, fermi gas
+lane: ai
+equation: \frac{dr}{dh} = -\frac{r\,(r - 2m)}{m + 4\pi r^3 P}, \qquad \frac{dm}{dh} = 4\pi r^2 \varepsilon\,\frac{dr}{dh}
+summary: Hold a ball of neutrons up by their Fermi pressure alone, with gravity from general relativity, and solve for the star at each central density. The mass rises, peaks at $0.7102$ solar masses with a radius of 9.16 km, and falls: no heavier star of free neutrons exists. A scipy twin written in different variables gets $0.71018$, and Narain, Schaffner-Bielich and Mishustin (2006) quote $0.710$.
+
+The reference, in `posts/refs/the-free-neutron-star-limit.py`, integrates the same
+physics a different way: in cgs units, with the radius as the independent
+variable and the Fermi momentum as the unknown, by scipy's DOP853 at a
+relative tolerance of $10^{-12}$, and finds the maximum with
+`minimize_scalar`. It gives $M_\text{max} = 0.71018029\,M_\odot$ at
+$R = 9.161465$ km. The literature value is from G. Narain, J.
+Schaffner-Bielich and I. N. Mishustin, "Compact stars made of fermionic dark
+matter", Phys. Rev. D 74, 063003 (2006), arXiv:astro-ph/0605724: from their
+Eqs. (31) and (32), a star of free neutrons has "the maximum mass
+$M_\text{max} = 0.710\,M_\odot$ at a radius of $R_\text{min} = 9.192$ km,
+which match very well the original results of Oppenheimer and Volkoff"
+(Phys. Rev. 55, 374, 1939).
+
+The program takes 400 steps per star, and its maximum agrees with scipy's to
+$2 \times 10^{-8}$ of a solar mass; the tests allow $10^{-6}$, relative.
+###
+
+###
+## The question
+
+A neutron star is held up by the pressure of its neutrons. Neutrons are
+fermions: no two can share a state, so packing them tighter forces them into
+states of higher momentum, and that momentum pushes outward even at zero
+temperature. In 1939 Oppenheimer and Volkoff asked how heavy a star held up
+this way alone can be, ignoring the nuclear force between the neutrons. In
+general relativity pressure is itself a source of gravity, so a star that
+squeezes its center harder to push back also pulls harder, and past some
+central density the extra pull wins.
+
+## The equation of state
+
+A cold gas of free neutrons is described by one number, the Fermi momentum
+$p_F$, written as $x = p_F / m_n c$. The energy density $\varepsilon$
+(including the neutrons' rest mass) and the pressure $P$ are
+
+$$\varepsilon = \varepsilon_0\left[(2x^3 + x)\sqrt{1+x^2} - \sinh^{-1} x\right], \qquad
+P = \frac{\varepsilon_0}{3}\left[(2x^3 - 3x)\sqrt{1+x^2} + 3\sinh^{-1} x\right],$$
+
+with $\varepsilon_0 = m_n^4 c^5 / 8\pi^2\hbar^3$. The bracket in $P$ is a
+difference of nearly equal terms when $x$ is small, so below $x = 0.01$ the
+program uses the first two terms of its series, $\tfrac{8}{15}x^5(1 -
+\tfrac{5}{14}x^2)$, which agree with the full formula to $2 \times 10^{-9}$
+there.
+###
+
+PI = 3.141592653589793
+# CODATA 2018, in cgs units (the values scipy.constants carries)
+G_CGS = 6.6743e-8
+C_CGS = 2.99792458e10
+# Planck's constant, exact since 2019; hbar = h / 2 pi
+H_CGS = 6.62607015e-27
+HBAR_CGS = H_CGS / (2.0 * PI)
+M_N_CGS = 1.67492749804e-24
+# G times the solar mass, IAU 2015 Resolution B3 (nominal), cm^3/s^2
+GM_SUN_CGS = 1.3271244e26
+CM_PER_KM = 1.0e5
+# below this Fermi momentum the pressure comes from its series
+X_SERIES = 0.01
+
+EPS0_CGS = pow(M_N_CGS, 4.0) * pow(C_CGS, 5.0) / (8.0 * PI * PI * pow(HBAR_CGS, 3.0))
+# geometric units, G = c = 1, lengths in km: an energy density becomes 1/km^2
+EPS0 = G_CGS * EPS0_CGS / pow(C_CGS, 4.0) * CM_PER_KM * CM_PER_KM
+M_SUN_KM = GM_SUN_CGS / (C_CGS * C_CGS) / CM_PER_KM
+show EPS0_CGS
+show M_SUN_KM
+
+#| sinh⁻¹(x).
+def arcsinh(x) {
+    return log(x + sqrt(1.0 + x * x))
+}
+
+#| The energy density of free neutrons at Fermi momentum x = p_F/(m_n·c), in
+#| units of ε₀.
+def eps_of_x(x) {
+    return (2.0 * x * x * x + x) * sqrt(1.0 + x * x) - arcsinh(x)
+}
+
+#| The first two terms of the pressure's series at small x,
+#| (8/15)·x⁵·(1 − (5/14)·x²), in units of ε₀.
+def p_series(x) {
+    return 8.0 / 15.0 * pow(x, 5.0) * (1.0 - 5.0 / 14.0 * x * x)
+}
+
+#| The pressure at Fermi momentum x, in units of ε₀; the series
+#| below `X_SERIES`.
+def p_of_x(x) {
+    if x < X_SERIES {
+        return p_series(x)
+    }
+    return ((2.0 * x * x * x - 3.0 * x) * sqrt(1.0 + x * x) + 3.0 * arcsinh(x)) / 3.0
+}
+
+test "eps0 = m_n^4 c^5 / (8 pi^2 hbar^3) and G M_sun / c^2 are scipy's" {
+    # posts/refs/the-free-neutron-star-limit.out, from scipy.constants: 2.0581136337e+36 erg/cm^3, 1.4766250381 km
+    assert_near(EPS0_CGS / 2.0581136337e36, 1.0, 1.0e-10)
+    assert_near(M_SUN_KM, 1.4766250381, 1.0e-10)
+}
+
+test "at x = 0.01 the series is the full pressure formula, evaluated in mpmath, to 2.1e-9" {
+    # the bracket over 3 at x = 0.01, mpmath at 40 digits
+    assert_near(p_series(X_SERIES) / 5.333142868253211e-11, 1.0, 2.1e-9)
+}
+
+###
+## The structure equations
+
+In geometric units ($G = c = 1$, lengths in km) the
+Tolman-Oppenheimer-Volkoff equations give the mass $m(r)$ inside radius $r$
+and the pressure there. The program writes them with the *log-enthalpy*
+$h = \ln(\mu / m_n c^2)$ as the independent variable, where $\mu$ is the
+energy it costs to add one neutron. For free neutrons
+$\mu = m_n c^2 \sqrt{1 + x^2}$, so $x = \sqrt{e^{2h} - 1}$ and the equation of
+state needs no inverting. The surface, where the pressure is zero, is
+$h = 0$ exactly, so every star is integrated over a known interval, from
+$h_c$ at the center to 0; the equations are the two at the top of the page
+(Lindblom, ApJ 398, 569, 1992).
+
+Near the center $r$ grows like $\sqrt{h_c - h}$, and near the surface the
+density falls like $h^{3/2}$; a fixed-step method follows neither well. So
+the program steps evenly in a variable $t$ that runs from 0 at the center
+to 1 at the surface, defined by $\sqrt{h_c - h} = \sqrt{h_c}\;t\,(2 - t)$.
+Near the center that makes $r$ a straight line in $t$,
+$r \approx \sqrt{h_c - h}\,\sqrt{3/2\pi(\varepsilon_c + 3P_c)}$, and near
+the surface $h \approx 2h_c(1 - t)^2$, so $x \propto 1 - t$ and the density
+is a polynomial in $t$ there too. The integration starts at $t = 0.01$
+from those two leading terms, with $m = \tfrac{4\pi}{3}\varepsilon_c r^3$,
+because a fourth-order step across the center itself, where $r$ and $m$ are
+both zero, is only second-order accurate. With 400 steps a star's radius
+and mass agree with the scipy twin to about $3 \times 10^{-7}$, the digits
+the twin was recorded to; with 100 steps, to $3 \times 10^{-5}$.
+###
+
+# Runge-Kutta steps in t per star
+N_STEPS = 400
+# the integration starts at this t, from the series at the center; starting
+# at 1e-4 instead leaves errors of 1e-4 in the radius at 400 steps
+T_START = 0.01
+
+#| dr/dt and dm/dt at (t, r, m) for a star with central log-enthalpy hc,
+#| written into out; s = √(hc − h) = √hc·t·(2 − t).
+def tov_rhs(t, r, m, hc, out: Arr) {
+    s = sqrt(hc) * t * (2.0 - t)
+    ds_dt = 2.0 * sqrt(hc) * (1.0 - t)
+    h = max(hc - s * s, 0.0)
+    x = sqrt(exp(2.0 * h) - 1.0)
+    eps = EPS0 * eps_of_x(x)
+    p = EPS0 * p_of_x(x)
+    dr_dh = -r * (r - 2.0 * m) / (m + 4.0 * PI * r * r * r * p)
+    # dh/dt = -2 s ds/dt
+    out[0] = -2.0 * s * ds_dt * dr_dh
+    out[1] = 4.0 * PI * r * r * eps * out[0]
+    return 0.0
+}
+
+#| The star with central Fermi momentum xc: [radius in km, mass in solar
+#| masses], by classical Runge-Kutta in t from the center to the surface, in
+#| n_steps steps.
+def star_n(xc, n_steps) {
+    hc = 0.5 * log(1.0 + xc * xc)
+    eps_c = EPS0 * eps_of_x(xc)
+    p_c = EPS0 * p_of_x(xc)
+    t = T_START
+    s = sqrt(hc) * t * (2.0 - t)
+    r = s * sqrt(3.0 / (2.0 * PI * (eps_c + 3.0 * p_c)))
+    m = 4.0 / 3.0 * PI * eps_c * r * r * r
+    dt = (1.0 - t) / n_steps
+    k1 = zeros(2)
+    k2 = zeros(2)
+    k3 = zeros(2)
+    k4 = zeros(2)
+    for n to n_steps {
+        tov_rhs(t, r, m, hc, k1)
+        tov_rhs(t + 0.5 * dt, r + 0.5 * dt * k1[0], m + 0.5 * dt * k1[1], hc, k2)
+        tov_rhs(t + 0.5 * dt, r + 0.5 * dt * k2[0], m + 0.5 * dt * k2[1], hc, k3)
+        tov_rhs(t + dt, r + dt * k3[0], m + dt * k3[1], hc, k4)
+        r = r + dt / 6.0 * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0])
+        m = m + dt / 6.0 * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1])
+        t = t + dt
+    }
+    return [r, m / M_SUN_KM]
+}
+
+#| The star with central Fermi momentum xc, in N_STEPS steps.
+def star(xc) {
+    return star_n(xc, N_STEPS)
+}
+
+star_half = star(0.5)
+star_two = star(2.0)
+show star_half
+show star_two
+
+# the scipy twin's stars (posts/refs/the-free-neutron-star-limit.out) are recorded to 7 or 8 digits, and
+# this program's 400-step stars match them to 3e-7; the tests allow 1e-6
+TOL_REF = 1.0e-6
+
+#| The largest relative difference of two stars [R, M] from the twin's.
+def star_diff(a, b, r_ref_a, m_ref_a, r_ref_b, m_ref_b) {
+    return max(max(abs(a[0] / r_ref_a - 1.0), abs(a[1] / m_ref_a - 1.0)), max(abs(b[0] / r_ref_b - 1.0), abs(b[1] / m_ref_b - 1.0)))
+}
+# the largest relative difference from the twin's radius and mass, at 400 steps and at 100
+N_STEPS_COARSE = 100
+diff_400 = star_diff(star_half, star_two, 13.509350, 0.59417916, 5.080605, 0.47630481)
+diff_100 = star_diff(star_n(0.5, N_STEPS_COARSE), star_n(2.0, N_STEPS_COARSE), 13.509350, 0.59417916, 5.080605, 0.47630481)
+show diff_400
+show diff_100
+
+test "with 400 steps the stars agree with the twin to about 3e-7, with 100 steps to 3e-5" {
+    assert_near(diff_400, 3.3e-7, 0.5e-7)
+    assert_near(diff_100, 3.3e-5, 0.5e-5)
+}
+
+test "single stars at x_c = 0.5 and 2 match scipy's radius and mass to 1e-6" {
+    # posts/refs/the-free-neutron-star-limit.out: x_c = 0.5, R = 13.509350 km, M = 0.59417916;
+    # x_c = 2, R = 5.080605 km, M = 0.47630481
+    assert_near(star_half[0] / 13.509350, 1.0, TOL_REF)
+    assert_near(star_half[1] / 0.59417916, 1.0, TOL_REF)
+    assert_near(star_two[0] / 5.080605, 1.0, TOL_REF)
+    assert_near(star_two[1] / 0.47630481, 1.0, TOL_REF)
+}
+
+###
+## The sequence of stars
+
+Each central density gives one star. A light star is large: at $x_c = 0.5$
+(central Fermi momentum half of $m_n c$) it has 0.594 solar masses in a
+radius of 13.5 km. Before running: squeeze the center harder, to
+$x_c = 2$. Is the star heavier?
+
+It is lighter, 0.476 solar masses in 5.08 km. Somewhere in between the mass
+passed through a maximum. The next cell draws the whole sequence and then
+finds the peak by golden-section search on $\ln x_c$.
+###
+
+# stars drawn along the sequence, and the range of central Fermi momenta
+N_SEQ = 40
+X_LO = 0.15
+X_HI = 6.0
+# golden-section iterations: each shrinks the bracket by 0.618
+N_GOLDEN = 30
+
+lx = linspace(log(X_LO), log(X_HI), N_SEQ)
+seq_x = zeros(N_SEQ)
+seq_r = zeros(N_SEQ)
+seq_m = zeros(N_SEQ)
+for k to N_SEQ {
+    seq_x[k] = exp(lx[k])
+    rm = star(seq_x[k])
+    seq_r[k] = rm[0]
+    seq_m[k] = rm[1]
+}
+
+#| The star of greatest mass for central Fermi momenta between xlo and xhi,
+#| by golden-section search on ln(xc): [xc, radius, mass].
+def heaviest(xlo, xhi) {
+    g = 0.5 * (sqrt(5.0) - 1.0)
+    a = log(xlo)
+    b = log(xhi)
+    c = b - g * (b - a)
+    d = a + g * (b - a)
+    mc = star(exp(c))[1]
+    md = star(exp(d))[1]
+    for it to N_GOLDEN {
+        if mc > md {
+            b = d
+            d = c
+            md = mc
+            c = b - g * (b - a)
+            mc = star(exp(c))[1]
+        }
+        else {
+            a = c
+            c = d
+            mc = md
+            d = a + g * (b - a)
+            md = star(exp(d))[1]
+        }
+    }
+    xm = exp(0.5 * (a + b))
+    best = star(xm)
+    return [xm, best[0], best[1]]
+}
+
+peak = heaviest(0.5, 1.5)
+x_max = peak[0]
+r_max = peak[1]
+m_max = peak[2]
+rho_c = EPS0_CGS * eps_of_x(x_max) / (C_CGS * C_CGS)
+show x_max
+show r_max
+show m_max
+show rho_c
+m_max_diff = abs(m_max - 0.71018029)
+show m_max_diff
+
+figure("Free-neutron stars: mass against radius", "radius R (km)", "mass M (solar masses)", 4.0, 22.0, 0.0, 0.8)
+plot(seq_r, seq_m, "one star per central density")
+scatter([r_max], [m_max], "the heaviest: 0.710 at 9.16 km")
+hline("0.710 (Narain et al. 2006)", 0.71)
+
+figure("Mass against central Fermi momentum", "central Fermi momentum $x_c = p_F/m_n c$", "mass M (solar masses)", X_LO, X_HI, 0.0, 0.8)
+xscale("log")
+plot(seq_x, seq_m, "$M(x_c)$")
+vline("x_c at the maximum", x_max)
+
+test "the maximum is scipy's 0.71018029 solar masses at 9.161465 km, to 1e-6" {
+    # posts/refs/the-free-neutron-star-limit.out: minimize_scalar over x_c, DOP853 at rtol 1e-12
+    assert_near(m_max / 0.71018029, 1.0, TOL_REF)
+    assert_near(r_max / 9.161465, 1.0, TOL_REF)
+    # the mass is flat at its peak, so x_c is known less well than M
+    assert_near(x_max, 0.833853, 1.0e-4)
+    # posts/refs/the-free-neutron-star-limit.out: 4.205834e+15 g/cm^3 at the maximum
+    assert_near(rho_c / 4.205834e15, 1.0, 1.0e-3)
+}
+
+test "the maximum mass agrees with scipy's to 2e-8 of a solar mass" {
+    assert_lt(m_max_diff, 2.0e-8)
+}
+
+test "and Narain, Schaffner-Bielich and Mishustin's 0.710, to the three digits they quote" {
+    # Phys. Rev. D 74, 063003 (2006), text after Eqs. (31)-(32)
+    assert_near(m_max, 0.710, 0.0005)
+}
+
+###
+The heaviest star has $M = 0.7102$ solar masses and $R = 9.16$ km (`m_max`,
+`r_max`), at a central Fermi momentum $x_c = 0.834$ (`x_max`) and a central
+density of $4.2 \times 10^{15}$ g/cm³ (`rho_c`). Narain, Schaffner-Bielich and Mishustin (2006) quote 9.192 km for the
+radius, 0.3% larger than both this program and the scipy twin; their number
+comes from a scaling formula (their Eq. (32)) whose
+coefficient, 3.367, they give to four digits.
+
+Along the sequence, the stars to the right of the peak (larger, lighter,
+less dense) are stable: add a little mass and the star settles slightly
+smaller. The stars to its left are not, and a small squeeze makes them
+collapse. So 0.71 solar masses is the most a star of free neutrons can hold.
+Heavier neutron stars need the force between neutrons, which this model
+leaves out, to be repulsive at these densities.
+###
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

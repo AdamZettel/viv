@@ -1,0 +1,156 @@
+###
+`for i to n` reads `n` once, before the first pass, and counts its passes
+itself, in every engine. The C backend used to compile it to
+`for (i = 0.0; i < n; i = i + 1.0)`, which re-reads n on every pass and
+counts with i: a body that grew n ran more passes compiled than interpreted,
+a body that assigned i skipped passes, and after the loop i was n, not the
+last pass's value. `parallel for i to n` re-read n too when built without
+OpenMP, and ran 2 passes for n = 2.5 where the interpreter runs 3. `for i
+from a to b by s` always fixed its bounds first.
+###
+
+def count_calls(calls) -> Num {
+    calls[0] += 1
+    return 3
+}
+
+n = 3
+passes = 0
+for i to n {
+    n += 1
+    passes += 1
+    if passes > 100 {
+        break
+    }
+}
+show passes
+show n
+
+for j to 4 {
+    j = j + 1
+    print(j)
+}
+
+for i to 5 {
+}
+show i
+
+test "a body that grows the bound runs the passes the bound had at the start" {
+    m = 3
+    count = 0
+    for i to m {
+        m = m + 2
+        count += 1
+        if count > 100 {
+            break
+        }
+    }
+    assert_near(count, 3, 0)
+    assert_near(m, 9, 0)
+}
+
+test "a body that shrinks the bound still runs every pass" {
+    m = 4
+    count = 0
+    for i to m {
+        m = 0
+        count += 1
+    }
+    assert_near(count, 4, 0)
+}
+
+test "the bound expression is evaluated once" {
+    calls = zeros(1)
+    count = 0
+    for i to count_calls(calls) {
+        count += 1
+    }
+    assert_near(count, 3, 0)
+    assert_near(calls[0], 1, 0)
+}
+
+test "assigning the loop variable changes neither the passes nor the next value" {
+    seen = zeros(4)
+    count = 0
+    for i to 4 {
+        seen[count] = i
+        i = 100
+        count += 1
+    }
+    assert_near(count, 4, 0)
+    assert_near(seen[3], 3, 0)
+}
+
+test "after the loop the variable holds the last pass's value" {
+    k = -1
+    for k to 6 {
+    }
+    assert_near(k, 5, 0)
+    k = -1
+    for k to 0 {
+    }
+    assert_near(k, -1, 0)
+    k = -1
+    for k to 2.5 {
+    }
+    assert_near(k, 2, 0)
+}
+
+test "a loop inside a loop reads its bound each time it starts" {
+    # the outer loop runs 3 passes; the inner one starts with m = 3, 6, 12
+    m = 3
+    total = 0
+    for a to m {
+        for b to m {
+            m += 1
+            total += 1
+            if total > 1000 {
+                break
+            }
+        }
+        if total > 1000 {
+            break
+        }
+    }
+    assert_near(total, 3 + 6 + 12, 0)
+}
+
+test "break and continue" {
+    m = 10
+    s = 0
+    for i to m {
+        m = 1
+        if i == 2 {
+            continue
+        }
+        if i == 5 {
+            break
+        }
+        s += i
+    }
+    assert_near(s, 0 + 1 + 3 + 4, 0)
+}
+
+test "parallel for reads its bound once too, and runs the pass a fractional bound allows" {
+    calls = zeros(1)
+    hits = zeros(8)
+    parallel for i to count_calls(calls) {
+        hits[i] = 1
+    }
+    assert_near(calls[0], 1, 0)
+    assert_near(sum(hits), 3, 0)
+    hits = zeros(8)
+    x = 2.5
+    parallel for i to x {
+        hits[i] = 1
+    }
+    assert_near(sum(hits), 3, 0)
+    hits = zeros(8)
+    parallel for i to 1.5 {
+        hits[i] = 1
+    }
+    assert_near(sum(hits), 2, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

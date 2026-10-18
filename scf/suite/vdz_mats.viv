@@ -1,0 +1,139 @@
+# PySCF's rows that push a random matrix through the water cc-pVDZ integrals
+# (test_rhf.py and test_uhf.py): J, K, the effective potential, the energy
+# and the level shift of `numpy.random.random((24, 24))` after
+# `numpy.random.seed(1)`.
+#
+# The random matrices are drawn here from numpy's own generator (MT19937,
+# `sts_mt_new` in scf/suite/ref/sts), so they are the tests' matrices entry
+# for entry. Most of them are not symmetric. J only sees the symmetric part
+# of a density, but K does not, so K is taken from the dense J/K member,
+# which applies the definition `K_ik = sum_jl (ij|kl) D_jl` as written. Where
+# the test calls PySCF with its default `hermi=1` on such a matrix, PySCF
+# computes the lower triangle of K and mirrors it; `sts_hermi1` does the
+# same, since that is the number the test asserts.
+#
+#     tools/both-engines.sh scf/suite vdz_mats
+from hf.hf import hf_blob, hf_scf, hf_setup
+from hf.molecule import molecule_packs
+from hf.scf_loop import scf_opts, scf_setup
+from hf.opts import opt_new, scf_checked, SCF_UHF, ScfOptions
+from hf.density import den_stack1, den_stack2
+from hf.guess import GS_CORE
+from hf.jk import jk_methods
+from hf.jk_direct import int_jk_direct
+from hfref.water_ccpvdz import waterccpvdz_atoms, waterccpvdz_prims, waterccpvdz_shells
+from hfref.pyscf_tests import (
+    PST_FILE_RHF, PST_FILE_UHF, PST_RHF_307, PST_RHF_307_P, PST_RHF_435, PST_RHF_435_P,
+    PST_RHF_444, PST_RHF_444_P, PST_RHF_547, PST_RHF_547_P, PST_RHF_548, PST_RHF_548_P,
+    PST_RHF_870, PST_RHF_870_P, PST_RHF_881, PST_RHF_881_P, PST_RHF_882, PST_RHF_882_P,
+    PST_RHF_897, PST_RHF_897_P, PST_UHF_106, PST_UHF_106_P, PST_UHF_123, PST_UHF_123_P,
+    PST_UHF_335, PST_UHF_335_P,
+)
+from scf.suite.ref.sts import (
+    sts_dot, sts_fp, sts_hermi1, sts_mt_new, sts_mt_random, sts_norm, sts_random_matrix,
+    sts_row, sts_sym,
+)
+
+#| `[J, K]` of one `[n, n]` density from member `k` of the J/K registry.
+def svm_jk(G: Arr, D: Arr, k) -> Arr {
+    ms = jk_methods()
+    return apply(ms[k], G, G, G, den_stack1(D), opt_new())
+}
+
+svm_m = molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims())
+svm_p = hf_setup(svm_m, scf_checked())
+svm_S = svm_p.s
+svm_H = svm_p.h
+svm_G = svm_p.eri
+svm_n = 24
+
+test "numpy's stream: seed 1 starts 0.417022004702574, 0.720324493442158, 0.000114374817345" {
+    svm_st = sts_mt_new(1)
+    assert_near(sts_mt_random(svm_st), 0.417022004702574, 1.0e-15)
+    assert_near(sts_mt_random(svm_st), 0.7203244934421581, 1.0e-15)
+    assert_near(sts_mt_random(svm_st), 0.00011437481734488664, 1.0e-18)
+}
+
+test "J and K of a random nonsymmetric density: |J| = 77.035779188661465, |K| = 46.253491700647963, fp(K) = -12.365527167710301 (test_rhf.py:547, 548, 897)" {
+    svm_D = sts_random_matrix(sts_mt_new(1), svm_n)
+    svm_R = svm_jk(svm_G, svm_D, 2)
+    svm_J = slab(svm_R, 0)
+    svm_K = slab(svm_R, 1)
+    assert_near(sts_row(PST_FILE_RHF, 547, sts_norm(svm_J), PST_RHF_547, PST_RHF_547_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 548, sts_norm(svm_K), PST_RHF_548, PST_RHF_548_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 897, sts_fp(svm_K), PST_RHF_897, PST_RHF_897_P), 1.0, 0.0)
+}
+
+test "direct J of the same density: |J| = 77.035779188661465 (test_rhf.py:870)" {
+    # max_memory=0: the direct member, which recomputes the integrals from the basis
+    svm_D = sts_random_matrix(sts_mt_new(1), svm_n)
+    svm_b = hf_blob(svm_m)
+    svm_R = int_jk_direct(svm_b, svm_b, svm_b, den_stack1(svm_D), scf_opts(svm_p))
+    assert_near(sts_row(PST_FILE_RHF, 870, sts_norm(slab(svm_R, 0)), PST_RHF_870, PST_RHF_870_P), 1.0, 0.0)
+}
+
+test "J and K of the identity: fp(J) = 1.6593323222866125, fp(K) = -1.4662135224053987 (test_rhf.py:881, 882)" {
+    svm_I = zeros(svm_n, svm_n)
+    for svm_i to svm_n {
+        svm_I[svm_i, svm_i] = 1.0
+    }
+    svm_R = svm_jk(svm_G, svm_I, 0)
+    assert_near(sts_row(PST_FILE_RHF, 881, sts_fp(slab(svm_R, 0)), PST_RHF_881, PST_RHF_881_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 882, sts_fp(slab(svm_R, 1)), PST_RHF_882, PST_RHF_882_P), 1.0, 0.0)
+}
+
+test "the RHF energy_elec of the random density is -59.332199154299914 (test_rhf.py:307)" {
+    # E = Tr(h D) + (1/2) Tr((J - K/2) D), with K as PySCF's hermi=1 call makes it
+    svm_D = sts_random_matrix(sts_mt_new(1), svm_n)
+    svm_R = svm_jk(svm_G, svm_D, 2)
+    svm_V = slab(svm_R, 0) - 0.5 * sts_hermi1(slab(svm_R, 1))
+    svm_e = sts_dot(svm_H, svm_D) + 0.5 * sts_dot(svm_V, svm_D)
+    assert_near(sts_row(PST_FILE_RHF, 307, svm_e, PST_RHF_307, PST_RHF_307_P), 1.0, 0.0)
+}
+
+test "the UHF energy_elec of a random density pair is 57.122667754846844 (test_uhf.py:123)" {
+    svm_st = sts_mt_new(1)
+    svm_Da = sts_random_matrix(svm_st, svm_n)
+    svm_Db = sts_random_matrix(svm_st, svm_n)
+    svm_Ra = svm_jk(svm_G, svm_Da, 2)
+    svm_Rb = svm_jk(svm_G, svm_Db, 2)
+    svm_J = slab(svm_Ra, 0) + slab(svm_Rb, 0)
+    svm_Va = svm_J - sts_hermi1(slab(svm_Ra, 1))
+    svm_Vb = svm_J - sts_hermi1(slab(svm_Rb, 1))
+    svm_e = sts_dot(svm_H, svm_Da) + sts_dot(svm_H, svm_Db) + 0.5 * (sts_dot(svm_Va, svm_Da) + sts_dot(svm_Vb, svm_Db))
+    assert_near(sts_row(PST_FILE_UHF, 123, svm_e, PST_UHF_123, PST_UHF_123_P), 1.0, 0.0)
+}
+
+test "the effective potential of two symmetrized random densities: RHF |V| = 199.66041114502335, UHF |V| = 398.09239104094513 (test_rhf.py:444, test_uhf.py:335)" {
+    svm_st = sts_mt_new(1)
+    svm_d1 = sts_sym(sts_random_matrix(svm_st, svm_n))
+    svm_d2 = sts_sym(sts_random_matrix(svm_st, svm_n))
+    svm_R1 = svm_jk(svm_G, svm_d1, 0)
+    svm_R2 = svm_jk(svm_G, svm_d2, 0)
+    svm_J1 = slab(svm_R1, 0)
+    svm_K1 = slab(svm_R1, 1)
+    svm_J2 = slab(svm_R2, 0)
+    svm_K2 = slab(svm_R2, 1)
+    # RHF: one potential per density, J - K/2
+    svm_V = den_stack2(svm_J1 - 0.5 * svm_K1, svm_J2 - 0.5 * svm_K2)
+    # UHF: the pair is (alpha, beta), V_s = J_a + J_b - K_s
+    svm_U = den_stack2(svm_J1 + svm_J2 - svm_K1, svm_J1 + svm_J2 - svm_K2)
+    assert_near(sts_row(PST_FILE_RHF, 444, sts_norm(svm_V), PST_RHF_444, PST_RHF_444_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 335, sts_norm(svm_U), PST_UHF_335, PST_UHF_335_P), 1.0, 0.0)
+}
+
+test "the level shift of a symmetrized random density: |H + 0.5 (S - S D S)| = 94.230157719053565 (test_rhf.py:435)" {
+    svm_D = sts_sym(sts_random_matrix(sts_mt_new(1), svm_n))
+    svm_F = svm_H + 0.5 * (svm_S - svm_S @ svm_D @ svm_S)
+    assert_near(sts_row(PST_FILE_RHF, 435, sts_norm(svm_F), PST_RHF_435, PST_RHF_435_P), 1.0, 0.0)
+}
+
+test "one electron with UHF: -23.867818585778764 (test_uhf.py:106)" {
+    svm_one = scf_setup(svm_p.h, svm_p.s, svm_p.eri, 1, 0, svm_p.enuc, ScfOptions { guess: GS_CORE, method: SCF_UHF, ..scf_checked() })
+    svm_r = hf_scf(svm_one)
+    assert_near(svm_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 106, svm_r.energy, PST_UHF_106, PST_UHF_106_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

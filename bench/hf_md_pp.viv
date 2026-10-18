@@ -1,0 +1,49 @@
+# 10,000 (pp|pp) primitive quartets, one integral each: every function is the
+# x component, which is how the legacy lib/gto_md cost per primitive
+# quartet was measured (9.67 us at (dd|dd), 1.11 us at (pp|pp), a ratio of
+# 8.7). Each quartet goes through mderi_prim1: E tables for the two pairs,
+# one Boys evaluation, the R entries inside the box the powers need, and the
+# Hermite sum. The pairs come from two seeded pools of 100, so the bra and
+# ket pools make 100 x 100 quartets; the printed sum is a checksum.
+#
+#     tools/race.sh bench/hf_md_dd.viv bench/hf_md_pp.viv
+from hf.md_eri import mderi_prim1, mderi_prim1_size
+from hf.eri_store import es_rng
+from hf.hermite import herm_grid
+
+hfbpp_L = 1
+hfbpp_st = zeros(1)
+hfbpp_st[0] = 20260923
+# a pool row: (a, Ax, Ay, Az, b, Bx, By, Bz), exponents in (0.2, 3.2), centers in a 2-bohr box
+hfbpp_pool = zeros(200, 8)
+for hfbpp_r to 200 {
+    hfbpp_pool[hfbpp_r, 0] = 0.2 + 3.0 * es_rng(hfbpp_st)
+    hfbpp_pool[hfbpp_r, 4] = 0.2 + 3.0 * es_rng(hfbpp_st)
+    for hfbpp_k to 3 {
+        hfbpp_pool[hfbpp_r, 1 + hfbpp_k] = 2.0 * es_rng(hfbpp_st) - 1.0
+        hfbpp_pool[hfbpp_r, 5 + hfbpp_k] = 2.0 * es_rng(hfbpp_st) - 1.0
+    }
+}
+hfbpp_PQ = zeros(4, 7)
+for hfbpp_f to 4 {
+    hfbpp_PQ[hfbpp_f, 4] = hfbpp_L
+}
+hfbpp_G = herm_grid(4 * hfbpp_L, 40.0)
+hfbpp_W = zeros(mderi_prim1_size(hfbpp_L))
+hfbpp_F = zeros(4 * hfbpp_L + 1)
+hfbpp_acc = 0.0
+for hfbpp_i to 100 {
+    for hfbpp_j to 100 {
+        for hfbpp_k to 4 {
+            hfbpp_PQ[0, hfbpp_k] = hfbpp_pool[hfbpp_i, hfbpp_k]
+            hfbpp_PQ[1, hfbpp_k] = hfbpp_pool[hfbpp_i, 4 + hfbpp_k]
+            hfbpp_PQ[2, hfbpp_k] = hfbpp_pool[100 + hfbpp_j, hfbpp_k]
+            hfbpp_PQ[3, hfbpp_k] = hfbpp_pool[100 + hfbpp_j, 4 + hfbpp_k]
+        }
+        hfbpp_acc = hfbpp_acc + mderi_prim1(hfbpp_PQ, hfbpp_G, hfbpp_W, hfbpp_F)
+    }
+}
+show hfbpp_acc
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

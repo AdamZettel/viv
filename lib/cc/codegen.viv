@@ -1,0 +1,281 @@
+# The code generator: the syntax tree in, RV32IM assembly text out.
+#
+# A stack machine, as chibicc's first stages are: every expression leaves
+# its value in register a0; a binary operator computes its right operand,
+# pushes it on the stack, computes the left operand and pops the right one
+# into a1. Slow code, but each node's code can be read on its own.
+#
+# A function's frame: the caller's s0 and the return address ra sit just
+# below the caller's stack, s0 points at them, and local variable k lives
+# at 4 (k + 1) bytes below s0. The expression stack grows below that.
+#
+#         higher addresses
+#     | ra             |  s0 + 4
+#     | caller's s0    |  s0 + 0   <- s0
+#     | local 0        |  s0 - 4
+#     | local 1        |  s0 - 8
+#     | ...            |
+#     | pushed values  |           <- sp
+
+from cc.lexer import tokenize
+from cc.parser import Program, Function, Node, NodeKind, parse
+
+WORD_BYTES: Int = 4             # an int, a register, a stack slot
+STACK_ALIGN: Int = 16           # the RISC-V ABI keeps sp a multiple of 16
+
+#| The generator's state: the program, the assembly lines so far and the
+#| function being generated.
+record Gen {
+    prog: Program
+    out: [Str]
+    func: Str = ""
+    labels: Int = 0     # labels made so far; each if and loop numbers its own
+}
+
+#| The generator with one more line of assembly.
+def emit(g: Gen, line: Str) -> Gen {
+    h = g
+    h.out = append(g.out, line)
+    return h
+}
+
+#| Push a0 on the stack.
+def push(g: Gen) -> Gen {
+    g = emit(g, "  addi sp, sp, -4")
+    return emit(g, "  sw a0, 0(sp)")
+}
+
+#| Pop the top of the stack into register r.
+def pop(g: Gen, r: Str) -> Gen {
+    g = emit(g, f"  lw {r}, 0(sp)")
+    return emit(g, "  addi sp, sp, 4")
+}
+
+#| Where local variable `slot` lives, as an offset from s0.
+def local_offset(slot: Int) -> Int {
+    return -WORD_BYTES * (slot + 1)
+}
+
+#| Code that leaves the value of expression node n in a0.
+def gen_expr(g: Gen, n: Int) -> Gen {
+    node = g.prog.nodes[n]
+    match node.kind {
+        Num => { return emit(g, f"  li a0, {node.val}") }
+        Call => {
+            #: each argument is computed and pushed; then they are popped into a0..a7, last first
+            for a in node.body {
+                g = gen_expr(g, a)
+                g = push(g)
+            }
+            for k to len(node.body) reversed {
+                g = pop(g, f"a{k}")
+            }
+            #: the result comes back in a0
+            return emit(g, f"  call {node.name}")
+        }
+        Var => { return emit(g, f"  lw a0, {local_offset(node.val)}(s0)") }
+        Assign => {
+            #: the value stays in a0: an assignment is an expression, so a = b = 3 works
+            g = gen_expr(g, node.rhs)
+            slot = g.prog.nodes[node.lhs].val
+            return emit(g, f"  sw a0, {local_offset(slot)}(s0)")
+        }
+        Neg => {
+            g = gen_expr(g, node.lhs)
+            return emit(g, "  neg a0, a0")
+        }
+        Not => {
+            g = gen_expr(g, node.lhs)
+            return emit(g, "  seqz a0, a0")
+        }
+        LogAnd => {
+            #: the first zero operand decides: skip the rest and give 0
+            g, k = new_label(g)
+            g = gen_expr(g, node.lhs)
+            g = emit(g, f"  beqz a0, .L.false.{k}")
+            g = gen_expr(g, node.rhs)
+            g = emit(g, f"  beqz a0, .L.false.{k}")
+            g = emit(g, "  li a0, 1")
+            g = emit(g, f"  j .L.end.{k}")
+            g = emit(g, f".L.false.{k}:")
+            g = emit(g, "  li a0, 0")
+            return emit(g, f".L.end.{k}:")
+        }
+        LogOr => {
+            #: the first nonzero operand decides: skip the rest and give 1
+            g, k = new_label(g)
+            g = gen_expr(g, node.lhs)
+            g = emit(g, f"  bnez a0, .L.true.{k}")
+            g = gen_expr(g, node.rhs)
+            g = emit(g, f"  bnez a0, .L.true.{k}")
+            g = emit(g, "  li a0, 0")
+            g = emit(g, f"  j .L.end.{k}")
+            g = emit(g, f".L.true.{k}:")
+            g = emit(g, "  li a0, 1")
+            return emit(g, f".L.end.{k}:")
+        }
+        _ => { g = g }
+    }
+
+    #: a binary operator: the right operand waits on the stack while the left is computed
+    g = gen_expr(g, node.rhs)
+    g = push(g)
+    g = gen_expr(g, node.lhs)
+    g = pop(g, "a1")
+    match node.kind {
+        Add => { return emit(g, "  add a0, a0, a1") }
+        Sub => { return emit(g, "  sub a0, a0, a1") }
+        Mul => { return emit(g, "  mul a0, a0, a1") }
+        Div => { return emit(g, "  div a0, a0, a1") }
+        Mod => { return emit(g, "  rem a0, a0, a1") }
+        Eq => {
+            #: equal when the difference is zero
+            g = emit(g, "  sub a0, a0, a1")
+            return emit(g, "  seqz a0, a0")
+        }
+        Ne => {
+            g = emit(g, "  sub a0, a0, a1")
+            return emit(g, "  snez a0, a0")
+        }
+        Lt => { return emit(g, "  slt a0, a0, a1") }
+        Le => {
+            #: a <= b is not (b < a)
+            g = emit(g, "  slt a0, a1, a0")
+            return emit(g, "  xori a0, a0, 1")
+        }
+        _ => { stop("codegen: not an expression") }
+    }
+    return g
+}
+
+#| A fresh label number for an if or a loop.
+def new_label(g: Gen) {
+    return Gen { labels: g.labels + 1, ..g }, g.labels
+}
+
+#| Code for statement node n.
+def gen_stmt(g: Gen, n: Int) -> Gen {
+    node = g.prog.nodes[n]
+    match node.kind {
+        Block => {
+            for s in node.body {
+                g = gen_stmt(g, s)
+            }
+            return g
+        }
+        Return => {
+            #: the value goes in a0; the jump leaves through the function's epilogue
+            g = gen_expr(g, node.lhs)
+            return emit(g, f"  j .L.return.{g.func}")
+        }
+        ExprStmt => { return gen_expr(g, node.lhs) }
+        If => {
+            #: a zero condition branches past the then-part to the else-part
+            g, k = new_label(g)
+            g = gen_expr(g, node.cond)
+            g = emit(g, f"  beqz a0, .L.else.{k}")
+            g = gen_stmt(g, node.then)
+            g = emit(g, f"  j .L.end.{k}")
+            g = emit(g, f".L.else.{k}:")
+            if node.els >= 0 {
+                g = gen_stmt(g, node.els)
+            }
+            return emit(g, f".L.end.{k}:")
+        }
+        For => {
+            #: init once; then test, body, increment, and back to the test
+            g, k = new_label(g)
+            if node.init >= 0 {
+                g = gen_stmt(g, node.init)
+            }
+            g = emit(g, f".L.begin.{k}:")
+            if node.cond >= 0 {
+                g = gen_expr(g, node.cond)
+                g = emit(g, f"  beqz a0, .L.end.{k}")
+            }
+            g = gen_stmt(g, node.then)
+            if node.inc >= 0 {
+                g = gen_stmt(g, node.inc)
+            }
+            g = emit(g, f"  j .L.begin.{k}")
+            return emit(g, f".L.end.{k}:")
+        }
+        _ => { stop("codegen: not a statement") }
+    }
+    return g
+}
+
+#| Round n up to a multiple of `align`.
+def align_to(n: Int, align: Int) -> Int {
+    return (n + align - 1) // align * align
+}
+
+#| One function: the prologue that builds its frame, the body, and the
+#| epilogue every return jumps to, which takes the frame down.
+def gen_function(g: Gen, f: Function) -> Gen {
+    name = f.name
+    g = emit(Gen { func: name, ..g }, f"{name}:")
+
+    #: prologue: save ra and the caller's s0, point s0 at them, make room for the locals
+    g = emit(g, "  addi sp, sp, -8")
+    g = emit(g, "  sw ra, 4(sp)")
+    g = emit(g, "  sw s0, 0(sp)")
+    g = emit(g, "  mv s0, sp")
+    frame = align_to(WORD_BYTES * len(f.locals), STACK_ALIGN)
+    if frame > 0 {
+        g = emit(g, f"  addi sp, sp, -{frame}")
+    }
+
+    #: the arguments arrive in a0..a7; each parameter is stored in its slot
+    for k to f.nparams {
+        g = emit(g, f"  sw a{k}, {local_offset(k)}(s0)")
+    }
+
+    g = gen_stmt(g, f.body)
+
+    #: epilogue: drop the locals and whatever is pushed, restore s0 and ra, return
+    g = emit(g, f".L.return.{name}:")
+    g = emit(g, "  mv sp, s0")
+    g = emit(g, "  lw s0, 0(sp)")
+    g = emit(g, "  lw ra, 4(sp)")
+    g = emit(g, "  addi sp, sp, 8")
+    return emit(g, "  ret")
+}
+
+#| The startup code: call main, then exit with its result (a7 = 93 is the
+#| exit service of lib/rv32/sim.viv).
+def gen_start(g: Gen) -> Gen {
+    g = emit(g, "_start:")
+    g = emit(g, "  call main")
+    g = emit(g, "  li a7, 93")
+    return emit(g, "  ecall")
+}
+
+#| The runtime library: print_int(x) prints x and a newline through the
+#| simulator's print service (a7 = 1) and returns x.
+def gen_runtime(g: Gen) -> Gen {
+    g = emit(g, "print_int:")
+    g = emit(g, "  li a7, 1")
+    g = emit(g, "  ecall")
+    return emit(g, "  ret")
+}
+
+#| The assembly text of a whole program.
+def codegen(prog: Program) -> Str {
+    g = Gen { prog: prog, out: ["x"][:0] }
+    g = gen_start(g)
+    for f in prog.funcs {
+        g = gen_function(g, f)
+    }
+    g = gen_runtime(g)
+    return join("\n", g.out) + "\n"
+}
+
+test "return 42 loads a0 and leaves main" {
+    text = codegen(parse(tokenize("int main() { return 42; }")))
+    assert_true("  li a0, 42\n  j .L.return.main\n.L.return.main:\n" in text)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2019 Rui Ueyama
+# SPDX-FileCopyrightText: 2026 The Viv authors

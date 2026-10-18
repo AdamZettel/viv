@@ -1,0 +1,135 @@
+###
+One atom in the local density approximation, nonrelativistic (Schrodinger,
+LDA) or relativistic (Dirac, RLDA), solved self-consistently on dftatom's
+exponential mesh. A run returns the Kohn-Sham orbital energies labelled by
+n, l and kappa, the total energy and its kinetic, Hartree,
+electron-nucleus and exchange-correlation parts, the density and the
+potential on the mesh, and how the SCF loop ended.
+
+This is dftatom by Ondrej Certik, John E. Pask and Jiri Vackar
+(https://github.com/certik/dftatom; Comput. Phys. Commun. 184, 1777 (2013)),
+ported to Viv. If you use it, cite that paper.
+###
+# The program behind `viv export ports/dftatom/atom.export.toml`: the
+# settings at the top level, one call of atom_scf, and its results copied into
+# the globals below. A parameter left out of a run keeps the value here.
+#
+#     viv run ports/dftatom/atom.viv
+#
+# Derived from dftatom src/drivers.f90 and tests/lda/conv_lda.f90 and
+# tests/rlda/conv_rlda.f90 (their mesh, tolerances and mixing), Copyright (c)
+# 2006-2012 Ondrej Certik, Jiri Vackar, John Pask; MIT license, see
+# ports/dftatom/LICENSE.
+#
+# Units are Hartree atomic units: energies in Hartree, lengths in Bohr.
+from ports.dftatom.dftatom import atom_scf, integrate, EKIN, ECOUL, EENUC, EXC, ETOT
+
+#: z  the atomic number Z, 1 to 92; the electrons are NIST's ground configuration of the neutral atom
+z: Int = 26
+#: relativistic  true: the Dirac equation and relativistic LDA exchange (RLDA); false: Schrodinger and LDA
+relativistic = false
+#: r_min  the first mesh point, in Bohr
+r_min = 1.0e-7
+#: r_max  the last mesh point, in Bohr
+r_max = 50.0
+#: a  the ratio of the last mesh interval to the first
+a = 2.7e6
+#: n  the number of mesh intervals N; the mesh has N + 1 points
+n: Int = 6000
+#: c  the speed of light in atomic units (NIST's atomic reference data use 137.0359895)
+c = 137.0359895
+#: reigen_eps  the eigenvalue tolerance of each radial solve, in Hartree
+reigen_eps = 1.0e-10
+#: reigen_max_iter  the most iterations one radial eigenvalue search may take
+reigen_max_iter: Int = 100
+#: mixing_eps  the SCF stops when no orbital energy moved more than this, in Hartree, two iterations running
+mixing_eps = 5.0e-9
+#: mixing_alpha  the linear part of the Anderson mixing of the potential
+mixing_alpha = 0.5
+#: mixing_max_iter  the most SCF iterations
+mixing_max_iter: Int = 200
+#: perturb  true: refine each eigenvalue by the perturbative correction at the turning point; false: bisection only
+perturb = true
+
+if z < 1 or z > 92 {
+    stop(f"z must be between 1 and 92; it is {z}")
+}
+if r_min <= 0.0 or r_max <= r_min {
+    stop(f"the mesh needs 0 < r_min < r_max; they are {r_min} and {r_max}")
+}
+if a <= 1.0 {
+    stop(f"the mesh ratio a must be above 1; it is {a}")
+}
+
+d, converged, iterations = atom_scf(z, relativistic, r_min, r_max, a, n, c, reigen_eps, reigen_max_iter, mixing_eps, mixing_alpha, mixing_max_iter, perturb)
+
+# ---- the energies
+#: etot  the total energy, in Hartree
+etot = d.energies[ETOT]
+#: ekin  the Kohn-Sham kinetic energy T_s, in Hartree
+ekin = d.energies[EKIN]
+#: ecoul  the Hartree energy, (1/2) int n V_H, in Hartree
+ecoul = d.energies[ECOUL]
+#: eenuc  the electron-nucleus energy, -Z int n / r, in Hartree
+eenuc = d.energies[EENUC]
+#: exc  the exchange-correlation energy, int n e_xc, in Hartree
+exc = d.energies[EXC]
+
+# ---- the orbitals, in upstream's order
+norb: Int = len(d.no)
+#: orbital_n  the principal quantum number n of each orbital
+orbital_n = zeros(norb)
+#: orbital_l  the orbital angular momentum l of each orbital
+orbital_l = zeros(norb)
+#: orbital_kappa  Dirac's kappa of each orbital: -l - 1 for j = l + 1/2, l for j = l - 1/2; 0 in a nonrelativistic run
+orbital_kappa = zeros(norb)
+for k to norb {
+    orbital_n[k] = 1.0 * d.no[k]
+    orbital_l[k] = 1.0 * d.lo[k]
+    if relativistic {
+        orbital_kappa[k] = -1.0 * d.lo[k] - 1.0
+        if d.so[k] == 0 {
+            orbital_kappa[k] = 1.0 * d.lo[k]
+        }
+    }
+}
+#: occupation  the electrons in each orbital
+occupation = d.fo
+#: orbital_energies  the Kohn-Sham eigenvalue of each orbital, in Hartree
+orbital_energies = d.ks
+
+# ---- on the mesh
+#: mesh  the radial mesh r_i, in Bohr
+mesh = d.R
+#: density  the electron density n(r) on the mesh, in electrons per cubic Bohr
+density = d.rho
+#: v_tot  the self-consistent potential -Z/r + V_H + V_xc on the mesh, in Hartree
+v_tot = d.V_tot
+#: charge  the electrons the density holds, 4 pi int n r^2 dr; z for a converged neutral atom
+charge = 4.0 * pi * integrate(d.Rp, d.rho * d.R * d.R)
+
+# ---- the loop
+#: scf_converged  whether the SCF loop met its tolerance within mixing_max_iter
+scf_converged = converged
+#: scf_iterations  the SCF iterations run
+scf_iterations = iterations
+
+print(f"Z = {z}  relativistic = {relativistic}  converged = {scf_converged} in {scf_iterations} iterations")
+print(f"E_tot = {fmt(etot, '.10f')}  E_kin = {fmt(ekin, '.10f')}  E_coul = {fmt(ecoul, '.10f')}  E_enuc = {fmt(eenuc, '.10f')}  E_xc = {fmt(exc, '.10f')}")
+for k to norb {
+    print(f"  {d.no[k]} {d.lo[k]} {fmt(orbital_kappa[k], '.0f')}  f = {fmt(occupation[k], '.4f')}  e = {fmt(orbital_energies[k], '.10f')}")
+}
+
+test "the density holds Z electrons" {
+    assert_near(charge, 1.0 * z, 1.0e-6)
+}
+test "the energy components add up to the total" {
+    assert_near(ekin + ecoul + eenuc + exc, etot, 1.0e-9 * abs(etot))
+}
+test "the SCF loop converged" {
+    assert_true(scf_converged)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2006-2012 Ondřej Čertík, Jiří Vackář, John Pask
+# SPDX-FileCopyrightText: 2026 The Viv authors

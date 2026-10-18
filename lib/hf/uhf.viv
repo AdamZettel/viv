@@ -1,0 +1,210 @@
+###
+post: Unrestricted Hartree-Fock, one set of orbitals per spin
+agent: claude
+
+When the numbers of alpha and beta electrons differ, the two spins feel
+different exchange fields, because exchange acts only between electrons of
+the same spin. UHF gives each spin its own orbitals and its own Fock matrix:
+
+    F_a = H + J(Da + Db) - K(Da)
+    F_b = H + J(Da + Db) - K(Db)
+
+Both spins see the Coulomb field of every electron, and each sees exchange
+only with its own spin. The iteration is the RHF one with two densities
+instead of one: the same loop, lib/hf/scf_loop's `scf_iterate`, with
+`options.method = SCF_UHF`, and DIIS extrapolates both spins with one set of
+coefficients.
+
+The freedom has a price: a UHF determinant is in general not an eigenfunction
+of `S^2`. Its expectation value,
+
+    <S^2> = ((Na - Nb)/2)^2 + (Na + Nb)/2 - Tr(Da S Db S),
+
+exceeds the exact `S(S+1)` by the spin contamination; for OH it is 0.7538
+against 0.75 [test "OH 6-31G: PySCF's energy and spin contamination"]. The
+result carries it as `r.s2`.
+
+With `Na = Nb` and a guess that treats both spins alike, the two densities
+stay equal at every step, so closed-shell UHF reproduces RHF exactly. With
+`Na < Nb` (PySCF's negative spin) the roles of the spins swap and the energy
+is the same as for `Na > Nb`.
+
+**Result:** an `ScfResult` (lib/hf/scf_loop) whose `alpha` and `beta` hold
+each spin's orbitals, density and Fock matrix; `density` is their total.
+
+Used with `import hf.uhf`.
+###
+
+import hf.rhf
+from hf.scf_loop import scf, scf_densities, scf_setup, scf_setup_with, scf_step, ScfResult, ScfSetup
+from hf.opts import scf_defaults, SCF_RHF, SCF_UHF, ScfOptions
+from hf.eri_store import es_index8, es_len8
+from hf.density import den_trace
+from hf.guess import GS_AVG, GS_CORE
+from hf.accelerate import ACCEL_CDIIS
+from hfref.water_631g import (
+    WATER631G_E_NUC, WATER631G_E_UHF, water631g_eri8_cart, WATER631G_RHF_NALPHA,
+    WATER631G_RHF_NBETA, water631g_s_unit, WATER631G_SPIN2_UHF_NALPHA,
+    WATER631G_SPIN2_UHF_NBETA, WATER631G_SPINM2_UHF_NALPHA, WATER631G_SPINM2_UHF_NBETA,
+    WATER631G_SPINM2_UHF_S2, water631g_t_unit, WATER631G_UHF_NALPHA, WATER631G_UHF_NBETA,
+    water631g_v_unit,
+)
+from hfref.pyscf_tests import pst_model_h, PST_MODEL_N, PST_MODEL_NELEC, PST_MODEL_U, PST_UHF_374
+from hfref.h_sto3g import (
+    h_sto3g_eri8_cart, h_sto3g_s_unit, h_sto3g_t_unit, H_STO3G_UHF_NALPHA, H_STO3G_UHF_NBETA,
+    h_sto3g_v_unit,
+)
+from hfref.oh_631g import (
+    OH_631G_E_NUC, OH_631G_E_UHF, oh_631g_eri8_cart, oh_631g_s_unit, oh_631g_t_unit,
+    OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA, oh_631g_v_unit,
+)
+from hfref.o2_sto3g import (
+    O2_STO3G_E_NUC, O2_STO3G_E_UHF_DEFAULT, O2_STO3G_E_UHF_GUESS_1E, O2_STO3G_E_UHF_STABLE,
+    o2_sto3g_eri8_cart, o2_sto3g_s_unit, o2_sto3g_t_unit, o2_sto3g_uhf_da, o2_sto3g_uhf_db,
+    O2_STO3G_UHF_NALPHA, O2_STO3G_UHF_NBETA, O2_STO3G_UHF_SELF_STEP, o2_sto3g_uhf_stable_da,
+    o2_sto3g_uhf_stable_db, O2_STO3G_UHF_STABLE_SELF_STEP, o2_sto3g_v_unit,
+)
+
+# O2 STO-3G takes more than the default iteration limit (max_iter) to converge
+UHF_T_O2_MAXIT = 300
+
+#| The UHF options with guess `g` and the rest the default.
+#~ test
+#@ a7aefa8e
+def uhf_t_options(g) -> ScfOptions {
+    return ScfOptions { method: SCF_UHF, guess: g, ..scf_defaults() }
+}
+
+#~ test
+def uhf_t_water(na, nb, g) -> ScfResult {
+    H = water631g_t_unit() + water631g_v_unit()
+    return scf(scf_setup(H, water631g_s_unit(), water631g_eri8_cart(), na, nb, WATER631G_E_NUC, uhf_t_options(g)))
+}
+
+#~ test
+def uhf_t_o2_setup(g, a) -> ScfSetup {
+    o = ScfOptions { accelerator: a, max_iter: UHF_T_O2_MAXIT, ..uhf_t_options(g) }
+    H = o2_sto3g_t_unit() + o2_sto3g_v_unit()
+    return scf_setup(H, o2_sto3g_s_unit(), o2_sto3g_eri8_cart(), O2_STO3G_UHF_NALPHA, O2_STO3G_UHF_NBETA, O2_STO3G_E_NUC, o)
+}
+
+test "closed-shell UHF on water 6-31G is RHF" {
+    uhf_r = uhf_t_water(WATER631G_UHF_NALPHA, WATER631G_UHF_NBETA, GS_AVG)
+    uhf_H = water631g_t_unit() + water631g_v_unit()
+    uhf_rr = scf(scf_setup(uhf_H, water631g_s_unit(), water631g_eri8_cart(), WATER631G_RHF_NALPHA, WATER631G_RHF_NBETA, WATER631G_E_NUC, scf_defaults()))
+    assert_near(uhf_r.converged, 1.0, 0.0)
+    assert_near(uhf_r.method, SCF_UHF, 0.0)
+    assert_near(uhf_rr.method, SCF_RHF, 0.0)
+    assert_lt(abs(uhf_r.energy - uhf_rr.energy), 1.0e-10)
+    assert_lt(abs(uhf_r.energy - WATER631G_E_UHF), 1.0e-10)
+    # each spin density is half the RHF density, and <S^2> is 0
+    uhf_worst = max(max(abs(uhf_r.alpha.density - 0.5 * uhf_rr.density)), max(abs(uhf_r.beta.density - 0.5 * uhf_rr.density)))
+    assert_lt(uhf_worst, 1.0e-9)
+    assert_lt(abs(uhf_r.s2), 1.0e-10)
+}
+
+test "triplet water: spin -2 and +2 give PySCF's energy, and the same one" {
+    uhf_m = uhf_t_water(WATER631G_SPINM2_UHF_NALPHA, WATER631G_SPINM2_UHF_NBETA, GS_AVG)
+    uhf_p = uhf_t_water(WATER631G_SPIN2_UHF_NALPHA, WATER631G_SPIN2_UHF_NBETA, GS_AVG)
+    assert_near(uhf_m.converged, 1.0, 0.0)
+    assert_near(uhf_p.converged, 1.0, 0.0)
+    assert_lt(abs(uhf_m.energy - (-75.726396909036637)), 1.0e-9)
+    assert_lt(abs(uhf_p.energy - (-75.726396909036637)), 1.0e-9)
+    assert_lt(abs(uhf_m.energy - uhf_p.energy), 1.0e-10)
+    assert_lt(abs(uhf_m.s2 - WATER631G_SPINM2_UHF_S2), 1.0e-6)
+    # swapping the spins swaps the densities: alpha [3, 5] of one is beta [3, 5] of the other
+    assert_lt(abs(uhf_m.alpha.density[3, 5] - uhf_p.beta.density[3, 5]), 1.0e-8)
+    # from the core guess the run lands on the same triplet, as PySCF's "1e"
+    # guess does with its default diis_start_cycle = 1 (Viv's default
+    # diis_start = 1)
+    uhf_c = uhf_t_water(WATER631G_SPINM2_UHF_NALPHA, WATER631G_SPINM2_UHF_NBETA, GS_CORE)
+    assert_near(uhf_c.converged, 1.0, 0.0)
+    assert_lt(abs(uhf_c.energy - uhf_m.energy), 1.0e-9)
+    # with the guess's Fock matrix in the DIIS history (diis_start 0) both
+    # programs land 0.082 Eh higher, on another triplet: PySCF 2.5.0, "1e"
+    # guess, diis_start_cycle 0, gives -75.64457741080525. That is a
+    # different SCF solution, not a failure to converge.
+    uhf_H = water631g_t_unit() + water631g_v_unit()
+    uhf_c = scf(scf_setup(uhf_H, water631g_s_unit(), water631g_eri8_cart(), WATER631G_SPINM2_UHF_NALPHA, WATER631G_SPINM2_UHF_NBETA, WATER631G_E_NUC, ScfOptions { diis_start: 0, ..uhf_t_options(GS_CORE) }))
+    assert_near(uhf_c.converged, 1.0, 0.0)
+    assert_lt(abs(uhf_c.energy - (-75.64457741080525)), 1.0e-9)
+}
+
+test "the hydrogen atom and the two-electron model at spin 2" {
+    uhf_H = h_sto3g_t_unit() + h_sto3g_v_unit()
+    uhf_r = scf(scf_setup(uhf_H, h_sto3g_s_unit(), h_sto3g_eri8_cart(), H_STO3G_UHF_NALPHA, H_STO3G_UHF_NBETA, 0.0, scf_defaults()))
+    assert_near(uhf_r.method, SCF_UHF, 0.0)
+    assert_lt(abs(uhf_r.energy - (-0.46658184955727555)), 1.0e-12)
+    assert_lt(abs(uhf_r.s2 - 0.75), 1.0e-12)
+    # test_uhf.py:374: h = diag(0, 1, 2), S = I, (ii|ii) = 0.2, two alpha
+    # electrons in orbitals 0 and 1: E = 0 + 1, and same-spin J and K cancel
+    uhf_H = pst_model_h()
+    uhf_S = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    uhf_G = zeros(es_len8(PST_MODEL_N))
+    for uhf_i to PST_MODEL_N {
+        uhf_G[es_index8(uhf_i, uhf_i, uhf_i, uhf_i)] = PST_MODEL_U
+    }
+    uhf_r = scf(scf_setup(uhf_H, uhf_S, uhf_G, PST_MODEL_NELEC, 0, 0.0, scf_defaults()))
+    assert_lt(abs(uhf_r.energy - 1.0), 1.0e-12)
+    assert_lt(abs(uhf_r.energy - PST_UHF_374), 1.0e-12)
+}
+
+test "OH 6-31G: PySCF's energy and spin contamination" {
+    uhf_H = oh_631g_t_unit() + oh_631g_v_unit()
+    uhf_s = scf_setup(uhf_H, oh_631g_s_unit(), oh_631g_eri8_cart(), OH_631G_UHF_NALPHA, OH_631G_UHF_NBETA, OH_631G_E_NUC, scf_defaults())
+    uhf_r = scf(uhf_s)
+    assert_near(uhf_r.converged, 1.0, 0.0)
+    assert_lt(abs(uhf_r.energy - (-75.36316991969719)), 1.0e-9)
+    assert_lt(abs(uhf_r.s2 - 0.753768), 1.0e-6)
+    assert_lt(abs(uhf_r.energy_check - uhf_r.energy), 1.0e-10)
+    # The beta hole sits in one of two degenerate pi orbitals, and which one
+    # is not fixed by anything but the path (PySCF's densities and these
+    # differ by 0.010 in Da and 0.16 in Db). The energy and <S^2> do not
+    # depend on it, and neither do the electron counts.
+    uhf_D = scf_densities(uhf_r)
+    assert_lt(abs(den_trace(uhf_D, 0, oh_631g_s_unit()) - 5.0), 1.0e-12)
+    assert_lt(abs(den_trace(uhf_D, 1, oh_631g_s_unit()) - 4.0), 1.0e-12)
+    # the alpha orbitals hold 5 electrons and the beta ones 4
+    assert_near(sum(uhf_r.alpha.mo_occ), 5, 0.0)
+    assert_near(sum(uhf_r.beta.mo_occ), 4, 0.0)
+    # the core guess lands on the ground state too, as PySCF's "1e" guess
+    # does with its default diis_start_cycle = 1; with the guess's Fock
+    # matrix in the DIIS history (diis_start 0) both land on the excited
+    # 2Sigma+ state, 0.155 Eh up (PySCF 2.5.0, "1e", diis_start_cycle 0:
+    # -75.20797654828289)
+    uhf_r = scf(scf_setup_with(uhf_s, uhf_t_options(GS_CORE)))
+    assert_lt(abs(uhf_r.energy - OH_631G_E_UHF), 1.0e-9)
+    uhf_r = scf(scf_setup_with(uhf_s, ScfOptions { diis_start: 0, ..uhf_t_options(GS_CORE) }))
+    assert_lt(abs(uhf_r.energy - (-75.20797654828289)), 1.0e-9)
+}
+
+test "O2 STO-3G lands on a labeled state, and both labeled densities are fixed points" {
+    uhf_s = uhf_t_o2_setup(GS_AVG, ACCEL_CDIIS)
+    uhf_r = scf(uhf_s)
+    assert_near(uhf_r.converged, 1.0, 0.0)
+    uhf_gap = min(abs(uhf_r.energy - O2_STO3G_E_UHF_DEFAULT), abs(uhf_r.energy - O2_STO3G_E_UHF_STABLE))
+    assert_lt(uhf_gap, 1.0e-9)
+    # PySCF's own step (get_fock, eig, get_occ, make_rdm1) from the stored
+    # densities moves them by the recorded _SELF_STEP amounts (max abs over
+    # both spins, below 1e-10)
+    uhf_f = scf_step(uhf_s, o2_sto3g_uhf_da(), o2_sto3g_uhf_db())
+    uhf_g = max(max(abs(uhf_f.alpha.density - o2_sto3g_uhf_da())), max(abs(uhf_f.beta.density - o2_sto3g_uhf_db())))
+    assert_lt(uhf_g, 1.0e-8)
+    assert_lt(abs(uhf_g - O2_STO3G_UHF_SELF_STEP), 1.0e-12)
+    assert_lt(abs(uhf_f.energy - O2_STO3G_E_UHF_DEFAULT), 1.0e-10)
+    uhf_f = scf_step(uhf_s, o2_sto3g_uhf_stable_da(), o2_sto3g_uhf_stable_db())
+    uhf_g = max(max(abs(uhf_f.alpha.density - o2_sto3g_uhf_stable_da())), max(abs(uhf_f.beta.density - o2_sto3g_uhf_stable_db())))
+    assert_lt(uhf_g, 1.0e-8)
+    assert_lt(abs(uhf_g - O2_STO3G_UHF_STABLE_SELF_STEP), 1.0e-12)
+    assert_lt(abs(uhf_f.energy - O2_STO3G_E_UHF_STABLE), 1.0e-10)
+}
+
+test "O2 STO-3G from the core guess lands where PySCF's 1e guess does" {
+    # a third SCF solution, 0.255 Eh above the default; R labels it
+    uhf_r = scf(uhf_t_o2_setup(GS_CORE, ACCEL_CDIIS))
+    assert_near(uhf_r.converged, 1.0, 0.0)
+    assert_lt(abs(uhf_r.energy - O2_STO3G_E_UHF_GUESS_1E), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

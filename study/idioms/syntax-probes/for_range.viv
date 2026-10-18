@@ -1,0 +1,112 @@
+###
+`for i from a to b by s`, and `reversed` (gap R7). `to` is the
+exclusive end, as in `for i to n`: the loop runs ceil((b - a) / s) times and
+the k-th pass has i = a + k * s.
+###
+
+def collect(lo, hi, step) -> Arr {
+    n = 0
+    for i from lo to hi by step {
+        n += 1
+    }
+    out = zeros(n)
+    k = 0
+    for i from lo to hi by step {
+        out[k] = i
+        k += 1
+    }
+    return out
+}
+
+for i from 2 to 6 {
+    print(i)
+}
+for i from 10 to 0 by -3 {
+    print(i)
+}
+for t to 4 reversed {
+    print(t)
+}
+for i from 1 to 10 by 4 reversed {
+    print(i)
+}
+show collect(0, 1, 0.25)
+
+test "from and by" {
+    v = collect(3, 11, 2)
+    assert_near(len(v), 4, 0)
+    assert_near(v[0], 3, 0)
+    assert_near(v[3], 9, 0)
+}
+
+test "a negative step counts down and stops before the end" {
+    v = collect(5, 0, -1)
+    assert_near(len(v), 5, 0)
+    assert_near(v[0], 5, 0)
+    assert_near(v[4], 1, 0)
+}
+
+test "an empty range runs no passes" {
+    assert_near(len(collect(4, 4, 1)), 0, 0)
+    assert_near(len(collect(4, 2, 1)), 0, 0)
+    assert_near(len(collect(0, 5, -1)), 0, 0)
+}
+
+test "reversed walks the same values, last first" {
+    up = zeros(4)
+    down = zeros(4)
+    k = 0
+    for i from 1 to 13 by 3 {
+        up[k] = i
+        k += 1
+    }
+    k = 0
+    for i from 1 to 13 by 3 reversed {
+        down[k] = i
+        k += 1
+    }
+    for j to 4 {
+        assert_near(down[j], up[3 - j], 0)
+    }
+    assert_near(down[0], 10, 0)
+}
+
+test "the bounds are fixed when the loop starts" {
+    n = 3
+    passes = 0
+    for i from 0 to n {
+        n = 100
+        passes += 1
+    }
+    assert_near(passes, 3, 0)
+}
+
+test "break and continue" {
+    s = 0
+    for i from 0 to 100 by 5 reversed {
+        if i > 50 {
+            continue
+        }
+        if i < 20 {
+            break
+        }
+        s += i
+    }
+    # 50 + 45 + ... + 20
+    assert_near(s, 245, 0)
+}
+
+test "Fisher-Yates with reversed" {
+    srand(3)
+    p = [0, 1, 2, 3, 4, 5]
+    for i from 1 to len(p) reversed {
+        j = floor(rand() * (i + 1))
+        tmp = p[i]
+        p[i] = p[j]
+        p[j] = tmp
+    }
+    assert_near(sum(p), 15, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

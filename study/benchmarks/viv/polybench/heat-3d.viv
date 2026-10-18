@@ -1,0 +1,50 @@
+#! timing
+# PolyBench/C 4.2.1 heat-3d: explicit time steps of the 3-D heat equation,
+# alternating between A and B.
+# Reference: upstream/polybench-c-4.2.1/stencils/heat-3d/heat-3d.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+TSTEPS = 20
+N = 10
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    A = zeros(N, N, N)
+    for i to N {
+        for j to N {
+            for k to N {
+                A[i, j, k] = (i + j + (N - k)) * 10 / N
+            }
+        }
+    }
+    return A, copy(A)
+}
+
+# One explicit step on the interior: dst = src + 0.125 times the second
+# difference along each axis. It reads only src, so it is one whole-array
+# statement over shifted slices.
+def heat_step(src, dst) {
+    c = src[1:N - 1, 1:N - 1, 1:N - 1]
+    dst[1:N - 1, 1:N - 1, 1:N - 1] = 0.125 * (src[2:N, 1:N - 1, 1:N - 1] - 2.0 * c + src[0:N - 2, 1:N - 1, 1:N - 1]) + 0.125 * (src[1:N - 1, 2:N, 1:N - 1] - 2.0 * c + src[1:N - 1, 0:N - 2, 1:N - 1]) + 0.125 * (src[1:N - 1, 1:N - 1, 2:N] - 2.0 * c + src[1:N - 1, 1:N - 1, 0:N - 2]) + c
+}
+
+def kernel(A, B) {
+    for t to TSTEPS {
+        heat_step(A, B)
+        heat_step(B, A)
+    }
+    return A
+}
+
+A, B = init()
+t0 = clock()
+A = kernel(A, B)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("A", A)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

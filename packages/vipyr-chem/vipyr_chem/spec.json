@@ -1,0 +1,736 @@
+{
+ "dist": "vipyr-chem",
+ "fields": [
+  {
+   "about": "Hartree-Fock for molecules in Gaussian basis sets.",
+   "dist": "vipyr-chem",
+   "extra": "chem",
+   "id": "scf",
+   "overview": "Hartree-Fock for molecules, with PySCF's names, shapes and units.\n- give a molecule, a Gaussian basis set and RHF or UHF\n- get back the energy, the orbitals and the density\nIt is a Viv port of PySCF's SCF, checked against PySCF 2.5.0 on every case of the port.",
+   "title": "Quantum chemistry"
+  },
+  {
+   "about": "Plane-wave density-functional theory of crystals.",
+   "dist": "vipyr-chem",
+   "extra": "chem",
+   "id": "dft",
+   "overview": "Plane-wave density-functional theory for crystals.\n- name the material, the plane-wave cutoff and the k-point mesh\n- get back the total energy, the band energies and the band gap\nChecked against an independent NumPy implementation and published band energies.",
+   "title": "Electronic structure of solids"
+  }
+ ],
+ "format": 1,
+ "functions": {
+  "dft.pw": {
+   "about": "dft/pwdft_it.intent",
+   "aliases": {
+    "kmesh": "nkmesh"
+   },
+   "cases_file": null,
+   "checked": [
+    {
+     "label": "program",
+     "text": "the dense numpy reference, dft/ref (a different algorithm as well as a different language), through each material's check file (dft/<material>_it_check.viv)"
+    },
+    {
+     "label": "cases",
+     "text": "the six decks, each at its own settings"
+    },
+    {
+     "label": "band_tol",
+     "text": "1e-5 eV, every band at every point of the path"
+    },
+    {
+     "label": "energy_tol",
+     "text": "1e-7 hartree, the total energy"
+    }
+   ],
+   "deck_param": "material",
+   "decks": [
+    "si",
+    "ge",
+    "c",
+    "gaas",
+    "al",
+    "cu"
+   ],
+   "description": null,
+   "dist": "vipyr-chem",
+   "docs_file": null,
+   "exact_hashes": {
+    "al": "d9cbcbb766a88ca922b4d498224b022d1a2b33905c45d56b856f5699299e3754",
+    "c": "22d3da58f2012825eca22c843d486658f5b3583c25664d7500f658b3365b61e0",
+    "cu": "d383babecea62e064739ad73900b84ce8161ea124c1b23d42c141f81a5be3787",
+    "gaas": "3bc88ad8303e4aa1546ba8d935ab8007ccf90badd3b11d4a1cfdb4d55294be32",
+    "ge": "431c685370270a050457b8d28eb08255fdbed82e539f1b27997da832e23afa66",
+    "si": "3a442db25d75d977b7e8559e37d7f94ac0e9dfd86355a6f02d46774205b1edf1"
+   },
+   "example": "import vipyr as vp\nr = vp.dft.pw(material=\"si\")          # the deck's ecut and k-mesh\nprint(r.etot, r.gap, r.evb.shape)\nassert r.check()",
+   "examples": [
+    {
+     "caption": null,
+     "code": "import vipyr as vp\nr = vp.dft.pw(material=\"si\")          # the deck's ecut and k-mesh\nprint(r.etot, r.gap, r.evb.shape)\nassert r.check()",
+     "output": "0.4800804469256543 0.4745244429815319 (61, 8)"
+    }
+   ],
+   "explore": "silicon-dense",
+   "extra": "chem",
+   "family": "dft",
+   "groups": {},
+   "hashes_file": "dft/pwdft.exact_hashes.json",
+   "kind": "program",
+   "manifest": "dft/pwdft.export.toml",
+   "manifest_sha256": "3dbe759f63497605701317bf2410693ce8eb54adfc730fbb765273ebd5a86972",
+   "name": "pw",
+   "notes": [],
+   "notes_md": null,
+   "params": [
+    {
+     "choices": [
+      "si",
+      "ge",
+      "c",
+      "gaas",
+      "al",
+      "cu"
+     ],
+     "default": "si",
+     "help": "the deck: a named set of every parameter's value, with the checks that hold at it",
+     "manifest_name": "material",
+     "name": "material",
+     "python_type": "str",
+     "range": "one of si, ge, c, gaas, al, cu",
+     "type": "deck",
+     "units": null
+    },
+    {
+     "default": {
+      "al": "10.0",
+      "c": "30.0",
+      "cu": "50.0",
+      "gaas": "14.0",
+      "ge": "14.0",
+      "si": "10.0"
+     },
+     "help": "plane-wave cutoff, hartree",
+     "manifest_name": "ECUT",
+     "min": 0.5,
+     "name": "ecut",
+     "python_type": "float",
+     "range": ">= 0.5",
+     "type": "Num",
+     "units": "hartree"
+    },
+    {
+     "alias_of": "nkmesh",
+     "default": {
+      "al": "4",
+      "c": "2",
+      "cu": "4",
+      "gaas": "2",
+      "ge": "2",
+      "si": "2"
+     },
+     "help": "the k-mesh is NKMESH^3, shifted (dft/kmesh.viv)",
+     "manifest_name": "NKMESH",
+     "max": 8,
+     "min": 1,
+     "name": "kmesh",
+     "python_type": "int",
+     "range": ">= 1, <= 8",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "default": {
+      "al": "6",
+      "c": "8",
+      "cu": "12",
+      "gaas": "8",
+      "ge": "8",
+      "si": "8"
+     },
+     "help": "bands computed at every k-point",
+     "manifest_name": "NBANDS",
+     "min": 1,
+     "name": "nbands",
+     "python_type": "int",
+     "range": ">= 1",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "default": {
+      "al": "0.01",
+      "c": "0.0",
+      "cu": "0.01",
+      "gaas": "0.0",
+      "ge": "0.0",
+      "si": "0.0"
+     },
+     "help": "Fermi-Dirac width, hartree; 0 for an insulator",
+     "manifest_name": "SMEAR",
+     "min": 0.0,
+     "name": "smear",
+     "python_type": "float",
+     "range": ">= 0",
+     "type": "Num",
+     "units": "hartree"
+    },
+    {
+     "default": {
+      "al": "0.6",
+      "c": "0.6",
+      "cu": "0.6",
+      "gaas": "0.6",
+      "ge": "0.6",
+      "si": "0.6"
+     },
+     "help": "the damping in the Anderson mixer (dft/pw_common.viv)",
+     "manifest_name": "MIX",
+     "max": 1.0,
+     "min": 0.0,
+     "name": "mix",
+     "python_type": "float",
+     "range": ">= 0, <= 1",
+     "type": "Num",
+     "units": null
+    },
+    {
+     "default": {
+      "al": "1.0e-9",
+      "c": "1.0e-9",
+      "cu": "1.0e-9",
+      "gaas": "1.0e-9",
+      "ge": "1.0e-9",
+      "si": "1.0e-9"
+     },
+     "help": "the SCF stops when the density changes by less than this",
+     "manifest_name": "SCF_TOL",
+     "min": 0.0,
+     "name": "scf_tol",
+     "python_type": "float",
+     "range": ">= 0",
+     "type": "Num",
+     "units": null
+    },
+    {
+     "default": {
+      "al": "80",
+      "c": "80",
+      "cu": "80",
+      "gaas": "80",
+      "ge": "80",
+      "si": "80"
+     },
+     "help": "at most this many SCF iterations",
+     "manifest_name": "MAXIT",
+     "min": 1,
+     "name": "maxit",
+     "python_type": "int",
+     "range": ">= 1",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "default": {
+      "al": "7.65",
+      "c": "6.74",
+      "cu": "6.82",
+      "gaas": "10.68",
+      "ge": "10.68",
+      "si": "10.26"
+     },
+     "help": "lattice constant, bohr",
+     "manifest_name": "ALAT",
+     "min": 0.0,
+     "name": "alat",
+     "python_type": "float",
+     "range": ">= 0",
+     "type": "Num",
+     "units": "bohr"
+    },
+    {
+     "default": {
+      "al": "30",
+      "c": "30",
+      "cu": "30",
+      "gaas": "30",
+      "ge": "30",
+      "si": "30"
+     },
+     "help": "points per path segment; the figure has 2 NSEG + 1",
+     "manifest_name": "NSEG",
+     "min": 1,
+     "name": "nseg",
+     "python_type": "int",
+     "range": ">= 1",
+     "type": "Int",
+     "units": null
+    }
+   ],
+   "qualname": "dft.pw",
+   "raises": [
+    {
+     "name": "vipyr.ParameterError",
+     "text": "a ValueError: an argument outside its range, choices, rank or shape, or one of a group given without the rest; its .param names the argument"
+    },
+    {
+     "name": "TypeError",
+     "text": "an argument of the wrong type, or an unknown keyword"
+    },
+    {
+     "name": "vipyr.VivBuildError",
+     "text": "an ImportError: no C compiler, or the program's C does not build"
+    },
+    {
+     "name": "RuntimeError",
+     "text": "the program stops with its own message (a combination it rejects, or no convergence where the program treats that as an error)"
+    }
+   ],
+   "reference": {
+    "band_tol": "1e-5 eV, every band at every point of the path",
+    "cases": "the six decks, each at its own settings",
+    "energy_tol": "1e-7 hartree, the total energy",
+    "program": "the dense numpy reference, dft/ref (a different algorithm as well as a different language), through each material's check file (dft/<material>_it_check.viv)"
+   },
+   "references": [],
+   "result": "PWResult",
+   "results": [
+    {
+     "doc": "total electronic energy per cell, hartree, without the ion-ion (Ewald) term: a constant for fixed atoms, so it moves no band, but the number is not the full total energy and cannot be compared between structures",
+     "key": "etot",
+     "name": "etot",
+     "python_type": "float",
+     "type": "Num",
+     "units": "hartree"
+    },
+    {
+     "doc": "Fermi level from the smearing, hartree; 0 when SMEAR is 0",
+     "key": "efermi",
+     "name": "efermi",
+     "python_type": "float",
+     "type": "Num",
+     "units": "hartree"
+    },
+    {
+     "doc": "SCF iterations",
+     "key": "iter",
+     "name": "iter",
+     "python_type": "int",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "doc": "the last density change",
+     "key": "drho",
+     "name": "drho",
+     "python_type": "float",
+     "type": "Num",
+     "units": null
+    },
+    {
+     "doc": "band energies along the path, eV, from the valence-band top (an insulator) or the Fermi level (a metal): path points x bands",
+     "key": "evb",
+     "name": "evb",
+     "python_type": "ndarray[float64]",
+     "type": "Arr",
+     "units": "eV"
+    },
+    {
+     "doc": "each path point's position along the path, for plotting",
+     "key": "pathx",
+     "name": "pathx",
+     "python_type": "ndarray[float64]",
+     "type": "Arr",
+     "units": null
+    },
+    {
+     "doc": "smallest gap along the band path, eV (from the check file; insulators only)",
+     "key": "gap",
+     "name": "gap",
+     "python_type": "float",
+     "type": "Num",
+     "units": "eV"
+    }
+   ],
+   "see_also": [],
+   "signature": "vp.dft.pw(material=\"si\", *, ecut=None, kmesh=None, nbands=None, smear=None, mix=None, scf_tol=None, maxit=None, alat=None, nseg=None)",
+   "sources": [
+    "dft/kmesh.viv",
+    "dft/pw_common.viv",
+    "dft/pwdft_it.viv"
+   ],
+   "summary": "The iterative engine: the same Kohn-Sham calculation as dft/pwdft.viv, without ever forming the Hamiltonian as a matrix."
+  },
+  "scf.run": {
+   "about": "study/ports/pyscf/vivscf.viv",
+   "aliases": {},
+   "cases_file": "study/ports/pyscf/vivscf.cases.json",
+   "checked": [
+    {
+     "label": "program",
+     "text": "PySCF 2.5.0, run live by study/ports/pyscf/test_vivscf_vs_pyscf.py (VIVSCF_BACKEND=export)"
+    },
+    {
+     "label": "cases",
+     "text": "study/ports/pyscf/port.toml, the 11 cases"
+    },
+    {
+     "label": "energy_tol",
+     "text": "1e-10 hartree, |E - E_PySCF|"
+    },
+    {
+     "label": "mo_energy_tol",
+     "text": "1e-8 hartree, each orbital energy"
+    }
+   ],
+   "deck_param": null,
+   "decks": [],
+   "description": "The molecule is data: atomic numbers, positions in angstrom, a basis set,\nthe charge and the spin. The run builds the one- and two-electron integrals,\nstarts from the core-Hamiltonian guess, and iterates the self-consistent\nfield with DIIS until both the energy change and the orbital gradient are\nbelow their tolerances. The defaults are water in STO-3G.\n\nThe results use PySCF's conventions: `e_tot` is the total energy in hartree,\nincluding the nuclear repulsion `e_nuc`; `mo_energy`, `mo_coeff` and `dm`\nhave the shapes `pyscf.scf.RHF` and `UHF` give them.\n",
+   "dist": "vipyr-chem",
+   "docs_file": "study/ports/pyscf/vivscf.docs.toml",
+   "exact_hashes": {
+    "benzene_ccpvdz": "f4e154950a73338d4c6e383ab91068209fd1ceeaf27be8bb2dfceb2c13538f86",
+    "water1_631gs": "be076358ee64f35dd4e2574cae456799317e8234357949968ebc0aeb91623902",
+    "water2_631gs": "87ff9f9981810dafc10e66786626becf838cfc8fdd42f5303ce9dde2362d680c",
+    "water4_631gs": "c264bbed6ea9352dcabc458d88477cdf34440f1ead06f620b4dea3b78eef8efb",
+    "water8_631gs": "197b7e678c4b84f5d5bf245de60b6eebbf038e187b1f7beb328f0d4a5aef0518",
+    "water_631g": "a716c802074f6b45e9118cb2b8412dde376a053e0bcdcade70adcc4051ce5b1f",
+    "water_ccpvdz": "742d42d9063b14abf5649ce516fd4ba24d9e4ff8daee3951092a92f1015e94e2",
+    "water_ccpvtz": "47081b87e3a384380054db87008ca8b82f95d7a255429633515f7bbb9d79d11a",
+    "water_sto3g": "8d89f6078d982bf991c8a708c7baa68ccca5e12723fbc66b1d5dd7a8e364d546",
+    "watercat_631g_uhf": "b479066544fa0331af646bf4a5d935315721c41f91f43b6d38502a82e362cb62",
+    "watercat_ccpvdz_uhf": "ca040f62d0b879827f91db0f71d966c72e4e808d72ea6a563af1ecdb0b138aff"
+   },
+   "example": "import vipyr as vp\n# water in STO-3G; atoms= (atomic numbers) and coords= (angstrom) for another molecule\nr = vp.scf.run(basis=\"sto-3g\", method=\"rhf\")\nprint(r.e_tot, r.converged, r.mo_energy[:3])\nassert r.check()",
+   "examples": [
+    {
+     "caption": null,
+     "code": "import vipyr as vp\n# water in STO-3G; atoms= (atomic numbers) and coords= (angstrom) for another molecule\nr = vp.scf.run(basis=\"sto-3g\", method=\"rhf\")\nprint(r.e_tot, r.converged, r.mo_energy[:3])\nassert r.check()",
+     "output": "-74.96306312972935 True [-20.24196697  -1.26816105  -0.61738544]"
+    },
+    {
+     "caption": "An open-shell molecule: the OH radical (one unpaired electron) by UHF.",
+     "code": "import numpy as np\nimport vipyr as vp\nr = vp.scf.run(atoms=[8, 1], coords=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]),\n               basis=\"sto-3g\", method=\"uhf\", spin=1)\nprint(round(r.e_tot, 8), r.converged, r.mo_energy.shape)",
+     "output": "-74.36266919 True (2, 6)"
+    }
+   ],
+   "explore": "pyscf-port-water",
+   "extra": "chem",
+   "family": "scf",
+   "groups": {
+    "geometry": [
+     "atoms",
+     "coords"
+    ]
+   },
+   "hashes_file": "study/ports/pyscf/vivscf.exact_hashes.json",
+   "kind": "program",
+   "manifest": "study/ports/pyscf/vivscf.export.toml",
+   "manifest_sha256": "67eef01d24e328f3b9b26b0681e2862a35bdd9616b9404ac5a4380134ebdcd44",
+   "name": "run",
+   "notes": [
+    "atoms, coords are given together or not at all.",
+    "coords has shape (len(atoms), 3)."
+   ],
+   "notes_md": "Hartree-Fock writes the wavefunction as one Slater determinant and makes the\nenergy stationary over the orbitals. In a basis of $n$ atomic orbitals with\noverlap matrix $S$, restricted Hartree-Fock solves the Roothaan-Hall\nequations\n\n$$F(D)\\,C = S\\,C\\,\\varepsilon, \\qquad D = 2\\,C_{\\mathrm{occ}} C_{\\mathrm{occ}}^{\\mathsf T},$$\n\nwhere the Fock matrix $F = h + J(D) - \\tfrac12 K(D)$ depends on the density\n$D$ it determines, so the equations are solved by iteration. Unrestricted\nHartree-Fock keeps one density per spin (the Pople-Nesbet equations).\n\nEach iteration builds $J$ and $K$ from the electron-repulsion integrals\n(McMurchie-Davidson, lib/hf), in core or direct as `jk` says, then\ndiagonalizes $F$ in an orthonormal basis. Canonical orthogonalization drops\noverlap eigenvalues at or below $10^{-8}$, so `nmo` can be smaller than\n`nao` for a near-dependent basis. Pulay's DIIS extrapolates the Fock matrix\nfrom the last `diis_size` iterations, minimizing the norm of the commutator\n$FDS - SDF$.\n\nThe run has converged when the energy changes by less than `e_tol` and the\nlargest element of $FDS - SDF$ is below `grad_tol`. With $N$ basis\nfunctions the two-electron integrals take $O(N^4)$ time per build (in core,\n$O(N^4)$ memory as well).\n\nLimits: atoms H to Ar (the basis tables) and the five basis sets listed;\nno point-group symmetry and no density fitting. lib/hf has a level shift\nand damping, but this function does not expose them.\n",
+   "params": [
+    {
+     "default": "[8, 1, 1]",
+     "help": "atomic numbers, one per atom",
+     "manifest_name": "atoms",
+     "max": 18,
+     "min": 1,
+     "name": "atoms",
+     "python_type": "ndarray[int64]",
+     "range": "each element >= 1, <= 18",
+     "range_doc": "1 (H) to 18 (Ar), the elements the basis tables cover; given with coords",
+     "type": "[Int]",
+     "units": null
+    },
+    {
+     "default": "[[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]]",
+     "default_shape": [
+      3,
+      3
+     ],
+     "help": "positions [natm, 3], angstrom",
+     "manifest_name": "coords",
+     "name": "coords",
+     "python_type": "ndarray[float64]",
+     "range": "shape (len(atoms), 3)",
+     "range_doc": "one row of three per atom; given with atoms",
+     "shape": [
+      "atoms",
+      3
+     ],
+     "type": "Arr",
+     "units": "angstrom"
+    },
+    {
+     "choices": [
+      "sto-3g",
+      "6-31g",
+      "6-31g*",
+      "cc-pvdz",
+      "cc-pvtz"
+     ],
+     "default": "\"sto-3g\"",
+     "help": "the basis set",
+     "manifest_name": "basis",
+     "name": "basis",
+     "normalize": "pyscf_basis",
+     "note": "spelled as PySCF reads a basis name: any case, `-`, `_` and spaces ignored, `*` read as `s`",
+     "python_type": "str",
+     "range": "one of sto-3g, 6-31g, 6-31g*, cc-pvdz, cc-pvtz",
+     "type": "BasisSet",
+     "units": null
+    },
+    {
+     "default": "0",
+     "help": "net charge, in units of e",
+     "manifest_name": "charge",
+     "max": 18,
+     "min": -18,
+     "name": "charge",
+     "python_type": "int",
+     "range": ">= -18, <= 18",
+     "type": "Int",
+     "units": "units of e"
+    },
+    {
+     "default": "0",
+     "help": "alpha minus beta electrons (2S)",
+     "manifest_name": "spin",
+     "min": 0,
+     "name": "spin",
+     "python_type": "int",
+     "range": ">= 0",
+     "range_doc": "2S, the number of unpaired electrons: 0 for RHF; with UHF its parity must match the electron count, or the program stops with a message",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "choices": [
+      "rhf",
+      "uhf"
+     ],
+     "default": "\"rhf\"",
+     "help": "RHF or UHF",
+     "manifest_name": "method",
+     "name": "method",
+     "normalize": "lower",
+     "note": "case does not matter",
+     "python_type": "str",
+     "range": "one of rhf, uhf",
+     "type": "Method",
+     "units": null
+    },
+    {
+     "choices": [
+      "auto",
+      "incore",
+      "direct"
+     ],
+     "default": "\"auto\"",
+     "help": "how J and K are built",
+     "manifest_name": "jk",
+     "name": "jk",
+     "normalize": "lower",
+     "note": "case does not matter",
+     "python_type": "str",
+     "range": "one of auto, incore, direct",
+     "type": "JkMode",
+     "units": null
+    },
+    {
+     "default": "1.0e-12",
+     "help": "the SCF converges once the energy changes by less than this (hartree)",
+     "manifest_name": "e_tol",
+     "min": 0.0,
+     "name": "e_tol",
+     "python_type": "float",
+     "range": ">= 0",
+     "range_doc": "0 asks for an exact repeat of the energy, which the run may not reach before max_iter",
+     "type": "Num",
+     "units": "hartree"
+    },
+    {
+     "default": "1.0e-9",
+     "help": "and the largest element of the orbital gradient (the commutator of the Fock and density matrices) is below this",
+     "manifest_name": "grad_tol",
+     "min": 0.0,
+     "name": "grad_tol",
+     "python_type": "float",
+     "range": ">= 0",
+     "type": "Num",
+     "units": null
+    },
+    {
+     "default": "100",
+     "help": "the SCF iteration limit",
+     "manifest_name": "max_iter",
+     "min": 1,
+     "name": "max_iter",
+     "python_type": "int",
+     "range": ">= 1",
+     "range_doc": "a run that reaches it returns converged = False, and the program's test that the run converged fails in check()",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "default": "8",
+     "help": "how many Fock matrices the DIIS extrapolation mixes",
+     "manifest_name": "diis_size",
+     "min": 1,
+     "name": "diis_size",
+     "python_type": "int",
+     "range": ">= 1",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "default": "1",
+     "help": "iterations DIIS leaves out (1: the guess's, as PySCF)",
+     "manifest_name": "diis_start",
+     "min": 0,
+     "name": "diis_start",
+     "python_type": "int",
+     "range": ">= 0",
+     "type": "Int",
+     "units": null
+    }
+   ],
+   "qualname": "scf.run",
+   "raises": [
+    {
+     "name": "vipyr.ParameterError",
+     "text": "a ValueError: an argument outside its range, choices, rank or shape, or one of a group given without the rest; its .param names the argument"
+    },
+    {
+     "name": "TypeError",
+     "text": "an argument of the wrong type, or an unknown keyword"
+    },
+    {
+     "name": "vipyr.VivBuildError",
+     "text": "an ImportError: no C compiler, or the program's C does not build"
+    },
+    {
+     "name": "RuntimeError",
+     "text": "the program stops with its own message (a combination it rejects, or no convergence where the program treats that as an error)"
+    }
+   ],
+   "reference": {
+    "cases": "study/ports/pyscf/port.toml, the 11 cases",
+    "energy_tol": "1e-10 hartree, |E - E_PySCF|",
+    "mo_energy_tol": "1e-8 hartree, each orbital energy",
+    "program": "PySCF 2.5.0, run live by study/ports/pyscf/test_vivscf_vs_pyscf.py (VIVSCF_BACKEND=export)"
+   },
+   "references": [
+    {
+     "doi": "10.1002/wcms.1340",
+     "text": "Q. Sun et al., PySCF: the Python-based simulations of chemistry framework, WIREs Computational Molecular Science 8, e1340 (2018). The upstream code this program is checked against."
+    },
+    {
+     "doi": "10.1103/RevModPhys.23.69",
+     "text": "C. C. J. Roothaan, New developments in molecular orbital theory, Reviews of Modern Physics 23, 69 (1951)."
+    },
+    {
+     "doi": "10.1063/1.1740120",
+     "text": "J. A. Pople and R. K. Nesbet, Self-consistent orbitals for radicals, Journal of Chemical Physics 22, 571 (1954)."
+    },
+    {
+     "doi": "10.1016/0009-2614(80)80396-4",
+     "text": "P. Pulay, Convergence acceleration of iterative sequences. The case of SCF iteration, Chemical Physics Letters 73, 393 (1980)."
+    },
+    {
+     "doi": "10.1016/0021-9991(78)90092-X",
+     "text": "L. E. McMurchie and E. R. Davidson, One- and two-electron integrals over Cartesian Gaussian functions, Journal of Computational Physics 26, 218 (1978)."
+    }
+   ],
+   "result": "SCFResult",
+   "results": [
+    {
+     "doc": "total energy, hartree",
+     "key": "e_tot",
+     "name": "e_tot",
+     "python_type": "float",
+     "type": "Num",
+     "units": "hartree"
+    },
+    {
+     "doc": "nuclear repulsion, hartree",
+     "key": "e_nuc",
+     "name": "e_nuc",
+     "python_type": "float",
+     "type": "Num",
+     "units": "hartree"
+    },
+    {
+     "doc": "whether both convergence tests passed",
+     "key": "converged",
+     "name": "converged",
+     "python_type": "bool",
+     "type": "Bool",
+     "units": null
+    },
+    {
+     "doc": "SCF iterations run",
+     "key": "iterations",
+     "name": "iterations",
+     "python_type": "int",
+     "type": "Int",
+     "units": null
+    },
+    {
+     "doc": "orbital energies, hartree: [n] RHF, [2, n] UHF (rank 1 when method is rhf, rank 2 when method is uhf)",
+     "key": "mo_energy",
+     "name": "mo_energy",
+     "python_type": "ndarray[float64]",
+     "rank_by": {
+      "by": "method",
+      "rhf": 1,
+      "uhf": 2
+     },
+     "type": "Arr",
+     "units": "hartree"
+    },
+    {
+     "doc": "orbital coefficients, AO by MO: [n, n] RHF, [2, n, n] UHF (rank 2 when method is rhf, rank 3 when method is uhf)",
+     "key": "mo_coeff",
+     "name": "mo_coeff",
+     "python_type": "ndarray[float64]",
+     "rank_by": {
+      "by": "method",
+      "rhf": 2,
+      "uhf": 3
+     },
+     "type": "Arr",
+     "units": null
+    },
+    {
+     "doc": "the AO density: total for RHF, [2, n, n] alpha and beta for UHF (rank 2 when method is rhf, rank 3 when method is uhf)",
+     "key": "dm",
+     "name": "dm",
+     "python_type": "ndarray[float64]",
+     "rank_by": {
+      "by": "method",
+      "rhf": 2,
+      "uhf": 3
+     },
+     "type": "Arr",
+     "units": null
+    }
+   ],
+   "see_also": [
+    "dft.pw",
+    "nuclear.skyrme_hf"
+   ],
+   "signature": "vp.scf.run(*, atoms=[8, 1, 1], coords=..., basis=\"sto-3g\", charge=0, spin=0, method=\"rhf\", jk=\"auto\", e_tol=1.0e-12, grad_tol=1.0e-9, max_iter=100, diis_size=8, diis_start=1)",
+   "sources": [
+    "study/ports/pyscf/vivscf.viv"
+   ],
+   "summary": "Restricted or unrestricted Hartree-Fock for a molecule in a Gaussian basis set, with PySCF's names, shapes and units."
+  }
+ }
+}

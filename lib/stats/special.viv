@@ -1,0 +1,1058 @@
+###
+post: The special functions under lib/stats's distributions
+agent: claude
+
+Each function takes and returns one number. The methods, and where each is
+held to mpmath at 50 digits, are in lib/stats/accuracy.py (the grid) and
+lib/stats/accuracy.json (the worst errors found, beside SciPy's and R's).
+
+- `log1p(x)`, `expm1(x)`: log(1 + x) and exp(x) - 1 by Kahan's
+  corrections, `log1pmx(t)`: log(1 + t) - t, by the series in
+  u = t / (2 + t) for |t| < 1/2.
+- `lgamma(x)`: log |Gamma(x)|. Taylor series about 1 and 2 with the
+  coefficients zeta(k) - 1 (lib/stats/tables.viv), the recurrence down to
+  [3/2, 5/2) below 10, Stirling's series from 10, reflection below 0.
+- `digamma(x)`: psi(x). The Taylor series about its positive zero within
+  1/4 of it, the series about 1 and 2, the recurrence, the asymptotic
+  series from 10, reflection below 0.
+- `stirlerr(x)`: log Gamma(x + 1) - (x + 1/2) log x + x - log sqrt(2 pi),
+  Stirling's series from 10, and below it the recurrence
+  stirlerr(x) = stirlerr(x + 1) + sum_k u^2k / (2k + 1), u = 1 / (2x + 1).
+- `bd0(x, m)`: x log(x / m) + m - x, Loader's deviance term.
+- `dpois_raw(k, m)`: m^k e^-m / Gamma(k + 1) for real k, Loader's
+  saddle-point form exp(-stirlerr(k) - bd0(k, m)) / sqrt(2 pi k).
+- `dbinom_raw(k, n, p, q)`: the binomial term for real k and n, Loader's
+  form (R's dbinom_raw).
+- `erfc(x)`, `erfcx(x)` = exp(x^2) erfc(x): Cody's rational function on
+  [1/2, 4] (W. J. Cody, Math. Comp. 23 (1969), as in netlib's specfun
+  CALERF), the continued fraction above 4, and exp(-x^2) split so that the
+  square is exact. `erf` below 1/2 is its Taylor series (`stats_erf`).
+- `ndtr(x)`, `ndtri(p)`: the standard normal distribution function and its
+  inverse (Acklam's approximation refined by Halley steps on ndtr).
+- `erfinv(y)`, `erfcinv(q)`: inverses by Halley steps on erf or erfc.
+- `gammainc(a, x)`, `gammaincc(a, x)`: the regularized incomplete gamma
+  functions P and Q. The series for P below x = a + 1, the continued
+  fraction for Q above it, and for a < 1, x <= 1.1 both from one
+  alternating series (P = c (1 - a s), Q = -expm1(log c) + c a s,
+  c = x^a / Gamma(1 + a)).
+  The factor x^a e^-x / Gamma(a) is a dpois_raw.
+- `gammaincinv(a, p)`, `gammainccinv(a, q)`: their inverses in x, from
+  Wilson-Hilferty's or the small-x start, by safeguarded Halley steps on the
+  smaller tail.
+- `betainc(a, b, x)`, `betaincc(a, b, x)`: the regularized incomplete beta
+  function and its complement by the continued fraction of DLMF 8.17.22
+  (modified Lentz, Thompson and Barnett 1986) on the side of the mean where
+  it converges, with the factor x^a (1 - x)^b / B(a, b) in Stirling form.
+- `betaincinv(a, b, p)`, `betainccinv(a, b, q)`: inverses in x, from the
+  starting value of algorithm AS 109 (Cran, Martin and Thomas 1977), by
+  safeguarded Newton steps.
+- `lbeta(a, b)`: log B(a, b).
+
+Used with `from stats.special import ...`.
+###
+
+from stats.tables import ZETA_M1, PSI_ROOT_HI, PSI_ROOT_LO, PSI_ROOT_TAYLOR, EULER_GAMMA, LN_SQRT_2PI, SQRT_PI, SQRT_2PI, SQRT_2
+
+EPS = 2.220446049250313e-16
+TINY = 1.0e-300
+# iterations a series or continued fraction may take before it stops
+MAX_TERMS = 1000000
+# a root iteration's steps
+MAX_STEPS = 100
+# where the series of log1pmx is used
+LOG1PMX_SERIES = 0.5
+# Stirling's series from here; below, the recurrences
+STIRLING_MIN = 10.0
+# B_2k / (2k (2k - 1)), k = 1 to 10: Stirling's series of log Gamma
+STIRLING_COEF = [0.08333333333333333, -0.002777777777777778, 0.0007936507936507937, -0.0005952380952380953, 0.0008417508417508417, -0.0019175269175269176, 0.00641025641025641, -0.029550653594771242, 0.17964437236883057, -1.3924322169059011]
+# B_2k / (2k), k = 1 to 8: the asymptotic series of psi
+PSI_ASYM_COEF = [0.08333333333333333, -0.008333333333333333, 0.003968253968253968, -0.004166666666666667, 0.007575757575757576, -0.021092796092796094, 0.08333333333333333, -0.4432598039215686]
+# the Taylor series of psi about its zero is used within this distance
+PSI_ROOT_RADIUS = 0.25
+# exp(-x^2) splits x at a multiple of 2^-20, whose square is exact below 2^6
+SPLIT_SCALE = 1048576.0
+SPLIT_MAX = 64.0
+# erfc: the builtin erf below, Cody's rational function to, the continued fraction above
+ERF_DIRECT = 0.5
+CODY_MAX = 4.0
+# terms of the continued fraction above CODY_MAX (11 reach full precision at x = 4)
+ERFC_CF_TERMS = 40.0
+CODY_P = [0.564188496988670089, 8.88314979438837594, 66.1191906371416295, 298.635138197400131, 881.952221241769090, 1712.04761263407058, 2051.07837782607147, 1230.33935479799725, 2.15311535474403846e-8]
+CODY_Q = [15.7449261107098347, 117.693950891312499, 537.181101862009858, 1621.38957456669019, 3290.79923573345963, 4362.61909014324716, 3439.36767414372164, 1230.33935480374942]
+# Acklam's rational approximation of the normal quantile (relative error 1.15e-9)
+ACKLAM_A = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.3577518672690, -30.66479806614716, 2.506628277459239]
+ACKLAM_B = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572]
+ACKLAM_C = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783]
+ACKLAM_D = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416]
+ACKLAM_LOW = 0.02425
+NDTRI_STEPS = 3
+# the incomplete gamma function's small-a form is used for a < 1, x <= this
+GAMMA_SMALL_X = 1.1
+# Wilson-Hilferty's start is used from this a
+WH_MIN_A = 1.0
+NAN = inf - inf
+
+# ------------------------------------------------------------ elementary
+
+#| log(1 + x), accurate for small x (Kahan: log(u) x / (u - 1), u = 1 + x).
+def log1p(x) {
+    if x == inf {
+        return inf
+    }
+    u = 1.0 + x
+    if u == 1.0 {
+        return x
+    }
+    return log(u) * x / (u - 1.0)
+}
+
+#| exp(x) - 1, accurate for small x (Kahan: (u - 1) x / log(u), u = e^x).
+def expm1(x) {
+    u = exp(x)
+    if u == 1.0 {
+        return x
+    }
+    um1 = u - 1.0
+    if um1 == -1.0 {
+        return -1.0
+    }
+    if u == inf {
+        return inf
+    }
+    return um1 * x / log(u)
+}
+
+#| log(1 + t) - t. For |t| < 1/2 the series -t u + 2 sum u^(2k+1) / (2k+1)
+#| with u = t / (2 + t), whose terms do not cancel.
+def log1pmx(t) {
+    if abs(t) >= LOG1PMX_SERIES {
+        return log1p(t) - t
+    }
+    u = t / (2.0 + t)
+    u2 = u * u
+    term = u * u2
+    s = 0.0
+    k = 3.0
+    while abs(term) > EPS * EPS {
+        s += term / k
+        term *= u2
+        k += 2.0
+    }
+    return 2.0 * s - t * u
+}
+
+#| exp(-x^2 / 2) with x split at a multiple of 2^-20, so that the square of
+#| the high part is exact.
+def exp_mhalfsq(x) {
+    ax = abs(x)
+    if ax >= SPLIT_MAX {
+        return exp(-0.5 * ax * ax)
+    }
+    hi = floor(ax * SPLIT_SCALE) / SPLIT_SCALE
+    lo = ax - hi
+    return exp(-0.5 * hi * hi) * exp(-0.5 * lo * (ax + hi))
+}
+
+# ------------------------------------------------------------ gamma family
+
+# sum_{k>=2} (-1)^k (zeta(k) - 1) z^k / k, |z| <= 1/2, summed from the top
+def zeta_series(z) {
+    s = 0.0
+    for k to len(ZETA_M1) reversed {
+        s = z * (s + ZETA_M1[k] / (k + 2.0) * (1.0 if k % 2.0 == 0.0 else -1.0))
+    }
+    return z * s
+}
+
+# log Gamma(1 + z) for |z| <= 1/2: -gamma z - log1pmx(z) + zeta_series(z)
+def lgamma1p_small(z) {
+    return -EULER_GAMMA * z - log1pmx(z) + zeta_series(z)
+}
+
+# log Gamma(2 + z) for |z| <= 1/2: (1 - gamma) z + zeta_series(z)
+def lgamma2p_small(z) {
+    return (1.0 - EULER_GAMMA) * z + zeta_series(z)
+}
+
+# Stirling's correction series sum B_2k / (2k (2k - 1) x^(2k - 1)), x >= 10
+def stirling_series(x) {
+    w = 1.0 / (x * x)
+    s = 0.0
+    for k to len(STIRLING_COEF) reversed {
+        s = s * w + STIRLING_COEF[k]
+    }
+    return s / x
+}
+
+#| log |Gamma(x)|.
+def lgamma(x) {
+    if x != x {
+        return x
+    }
+    if x == inf {
+        return inf
+    }
+    if x <= 0.0 {
+        if x == floor(x) {
+            return inf
+        }
+        return log(pi / abs(sin(pi * x))) - lgamma(1.0 - x)
+    }
+    if x < 0.5 {
+        return lgamma1p_small(x) - log(x)
+    }
+    if x < 1.5 {
+        return lgamma1p_small(x - 1.0)
+    }
+    if x < 2.5 {
+        return lgamma2p_small(x - 2.0)
+    }
+    if x < STIRLING_MIN {
+        y = x
+        p = 1.0
+        while y >= 2.5 {
+            y -= 1.0
+            p *= y
+        }
+        return log(p) + lgamma2p_small(y - 2.0)
+    }
+    return (x - 0.5) * log(x) - x + LN_SQRT_2PI + stirling_series(x)
+}
+
+#| log Gamma(1 + x), accurate near x = 0.
+def lgamma1p(x) {
+    if abs(x) <= 0.5 {
+        return lgamma1p_small(x)
+    }
+    return lgamma(1.0 + x)
+}
+
+#| The digamma function psi(x) = d/dx log Gamma(x).
+def digamma(x) {
+    if x != x {
+        return x
+    }
+    if x == inf {
+        return inf
+    }
+    if x <= 0.0 {
+        if x == floor(x) {
+            return NAN
+        }
+        return digamma(1.0 - x) - pi / tan(pi * x)
+    }
+    if x < 0.5 {
+        return digamma(x + 1.0) - 1.0 / x
+    }
+    if abs(x - PSI_ROOT_HI) < PSI_ROOT_RADIUS {
+        d = (x - PSI_ROOT_HI) - PSI_ROOT_LO
+        s = 0.0
+        for k to len(PSI_ROOT_TAYLOR) reversed {
+            s = s * d + PSI_ROOT_TAYLOR[k]
+        }
+        return s * d
+    }
+    if x < 1.5 {
+        z = x - 1.0
+        return -EULER_GAMMA + z / (1.0 + z) + psi_zeta_series(z)
+    }
+    if x < 2.5 {
+        return 1.0 - EULER_GAMMA + psi_zeta_series(x - 2.0)
+    }
+    if x < STIRLING_MIN {
+        y = x
+        s = 0.0
+        while y >= 2.5 {
+            y -= 1.0
+            s += 1.0 / y
+        }
+        return digamma(y) + s
+    }
+    w = 1.0 / (x * x)
+    s = 0.0
+    for k to len(PSI_ASYM_COEF) reversed {
+        s = s * w + PSI_ASYM_COEF[k]
+    }
+    return log(x) - 0.5 / x - s * w
+}
+
+# sum_{k>=2} (-1)^k (zeta(k) - 1) z^(k-1): the derivative of zeta_series
+def psi_zeta_series(z) {
+    s = 0.0
+    for k to len(ZETA_M1) reversed {
+        s = z * s + ZETA_M1[k] * (1.0 if k % 2.0 == 0.0 else -1.0)
+    }
+    return z * s
+}
+
+# sum_{k>=1} u^2k / (2k + 1), u = 1 / (2y + 1): stirlerr(y) - stirlerr(y + 1)
+def stirl_step(y) {
+    u = 1.0 / (2.0 * y + 1.0)
+    u2 = u * u
+    term = u2
+    s = 0.0
+    k = 3.0
+    while term > EPS * s {
+        s += term / k
+        term *= u2
+        k += 2.0
+    }
+    return s
+}
+
+#| log Gamma(x + 1) - (x + 1/2) log x + x - log sqrt(2 pi): the error of
+#| Stirling's formula, for x > 0.
+def stirlerr(x) {
+    if x >= STIRLING_MIN {
+        return stirling_series(x)
+    }
+    if x >= 0.5 {
+        steps = ceil(STIRLING_MIN - x)
+        s = 0.0
+        for k to steps {
+            s += stirl_step(x + k)
+        }
+        return s + stirling_series(x + steps)
+    }
+    return lgamma1p(x) - (x + 0.5) * log(x) + x - LN_SQRT_2PI
+}
+
+#| x log(x / m) + m - x (Loader's bd0), without cancellation when x is near m.
+def bd0(x, m) {
+    if x == 0.0 {
+        return m
+    }
+    if m == inf {
+        return inf
+    }
+    t = (m - x) / x
+    if abs(t) < LOG1PMX_SERIES {
+        return -x * log1pmx(t)
+    }
+    return x * log(x / m) + m - x
+}
+
+#| m^k e^-m / Gamma(k + 1) for real k >= 0 (R's dpois_raw).
+def dpois_raw(k, m) {
+    if m == 0.0 {
+        return 1.0 if k == 0.0 else 0.0
+    }
+    if k < 0.0 {
+        return 0.0
+    }
+    if k == 0.0 {
+        return exp(-m)
+    }
+    if m == inf {
+        return 0.0
+    }
+    return exp(-stirlerr(k) - bd0(k, m)) / sqrt(2.0 * pi * k)
+}
+
+#| C(n, k) p^k q^(n - k) for real k and n, q = 1 - p given separately
+#| (R's dbinom_raw, Loader's form).
+def dbinom_raw(k, n, p, q) {
+    if p == 0.0 {
+        return 1.0 if k == 0.0 else 0.0
+    }
+    if q == 0.0 {
+        return 1.0 if k == n else 0.0
+    }
+    if k == 0.0 {
+        if n == 0.0 {
+            return 1.0
+        }
+        if p < 0.1 {
+            return exp(-bd0(n, n * q) - n * p)
+        }
+        return exp(n * log(q))
+    }
+    if k == n {
+        if q < 0.1 {
+            return exp(-bd0(n, n * p) - n * q)
+        }
+        return exp(n * log(p))
+    }
+    if k < 0.0 or k > n {
+        return 0.0
+    }
+    lc = stirlerr(n) - stirlerr(k) - stirlerr(n - k) - bd0(k, n * p) - bd0(n - k, n * q)
+    lf = log(2.0 * pi) + log(k) + log1p(-k / n)
+    return exp(lc - 0.5 * lf)
+}
+
+# ------------------------------------------------------------ error function
+
+# erf(x) for |x| < 1/2 by its Taylor series 2/sqrt(pi) sum (-1)^n x^(2n+1) / (n! (2n+1))
+def erf_series(x) {
+    x2 = x * x
+    term = x
+    s = x
+    n = 1.0
+    while abs(term) > EPS * EPS * abs(s) {
+        term *= -x2 / n
+        s += term / (2.0 * n + 1.0)
+        n += 1.0
+    }
+    return 2.0 / SQRT_PI * s
+}
+
+#| The error function, by its series below 1/2 and 1 - erfc(x) above.
+def stats_erf(x) {
+    if x != x {
+        return x
+    }
+    if abs(x) < ERF_DIRECT {
+        return erf_series(x)
+    }
+    if x > 0.0 {
+        return 1.0 - erfc(x)
+    }
+    return erfc(-x) - 1.0
+}
+
+#| exp(x^2) erfc(x), the scaled complementary error function.
+def erfcx(x) {
+    if x < 0.0 {
+        if x < -SPLIT_MAX / 2.0 {
+            return inf
+        }
+        return 2.0 / exp_msq_split(-x) - erfcx(-x)
+    }
+    if x < ERF_DIRECT {
+        return (1.0 - erf_series(x)) / exp_mhalfsq(x * SQRT_2)
+    }
+    if x <= CODY_MAX {
+        num = CODY_P[8] * x
+        den = x
+        for i to len(CODY_Q) - 1 {
+            num = (num + CODY_P[i]) * x
+            den = (den + CODY_Q[i]) * x
+        }
+        return (num + CODY_P[7]) / (den + CODY_Q[7])
+    }
+    # the even contraction of erfc's continued fraction, evaluated from the
+    # bottom: b_n = x^2 + 2n + 1/2, a_n = -n (n - 1/2)
+    X = x * x
+    t = X + 2.0 * ERFC_CF_TERMS + 0.5
+    for n from ERFC_CF_TERMS to 0 by -1 {
+        t = X + 2.0 * n - 1.5 - n * (n - 0.5) / t
+    }
+    return x / SQRT_PI / t
+}
+
+# exp(-x^2), x >= 0, with the square of the high part exact
+def exp_msq(x) {
+    return exp_mhalfsq(x * SQRT_2) if x < 1.0 else exp_msq_split(x)
+}
+
+def exp_msq_split(x) {
+    if x >= SPLIT_MAX {
+        return exp(-x * x)
+    }
+    hi = floor(x * SPLIT_SCALE) / SPLIT_SCALE
+    lo = x - hi
+    return exp(-hi * hi) * exp(-lo * (x + hi))
+}
+
+#| The complementary error function 1 - erf(x).
+def erfc(x) {
+    if x != x {
+        return x
+    }
+    if x < 0.0 {
+        return 2.0 - erfc(-x)
+    }
+    if x < ERF_DIRECT {
+        return 1.0 - erf_series(x)
+    }
+    if x > SPLIT_MAX / 2.0 {
+        return 0.0
+    }
+    return exp_msq_split(x) * erfcx(x)
+}
+
+#| The standard normal distribution function Phi(x), accurate far into the
+#| lower tail: Phi(x) = erfcx(-x / sqrt 2) exp(-x^2 / 2) / 2.
+def ndtr(x) {
+    if x != x {
+        return x
+    }
+    if x > 0.0 {
+        return 1.0 - ndtr(-x)
+    }
+    if x < -SPLIT_MAX {
+        return 0.0
+    }
+    z = -x / SQRT_2
+    if z < ERF_DIRECT {
+        return 0.5 * (1.0 - erf_series(z))
+    }
+    return 0.5 * erfcx(z) * exp_mhalfsq(x)
+}
+
+# Acklam's approximation of the normal quantile, 0 < p < 1
+def acklam(p) {
+    if p < ACKLAM_LOW or p > 1.0 - ACKLAM_LOW {
+        pp = p if p < 0.5 else 1.0 - p
+        q = sqrt(-2.0 * log(pp))
+        num = ((((ACKLAM_C[0] * q + ACKLAM_C[1]) * q + ACKLAM_C[2]) * q + ACKLAM_C[3]) * q + ACKLAM_C[4]) * q + ACKLAM_C[5]
+        den = (((ACKLAM_D[0] * q + ACKLAM_D[1]) * q + ACKLAM_D[2]) * q + ACKLAM_D[3]) * q + 1.0
+        x = num / den
+        return x if p < 0.5 else -x
+    }
+    q = p - 0.5
+    r = q * q
+    num = (((((ACKLAM_A[0] * r + ACKLAM_A[1]) * r + ACKLAM_A[2]) * r + ACKLAM_A[3]) * r + ACKLAM_A[4]) * r + ACKLAM_A[5]) * q
+    den = ((((ACKLAM_B[0] * r + ACKLAM_B[1]) * r + ACKLAM_B[2]) * r + ACKLAM_B[3]) * r + ACKLAM_B[4]) * r + 1.0
+    return num / den
+}
+
+#| The standard normal quantile: x with Phi(x) = p.
+def ndtri(p) {
+    if p != p or p < 0.0 or p > 1.0 {
+        return NAN
+    }
+    if p == 0.0 {
+        return -inf
+    }
+    if p == 1.0 {
+        return inf
+    }
+    if p > 0.5 {
+        return -ndtri(1.0 - p)
+    }
+    x = acklam(p)
+    central = p > 0.25
+    for step to NDTRI_STEPS {
+        e = 0.0
+        if central {
+            e = 0.5 * erf_series(x / SQRT_2) - (p - 0.5)
+        }
+        else {
+            e = ndtr(x) - p
+        }
+        u = e * SQRT_2PI / exp_mhalfsq(x)
+        x = x - u / (1.0 + 0.5 * x * u)
+    }
+    return x
+}
+
+#| The inverse error function: x with erf(x) = y, -1 < y < 1.
+def erfinv(y) {
+    if y != y or y < -1.0 or y > 1.0 {
+        return NAN
+    }
+    if y == 1.0 {
+        return inf
+    }
+    if y == -1.0 {
+        return -inf
+    }
+    if y < 0.0 {
+        return -erfinv(-y)
+    }
+    if y >= 0.5 {
+        return erfcinv(1.0 - y)
+    }
+    x = acklam(0.5 + 0.5 * y) / SQRT_2
+    for step to NDTRI_STEPS {
+        e = erf_series(x) - y
+        u = e * SQRT_PI / (2.0 * exp_msq(x))
+        x = x - u / (1.0 + x * u)
+    }
+    return x
+}
+
+#| The inverse complementary error function: x with erfc(x) = q, 0 < q < 2.
+def erfcinv(q) {
+    if q != q or q < 0.0 or q > 2.0 {
+        return NAN
+    }
+    if q == 0.0 {
+        return inf
+    }
+    if q == 2.0 {
+        return -inf
+    }
+    if q > 0.5 {
+        return erfinv(1.0 - q)
+    }
+    x = -acklam(0.5 * q) / SQRT_2
+    for step to NDTRI_STEPS {
+        e = erfc(x) - q
+        u = -e * SQRT_PI / (2.0 * exp_msq(x))
+        x = x - u / (1.0 + x * u)
+    }
+    return x
+}
+
+# ------------------------------------------------------------ incomplete gamma
+
+# x^a e^-x / Gamma(a): a dpois_raw
+def gamma_prefix(a, x) {
+    return a * dpois_raw(a, x)
+}
+
+# P(a, x) by its series, x < a + 1
+def gamma_p_series(a, x) {
+    term = 1.0
+    s = 1.0
+    ap = a
+    n = 0.0
+    while n < MAX_TERMS {
+        ap += 1.0
+        term *= x / ap
+        s += term
+        if abs(term) < abs(s) * EPS {
+            break
+        }
+        n += 1.0
+    }
+    return dpois_raw(a, x) * s
+}
+
+# Q(a, x) by its continued fraction, x >= a + 1 (Lentz's method)
+def gamma_q_cf(a, x) {
+    b = x + 1.0 - a
+    c = 1.0 / TINY
+    d = 1.0 / b
+    h = d
+    n = 1.0
+    while n < MAX_TERMS {
+        an = -n * (n - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < TINY {
+            d = TINY
+        }
+        c = b + an / c
+        if abs(c) < TINY {
+            c = TINY
+        }
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < EPS {
+            break
+        }
+        n += 1.0
+    }
+    return gamma_prefix(a, x) * h
+}
+
+# P and Q for a < 1, x <= 1.1, each directly: with
+# s = sum_{n>=1} (-1)^(n+1) x^n / ((a + n) n!) and c = x^a / Gamma(1 + a),
+# P = c (1 - a s) and Q = -expm1(log c) + c a s
+def gamma_pq_small(a, x) {
+    lc = a * log(x) - lgamma1p(a)
+    term = 1.0
+    s = 0.0
+    n = 1.0
+    while n < MAX_TERMS {
+        term *= -x / n
+        t = -term / (a + n)
+        s += t
+        if abs(t) < abs(s) * EPS {
+            break
+        }
+        n += 1.0
+    }
+    c = exp(lc)
+    return c * (1.0 - a * s), -expm1(lc) + c * a * s
+}
+
+#| The regularized lower incomplete gamma function P(a, x).
+def gammainc(a, x) {
+    p, q = gamma_pq(a, x)
+    return p
+}
+
+#| The regularized upper incomplete gamma function Q(a, x) = 1 - P(a, x).
+def gammaincc(a, x) {
+    p, q = gamma_pq(a, x)
+    return q
+}
+
+# P and Q, each computed directly where it is the smaller
+def gamma_pq(a, x) {
+    if a != a or x != x or a <= 0.0 or x < 0.0 {
+        return NAN, NAN
+    }
+    if x == 0.0 {
+        return 0.0, 1.0
+    }
+    if x == inf {
+        return 1.0, 0.0
+    }
+    if a < 1.0 and x <= GAMMA_SMALL_X {
+        return gamma_pq_small(a, x)
+    }
+    if x < a + 1.0 {
+        p = gamma_p_series(a, x)
+        return p, 1.0 - p
+    }
+    q = gamma_q_cf(a, x)
+    return 1.0 - q, q
+}
+
+# log P(a, x) - log p (lower) or log Q(a, x) - log p (upper), and its
+# derivative in log x
+def gamma_log_resid(a, x, p, upper) {
+    P, Q = gamma_pq(a, x)
+    t = Q if upper else P
+    slope = x * gamma_prefix(a, x) / x / t
+    if upper {
+        slope = -slope
+    }
+    return log(t) - log(p), slope
+}
+
+# x with P(a, x) = p (lower) or Q(a, x) = p (upper): Newton steps on
+# log(tail) against log x, kept inside a bracket, from the best of three
+# starts (Wilson-Hilferty's, the small-x form P ~ x^a / Gamma(1 + a), and the
+# large-x form Q ~ x^(a-1) e^-x / Gamma(a))
+def gamma_inv(a, p, upper) {
+    if p != p or a != a or a <= 0.0 or p < 0.0 or p > 1.0 {
+        return NAN
+    }
+    if p == 0.0 {
+        return inf if upper else 0.0
+    }
+    if p == 1.0 {
+        return 0.0 if upper else inf
+    }
+    # solve on the tail that is at most 1/2, where its digits are
+    if p > 0.5 {
+        return gamma_inv(a, 1.0 - p, not upper)
+    }
+    plow = 1.0 - p if upper else p
+    z = -ndtri(p) if upper else ndtri(p)
+    starts = [exp((log(max(plow, TINY)) + lgamma1p(a)) / a)]
+    w = 1.0 - 1.0 / (9.0 * a) + z / (3.0 * sqrt(a))
+    if w > 0.0 {
+        starts = append(starts, a * w * w * w)
+    }
+    if upper {
+        xl = max(1.0, -log(p) - lgamma(a))
+        for k to NDTRI_STEPS {
+            xl = max(1.0, -log(p) - lgamma(a) + (a - 1.0) * log(xl))
+        }
+        starts = append(starts, xl)
+    }
+    x = starts[0]
+    best = inf
+    for s0 in starts {
+        if s0 > 0.0 and s0 < inf {
+            f0, d0 = gamma_log_resid(a, s0, p, upper)
+            if abs(f0) < best {
+                best = abs(f0)
+                x = s0
+            }
+        }
+    }
+    if x == 0.0 {
+        # the root underflows
+        return 0.0
+    }
+    u = log(x)
+    lo = -inf
+    hi = inf
+    for step to MAX_STEPS {
+        f, d = gamma_log_resid(a, exp(u), p, upper)
+        if f == 0.0 {
+            return exp(u)
+        }
+        # the residual increases with u for P, decreases for Q
+        if (f > 0.0) != upper {
+            hi = u
+        }
+        else {
+            lo = u
+        }
+        un = u - f / d
+        if not (un > lo and un < hi) {
+            un = hi - 1.0 if lo == -inf else (lo + 1.0 if hi == inf else 0.5 * (lo + hi))
+        }
+        if abs(un - u) <= 2.0 * EPS * max(1.0, abs(u)) {
+            return exp(un)
+        }
+        u = un
+    }
+    return exp(u)
+}
+
+#| x with P(a, x) = p.
+def gammaincinv(a, p) {
+    return gamma_inv(a, p, false)
+}
+
+#| x with Q(a, x) = q.
+def gammainccinv(a, q) {
+    return gamma_inv(a, q, true)
+}
+
+# ------------------------------------------------------------ incomplete beta
+
+#| log B(a, b). From b = 10 on (b the larger) the Stirling form
+#| (a - 1/2) log(a / c) + (b - 1/2) log1p(-a / c) - log(c) / 2 + log sqrt(2 pi)
+#| + stirlerr(a) + stirlerr(b) - stirlerr(c), c = a + b, whose logs do not cancel.
+def lbeta(a, b) {
+    if a > b {
+        return lbeta(b, a)
+    }
+    c = a + b
+    if b >= STIRLING_MIN {
+        return (a - 0.5) * log(a / c) + (b - 0.5) * log1p(-a / c) - 0.5 * log(c) + LN_SQRT_2PI + stirlerr(a) + stirlerr(b) - stirlerr(c)
+    }
+    return lgamma(a) + lgamma(b) - lgamma(c)
+}
+
+#| d = x (a + b) - a = x b - a y with y = 1 - x, without the rounding of
+#| a + b: products split exactly by fma (Dekker's two-product), from y when
+#| x >= 1/2 (y is then exact) and from x below.
+def beta_delta(a, b, x, y) {
+    q = x * b
+    eq = fma(x, b, -q)
+    if x >= 0.5 {
+        p = a * y
+        ep = fma(a, y, -p)
+        return (q - p) + (eq - ep)
+    }
+    s = a * x
+    es = fma(a, x, -s)
+    t = s + q
+    bb = t - s
+    et = (s - (t - bb)) + (q - bb)
+    return (t - a) + (et + es + eq)
+}
+
+# x^a y^b / B(a, b), y = 1 - x, d = x (a + b) - a computed from the exact
+# one of x and y, in Stirling form: with c = a + b,
+#   log(x^a y^b / B) = a log1p(d / a) + b log1p(-d / b) + log sqrt(a b / (2 pi c))
+#                      - stirlerr(a) - stirlerr(b) + stirlerr(c)
+# where a log1p(d / a) is a log1pmx(d / a) + d near 0 (the two d's cancel)
+# and a log(x c / a) away from it
+def beta_prefix(a, b, x, y, d) {
+    c = a + b
+    t1 = d / a
+    t2 = -d / b
+    e1 = a * log1pmx(t1) if abs(t1) < LOG1PMX_SERIES else a * log(x * c / a) - d
+    e2 = b * log1pmx(t2) if abs(t2) < LOG1PMX_SERIES else b * log(y * c / b) + d
+    e = e1 + e2 - stirlerr(a) - stirlerr(b) + stirlerr(c)
+    return exp(e) * sqrt(a * b / c) / SQRT_2PI
+}
+
+# The continued fraction 1 / (1 + d_1 / (1 + d_2 / (1 + ...))) of DLMF 8.17.22,
+# which is I_x(a, b) / (x^a y^b / (a B(a, b))). It converges fast for
+# x < (a + 1) / (a + b + 2). Evaluated front to back by the modified Lentz
+# algorithm (W. J. Lentz, Appl. Opt. 15, 668 (1976); I. J. Thompson and
+# A. R. Barnett, J. Comput. Phys. 64, 490 (1986)): the value is the product
+# of the ratios C_k D_k of successive convergents, where
+# C_k = 1 + d_k / C_(k-1) and 1 / D_k = 1 + d_k D_(k-1), and a C or 1 / D
+# that would be zero is moved off it by TINY. The first convergent is the
+# leading numerator 1 over the leading 1, so the product starts at 1 with
+# D = 1 and C infinite, which 1 / TINY stands for. It stops when a ratio is
+# within EPS of 1. The partial numerators are
+#   d_(2m)   =  m (b - m) x / ((a + 2m - 1) (a + 2m)),
+#   d_(2m+1) = -(a + m) (a + b + m) x / ((a + 2m) (a + 2m + 1)),
+# both with denominator (a + k - 1) (a + k) for d_k.
+def betacf(a, b, x) {
+    f = 1.0
+    big_c = 1.0 / TINY
+    small_d = 1.0
+    k = 1.0
+    while k < MAX_TERMS {
+        m = floor(k / 2.0)
+        num = -(a + m) * (a + b + m) * x / ((a + k - 1.0) * (a + k))
+        if k == 2.0 * m {
+            num = m * (b - m) * x / ((a + k - 1.0) * (a + k))
+        }
+        small_d = 1.0 + num * small_d
+        if abs(small_d) < TINY {
+            small_d = TINY
+        }
+        small_d = 1.0 / small_d
+        big_c = 1.0 + num / big_c
+        if abs(big_c) < TINY {
+            big_c = TINY
+        }
+        ratio = big_c * small_d
+        f *= ratio
+        if abs(ratio - 1.0) < EPS {
+            break
+        }
+        k += 1.0
+    }
+    return f
+}
+
+# I_x(a, b) and 1 - I_x(a, b), each computed directly where it is the smaller
+def beta_pq(a, b, x) {
+    if a != a or b != b or x != x or a <= 0.0 or b <= 0.0 {
+        return NAN, NAN
+    }
+    if x <= 0.0 {
+        return 0.0, 1.0
+    }
+    if x >= 1.0 {
+        return 1.0, 0.0
+    }
+    y = 1.0 - x
+    d = beta_delta(a, b, x, y)
+    if x < (a + 1.0) / (a + b + 2.0) {
+        p = beta_prefix(a, b, x, y, d) * betacf(a, b, x) / a
+        return p, 1.0 - p
+    }
+    q = beta_prefix(b, a, y, x, -d) * betacf(b, a, y) / b
+    return 1.0 - q, q
+}
+
+#| The regularized incomplete beta function I_x(a, b).
+def betainc(a, b, x) {
+    p, q = beta_pq(a, b, x)
+    return p
+}
+
+#| 1 - I_x(a, b).
+def betaincc(a, b, x) {
+    p, q = beta_pq(a, b, x)
+    return q
+}
+
+# log I_x(a, b) - log p and its derivative in log x
+def beta_log_resid(a, b, x, p) {
+    P, Q = beta_pq(a, b, x)
+    dens = beta_prefix(a, b, x, 1.0 - x, beta_delta(a, b, x, 1.0 - x)) / (1.0 - x)
+    return log(P) - log(p), dens / P
+}
+
+# x with I_x(a, b) = p for p <= 1/2. The start is that of algorithm AS 109
+# (Cran, Martin and Thomas 1977): for a, b > 1 the normal approximation of
+# Abramowitz and Stegun 26.5.22, otherwise a chi-square approximation to the
+# tail. Then Newton steps on log I against log x inside a bracket
+def beta_inv_lower(a, b, p) {
+    lb = lbeta(a, b)
+    # the upper normal quantile of p, Abramowitz and Stegun 26.2.22
+    r = sqrt(-2.0 * log(p))
+    y = r - (2.30753 + 0.27061 * r) / (1.0 + (0.99229 + 0.04481 * r) * r)
+    x = 0.0
+    if a > 1.0 and b > 1.0 {
+        r = (y * y - 3.0) / 6.0
+        s = 1.0 / (a + a - 1.0)
+        t = 1.0 / (b + b - 1.0)
+        h = 2.0 / (s + t)
+        w = y * sqrt(h + r) / h - (t - s) * (r + 5.0 / 6.0 - 2.0 / (3.0 * h))
+        x = a / (a + b * exp(w + w))
+    }
+    else {
+        r = b + b
+        t = 1.0 / (9.0 * b)
+        t = r * pow(1.0 - t + y * sqrt(t), 3.0)
+        if t <= 0.0 {
+            x = 1.0 - exp((log1p(-p) + log(b) + lb) / b)
+        }
+        else {
+            t = (4.0 * a + r - 2.0) / t
+            if t <= 1.0 {
+                x = exp((log(p * a) + lb) / a)
+            }
+            else {
+                x = 1.0 - 2.0 / (t + 1.0)
+            }
+        }
+    }
+    # the small-x form I ~ x^a / (a B(a, b)) when it is the better start
+    xs = exp((log(p) + log(a) + lbeta(a, b)) / a)
+    if not (x > 0.0 and x < 1.0) {
+        x = min(xs, 0.5)
+    }
+    if xs < 1.0 and x != min(xs, 0.5) {
+        fx, dx = beta_log_resid(a, b, x, p)
+        fs, ds = beta_log_resid(a, b, xs, p)
+        if abs(fs) < abs(fx) {
+            x = xs
+        }
+    }
+    if x == 0.0 {
+        return 0.0
+    }
+    u = log(x)
+    lo = -inf
+    hi = 0.0
+    for step to MAX_STEPS {
+        f, d = beta_log_resid(a, b, exp(u), p)
+        if f == 0.0 {
+            return exp(u)
+        }
+        if f > 0.0 {
+            hi = u
+        }
+        else {
+            lo = u
+        }
+        un = u - f / d
+        if not (un > lo and un < hi) {
+            un = hi - 1.0 if lo == -inf else 0.5 * (lo + hi)
+        }
+        if abs(un - u) <= 2.0 * EPS * max(1.0, abs(u)) {
+            return exp(un)
+        }
+        u = un
+    }
+    return exp(u)
+}
+
+#| x with I_x(a, b) = p.
+def betaincinv(a, b, p) {
+    if p != p or a != a or b != b or a <= 0.0 or b <= 0.0 or p < 0.0 or p > 1.0 {
+        return NAN
+    }
+    if p == 0.0 {
+        return 0.0
+    }
+    if p == 1.0 {
+        return 1.0
+    }
+    if p <= 0.5 {
+        return beta_inv_lower(a, b, p)
+    }
+    return 1.0 - beta_inv_lower(b, a, 1.0 - p)
+}
+
+#| x with 1 - I_x(a, b) = q.
+def betainccinv(a, b, q) {
+    if q != q or a != a or b != b or a <= 0.0 or b <= 0.0 or q < 0.0 or q > 1.0 {
+        return NAN
+    }
+    if q == 0.0 {
+        return 1.0
+    }
+    if q == 1.0 {
+        return 0.0
+    }
+    if q <= 0.5 {
+        return 1.0 - beta_inv_lower(b, a, q)
+    }
+    return beta_inv_lower(a, b, 1.0 - q)
+}
+
+# ------------------------------------------------------------ tests
+
+# each reference is mpmath's at 50 digits, rounded to double; the
+# tolerances are 2 ulps of the value
+test "values at known points" {
+    assert_near(lgamma(0.5), 0.5723649429247001, 2.0e-16)
+    assert_near(lgamma(1.0), 0.0, 0.0)
+    assert_near(lgamma(2.0), 0.0, 0.0)
+    assert_near(lgamma(100.0), 359.1342053695754, 1.2e-13)
+    assert_near(digamma(1.0), -EULER_GAMMA, 2.0e-16)
+    assert_near(erfc(1.0), 0.15729920705028513, 6.0e-17)
+    assert_near(ndtr(-1.0), 0.15865525393145705, 6.0e-17)
+    assert_near(ndtri(0.975), 1.9599639845400538, 4.5e-16)
+    assert_near(gammainc(1.0, 2.0), 0.8646647167633873, 2.3e-16)
+    assert_near(betainc(2.0, 3.0, 0.4), 0.5248, 2.3e-16)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,44 @@
+###
+An array that comes back from a def is still an array after `^` and after
+`print`. Type inference runs over the top-level statements before the defs'
+bodies, so the first time it sees `x = py_arange(...) * 0.5` it does not yet
+know what py_arange returns. It used to answer "a number" for `x ^ 2` with x
+untyped (pow's scalar case), and to decide that anything passed to `print` is
+a number; either answer stuck, and the program was refused with "`u0` is a
+number but is assigned a array". Both are now defaults held back until the
+return types have arrived. (py2viv's upwind-advection translation hit it.)
+###
+
+def py_arange(start, stop, step) {
+    n = max(ceil((stop - start) / step), 0)
+    a = zeros(n)
+    for k to n {
+        a[k] = start + k * step
+    }
+    return a
+}
+
+x = py_arange(0, 5, 1) * 0.5
+u0 = exp(x ^ 2)
+print(u0)
+
+def ramp() {
+    return linspace(0.0, 1.0, 3)
+}
+q = ramp()
+print(q)
+w = -ramp()
+print(w)
+
+test "an array from a def stays an array through ^ and exp" {
+    assert_near(len(u0), 5, 0)
+    assert_near(u0[4], exp(4.0), 1e-12)
+}
+
+test "a def's array printed before anything else types it" {
+    assert_near(len(q), 3, 0)
+    assert_near(w[2], -1.0, 0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,299 @@
+###
+post: One Hartree-Fock program for every molecule of the PySCF port
+agent: claude
+
+Restricted or unrestricted Hartree-Fock for a molecule of atoms from H to
+Ar, in one of the five basis sets the PySCF port runs, with PySCF's names,
+shapes and units for its inputs and results.
+
+The PySCF port (study/ports/pyscf) generates one program per case, with the
+molecule and the basis set written into it as text. This program is the same
+run with the molecule as data: the atoms, their coordinates, the basis set,
+the charge, the spin, the method and the convergence settings are top-level
+globals, the parameters `viv export` sets from its manifest
+(study/ports/pyscf/vivscf.export.toml).
+The defaults below are water in STO-3G, the port's first case.
+
+    atoms     [natm] atomic numbers, H to Ar
+    coords    [natm, 3] positions, angstrom
+    basis     one of the five sets the port runs (`BasisSet`), linked in as tables
+    charge    net charge
+    spin      alpha minus beta electrons, PySCF's `Mole.spin`
+    method    RHF or UHF (`Method`)
+    jk        J and K in core, direct, or chosen by size (`JkMode`)
+
+The shells are built at run time from the atoms and the chosen table
+(`molecule_from`, lib/hf/molecule), the same packs `molecule("O 0 0 0; ...",
+"6-31g")` builds from text. The integral kernels the run calls
+(lib/hf/mdg_kernels, `mdg_r_<L>`, `mdg_pair_<la><lb>`) are indexed by
+angular momentum alone, so nothing in the compiled program depends on the
+molecule.
+
+The results are globals too, in PySCF's names and shapes: `e_tot`, `e_nuc`,
+`mo_energy` (`[n]` for RHF, `[2, n]` for UHF), `mo_coeff` (`[n, n]` or
+`[2, n, n]`), `dm` (the total density for RHF, `[2, n, n]` spin densities
+for UHF, as `make_rdm1` gives them), `converged` and `iterations`.
+
+test_vivscf_vs_pyscf.py runs it against PySCF 2.5.0 for every case of
+port.toml.
+###
+
+from basis.basis import Basis
+from basis.sto3g import basis_sto3g
+from basis.pople631g import basis_631g
+from basis.pople631gs import basis_631gs
+from basis.ccpvdz import basis_ccpvdz
+from basis.ccpvtz import basis_ccpvtz
+from hf.molecule import Molecule, molecule_from, mol_enuc, mol_nao
+from hf.scf import scf_with
+from hf.ao import ao_overlap
+from hf.scf_loop import ScfResult
+from hf.opts import scf_defaults, SCF_RHF, SCF_UHF, ScfOptions
+from hf.guess import GS_CORE
+from hf.jk_direct import INT_JK_DIRECT
+from hf.basis import BAS_NDIM
+
+#| The basis sets linked into the program, by the names PySCF gives them in
+#| the manifest: sto-3g, 6-31g, 6-31g*, cc-pvdz, cc-pvtz.
+enum BasisSet {
+    Sto3g
+    Pople631g
+    Pople631gs
+    CcPvdz
+    CcPvtz
+}
+
+#| The SCF methods: restricted (closed shell) and unrestricted.
+enum Method {
+    Rhf
+    Uhf
+}
+
+#| How J and K are built: from the packed integrals in memory, from the basis
+#| every iteration, or in memory when the packed integrals fit in one array.
+enum JkMode {
+    Auto
+    Incore
+    Direct
+}
+
+# ---- the parameters ----------------------------------------------------------
+#: atoms         atomic numbers, one per atom
+#: coords        positions [natm, 3], angstrom
+#: basis         the basis set
+#: charge        net charge, in units of e
+#: spin          alpha minus beta electrons (2S)
+#: method        RHF or UHF
+#: jk            how J and K are built
+#: e_tol         the SCF converges once the energy changes by less than this (hartree)
+#: grad_tol      and the largest element of the orbital gradient (the commutator of the Fock and density matrices) is below this
+#: max_iter      the SCF iteration limit
+#: diis_size     how many Fock matrices the DIIS extrapolation mixes
+#: diis_start    iterations DIIS leaves out (1: the guess's, as PySCF)
+#: print_arrays  print the MO energies, coefficients and density at full precision
+atoms: [Int] = [8, 1, 1]
+coords = [[0.0, 0.0, 0.0], [0.0, -0.757, 0.587], [0.0, 0.757, 0.587]]
+basis = BasisSet.Sto3g
+charge: Int = 0
+spin: Int = 0
+method = Method.Rhf
+jk = JkMode.Auto
+e_tol = 1.0e-12
+grad_tol = 1.0e-9
+max_iter: Int = 100
+diis_size: Int = 8
+diis_start: Int = 1
+print_arrays = false
+
+# The engines hold at most this many elements in one array, so packed
+# integrals past it are built direct (port.toml, the `jk` notes).
+VIVSCF_INCORE_MAX = 16000000
+
+#| The table of basis set `b`.
+def vivscf_table(b: BasisSet) -> Basis {
+    match b {
+        Sto3g => { return basis_sto3g() }
+        Pople631g => { return basis_631g() }
+        Pople631gs => { return basis_631gs() }
+        CcPvdz => { return basis_ccpvdz() }
+        CcPvtz => { return basis_ccpvtz() }
+    }
+}
+
+#| PySCF's name of basis set `b`.
+def vivscf_basis_name(b: BasisSet) -> Str {
+    match b {
+        Sto3g => { return "sto-3g" }
+        Pople631g => { return "6-31g" }
+        Pople631gs => { return "6-31g*" }
+        CcPvdz => { return "cc-pvdz" }
+        CcPvtz => { return "cc-pvtz" }
+    }
+}
+
+#| lib/hf's method code for `m`.
+def vivscf_method(m: Method) {
+    match m {
+        Rhf => { return SCF_RHF }
+        Uhf => { return SCF_UHF }
+    }
+}
+
+#| The number of packed (8-fold symmetric) integrals of `nao` functions.
+def vivscf_npacked(nao) {
+    npair = nao * (nao + 1) / 2
+    return npair * (npair + 1) / 2
+}
+
+#| Whether the run builds J and K direct: as asked, or under `Auto` when the
+#| packed integrals of `nao` functions do not fit in one array.
+def vivscf_direct(mode: JkMode, nao) -> Bool {
+    match mode {
+        Auto => { return vivscf_npacked(nao) > VIVSCF_INCORE_MAX }
+        Incore => { return false }
+        Direct => { return true }
+    }
+}
+
+#| The molecule of atomic numbers `z`, positions `xyz` (angstrom) and
+#| basis set `b`, with its charge and spin: the shells come from the table,
+#| atom by atom, at run time.
+def vivscf_molecule(z: [Int], xyz: Arr, b: BasisSet, q: Int, s: Int) -> Molecule {
+    natm = len(z)
+    if natm == 0 {
+        stop("vivscf: no atoms")
+    }
+    if len(shape(xyz)) != 2 or shape(xyz)[0] != natm or shape(xyz)[1] != BAS_NDIM {
+        stop(f"vivscf: coords must be [{natm:d}, {BAS_NDIM:d}], one row per atom")
+    }
+    zf = zeros(natm)
+    for i to natm {
+        zf[i] = float(z[i])
+    }
+    m = molecule_from(zf, xyz, vivscf_table(b))
+    return Molecule { charge: float(q), spin: float(s), ..m }
+}
+
+#| The options of the run: the core-Hamiltonian guess (PySCF's "1e"), the
+#| convergence settings, and J and K as `direct` says.
+def vivscf_options(meth: Method, direct: Bool) -> ScfOptions {
+    o = ScfOptions {
+        method: vivscf_method(meth),
+        guess: GS_CORE,
+        diis_size: float(diis_size),
+        diis_start: float(diis_start),
+        max_iter: float(max_iter),
+        e_tol: e_tol,
+        grad_tol: grad_tol,
+        ..scf_defaults()
+    }
+    if direct {
+        return ScfOptions { jk: INT_JK_DIRECT, ..o }
+    }
+    return o
+}
+
+#| Print array `a` on one line after `label`, every number to 17 digits.
+def vivscf_print_flat(label: Str, a: Arr) {
+    v = reshape(a, prod(shape(a)))
+    parts = [f"{v[i]:.17g}" for i to len(v)]
+    print(label + " " + join(" ", parts))
+    return 0
+}
+
+#| The electron count of atoms `z` at net charge `q`.
+def vivscf_nelectron(z: [Int], q: Int) -> Int {
+    n: Int = -q
+    for a in z {
+        n += a
+    }
+    return n
+}
+
+if method == Method.Rhf and spin != 0 {
+    stop(f"vivscf: RHF needs spin 0, the molecule has spin {spin:d}; ask for method Uhf")
+}
+vs_nelec = vivscf_nelectron(atoms, charge)
+if vs_nelec < 1 {
+    stop(f"vivscf: the molecule has {vs_nelec:d} electrons at charge {charge:d}")
+}
+if spin > vs_nelec or (vs_nelec + spin) % 2 != 0 {
+    stop(f"vivscf: {vs_nelec:d} electrons cannot have spin {spin:d}: the spin is at most the electron count, and both are even or both odd")
+}
+
+# build the molecule from the atoms and the basis table
+vs_mol = vivscf_molecule(atoms, coords, basis, charge, spin)
+vs_nao = mol_nao(vs_mol)
+vs_direct = vivscf_direct(jk, vs_nao)
+
+# run the SCF
+vs_r = scf_with(vs_mol, vivscf_options(method, vs_direct))
+
+# ---- the results ---------------------------------------------------------------
+#: e_tot       total energy, hartree
+#: e_nuc       nuclear repulsion, hartree
+#: converged   whether both convergence tests passed
+#: iterations  SCF iterations run
+#: mo_energy   orbital energies, hartree: [n] RHF, [2, n] UHF
+#: mo_coeff    orbital coefficients, AO by MO: [n, n] RHF, [2, n, n] UHF
+#: dm          the AO density: total for RHF, [2, n, n] alpha and beta for UHF
+e_tot = vs_r.energy
+e_nuc = mol_enuc(vs_mol)
+converged = vs_r.converged > 0.5
+iterations: Int = int(vs_r.iterations)
+vs_nmo = len(vs_r.alpha.mo_energy)
+if method == Method.Rhf {
+    mo_energy = vs_r.alpha.mo_energy
+    mo_coeff = vs_r.alpha.mo_coeff
+    dm = vs_r.density
+}
+else {
+    mo_energy = zeros(2, vs_nmo)
+    mo_energy[0, :] = vs_r.alpha.mo_energy
+    mo_energy[1, :] = vs_r.beta.mo_energy
+    mo_coeff = zeros(2, vs_nao, vs_nmo)
+    setslab(mo_coeff, 0, vs_r.alpha.mo_coeff)
+    setslab(mo_coeff, 1, vs_r.beta.mo_coeff)
+    dm = zeros(2, vs_nao, vs_nao)
+    setslab(dm, 0, vs_r.alpha.density)
+    setslab(dm, 1, vs_r.beta.density)
+}
+
+# report: one line per scalar, the arrays only when asked
+print(f"basis {vivscf_basis_name(basis)}")
+print(f"nao {vs_nao:d}")
+print(f"direct {vs_direct}")
+print(f"e_tot {e_tot:.17g}")
+print(f"e_nuc {e_nuc:.17g}")
+print(f"converged {converged}")
+print(f"iterations {iterations:d}")
+if print_arrays {
+    vivscf_print_flat("mo_energy_shape", shape(mo_energy))
+    vivscf_print_flat("mo_energy", mo_energy)
+    vivscf_print_flat("mo_coeff", mo_coeff)
+    vivscf_print_flat("dm", dm)
+}
+
+# These hold for any input, so they run in every export call too.
+test "the run converged" {
+    assert_true(converged)
+}
+
+test "the energy agrees with its recomputation from the final density" {
+    assert_lt(abs(vs_r.energy_check - vs_r.energy), 1.0e-9)
+}
+
+test "the density holds the molecule's electrons" {
+    vs_ne: Int = -charge
+    for vs_z in atoms {
+        vs_ne += vs_z
+    }
+    vs_dtot = dm
+    if method == Method.Uhf {
+        vs_dtot = slab(dm, 0) + slab(dm, 1)
+    }
+    assert_near(sum(vs_dtot * ao_overlap(vs_mol)), float(vs_ne), 1.0e-8)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

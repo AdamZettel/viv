@@ -1,0 +1,295 @@
+###
+post: The double scroll of Chua's circuit
+date: 2026-09-25
+kind: demo
+channel: dynamics
+tags: chaos, circuits, lyapunov exponents, odes
+lane: ai
+equation: \dot x = \alpha\,(y - x - g(x)), \quad \dot y = x - y + z, \quad \dot z = -\beta y
+summary: Two capacitors, an inductor, a resistor and one diode whose current is a three-piece straight line. The voltages never settle and never repeat: they wind around two centers, hopping between them at irregular times. Nearby starts separate like $e^{\lambda t}$ with $\lambda = 0.33$, which is what a separate scipy calculation gives within the scatter expected of a run this long.
+
+The exponent is measured here by following two copies of the circuit started
+$10^{-8}$ apart and pulling them back to that distance after every step
+(Benettin's method). The reference, in `posts/refs/chuas-circuit-double-scroll.py`, uses a
+different method and a different integrator: scipy's DOP853 at a tolerance of
+$10^{-11}$, carrying the linearized equations along the orbit, over 24000 time
+units. It gives $\lambda = 0.3277 \pm 0.0026$. Split into 40 windows of 600
+time units (the length of this post's run), the estimates scatter with a
+standard deviation of 0.0165, so the test allows three of those: 0.05.
+###
+
+###
+## The circuit
+
+*Chua's circuit* is an electronic circuit designed by Leon Chua to be
+chaotic: its voltages follow a definite rule, with no randomness in it, yet
+never settle into a repeating pattern. It has two capacitors, an inductor, a resistor, and
+one nonlinear part, a *Chua diode*: a small circuit whose current $g(x)$ is a
+function of the voltage $x$ across it made of three straight pieces. In the
+middle the slope is $m_0$ and outside $|x| > 1$ it is $m_1$, and both slopes
+are negative, so the part feeds energy into the circuit instead of absorbing
+it.
+
+In scaled units, with $x$ and $y$ the two capacitor voltages and $z$ the
+inductor current, the equations are the three above. The program uses the
+standard double-scroll values $\alpha = 9$, $\beta = 100/7$, $m_0 = -8/7$ and
+$m_1 = -5/7$.
+###
+
+ALPHA = 9.0
+BETA = 14.285714285714286
+M0 = -1.1428571428571428
+M1 = -0.7142857142857143
+# points on the diode's curve
+N_DIODE = 81
+
+#| The Chua diode's current at voltage x: slope M0 for |x| < 1, slope
+#| M1 outside, joined continuously at x = ±1.
+def diode(x) {
+    return M1 * x + 0.5 * (M0 - M1) * (abs(x + 1.0) - abs(x - 1.0))
+}
+
+v = linspace(-3.0, 3.0, N_DIODE)
+i_v = zeros(N_DIODE)
+for k to N_DIODE {
+    i_v[k] = diode(v[k])
+}
+show diode(0.5)
+show diode(2.0)
+
+figure("The Chua diode's current: three straight pieces", "voltage x", "current g(x)")
+plot(v, i_v, "g(x)")
+vline("x = -1", -1.0)
+vline("x = 1", 1.0)
+
+test "the diode is m0 x inside |x| < 1 and m1 x + (m0 - m1) outside" {
+    assert_near(diode(0.5), -0.5714285714285714, 1.0e-15)
+    assert_near(diode(2.0), -1.8571428571428572, 1.0e-15)
+}
+
+###
+Inside $|x| < 1$ the current is $m_0 x$, so $g(0.5) = -4/7 = -0.5714$, and
+outside it is $m_1 x + (m_0 - m_1)$ for $x > 1$, so $g(2) = -13/7 = -1.8571$.
+The negative slopes make the origin unstable: a small voltage grows instead
+of dying away. Far out, the circuit's other parts win and push it back. With
+nowhere stable to rest, the state keeps moving.
+
+## Stepping the equations
+
+The program advances the state $(x, y, z)$ with the classical fourth-order
+Runge-Kutta method at a step of $0.005$, then runs 20000 steps (100 time
+units) so the state reaches the set it keeps returning to, the *attractor*,
+before anything is measured.
+###
+
+DT = 0.005
+SETTLE = 20000
+# how long the settling run lasts, in time units
+settle_time = SETTLE * DT
+show settle_time
+
+test "the settling run is 20000 steps of 0.005, 100 time units" {
+    assert_near(settle_time, 100.0, 1.0e-10)
+}
+
+#| The right-hand side of Chua's equations at (x, y, z), written into out.
+def rhs(x, y, z, out: Arr) {
+    out[0] = ALPHA * (y - x - diode(x))
+    out[1] = x - y + z
+    out[2] = -BETA * y
+    return 0.0
+}
+
+#| One classical Runge-Kutta step of length dt on the state st = [x, y, z];
+#| k1 to k4 are scratch arrays for the four slopes.
+def rk4(st: Arr, dt, k1: Arr, k2: Arr, k3: Arr, k4: Arr) {
+    rhs(st[0], st[1], st[2], k1)
+    rhs(st[0] + 0.5 * dt * k1[0], st[1] + 0.5 * dt * k1[1], st[2] + 0.5 * dt * k1[2], k2)
+    rhs(st[0] + 0.5 * dt * k2[0], st[1] + 0.5 * dt * k2[1], st[2] + 0.5 * dt * k2[2], k3)
+    rhs(st[0] + dt * k3[0], st[1] + dt * k3[1], st[2] + dt * k3[2], k4)
+    for c to len(st) {
+        st[c] = st[c] + dt / 6.0 * (k1[c] + 2.0 * k2[c] + 2.0 * k3[c] + k4[c])
+    }
+    return 0.0
+}
+
+sa = [0.7, 0.0, 0.0]
+k1 = zeros(len(sa))
+k2 = zeros(len(sa))
+k3 = zeros(len(sa))
+k4 = zeros(len(sa))
+for s to SETTLE {
+    rk4(sa, DT, k1, k2, k3, k4)
+}
+show sa
+
+###
+## The double scroll
+
+Now follow the state for 210 time units (42000 steps). Record $x$, and count
+how often it changes sign: the attractor has two lobes, one around $x > 0$
+and one around $x < 0$, and a sign change is a hop from one to the other.
+Before looking: if the motion were periodic, the hops would come at a fixed
+rhythm. Do they?
+###
+
+FILM = 42000
+# keep every twentieth step (0.1 time units) for the pictures
+EVERY = 20
+# the x(t) figure shows the first 100 time units
+SHOW_STEPS = 20000
+# picture coordinates are rounded to 1e-3, well below a pixel, to keep the figure small
+ROUND = 1000.0
+
+#| x rounded to three decimals, for a figure.
+def r3(x) {
+    return round(x * ROUND) / ROUND
+}
+
+n_keep = FILM / EVERY
+px = zeros(n_keep)
+py = zeros(n_keep)
+pz = zeros(n_keep)
+n_time = SHOW_STEPS / EVERY
+t_x = zeros(n_time)
+x_t = zeros(n_time)
+jumps = 0.0
+prev_sign = 1.0
+if sa[0] < 0.0 {
+    prev_sign = -1.0
+}
+for s to FILM {
+    rk4(sa, DT, k1, k2, k3, k4)
+    sign = 1.0
+    if sa[0] < 0.0 {
+        sign = -1.0
+    }
+    if sign * prev_sign < 0.0 {
+        jumps = jumps + 1.0
+    }
+    prev_sign = sign
+    if mod(s, EVERY) == 0.0 {
+        n = s / EVERY
+        px[n] = r3(sa[0])
+        py[n] = r3(sa[1])
+        pz[n] = r3(sa[2])
+        if n < n_time {
+            t_x[n] = r3((s + 1.0) * DT)
+            x_t[n] = px[n]
+        }
+    }
+}
+show jumps
+
+figure("The voltage x over 100 time units", "time", "x")
+plot(t_x, x_t, "x(t)")
+hline("x = 0", 0.0)
+
+figure("The double scroll, seen along z", "x", "y")
+plot(px, py, "(x, y) over 210 time units")
+
+plot3d(px, py, pz, "the double scroll in (x, y, z): drag to rotate")
+
+# scipy's long run (posts/refs/chuas-circuit-double-scroll.out): 40.87 hops per 210 time units on average,
+# with a standard deviation of 3.07 over 114 windows of that length
+HOPS_SCIPY = 40.87
+HOPS_SPREAD = 3.07
+
+test "the orbit hops between the scrolls about 41 times in 210 time units, as scipy's long run does" {
+    assert_near(jumps, HOPS_SCIPY, 3.0 * HOPS_SPREAD)
+}
+
+###
+In 210 time units the state changed lobes 41 times (`jumps`): a few turns
+around one center, then a few around the other, with the number of turns
+changing from visit to visit. That irregular count is the visible sign of
+chaos. A scipy run a hundred times longer (`posts/refs/chuas-circuit-double-scroll.py`) averages 40.9 hops
+per 210 time units, and single stretches of that length range from 34 to 50,
+with a standard deviation of 3.1; the test allows three of those.
+
+## How fast nearby starts separate
+
+Chaos has a measurable rate. Start two copies of the circuit a distance
+$d_0 = 10^{-8}$ apart. On average the distance grows like $d_0 e^{\lambda t}$;
+$\lambda$ is the *largest Lyapunov exponent*, and a positive $\lambda$ is
+what chaos means in numbers. The two copies cannot be left alone for long,
+since once their distance is as large as the attractor it stops growing. So
+after every step the program measures the new distance $d$, adds
+$\ln(d/d_0)$ to a running sum, and moves the second copy back along the same
+direction to distance $d_0$. The exponent is the sum divided by the elapsed
+time.
+
+The run is 120000 steps, 600 time units. The reference value from scipy is
+$0.3277$, and a run of this length scatters about the true value with a
+standard deviation of $0.0165$.
+###
+
+LYAP_STEPS = 120000
+D0 = 1.0e-8
+# points on the running-estimate figure
+N_TRACE = 200
+LAMBDA_SCIPY = 0.3277
+
+sb = sa + 0.0
+sb[0] = sa[0] + D0
+trace_every = LYAP_STEPS / N_TRACE
+trace_t = zeros(N_TRACE)
+trace_lambda = zeros(N_TRACE)
+log_sum = 0.0
+for s to LYAP_STEPS {
+    rk4(sa, DT, k1, k2, k3, k4)
+    rk4(sb, DT, k1, k2, k3, k4)
+    dx = sb[0] - sa[0]
+    dy = sb[1] - sa[1]
+    dz = sb[2] - sa[2]
+    d = sqrt(dx * dx + dy * dy + dz * dz)
+    log_sum = log_sum + log(d / D0)
+    f = D0 / d
+    sb[0] = sa[0] + dx * f
+    sb[1] = sa[1] + dy * f
+    sb[2] = sa[2] + dz * f
+    if mod(s + 1.0, trace_every) == 0.0 {
+        n = (s + 1.0) / trace_every - 1.0
+        trace_t[n] = (s + 1.0) * DT
+        trace_lambda[n] = log_sum / ((s + 1.0) * DT)
+    }
+}
+lyap = log_sum / (LYAP_STEPS * DT)
+show lyap
+
+figure("The running estimate of the largest Lyapunov exponent", "time", "$\\lambda$ estimate", 0.0, 0.0, 0.0, 0.6)
+plot(trace_t, trace_lambda, "ln(d / d0) summed, over elapsed time")
+hline("scipy: 0.3277", LAMBDA_SCIPY)
+# how far a 600-time-unit estimate scatters about scipy's value: one standard deviation
+LAMBDA_SPREAD = 0.0165
+fill_between("scipy's value, give or take one 600-unit run's spread", trace_t, zeros(N_TRACE) + (LAMBDA_SCIPY - LAMBDA_SPREAD), zeros(N_TRACE) + (LAMBDA_SCIPY + LAMBDA_SPREAD))
+
+test "the largest Lyapunov exponent is scipy's 0.3277 within three standard deviations of a 600-time-unit estimate" {
+    # posts/refs/chuas-circuit-double-scroll.out: 0.3277 +- 0.0026
+    # over 24000 time units; one 600-unit window scatters by 0.0165
+    assert_near(lyap, LAMBDA_SCIPY, 0.05)
+}
+
+horizon = log(1.0 / D0) / lyap
+show horizon
+
+test "a 1e-8 difference reaches order one in ln(1e8) / lambda = 56 time units, scipy's 56.2 within 15 percent" {
+    # ln(1e8) / 0.3277 = 56.21; a 0.05 error in lambda moves it by about 15
+    # percent, and the test allows the 3-sigma band of the measured lambda
+    assert_near(1.0 / D0, 1.0e8, 0.0)
+    assert_near(horizon, 18.420680743952367 / LAMBDA_SCIPY, 0.15 * 56.21)
+}
+
+###
+The estimate wanders early, while one or two passes near the center of a
+lobe can move it, and settles as the time grows. This run gives
+$\lambda = 0.327$ (`lyap`), against scipy's $0.3277$. At that rate a
+difference of $10^{-8}$ in the starting voltage grows to order one, the size
+of the attractor, in $\ln(10^8)/\lambda \approx 56$ time units
+(`horizon`). Past that time the equations are still exact, but a
+measurement of the starting voltage to eight digits no longer predicts which
+lobe the circuit is on.
+###
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

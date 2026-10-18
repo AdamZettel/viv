@@ -1,0 +1,89 @@
+###
+post: randlc, the NAS Parallel Benchmarks' random number generator
+agent: claude
+
+The NAS Parallel Benchmarks draw every random number from one linear
+congruential generator: `x_{k+1} = a * x_k mod 2^46`, returned as the uniform
+`2^-46 * x_{k+1}` in (0, 1). The seeds and multipliers in the benchmarks
+(`a = 5^13 = 1220703125`, `s = 271828183` for EP and IS, `314159265` for CG)
+are odd integers below 2^46.
+
+NPB ships two versions of the same function: `randdp.f90` splits each factor
+into 23-bit halves so that every product is exact in a double, and
+`randi8.f90` (the one NPB3.4's sample `make.def` selects) multiplies two
+64-bit integers and keeps the low 46 bits. Both give the same bits. This module
+is the integer one: the product of two numbers below 2^46 wraps mod 2^64, and
+`band` with `2^46 - 1` keeps the low 46 bits, which are the low 46 bits of the
+exact product because 2^46 divides 2^64.
+
+- `randlc(x, a)`: the next state `a * x mod 2^46` and the uniform it gives,
+  as NPB's `randlc(x, a)` returns the uniform and overwrites `x`.
+- `vranlc(n, x, a, y)`: `n` uniforms into `y[0], ..., y[n-1]`, returning the
+  state after the last one (NPB's `vranlc(n, x, a, y)`).
+- `randlc_split(x, a)`: the same step by `randdp.f90`'s double arithmetic,
+  kept as the check member: the tests hold the two equal.
+
+Used with `from randlc import randlc, vranlc`.
+###
+
+private MASK46: Int = 70368744177663
+private R46 = 0.5 ^ 46
+private R23 = 0.5 ^ 23
+private T23 = 2.0 ^ 23
+private T46 = 2.0 ^ 46
+
+def randlc(x: Int, a: Int) {
+    next: Int = band(wrap_mul(x, a), MASK46)
+    return next, R46 * float(next)
+}
+
+def vranlc(n: Int, x: Int, a: Int, y: Arr) -> Int {
+    for i to n {
+        x = band(wrap_mul(x, a), MASK46)
+        y[i] = R46 * float(x)
+    }
+    return x
+}
+
+# randdp.f90's randlc, line by line: a and x split into 23-bit halves so each
+# product below is exact in a double.
+def randlc_split(x, a) {
+    a1 = int(R23 * a)
+    a2 = a - T23 * a1
+    x1 = int(R23 * x)
+    x2 = x - T23 * x1
+    t1 = a1 * x2 + a2 * x1
+    t2 = int(R23 * t1)
+    z = t1 - T23 * t2
+    t3 = T23 * z + a2 * x2
+    t4 = int(R46 * t3)
+    next = t3 - T46 * t4
+    return next, R46 * next
+}
+
+test "randlc's integer and split forms give the same states" {
+    a: Int = 1220703125
+    x: Int = 271828183
+    xd = 271828183.0
+    for k to 1000 {
+        x, u = randlc(x, a)
+        xd, ud = randlc_split(xd, 1220703125.0)
+        assert_near(float(x), xd, 0.0)
+        assert_near(u, ud, 0.0)
+    }
+}
+
+test "vranlc continues where randlc left off" {
+    a: Int = 1220703125
+    x: Int = 314159265
+    y = zeros(5)
+    x_end = vranlc(5, x, a, y)
+    for k to 5 {
+        x, u = randlc(x, a)
+        assert_near(y[k], u, 0.0)
+    }
+    assert_true(x == x_end)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

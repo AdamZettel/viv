@@ -1,0 +1,88 @@
+###
+title: Newton's method doubles the correct digits each step
+line: Full double precision for $\sqrt{2}$ in 5 steps, where bisection needs 52; the error ratio $e_{k+1}/e_k^2$ is near 0.354.
+claim: Newton's method for $\sqrt{2}$ from $x_0 = 1$ reaches full double precision in 5 steps, where bisection on $[1, 2]$ gains $\log_{10} 2 = 0.301$ digits per step and needs 52. Once the error is small it squares at each step, with the ratio $e_{k+1}/e_k^2$ within 10% of $1/(2\sqrt{2}) = 0.354$, the constant $f''/(2f')$ at the root.
+topic: math
+section: root finding
+reference: $\sqrt{2} = 1.4142135623730951$ (correctly rounded); the error recurrence $e_{k+1} = e_k^2/(2x_k)$ of Newton's method for $x^2 - 2$.
+scope: One function and one start; the constant is checked at the step where the error first falls below $10^{-2}$ and is still above $10^{-9}$, so rounding does not enter.
+lane: ai
+by: claude
+cost: fast
+###
+
+SQRT2 = 1.4142135623730951
+MAX_STEPS: Int = 8
+#: the theory's constant f''(r) / (2 f'(r)) = 1 / (2 sqrt 2)
+NEWTON_CONST = 1.0 / (2.0 * SQRT2)
+
+errs = zeros(MAX_STEPS + 1)
+x = 1.0
+errs[0] = abs(x - SQRT2)
+steps_to_exact: Int = -1
+for k to MAX_STEPS {
+    x = x - (x * x - 2.0) / (2.0 * x)
+    errs[k + 1] = abs(x - SQRT2)
+    if steps_to_exact < 0 and errs[k + 1] <= 2.3e-16 {
+        steps_to_exact = k + 1
+    }
+}
+show errs
+show steps_to_exact
+ratio = 0.0
+for k to MAX_STEPS {
+    if ratio == 0.0 and errs[k] < 1.0e-2 and errs[k + 1] > 1.0e-9 {
+        ratio = errs[k + 1] / (errs[k] * errs[k])
+    }
+}
+show ratio
+
+#: bisection on [1, 2]: steps until the bracket is below the spacing of doubles near sqrt 2
+lo = 1.0
+hi = 2.0
+bisection_steps: Int = 0
+while hi - lo > 2.3e-16 {
+    mid = 0.5 * (lo + hi)
+    if mid * mid > 2.0 {
+        hi = mid
+    }
+    else {
+        lo = mid
+    }
+    bisection_steps = bisection_steps + 1
+}
+digits_per_bisection = log(2.0) / log(10.0)
+show bisection_steps
+show digits_per_bisection
+
+#: the figure: the error of each Newton step, beside the bracket width of bisection
+fg_newton_k = zeros(MAX_STEPS + 1)
+for fg_k to MAX_STEPS + 1 {
+    fg_newton_k[fg_k] = fg_k * 1.0
+}
+fg_bis_k = zeros(bisection_steps + 1)
+fg_bis_w = zeros(bisection_steps + 1)
+for fg_k to bisection_steps + 1 {
+    fg_bis_k[fg_k] = fg_k * 1.0
+    fg_bis_w[fg_k] = pow(0.5, fg_k * 1.0)
+}
+figure("Newton's method and bisection for sqrt(2)", "step", "error")
+yscale("log")
+plot(fg_bis_k, fg_bis_w, "bisection bracket")
+style("bisection bracket", "s2 nomarker")
+plot(fg_newton_k, errs, "Newton from x0 = 1")
+style("Newton from x0 = 1", "s1 circle")
+
+test "full double precision in 5 steps" {
+    assert_true(steps_to_exact == 5)
+}
+test "bisection on [1, 2] needs 52 steps" {
+    assert_true(bisection_steps == 52)
+}
+test "the error ratio e_(k+1) / e_k^2 is within 10% of 0.354" {
+    assert_near(ratio / NEWTON_CONST, 1.0, 0.1)
+    assert_near(NEWTON_CONST, 0.354, 0.0005)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

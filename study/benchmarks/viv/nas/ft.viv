@@ -1,0 +1,369 @@
+###
+post: NPB FT, a 3-D heat equation solved by FFT
+agent: claude
+
+A port of NPB3.4's FT (FT/ft.f90). FT solves `du/dt = alpha laplacian(u)` on
+a periodic box spectrally: transform a random initial field once, then at
+each step t multiply every Fourier mode by `exp(-4 alpha pi^2 |k|^2 t)`
+(here by the one-step factor repeatedly, `evolve`), transform back and take a
+checksum of 1024 scattered values. NPB checks the six checksums.
+
+The FFTs are NPB's own, not a library's: each 1-D transform along an axis
+is done on blocks of 32 lines at once (`cffts1/2/3` gather a block into a
+work array, `cfftz` transforms it), by log2(n) radix-2 passes (`fftz2`)
+that alternate between two work arrays, with the twiddle factors computed
+once by `fft_init`. Arrays are indexed `[k, j, i]` (i fastest), the
+Fortran's `x(i, j, k)` minus one in each index, without its padding row.
+Viv's `fft3` builtin would do the whole transform in one call; the port keeps
+NPB's algorithm so that the two programs do the same arithmetic.
+
+Run a class with `--set CLASS='"W"'` (S, W, A).
+###
+
+from randlc import randlc, vranlc
+
+CLASS = "S"
+EPSILON = 1.0e-12
+FFTBLOCK: Int = 32
+SEED: Int = 314159265
+A_RAND: Int = 1220703125
+ALPHA = 1.0e-6
+PI = 3.141592653589793
+NCHECK: Int = 1024
+
+# ft.f90 verify: the grid, the step count and the reference checksums
+private def ft_class(cls) {
+    ref = czeros(6)
+    if cls == "S" {
+        ref[0] = complex(5.546087004964e+02, 4.845363331978e+02)
+        ref[1] = complex(5.546385409189e+02, 4.865304269511e+02)
+        ref[2] = complex(5.546148406171e+02, 4.883910722336e+02)
+        ref[3] = complex(5.545423607415e+02, 4.901273169046e+02)
+        ref[4] = complex(5.544255039624e+02, 4.917475857993e+02)
+        ref[5] = complex(5.542683411902e+02, 4.932597244941e+02)
+        return 64, 64, 64, ref
+    }
+    if cls == "W" {
+        ref[0] = complex(5.673612178944e+02, 5.293246849175e+02)
+        ref[1] = complex(5.631436885271e+02, 5.282149986629e+02)
+        ref[2] = complex(5.594024089970e+02, 5.270996558037e+02)
+        ref[3] = complex(5.560698047020e+02, 5.260027904925e+02)
+        ref[4] = complex(5.530898991250e+02, 5.249400845633e+02)
+        ref[5] = complex(5.504159734538e+02, 5.239212247086e+02)
+        return 128, 128, 32, ref
+    }
+    if cls == "A" {
+        ref[0] = complex(5.046735008193e+02, 5.114047905510e+02)
+        ref[1] = complex(5.059412319734e+02, 5.098809666433e+02)
+        ref[2] = complex(5.069376896287e+02, 5.098144042213e+02)
+        ref[3] = complex(5.077892868474e+02, 5.101336130759e+02)
+        ref[4] = complex(5.085233095391e+02, 5.104914655194e+02)
+        ref[5] = complex(5.091487099959e+02, 5.107917842803e+02)
+        return 256, 256, 128, ref
+    }
+    stop("FT: unknown class " + cls)
+    return 0, 0, 0, ref
+}
+
+def ilog2(n: Int) -> Int {
+    lg: Int = 0
+    nn: Int = 1
+    while nn < n {
+        nn = 2 * nn
+        lg += 1
+    }
+    return lg
+}
+
+# ipow46: a^exponent mod 2^46, NPB's way
+def ipow46(a: Int, exponent: Int) -> Int {
+    if exponent == 0 {
+        return 1
+    }
+    q: Int = a
+    r: Int = 1
+    n: Int = exponent
+    while n > 1 {
+        n2: Int = n // 2
+        if n2 * 2 == n {
+            q, _ = randlc(q, q)
+            n = n2
+        }
+        else {
+            r, _ = randlc(r, q)
+            n = n - 1
+        }
+    }
+    r, _ = randlc(r, q)
+    return r
+}
+
+# the initial field: each (j, k) line is 2 nx uniforms, read as nx complex
+# numbers; plane k's generator starts 2 nx ny draws after plane k - 1's
+def compute_initial_conditions(u0: CArr) {
+    d3: Int = int(shape(u0)[0])
+    d2: Int = int(shape(u0)[1])
+    d1: Int = int(shape(u0)[2])
+    start: Int = SEED
+    start, _ = randlc(start, ipow46(A_RAND, 0))
+    an = ipow46(A_RAND, 2 * d1 * d2)
+    starts = int_zeros(d3)
+    starts[0] = start
+    for k from 1 to d3 {
+        start, _ = randlc(start, an)
+        starts[k] = start
+    }
+    line = zeros(2 * d1)
+    for k to d3 {
+        x0: Int = starts[k]
+        for j to d2 {
+            x0 = vranlc(2 * d1, x0, A_RAND, line)
+            for i to d1 {
+                u0[k, j, i] = complex(line[2 * i], line[2 * i + 1])
+            }
+        }
+    }
+}
+
+# the one-step decay factor of each mode, |k|^2 from the wrapped indices
+def compute_indexmap(twiddle: Arr) {
+    d3: Int = int(shape(twiddle)[0])
+    d2: Int = int(shape(twiddle)[1])
+    d1: Int = int(shape(twiddle)[2])
+    ap = -4.0 * ALPHA * PI * PI
+    for k to d3 {
+        for j to d2 {
+            kk: Int = (k + d3 // 2) % d3 - d3 // 2
+            kk2: Int = kk * kk
+            jj: Int = (j + d2 // 2) % d2 - d2 // 2
+            kj2: Int = jj * jj + kk2
+            for i to d1 {
+                ii: Int = (i + d1 // 2) % d1 - d1 // 2
+                twiddle[k, j, i] = exp(ap * float(ii * ii + kj2))
+            }
+        }
+    }
+}
+
+# fft_init: u[0] holds log2(n); the twiddles of the pass with span ln are
+# u[ln], ..., u[2 ln - 1] = exp(i pi t / ln)
+def fft_init(n: Int) {
+    m = ilog2(n)
+    u = czeros(n)
+    u[0] = complex(float(m), 0.0)
+    ku: Int = 1
+    ln: Int = 1
+    for j to m {
+        t = PI / float(ln)
+        for i to ln {
+            ti = float(i) * t
+            u[i + ku] = complex(cos(ti), sin(ti))
+        }
+        ku = ku + ln
+        ln = 2 * ln
+    }
+    return u
+}
+
+# fftz2: one radix-2 pass (number l of m) over every line of a block,
+# from x into y
+def fftz2(is: Int, l: Int, m: Int, u: CArr, x: CArr, y: CArr) {
+    n: Int = int(shape(x)[0])
+    ny: Int = int(shape(x)[1])
+    two: Int = 2
+    n1: Int = n // 2
+    lk: Int = two ^ (l - 1)
+    li: Int = two ^ (m - l)
+    lj: Int = 2 * lk
+    for i to li {
+        i11: Int = i * lk
+        i12: Int = i11 + n1
+        i21: Int = i * lj
+        i22: Int = i21 + lk
+        u1 = u[li + i]
+        if is < 1 {
+            u1 = conj(u1)
+        }
+        for k to lk {
+            for j to ny {
+                x11 = x[i11 + k, j]
+                x21 = x[i12 + k, j]
+                y[i21 + k, j] = x11 + x21
+                y[i22 + k, j] = u1 * (x11 - x21)
+            }
+        }
+    }
+}
+
+# cfftz: the m passes, alternating between x and y; the result ends in x
+def cfftz(is: Int, m: Int, u: CArr, x: CArr, y: CArr) {
+    for l from 1 to m + 1 by 2 {
+        fftz2(is, l, m, u, x, y)
+        if l == m {
+            x[:, :] = y
+            break
+        }
+        fftz2(is, l + 1, m, u, y, x)
+    }
+}
+
+# cffts1/2/3: the transforms along i, j and k, a block of FFTBLOCK lines
+# at a time
+def cffts1(is: Int, u: CArr, x: CArr, xout: CArr, y1: CArr, y2: CArr) {
+    d3: Int = int(shape(x)[0])
+    d2: Int = int(shape(x)[1])
+    d1: Int = int(shape(x)[2])
+    logd1 = ilog2(d1)
+    for k to d3 {
+        for jn to d2 // FFTBLOCK {
+            jj: Int = jn * FFTBLOCK
+            for j to FFTBLOCK {
+                for i to d1 {
+                    y1[i, j] = x[k, j + jj, i]
+                }
+            }
+            cfftz(is, logd1, u, y1, y2)
+            for j to FFTBLOCK {
+                for i to d1 {
+                    xout[k, j + jj, i] = y1[i, j]
+                }
+            }
+        }
+    }
+}
+
+def cffts2(is: Int, u: CArr, x: CArr, xout: CArr, y1: CArr, y2: CArr) {
+    d3: Int = int(shape(x)[0])
+    d2: Int = int(shape(x)[1])
+    d1: Int = int(shape(x)[2])
+    logd2 = ilog2(d2)
+    for k to d3 {
+        for in_ to d1 // FFTBLOCK {
+            ii: Int = in_ * FFTBLOCK
+            for j to d2 {
+                for i to FFTBLOCK {
+                    y1[j, i] = x[k, j, i + ii]
+                }
+            }
+            cfftz(is, logd2, u, y1, y2)
+            for j to d2 {
+                for i to FFTBLOCK {
+                    xout[k, j, i + ii] = y1[j, i]
+                }
+            }
+        }
+    }
+}
+
+def cffts3(is: Int, u: CArr, x: CArr, xout: CArr, y1: CArr, y2: CArr) {
+    d3: Int = int(shape(x)[0])
+    d2: Int = int(shape(x)[1])
+    d1: Int = int(shape(x)[2])
+    logd3 = ilog2(d3)
+    for j to d2 {
+        for in_ to d1 // FFTBLOCK {
+            ii: Int = in_ * FFTBLOCK
+            for k to d3 {
+                for i to FFTBLOCK {
+                    y1[k, i] = x[k, j, i + ii]
+                }
+            }
+            cfftz(is, logd3, u, y1, y2)
+            for k to d3 {
+                for i to FFTBLOCK {
+                    xout[k, j, i + ii] = y1[k, i]
+                }
+            }
+        }
+    }
+}
+
+# fft: forward is along i, j, then k into x2; inverse along k, j, then i
+def fft(dir: Int, u: CArr, x1: CArr, x2: CArr) {
+    d3: Int = int(shape(x1)[0])
+    d2: Int = int(shape(x1)[1])
+    d1: Int = int(shape(x1)[2])
+    if dir == 1 {
+        cffts1(1, u, x1, x1, czeros(d1, FFTBLOCK), czeros(d1, FFTBLOCK))
+        cffts2(1, u, x1, x1, czeros(d2, FFTBLOCK), czeros(d2, FFTBLOCK))
+        cffts3(1, u, x1, x2, czeros(d3, FFTBLOCK), czeros(d3, FFTBLOCK))
+    }
+    else {
+        cffts3(-1, u, x1, x1, czeros(d3, FFTBLOCK), czeros(d3, FFTBLOCK))
+        cffts2(-1, u, x1, x1, czeros(d2, FFTBLOCK), czeros(d2, FFTBLOCK))
+        cffts1(-1, u, x1, x2, czeros(d1, FFTBLOCK), czeros(d1, FFTBLOCK))
+    }
+}
+
+# evolve: u0 *= twiddle mode by mode, and u1 = u0
+def evolve(u0: CArr, u1: CArr, twiddle: Arr) {
+    d3: Int = int(shape(u0)[0])
+    d2: Int = int(shape(u0)[1])
+    d1: Int = int(shape(u0)[2])
+    for k to d3 {
+        for j to d2 {
+            for i to d1 {
+                u0[k, j, i] = u0[k, j, i] * twiddle[k, j, i]
+                u1[k, j, i] = u0[k, j, i]
+            }
+        }
+    }
+}
+
+# checksum: the mean of 1024 values spread over the grid
+def checksum(u1: CArr) {
+    d3: Int = int(shape(u1)[0])
+    d2: Int = int(shape(u1)[1])
+    d1: Int = int(shape(u1)[2])
+    chk = complex(0.0, 0.0)
+    for j from 1 to NCHECK + 1 {
+        q: Int = j % d1
+        r: Int = (3 * j) % d2
+        s: Int = (5 * j) % d3
+        chk = chk + u1[s, r, q]
+    }
+    return chk / (float(d1) * float(d2) * float(d3))
+}
+
+def ft_run(cls) {
+    nx_num, ny_num, nz_num, ref = ft_class(cls)
+    nx: Int = int(nx_num)
+    ny: Int = int(ny_num)
+    nz: Int = int(nz_num)
+    niter: Int = len(ref)
+    u0 = czeros(nz, ny, nx)
+    u1 = czeros(nz, ny, nx)
+    twiddle = zeros(nz, ny, nx)
+    # one forward transform for free, as NPB does, then again from the start
+    compute_indexmap(twiddle)
+    compute_initial_conditions(u1)
+    u = fft_init(nx)
+    fft(1, u, u1, u0)
+    compute_indexmap(twiddle)
+    compute_initial_conditions(u1)
+    u = fft_init(nx)
+    fft(1, u, u1, u0)
+    sums = czeros(niter)
+    for iter to niter {
+        evolve(u0, u1, twiddle)
+        fft(-1, u, u1, u1)
+        sums[iter] = checksum(u1)
+        print(f" T = {iter + 1}    Checksum = {re(sums[iter]):.12e} {im(sums[iter]):.12e}")
+    }
+    worst = amax([abs((sums[i] - ref[i]) / ref[i]) for i to niter])
+    return nx, ny, nz, niter, worst
+}
+
+nx, ny, nz, niter, worst_err = ft_run(CLASS)
+verified = worst_err <= EPSILON
+print(f"FT class {CLASS}: {nx} x {ny} x {nz} grid, {niter} steps")
+print(f"Largest checksum error = {worst_err:.3e}")
+status = "SUCCESSFUL" if verified else "UNSUCCESSFUL"
+print(f"Verification = {status}")
+
+test "FT's checksums match NPB's values for the class" {
+    assert_true(verified)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

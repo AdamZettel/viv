@@ -1,0 +1,55 @@
+# What a Landau run must reproduce: the exact root and the conservation laws.
+# One file serves every deck: the root is computed for the deck's k lambda_D
+# (lib/vlasov's vl_landau_root, which lib/vlasov's own test holds to mpmath).
+#
+#     viv run --use plasma/k05.viv --use plasma/landau.viv plasma/landau_check.viv
+#
+# Each tolerance on the rates and the energy is two to four times the error
+# the decks measure at DT = 0.05 (the tables in plasma/k05.viv and
+# plasma/k04.viv), and below the error at DT = 0.1, so a run at the decks'
+# settings has room and a run at twice the step does not pass. A step that lost the second order in time, or any return of the
+# first version's numerical damping (gamma 11.8% off), fails it.
+
+#: GAMMA_TOL  relative tolerance on gamma; measured 2.4e-4 (k = 0.5) and 3.6e-4 (k = 0.4), 9.4e-4 and 1.4e-3 at DT = 0.1
+GAMMA_TOL = 8.0e-4
+#: OMEGA_TOL  relative tolerance on omega; measured 5.5e-5 and 6.2e-5, 2.3e-4 and 2.5e-4 at DT = 0.1
+OMEGA_TOL = 2.0e-4
+
+test "the damping rate is the Landau root's to 8e-4 (relative)" {
+    assert_near(GAMMA, GAMMA_EXACT, GAMMA_TOL * abs(GAMMA_EXACT))
+}
+test "the frequency is the Landau root's to 2e-4 (relative)" {
+    assert_near(OMEGA, OMEGA_EXACT, OMEGA_TOL * OMEGA_EXACT)
+}
+# The fit is only as good as the window is clean. Peaks of log W on one line
+# to 1e-4 (measured 1.2e-5 and 6e-6) mean one mode is left; a window that
+# starts while the faster-damped roots are still there scatters them (a start
+# at t = 4 gives 4e-4 at k = 0.5, at t = 2 gives 7e-3).
+test "the fitted peaks of log W lie on one line, and there are ten or more" {
+    assert_lt(FIT_RMS, 1.0e-4)
+    assert_gt(NPEAKS, 9.5)
+}
+# The spectral x shift leaves the k = 0 mode alone and the spline's weights
+# sum to one, so particles are conserved by construction; what is left is
+# rounding, a few 1e-16 per step (measured 8e-14 over 800 steps, 1.2e-13 over 1200).
+test "particles are conserved to rounding: 1e-12 relative, the worst step of the run" {
+    assert_lt(MASS_DRIFT, 1.0e-12)
+}
+# The exact equation keeps the integral of f^2. The spline smooths filaments
+# at the grid scale, so the scheme may lose some, never gain. The
+# perturbation's own share of the integral is ALPHA^2 / 2 of it; the run may
+# lose at most 1% of that share (measured 1e-4 of it: 3e-13 and 7e-13).
+test "the integral of f^2 does not grow, and loses under 1% of the perturbation's share" {
+    assert_lt(L2_DRIFT, 1.0e-12)
+    assert_gt(L2_DRIFT, -0.01 * 0.5 * ALPHA * ALPHA)
+}
+# The field's energy W0 is damped away almost entirely; Landau damping hands
+# it to the resonant electrons. The total must not change by more than 0.15%
+# of W0 (measured 4.4e-4 and 4.2e-4, second order in DT like the rates;
+# 1.9e-3 at DT = 0.1).
+test "the energy the field loses reappears as kinetic energy, to 0.15% of the field's initial energy" {
+    assert_near(ENERGY_DRIFT, 0.0, 1.5e-3)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

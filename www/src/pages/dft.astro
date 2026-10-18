@@ -1,0 +1,321 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+import { REPO_PUBLIC, GITHUB } from '../lib/repo.js';
+import Code from '../components/Code.astro';
+import { readFileSync } from 'node:fs';
+import Base from '../layouts/Base.astro';
+import Toc from '../components/Toc.astro';
+import BandStructure from '../components/BandStructure.jsx';
+import dft from '../data/dft.json';
+import '../styles/dft.css';
+
+const mats = dft.materials;
+const by = Object.fromEntries(mats.map((m) => [m.id, m]));
+const { si, gaas, cu } = by;
+const inTab = mats.filter((m) => !m.recorded);
+const totalTests = mats.reduce((s, m) => s + m.result.pass.length, 0);
+const slowest = inTab.reduce((a, b) => (a.result.seconds > b.result.seconds ? a : b));
+const WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+
+// The function that applies H, quoted from the engine rather than copied into
+// the page: the text below is whatever dft/pwdft_it.viv says today.
+const engine = readFileSync(new URL('../../../dft/pwdft_it.viv', import.meta.url), 'utf8');
+const start = engine.indexOf('def hpsi(');
+const hpsi = engine.slice(start, engine.indexOf('\n}\n', start) + 2);
+const engineLines = engine.split('\n').length;
+
+// Copper against Marini, Onida & Del Sole, PRL 88, 016403 (2002), Table I. The
+// LDA column is what the check file asserts, so it comes from there; the
+// measured column is the same table's last one (Courths & Hufner's averages).
+const cuRows = [
+  { label: 'Γ₁', what: 'bottom of the s band', key: 'G1', measured: -8.6 },
+  { label: 'Γ₁₂', what: 'd bands at Γ', key: 'G12', measured: -2.78 },
+  { label: 'X₅', what: 'top of the d bands', key: 'X5', measured: -2.01 },
+  { label: 'L₃', what: 'd bands at L', key: 'L3', measured: -2.25 },
+  { label: 'L₂′', what: 'the occupied s-p state at the neck', key: 'L2P', measured: -0.85 },
+];
+const f2 = (v: number) => v.toFixed(2).replace('-', '−');
+
+const TOC: [string, string][] = [
+  ['run', 'Run one'],
+  ['what', 'What the button does'],
+  ['checked', 'How it is checked'],
+  ['copper', 'Copper'],
+  ['wrong', 'Three things it got wrong first'],
+  ['language', 'What the language had to grow'],
+  ['yourself', 'Run it yourself'],
+  ['not', 'What it does not do'],
+];
+---
+
+<Base
+  title="A band structure from plane-wave DFT · Viv"
+  description="A from-scratch plane-wave density-functional theory code written in Viv: self-consistent silicon, germanium, diamond, gallium arsenide and aluminum computed in the browser tab, copper natively, each checked against an independent numpy implementation and against published LDA band energies."
+  eyebrow="Plane-wave DFT"
+  heading="A band structure from plane-wave DFT">
+  <div class="withtoc">
+    <div>
+      <p class="lede">
+        This is a density-functional theory code written in Viv: plane waves, norm-conserving
+        pseudopotentials, the local-density approximation, a self-consistent field loop. Pick a
+        material and press the button. Your browser solves the Kohn–Sham equations for it and draws
+        the bands — silicon takes about {Math.round(si.result.seconds)} seconds,
+        <strong>and nothing is sent to a server.</strong>
+      </p>
+      <p>
+        There are two ways to run it here, and the switch under the plot chooses. <strong>Compiled</strong>
+        runs the C that the compiler generates from the Viv source, compiled to WebAssembly ahead of time: a
+        {(si.moduleBytes / 1024).toFixed(0)} KB module with no interpreter anywhere in it.
+        <strong>Interpreted</strong> hands the same {si.lines.toLocaleString()} lines of source to
+        <code>viv.wasm</code>, the Viv interpreter, which runs them. Both run the same program, print
+        the same answers and pass the same tests.
+        <a href="/dft/source/pwdft_it">The source is here</a>, as it is written.
+      </p>
+
+      <section id="run">
+        <BandStructure client:load materials={mats} />
+      </section>
+
+      <section>
+        <h2 id="what">What the button does</h2>
+        <p>
+          It starts a Web Worker so the page stays responsive, and the worker runs one of two things.
+          With <em>Compiled</em> selected it fetches <code>/dft/si.wasm</code> — the input file, the solver
+          and the checks, compiled to one WebAssembly module — and calls its <code>main</code>. The
+          module needs no JavaScript runtime: it imports only five WASI system calls,
+          which carry its <code>printf</code> output. With <em>Interpreted</em> it loads
+          <code>viv.wasm</code> and hands it the source. Either way, for silicon the program then does
+          this, in order:
+        </p>
+        <ol class="stages">
+          <li>
+            <strong>Builds the crystal.</strong>
+            <span>
+              Two atoms on an fcc lattice, their Goedecker–Teter–Hutter pseudopotentials, and
+              {si.result.shown.NKPT} k-points chosen so that the mesh has the crystal’s full symmetry.
+            </span>
+          </li>
+          <li>
+            <strong>Lists the plane waves.</strong>
+            <span>
+              Every reciprocal-lattice vector with kinetic energy under {si.ecut} hartree:
+              up to {si.result.shown.NPWMAX} per k-point. They are the basis; a wavefunction is
+              {si.result.shown.NPWMAX} complex numbers.
+            </span>
+          </li>
+          <li>
+            <strong>Guesses a density.</strong>
+            <span>
+              A uniform one, and from it the Hartree and exchange-correlation potentials on a
+              {si.result.shown.NG}<sup>3</sup> grid.
+            </span>
+          </li>
+          <li>
+            <strong>Finds the lowest {si.nbands} bands at every k-point.</strong>
+            <span>
+              The Hamiltonian is never formed. It is applied: kinetic energy is diagonal in plane
+              waves, the potential is diagonal in real space, and an FFT goes between them. LOBPCG, a
+              block eigensolver, needs only this product of H with a wavefunction.
+            </span>
+          </li>
+          <li>
+            <strong>Fills the bands, builds the new density, and mixes it.</strong>
+            <span>
+              Anderson mixing, over the last three densities. Then back to step 3 —
+              {si.result.shown.ITER} times for silicon, until the density stops changing at the
+              10<sup>−9</sup> level.
+            </span>
+          </li>
+          <li>
+            <strong>Walks L → Γ → X.</strong>
+            <span>
+              {si.result.x.length} points, in that now-fixed potential. The bands are printed as
+              <code>plot</code> lines, and the figure above is drawn from them.
+            </span>
+          </li>
+        </ol>
+        <p>Step 4 is the core of the method, and it is short. This is the function, as it stands in the repo today:</p>
+        <Code lang="viv" code={hpsi} />
+        <p>
+          <code>put</code> scatters the coefficients into the FFT box, <code>ifft3</code> takes them to
+          real space, <code>BOX * VR</code> multiplies a complex array by a real one, and
+          <code>take</code> gathers the result back. The last two lines are the nonlocal
+          pseudopotential, for every band at once, as two matrix products.
+        </p>
+      </section>
+
+      <section>
+        <h2 id="checked">How it is checked</h2>
+        <p>
+          A DFT code can be wrong and still draw a plausible band structure, so there are three
+          layers of checks. The test list under the plot runs the last two.
+        </p>
+        <p>
+          <strong>The formulas.</strong> The pseudopotential’s closed-form Fourier transforms are
+          tested against brute-force radial quadrature of their real-space definitions, and the
+          exchange-correlation functional against <a href="https://libxc.gitlab.io/">libxc</a>.
+          A formula copied from a paper can be wrong and still run; this way the same mistake has
+          to be made twice, independently.
+        </p>
+        <p>
+          <strong>The implementation.</strong> The repo has a second, independent implementation
+          in numpy, which diagonalizes H densely with LAPACK — a different algorithm, not only a
+          different language. The Viv code has to land on its total energy to 10<sup>−7</sup> hartree
+          and its band energies to 10<sup>−5</sup> eV. The expected numbers are stored in a check file
+          generated by running the numpy code, so an input file and its expected values always match.
+        </p>
+        <p>
+          <strong>The physics.</strong> Published LDA results, with tolerances loose enough to cover
+          the spread between papers. Silicon’s gap comes out at {si.result.shown.GAP.toFixed(2)} eV
+          against a measured 1.17: that is LDA’s well-known failure, and reproducing it is a sharper
+          test than getting a right answer would be.
+        </p>
+        <p>
+          Across the six materials that is {totalTests} tests, run with the program compiled to C and
+          run natively. The five lighter ones also run through <em>both</em> browser engines when this
+          site is built.
+        </p>
+      </section>
+
+      <section>
+        <h2 id="copper">Copper</h2>
+        <p>
+          Copper is the hard one. Its 3d electrons are in the valence, the pseudopotential is sharp,
+          and it takes {cu.result.shown.NPWMAX.toLocaleString()} plane waves at each of
+          {cu.result.shown.NKPT} k-points to describe them — about
+          {Math.round((cu.result.shown.NPWMAX * cu.result.shown.NKPT) / (si.result.shown.NPWMAX * si.result.shown.NKPT))}
+          times silicon’s problem. Compiled to C and run natively it takes {cu.result.seconds} seconds
+          on one core. Compiled to WebAssembly it takes about {Math.round(cu.wasmSeconds / 60)} minutes
+          and {cu.wasmMemoryMB} MB, and passes the same {cu.result.pass.length} tests — so it is offered
+          above, with that warning. What the page shows before you run it is the native run’s recorded output.
+        </p>
+        <p>Band energies in eV from the Fermi level, against a published LDA calculation and experiment:</p>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr><th>Level</th><th /><th class="r">This code</th><th class="r">Published LDA</th><th class="r">Measured</th></tr>
+            </thead>
+            <tbody>
+              {
+                cuRows.map((r) => (
+                  <tr>
+                    <td><strong>{r.label}</strong></td>
+                    <td>{r.what}</td>
+                    <td class="num hot-cell">{f2(cu.result.shown[r.key])}</td>
+                    <td class="num">{f2(cu.published[r.key].value)}</td>
+                    <td class="num">{f2(r.measured)}</td>
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </div>
+        <p>
+          The published column is Marini, Onida and Del Sole, <em>Phys. Rev. Lett.</em>
+          <strong>88</strong>, 016403 (2002), Table I; the measured one is the same table’s, from
+          Courths and Hüfner’s review. The d bands agree with the published calculation to
+          0.05 eV, and sit 0.5 to 0.7 eV above the measured ones, which is what LDA does to copper.
+        </p>
+        <p class="note">
+          One number is printed and not asserted. The gap above L₂′ comes out at
+          {cu.result.shown.LGAP.toFixed(2)} eV here against 5.40 in that paper, whose pseudopotential
+          keeps the 3s and 3p shells in the valence where this one does not. Every occupied level
+          agrees to 0.2 eV or better; why that empty one differs by half an electron-volt has not been
+          explained, so the check file claims no tolerance for it.
+        </p>
+      </section>
+
+      <section>
+        <h2 id="wrong">Bugs fixed during development</h2>
+        <p>
+          Each of these produced a reasonable-looking band structure. The checks above are how they
+          were found.
+        </p>
+        <h3>k-mesh symmetry</h3>
+        <p>
+          The top of silicon’s valence band is three states with one energy. It came out as two and
+          one, 56 meV apart. The standard shifted Monkhorst–Pack mesh, written in the primitive fcc
+          reciprocal vectors, is not closed under the cubic point group — some rotations send the shift
+          <code>(½ ½ ½)</code> to <code>(½ 0 0)</code> — and with no explicit symmetrization the
+          density is only as symmetric as the mesh. The fix is the four-shift mesh, which is that
+          shift’s whole orbit: the split is zero, and 16 k-points land within 6 millihartree of 128.
+          Every semiconductor here now tests the triplet.
+        </p>
+        <h3>LOBPCG search direction</h3>
+        <p>
+          LOBPCG reached a residual of 10<sup>−6</sup> and then grew by a factor of five per step.
+          Its search direction was being formed as the difference of two nearly equal vectors, which
+          leaves no relative accuracy; once normalized, the direction and its image under H no longer
+          matched, and the small eigenproblem at the center of the method was solving for a matrix
+          that was not H. Building the direction directly from the expansion coefficients — Knyazev’s
+          original form — has no subtraction to cancel. The compiled run had been passing by luck; the
+          interpreter’s contract on <code>eig_herm</code>, which refuses a matrix that is not
+          Hermitian, is what caught it.
+        </p>
+        <h3>Smearing width in copper</h3>
+        <p>
+          Metals need fractional occupations near the Fermi level. At a width of 0.02 hartree the
+          Fermi–Dirac tail reached the top of copper’s d bands, 1.5 eV down, and emptying them pushed
+          the Fermi level up by a quarter of an electron-volt — every band energy in the table above
+          was off by that much. At 0.01 the shift is 0.04 eV.
+        </p>
+      </section>
+
+      <section>
+        <h2 id="language">Language features this needed</h2>
+        <p>
+          Viv already had arrays of floats and a symmetric eigensolver. This program needed complex arrays,
+          <code>fft</code> and <code>fft3</code>, a Hermitian eigensolver, whole-array complex
+          arithmetic, and <code>slab</code>, <code>take</code> and <code>put</code> to move rows and
+          scattered elements without a loop. Each went into both the interpreter and the C backend at
+          once, with a test that the two agree to the last bit, the FFT included for every length.
+        </p>
+        <p>
+          It also turned up two things about the compiler. Generated C never freed an array, which
+          was fine for silicon but ran out of memory on copper; functions now release what they allocated when they
+          return. And clang was fusing <code>a * b + c</code> into one instruction that rounds once
+          where the interpreter rounds twice, a last-bit difference that an iterative solver amplifies
+          into a different iteration count. Generated C now turns that off.
+        </p>
+      </section>
+
+      <section>
+        <h2 id="yourself">Run it yourself</h2>
+        {!REPO_PUBLIC && <p class="note">The repository is not public yet; these commands run in a checkout of it.</p>}
+        <Code lang="sh" code={`${REPO_PUBLIC ? `git clone ${GITHUB} && cd viv\n` : ''}cargo build --release -p viv
+
+dft/run.sh si            # silicon, dense engine: H built and diagonalized
+dft/run.sh si it         # silicon, iterative engine: the one this page runs
+dft/run.sh cu it         # copper, about three minutes
+dft/check.sh             # five materials, every test
+dft/build-wasm.sh        # Viv -> C -> wasm, what this page runs (needs emscripten)`} />
+        <p>
+          <code>dft/run.sh</code> compiles the input file, the solver and the check file to one C program
+          and runs it; <code>dft/build-wasm.sh</code> hands that same C to emscripten. The same files go
+          through the interpreter with <code>viv run</code>. The slowest of the {WORDS[inTab.length] ?? inTab.length} materials
+          that run in a browser (all but {mats.filter((m) => m.recorded).map((m) => m.name.toLowerCase()).join(' and ')}),
+          {slowest.name.toLowerCase()}, takes {slowest.result.seconds} seconds compiled in a browser and
+          {slowest.interpreted.seconds} interpreted.
+          An input file is ordinary Viv that sets the globals the solver reads, and it is generated —
+          pseudopotential parameters are read from CP2K’s table by a script, never typed. The table is CP2K’s
+          GTH_POTENTIALS as PySCF ships it (Goedecker, Teter and Hutter 1996; Hartwigsen, Goedecker and Hutter
+          1998); only the numbers are used, no CP2K or PySCF code. Every file
+          can be <a href="/dft/source/pwdft_it">read here</a>, alongside what <code>viv doc</code> extracts from its annotations.
+        </p>
+      </section>
+
+      <section>
+        <h2 id="not">What it does not do</h2>
+        <ul>
+          <li><strong>Total energies you can compare between structures.</strong> The ion–ion (Ewald) term is left out. It is a constant for fixed atoms and does not move a band.</li>
+          <li><strong>Gradient corrections.</strong> LDA only; PBE needs the density’s gradient.</li>
+          <li><strong>Spin, or spin–orbit coupling.</strong> Germanium’s and gallium arsenide’s valence-band tops are split by it in reality and not here.</li>
+          <li><strong>Symmetry reduction.</strong> Every k-point of the full mesh is computed, halved only by time reversal. That is why the density is symmetric without being symmetrized, and also why copper needs {cu.result.shown.NKPT} of them.</li>
+          <li><strong>Forces, or anything but fcc lattices.</strong></li>
+        </ul>
+      </section>
+    </div>
+    <Toc items={TOC} />
+  </div>
+</Base>

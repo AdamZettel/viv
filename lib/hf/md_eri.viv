@@ -1,0 +1,872 @@
+###
+post: Electron repulsion integrals by McMurchie-Davidson, one shell quartet at a time
+agent: claude
+
+The two-electron integral over four Cartesian Gaussians is, after the
+Hermite expansion of both products (see `lib/hf/hermite`),
+
+    (ab|cd) = 2 pi^(5/2) / (p q sqrt(p + q))
+              * sum_h  E_ab(h)  sum_h'  (-1)^(t'+u'+v') E_cd(h')  R(h + h')
+
+where `h = (t, u, v)` runs over the Hermite functions of the bra pair,
+`h'` over those of the ket pair, and `R` is taken at `P - Q` with exponent
+`alpha = pq / (p + q)`. The sign comes from moving the derivatives of the
+ket's Hermite Gaussians over to the bra's: `d/dQ = -d/dP` on a function of
+`P - Q`.
+
+**Written as two matrix products.** For one shell pair, stack the E values of
+every primitive pair side by side: `E_ab` is `[components, primitive pairs x
+Hermite functions]`, with the contraction coefficients, the component factors
+and the Gaussian product prefactor folded in. For one shell quartet, the
+signed `R` values for a batch of bra primitive pairs against every ket
+primitive pair form a matrix `BR`, with a row per ket (primitive pair,
+Hermite function) and a column per bra (primitive pair, Hermite function).
+Then
+
+    Z_b = E_cd @ BR_b        [ket components, bra primitive-Hermite]
+    (ab|cd) = E_ab @ Z^T     [bra components, ket components]
+
+where `Z^T` stacks the `Z_b^T` of every batch, and both sums over primitives
+happen inside the products. The batch is as many bra primitive pairs as keep
+`BR` near `MDERI_BATCH` = 4096 entries: all 36 at once for a contracted (ss|ss)
+quartet of oxygen 1s shells, one at a time for a (dd|dd) quartet with 10
+primitives per shell, where a single `BR` over both primitive lists would be
+3500 x 3500. Each primitive quartet costs one Boys evaluation and one R
+table, shared by every component, and the component work goes to `@`, which
+skips the zeros of `E` (an entry is zero whenever `t` passes `i + j` on its
+axis) and runs the same sum in the same order in both engines.
+
+**The shell-pair list** is built once per basis: for every pair `A >= B`, the
+primitive-pair exponents `p`, centers `P` and the stacked `E_ab`. All of it
+lives in one flat array (`mderi_store`), because Viv has no records.
+
+**Schwarz screening.** `(ab|cd)^2 <= (ab|ab)(cd|cd)`, so with
+`Q_AB = sqrt(max (ab|ab))` over the components of a shell pair, a quartet with
+`Q_AB Q_CD` below the threshold contributes less than the threshold to every
+integral it holds. `mderi_screened` skips those quartets (threshold
+`MDERI_SCREEN_TOL` = 1e-14), and `mderi_full` computes every one; the two
+agree to the threshold.
+
+**One flat quartet list.** The build loops over a list of `(bra pair, ket
+pair)` rows with `parallel for`. Each row writes a disjoint set of packed-8
+slots, so the rows are independent, and the default (non-OpenMP) build runs
+them in order with the same result.
+
+**One integral at a time.** `mderi_prim1` computes a single `(ab|cd)` over
+four primitive components: E only for those powers, R only inside the box
+they need (`herm_rfill_box`), and a plain Hermite sum. It is for spot checks
+where a full block is wasted work, and it shares no matrix code with the
+block path, so the tests hold the two against each other.
+
+**Measured cost** (native, cc -O2, Apple M2 Pro). A full (dd|dd) block of
+single primitives, 1296 integrals, takes 12.7 us; a (pp|pp) block, 81
+integrals, 1.1 us: about 10 and 14 ns per integral. One `(xx,xx|xx,xx)`
+value through `mderi_prim1` takes 0.67 us and one `(x,x|x,x)` 0.34 us,
+against 9.67 us and 1.11 us for the legacy lib/gto_md. The water 6-31G
+build (4186 values, 41,050 primitive quartets) takes 2.7 ms against the
+legacy 53.8 ms.
+
+**PySCF is not always the better reference.** For the prims cases, PySCF's
+value and a 50-digit mpmath evaluation differ by more than 5e-13 relative
+in 7 of 1536 values, by up to 3.5e-11 for an (ff|ff) pair far apart, where
+this module is within 5.3e-14 of mpmath. The tests use the mpmath value for
+those 7 (`mderi_prims_fix`).
+
+Output is packed-8 (`lib/hf/eri_store`) over unit-normalized Cartesian AOs.
+
+Used with `import hf.md_eri`.
+###
+
+from hf.basis import (
+    AT_X, AT_Y, AT_Z, bas_contract, bas_nao_cart, bas_nao_sph, bas_nc, bas_ncart, BAS_NDIM,
+    bas_nr, bas_powers, PR_EXP, SH_ATOM, SH_CART0, SH_L, SH_NCART, SH_NPRIM, SH_NSPH, SH_P0,
+    SH_SPH0,
+)
+import hf.boys
+from hf.eri_store import es_checksums, es_len8, es_sample_gap
+from hf.hermite import (
+    herm_boys_fill, herm_efill, herm_esize, herm_grid, HERM_GRID_XMAX, herm_nh, herm_rfill,
+    herm_rfill_box, herm_tuv,
+)
+
+MDERI_PI = 3.141592653589793
+MDERI_SCREEN_TOL = 1.0e-14
+MDERI_HDR = 5
+MDERI_TOP = 2
+# entries per primitive pair in a pack, (p, Px, Py, Pz), and per pair of
+# shell groups in the store's directory, (offset, first shell of each group,
+# shells in each group, the two group numbers, 0)
+MDERI_PP_LEN = 4
+MDERI_DIR_LEN = 8
+MDERI_D_SA = 1
+MDERI_D_SB = 2
+MDERI_D_NA = 3
+MDERI_D_NB = 4
+MDERI_D_GA = 5
+MDERI_D_GB = 6
+MDERI_BATCH = 4096
+# the four functions of one integral (ab|cd), and the columns of the row
+# mderi_prim1 reads for each: (exponent, x, y, z, lx, ly, lz)
+MDERI_QUARTET = 4
+MDERI_PQ_LEN = 7
+# a row of mderi_prims_fix: (case, pick, kind, value)
+MDERI_FIX_ROW = 4
+# the highest l in lib/hfref/prims: f
+MDERI_T_LMAX = 3
+
+#| Entries of one pack for groups of `ca` and `cb` shells of angular
+#| momentum `la` and `lb` with `npp` primitive pairs: a 5-number header
+#| `[la, lb, npp, nab, nh]`, `(p, Px, Py, Pz)` per primitive pair, then
+#| `E_ab` as `[nab, npp * nh]`, `nab = ca cb ncart(la) ncart(lb)` rows.
+def mderi_packsize(la, lb, npp, ca, cb) {
+    return MDERI_HDR + MDERI_PP_LEN * npp + ca * cb * bas_ncart(la) * bas_ncart(lb) * npp * herm_nh(la + lb)
+}
+
+#| Fill the pack for the group pair of `nga` shells from `sa` and `ngb`
+#| from `sb` at `ST[off ..]`. `cn` is from `bas_contract`. The shells of a
+#| group share their primitives' exponents, so the primitive pairs, their
+#| centers and the Hermite expansions are the first shells'; each row of
+#| `E_ab` carries one shell pair's contraction coefficients, rows ordered
+#| `((a nb_grp + b) ncart_a + i) ncart_b + j` for shell `a` of the first
+#| group, `b` of the second, components `i` and `j`.
+def mderi_fillpack(ST: Arr, off, atoms: Arr, shells: Arr, prims: Arr, cn: Arr, sa, nga, sb, ngb) {
+    la = shells[sa, SH_L]
+    lb = shells[sb, SH_L]
+    na = bas_ncart(la)
+    nb = bas_ncart(lb)
+    npa = round(shells[sa, SH_NPRIM])
+    npb = round(shells[sb, SH_NPRIM])
+    npp = npa * npb
+    L = la + lb
+    nh = herm_nh(L)
+    ST[off] = la
+    ST[off + 1] = lb
+    ST[off + 2] = npp
+    ST[off + 3] = nga * ngb * na * nb
+    ST[off + 4] = nh
+    PA = bas_powers(la)
+    PB = bas_powers(lb)
+    H = herm_tuv(L)
+    NA = zeros(na)
+    NB = zeros(nb)
+    for i to na {
+        NA[i] = bas_nc(PA[i, 0], PA[i, 1], PA[i, 2])
+    }
+    for j to nb {
+        NB[j] = bas_nc(PB[j, 0], PB[j, 1], PB[j, 2])
+    }
+    ca = round(shells[sa, SH_ATOM])
+    cb = round(shells[sb, SH_ATOM])
+    Ax = atoms[ca, AT_X]
+    Ay = atoms[ca, AT_Y]
+    Az = atoms[ca, AT_Z]
+    Bx = atoms[cb, AT_X]
+    By = atoms[cb, AT_Y]
+    Bz = atoms[cb, AT_Z]
+    EX = zeros(herm_esize(la, lb))
+    EY = zeros(herm_esize(la, lb))
+    EZ = zeros(herm_esize(la, lb))
+    nt = L + 1
+    ld = lb + 1
+    ncol = npp * nh
+    e0 = off + MDERI_HDR + MDERI_PP_LEN * npp
+    pa0 = round(shells[sa, SH_P0])
+    pb0 = round(shells[sb, SH_P0])
+    #: contraction and normalization folded into each E_ab row
+    for ip to npa {
+        a = prims[pa0 + ip, PR_EXP]
+        for jp to npb {
+            b = prims[pb0 + jp, PR_EXP]
+            k = ip * npb + jp
+            p = a + b
+            ST[off + MDERI_HDR + MDERI_PP_LEN * k] = p
+            ST[off + MDERI_HDR + MDERI_PP_LEN * k + 1] = (a * Ax + b * Bx) / p
+            ST[off + MDERI_HDR + MDERI_PP_LEN * k + 2] = (a * Ay + b * By) / p
+            ST[off + MDERI_HDR + MDERI_PP_LEN * k + 3] = (a * Az + b * Bz) / p
+            herm_efill(EX, 0, la, lb, a, b, Ax - Bx)
+            herm_efill(EY, 0, la, lb, a, b, Ay - By)
+            herm_efill(EZ, 0, la, lb, a, b, Az - Bz)
+            for ga to nga {
+                for gb to ngb {
+                    c = cn[round(shells[sa + ga, SH_P0]) + ip] * cn[round(shells[sb + gb, SH_P0]) + jp]
+                    r0 = (ga * ngb + gb) * na * nb
+                    for i to na {
+                        for j to nb {
+                            ox = (PA[i, 0] * ld + PB[j, 0]) * nt
+                            oy = (PA[i, 1] * ld + PB[j, 1]) * nt
+                            oz = (PA[i, 2] * ld + PB[j, 2]) * nt
+                            tx = PA[i, 0] + PB[j, 0]
+                            ty = PA[i, 1] + PB[j, 1]
+                            tz = PA[i, 2] + PB[j, 2]
+                            w = c * NA[i] * NB[j]
+                            rowoff = e0 + (r0 + i * nb + j) * ncol + k * nh
+                            for h to nh {
+                                if H[h, 0] <= tx and H[h, 1] <= ty and H[h, 2] <= tz {
+                                    ST[rowoff + h] = w * EX[ox + H[h, 0]] * EY[oy + H[h, 1]] * EZ[oz + H[h, 2]]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+#| The store for the group pairs in `PL` (`[npl, 2]`, rows `(ga, gb)`) of
+#| the groups `GT` (`[ng, 2]`, rows `(first shell, shells)`), as one flat
+#| array: `ST[0]` = pair count, `ST[1]` = largest l, then the directory
+#| (`MDERI_DIR_LEN` entries a pair), then the packs.
+def mderi_store_groups(atoms: Arr, shells: Arr, prims: Arr, GT: Arr, PL: Arr) {
+    cn = bas_contract(shells, prims)
+    npl = len(PL)
+    total = MDERI_TOP + MDERI_DIR_LEN * npl
+    lmax = 0
+    for k to npl {
+        sa = GT[PL[k, 0], 0]
+        sb = GT[PL[k, 1], 0]
+        total = total + mderi_packsize(shells[sa, SH_L], shells[sb, SH_L], shells[sa, SH_NPRIM] * shells[sb, SH_NPRIM], GT[PL[k, 0], 1], GT[PL[k, 1], 1])
+        lmax = max(lmax, max(shells[sa, SH_L], shells[sb, SH_L]))
+    }
+    ST = zeros(total)
+    ST[0] = npl
+    ST[1] = lmax
+    off = MDERI_TOP + MDERI_DIR_LEN * npl
+    for k to npl {
+        ga = PL[k, 0]
+        gb = PL[k, 1]
+        d0 = MDERI_TOP + MDERI_DIR_LEN * k
+        ST[d0] = off
+        ST[d0 + MDERI_D_SA] = GT[ga, 0]
+        ST[d0 + MDERI_D_SB] = GT[gb, 0]
+        ST[d0 + MDERI_D_NA] = GT[ga, 1]
+        ST[d0 + MDERI_D_NB] = GT[gb, 1]
+        ST[d0 + MDERI_D_GA] = ga
+        ST[d0 + MDERI_D_GB] = gb
+        mderi_fillpack(ST, off, atoms, shells, prims, cn, GT[ga, 0], GT[ga, 1], GT[gb, 0], GT[gb, 1])
+        sa = GT[ga, 0]
+        sb = GT[gb, 0]
+        off = off + mderi_packsize(shells[sa, SH_L], shells[sb, SH_L], shells[sa, SH_NPRIM] * shells[sb, SH_NPRIM], GT[ga, 1], GT[gb, 1])
+    }
+    return ST
+}
+
+#| The store for the shell pairs in `PL` (`[npl, 2]`, rows `(sa, sb)`), each
+#| shell a group of its own.
+def mderi_store_pairs(atoms: Arr, shells: Arr, prims: Arr, PL: Arr) {
+    return mderi_store_groups(atoms, shells, prims, mderi_seg_groups(shells), PL)
+}
+
+#| Every shell a group of its own, `[nsh, 2]`: the segmented store.
+def mderi_seg_groups(shells: Arr) {
+    nsh = len(shells)
+    GT = zeros(nsh, 2)
+    for s to nsh {
+        GT[s, 0] = s
+        GT[s, 1] = 1
+    }
+    return GT
+}
+
+#| `1` when shells `s` and `t` are on the same atom, have the same angular
+#| momentum and the same primitive exponents: the contractions of one
+#| general contraction, which the basis tables list as segmented shells
+#| one after the other.
+def mderi_same_prims(shells: Arr, prims: Arr, s, t) {
+    if shells[s, SH_ATOM] != shells[t, SH_ATOM] or shells[s, SH_L] != shells[t, SH_L] or shells[s, SH_NPRIM] != shells[t, SH_NPRIM] {
+        return 0
+    }
+    ps = round(shells[s, SH_P0])
+    pt = round(shells[t, SH_P0])
+    for i to shells[s, SH_NPRIM] {
+        if prims[ps + i, PR_EXP] != prims[pt + i, PR_EXP] {
+            return 0
+        }
+    }
+    return 1
+}
+
+#| The shell groups, `[ng, 2]` rows `(first shell, shells)`: runs of
+#| consecutive shells with the same atom, angular momentum and exponents.
+#| A group's primitive integrals are computed once for all its shells.
+def mderi_groups(shells: Arr, prims: Arr) {
+    nsh = len(shells)
+    first = zeros(nsh)
+    ng = 0
+    for s to nsh {
+        if s == 0 or mderi_same_prims(shells, prims, s - 1, s) < 1 {
+            first[ng] = s
+            ng = ng + 1
+        }
+    }
+    GT = zeros(ng, 2)
+    for g to ng {
+        GT[g, 0] = first[g]
+        nxt = nsh
+        if g + 1 < ng {
+            nxt = first[g + 1]
+        }
+        GT[g, 1] = nxt - first[g]
+    }
+    return GT
+}
+
+#| Every canonical pair `a >= b` of `nsh` shells (or groups), numbered
+#| `a (a + 1)/2 + b`.
+def mderi_canon_pairs(nsh) {
+    PL = zeros(nsh * (nsh + 1) / 2, 2)
+    for sa to nsh {
+        for sb to sa + 1 {
+            PL[sa * (sa + 1) / 2 + sb, 0] = sa
+            PL[sa * (sa + 1) / 2 + sb, 1] = sb
+        }
+    }
+    return PL
+}
+
+#| The store over every canonical pair of shell groups (`mderi_groups`):
+#| the production one.
+def mderi_store(atoms: Arr, shells: Arr, prims: Arr) {
+    GT = mderi_groups(shells, prims)
+    return mderi_store_groups(atoms, shells, prims, GT, mderi_canon_pairs(len(GT)))
+}
+
+#| The store over every canonical shell pair, each shell its own group: the
+#| segmented store, which checks the grouped one.
+def mderi_store_seg(atoms: Arr, shells: Arr, prims: Arr) {
+    return mderi_store_pairs(atoms, shells, prims, mderi_canon_pairs(len(shells)))
+}
+
+#| The Boys grid an ERI build needs: orders up to `4 lmax`.
+def mderi_grid(ST: Arr) {
+    return herm_grid(MDERI_QUARTET * ST[1], HERM_GRID_XMAX)
+}
+
+#| `E_ab` of the pack at `o`, copied out as a matrix for `@`.
+def mderi_emat(ST: Arr, o) {
+    npp = ST[o + 2]
+    nab = ST[o + 3]
+    ncol = npp * ST[o + 4]
+    e0 = o + MDERI_HDR + MDERI_PP_LEN * npp
+    E = zeros(nab, ncol)
+    for r to nab {
+        for c to ncol {
+            E[r, c] = ST[e0 + r * ncol + c]
+        }
+    }
+    return E
+}
+
+#| Offsets `(t D + u) D + v` into an R cube of side `D`, for the Hermite list
+#| of order `L`; with `signed = 1`, the sign `(-1)^(t+u+v)` instead.
+def mderi_hoff(L, D, signed) {
+    O = zeros(herm_nh(L))
+    h = 0
+    for t to L + 1 {
+        for u to L - t + 1 {
+            for v to L - t - u + 1 {
+                O[h] = (t * D + u) * D + v
+                if signed == 1 {
+                    O[h] = 1 - 2 * mod(t + u + v, 2)
+                }
+                h = h + 1
+            }
+        }
+    }
+    return O
+}
+
+#| The block `(ab|cd)` for bra pair `k1` and ket pair `k2` of the store, as
+#| `[ncart_a * ncart_b, ncart_c * ncart_d]`. `G` is from `mderi_grid`.
+def mderi_block(ST: Arr, k1, k2, G: Arr) {
+    o1 = ST[MDERI_TOP + MDERI_DIR_LEN * k1]
+    o2 = ST[MDERI_TOP + MDERI_DIR_LEN * k2]
+    L1 = ST[o1] + ST[o1 + 1]
+    L2 = ST[o2] + ST[o2 + 1]
+    np1 = ST[o1 + 2]
+    np2 = ST[o2 + 2]
+    nh1 = ST[o1 + 4]
+    nh2 = ST[o2 + 4]
+    L = L1 + L2
+    D = L + 1
+    #: ket signs (-1)^(t+u+v) move its derivatives onto the bra
+    HA = mderi_hoff(L1, D, 0)
+    HC = mderi_hoff(L2, D, 0)
+    SG = mderi_hoff(L2, D, 1)
+    ncd = ST[o2 + 3]
+    E2 = mderi_emat(ST, o2)
+    # bra primitive pairs per batch, so BR stays near MDERI_BATCH entries
+    nbat = max(1, min(np1, floor(MDERI_BATCH / (np2 * nh2 * nh1))))
+    BR = zeros(np2 * nh2, nbat * nh1)
+    ZT = zeros(np1 * nh1, ncd)
+    S = zeros(2 * D * D * D)
+    F = zeros(L + 1)
+    c52 = 2.0 * pow(MDERI_PI, 2.5)
+    #: per batch: an R table per primitive quartet into BR, then Z_b = E_cd @ BR
+    k0 = 0
+    while k0 < np1 {
+        kn = min(nbat, np1 - k0)
+        for kk to kn {
+            b1 = o1 + MDERI_HDR + MDERI_PP_LEN * (k0 + kk)
+            p = ST[b1]
+            for m to np2 {
+                b2 = o2 + MDERI_HDR + MDERI_PP_LEN * m
+                q = ST[b2]
+                X = ST[b1 + 1] - ST[b2 + 1]
+                Y = ST[b1 + 2] - ST[b2 + 2]
+                Z = ST[b1 + 3] - ST[b2 + 3]
+                al = p * q / (p + q)
+                herm_boys_fill(G, L, al * (X * X + Y * Y + Z * Z), F)
+                herm_rfill(S, L, al, X, Y, Z, F, c52 / (p * q * sqrt(p + q)))
+                for hc to nh2 {
+                    row = m * nh2 + hc
+                    base = HC[hc]
+                    sg = SG[hc]
+                    for ha to nh1 {
+                        BR[row, kk * nh1 + ha] = sg * S[base + HA[ha]]
+                    }
+                }
+            }
+        }
+        # this batch of bra primitive pairs against every ket one, then its
+        # rows of Z^T; columns past the batch hold stale values and are not read
+        Zb = E2 @ BR
+        for c to kn * nh1 {
+            for cd to ncd {
+                ZT[k0 * nh1 + c, cd] = Zb[cd, c]
+            }
+        }
+        k0 = k0 + nbat
+    }
+    return mderi_emat(ST, o1) @ ZT
+}
+
+#| `Q[k] = sqrt(max (ab|ab))` over the components of store pair `k`.
+def mderi_schwarz(ST: Arr, G: Arr) {
+    npl = ST[0]
+    Q = zeros(npl)
+    parallel for k to npl {
+        mderi_schwarz_one(ST, G, Q, k)
+    }
+    return Q
+}
+
+def mderi_schwarz_one(ST: Arr, G: Arr, Q: Arr, k) {
+    B = mderi_block(ST, k, k, G)
+    w = 0.0
+    for r to len(B) {
+        w = max(w, B[r, r])
+    }
+    Q[k] = sqrt(w)
+    return 0
+}
+
+#| The flat quartet list `[nq, 2]` of `(bra pair, ket pair)` rows with
+#| `bra >= ket`, keeping a row when `Q[bra] Q[ket] >= tol`. A negative `tol`
+#| keeps every row, and `Q` is then not read.
+def mderi_qlist(Q: Arr, npl, tol) {
+    QL = []
+    for k1 to npl {
+        for k2 to k1 + 1 {
+            if tol < 0.0 or Q[k1] * Q[k2] >= tol {
+                QL = append(QL, [k1, k2])
+            }
+        }
+    }
+    return QL
+}
+
+#| Write block `B` of store pairs `(k1, k2)` into the packed vector. Only the
+#| canonical entries (`i >= j`, `k >= l`, and `ij >= kl` when the two pairs
+#| are the same) are written, so every slot is written once.
+def mderi_put(Gp: Arr, B: Arr, ST: Arr, shells: Arr, k1, k2) {
+    return mderi_put_at(Gp, B, ST, shells, k1, k2, SH_CART0, SH_NCART)
+}
+
+#| `mderi_put` with the functions numbered by the shells-table columns
+#| `c0col` (first function) and `ncol` (how many): `SH_CART0` and
+#| `SH_NCART` for a Cartesian block, `SH_SPH0` and `SH_NSPH` for a spherical
+#| one. The shells are in the same order in both numberings, so the same
+#| canonical quartets hold every canonical integral of either. A row of the
+#| block is `((a nb_grp + b) n_a + i) n_b + j` (lib/hf/md_eri's pack rows),
+#| and within one group pair only `i >= j` (by function number) is written.
+def mderi_put_at(Gp: Arr, B: Arr, ST: Arr, shells: Arr, k1, k2, c0col, ncol) {
+    d1 = MDERI_TOP + MDERI_DIR_LEN * k1
+    d2 = MDERI_TOP + MDERI_DIR_LEN * k2
+    sa = ST[d1 + MDERI_D_SA]
+    sb = ST[d1 + MDERI_D_SB]
+    sc = ST[d2 + MDERI_D_SA]
+    sd = ST[d2 + MDERI_D_SB]
+    gna = ST[d1 + MDERI_D_NA]
+    gnb = ST[d1 + MDERI_D_NB]
+    gnc = ST[d2 + MDERI_D_NA]
+    gnd = ST[d2 + MDERI_D_NB]
+    na = shells[sa, ncol]
+    nb = shells[sb, ncol]
+    nc = shells[sc, ncol]
+    nd = shells[sd, ncol]
+    #: only canonical integrals, each slot written once
+    for ga to gna {
+        for ia to na {
+            i = shells[sa + ga, c0col] + ia
+            for gb to gnb {
+                for ib to nb {
+                    j = shells[sb + gb, c0col] + ib
+                    if sa == sb and j > i {
+                        continue
+                    }
+                    ij = i * (i + 1) / 2 + j
+                    row = ((ga * gnb + gb) * na + ia) * nb + ib
+                    for gc to gnc {
+                        for ic to nc {
+                            k = shells[sc + gc, c0col] + ic
+                            for gd to gnd {
+                                for id to nd {
+                                    l = shells[sd + gd, c0col] + id
+                                    if sc == sd and l > k {
+                                        continue
+                                    }
+                                    kl = k * (k + 1) / 2 + l
+                                    if k1 == k2 and kl > ij {
+                                        continue
+                                    }
+                                    slot = kl * (kl + 1) / 2 + ij
+                                    if ij >= kl {
+                                        slot = ij * (ij + 1) / 2 + kl
+                                    }
+                                    Gp[slot] = B[row, ((gc * gnd + gd) * nc + ic) * nd + id]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+#| One row of the quartet list, computed and written; a def of its own so
+#| that its arrays are freed on return, on whichever thread ran it.
+def mderi_do(Gp: Arr, ST: Arr, G: Arr, shells: Arr, QL: Arr, q) {
+    k1 = QL[q, 0]
+    k2 = QL[q, 1]
+    mderi_put(Gp, mderi_block(ST, k1, k2, G), ST, shells, k1, k2)
+    return 0
+}
+
+#| Packed-8 ERIs over Cartesian AOs, skipping quartets with `Q_AB Q_CD < tol`
+#| (a negative `tol` skips nothing and never computes `Q`), over the
+#| grouped store.
+def mderi_build(atoms: Arr, shells: Arr, prims: Arr, tol) {
+    return mderi_build_st(mderi_store(atoms, shells, prims), shells, tol)
+}
+
+#| `mderi_build` over a given store: grouped or segmented.
+def mderi_build_st(ST: Arr, shells: Arr, tol) {
+    n = bas_nao_cart(shells)
+    G = mderi_grid(ST)
+    npl = ST[0]
+    Q = zeros(npl)
+    if tol >= 0.0 {
+        Q = mderi_schwarz(ST, G)
+    }
+    QL = mderi_qlist(Q, npl, tol)
+    #: rows write disjoint slots, so they run in parallel
+    Gp = zeros(es_len8(n))
+    parallel for q to len(QL) {
+        mderi_do(Gp, ST, G, shells, QL, q)
+    }
+    return Gp
+}
+
+#| Integral-stage members `(atoms, shells, prims) -> packed-8`.
+def mderi_screened(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return mderi_build(atoms, shells, prims, MDERI_SCREEN_TOL)
+}
+
+def mderi_full(atoms: Arr, shells: Arr, prims: Arr) -> Arr {
+    return mderi_build_st(mderi_store_seg(atoms, shells, prims), shells, -1.0)
+}
+
+# ---- spherical functions, block by block --------------------------------------
+
+#| The pair transforms of the store's group pairs as one flat array. `TS[k]`
+#| is where pair k's matrix starts, `[rows of its block, nsph_a nsph_b times
+#| the shell pairs]`, block diagonal with one `M_a (x) M_b` per shell pair,
+#| followed by its transpose; `TS[k]` is `-1` when both groups are up to p,
+#| whose block of `M` is the identity. `M` is the c2s matrix of
+#| lib/hf/cart2sph.
+def mderi_tstore(ST: Arr, shells: Arr, M: Arr) {
+    npl = ST[0]
+    total = npl
+    for k to npl {
+        d0 = MDERI_TOP + MDERI_DIR_LEN * k
+        sa = ST[d0 + MDERI_D_SA]
+        sb = ST[d0 + MDERI_D_SB]
+        if shells[sa, SH_L] > 1 or shells[sb, SH_L] > 1 {
+            ng = ST[d0 + MDERI_D_NA] * ST[d0 + MDERI_D_NB]
+            total = total + 2 * ng * ng * shells[sa, SH_NCART] * shells[sb, SH_NCART] * shells[sa, SH_NSPH] * shells[sb, SH_NSPH]
+        }
+    }
+    #: TS[k] = -1 marks an identity pair (both shells up to p)
+    TS = zeros(total)
+    off = npl
+    for k to npl {
+        TS[k] = -1
+        d0 = MDERI_TOP + MDERI_DIR_LEN * k
+        sa = ST[d0 + MDERI_D_SA]
+        sb = ST[d0 + MDERI_D_SB]
+        if shells[sa, SH_L] > 1 or shells[sb, SH_L] > 1 {
+            TS[k] = off
+            gnb = ST[d0 + MDERI_D_NB]
+            ng = ST[d0 + MDERI_D_NA] * gnb
+            na = shells[sa, SH_NCART]
+            nb = shells[sb, SH_NCART]
+            ma = shells[sa, SH_NSPH]
+            mb = shells[sb, SH_NSPH]
+            nr = ng * na * nb
+            nc = ng * ma * mb
+            for g to ng {
+                a = sa + floor(g / gnb)
+                b = sb + mod(g, gnb)
+                ca = shells[a, SH_CART0]
+                cb = shells[b, SH_CART0]
+                pa = shells[a, SH_SPH0]
+                pb = shells[b, SH_SPH0]
+                for ia to na {
+                    for ib to nb {
+                        r = g * na * nb + ia * nb + ib
+                        for qa to ma {
+                            for qb to mb {
+                                c = g * ma * mb + qa * mb + qb
+                                v = M[ca + ia, pa + qa] * M[cb + ib, pb + qb]
+                                TS[off + r * nc + c] = v
+                                TS[off + nr * nc + c * nr + r] = v
+                            }
+                        }
+                    }
+                }
+            }
+            off = off + 2 * nr * nc
+        }
+    }
+    return TS
+}
+
+#| The `[rows, cols]` matrix stored at `TS[o ..]`, copied out for `@`.
+def mderi_tmat(TS: Arr, o, rows, cols) {
+    T = zeros(rows, cols)
+    for r to rows {
+        for c to cols {
+            T[r, c] = TS[o + r * cols + c]
+        }
+    }
+    return T
+}
+
+#| The block `(ab|cd)` of store pairs `k1`, `k2` over spherical functions:
+#| the Cartesian block of `mderi_block` with the bra pair's transform
+#| transposed on the left and the ket pair's on the right (`mderi_tstore`),
+#| a side skipped when its transform is the identity.
+def mderi_block_sph(ST: Arr, TS: Arr, shells: Arr, k1, k2, G: Arr) {
+    B = mderi_block(ST, k1, k2, G)
+    if TS[k1] >= 0 {
+        d1 = MDERI_TOP + MDERI_DIR_LEN * k1
+        sa = ST[d1 + MDERI_D_SA]
+        sb = ST[d1 + MDERI_D_SB]
+        ng = ST[d1 + MDERI_D_NA] * ST[d1 + MDERI_D_NB]
+        nr = ng * shells[sa, SH_NCART] * shells[sb, SH_NCART]
+        nc = ng * shells[sa, SH_NSPH] * shells[sb, SH_NSPH]
+        B = mderi_tmat(TS, TS[k1] + nr * nc, nc, nr) @ B
+    }
+    if TS[k2] >= 0 {
+        d2 = MDERI_TOP + MDERI_DIR_LEN * k2
+        sc = ST[d2 + MDERI_D_SA]
+        sd = ST[d2 + MDERI_D_SB]
+        ng = ST[d2 + MDERI_D_NA] * ST[d2 + MDERI_D_NB]
+        B = B @ mderi_tmat(TS, TS[k2], ng * shells[sc, SH_NCART] * shells[sd, SH_NCART], ng * shells[sc, SH_NSPH] * shells[sd, SH_NSPH])
+    }
+    return B
+}
+
+#| One row of the quartet list over spherical functions, computed,
+#| transformed and written; a def of its own so its arrays are freed on
+#| return.
+def mderi_sph_do(Gs: Arr, ST: Arr, TS: Arr, G: Arr, shells: Arr, QL: Arr, q) {
+    k1 = QL[q, 0]
+    k2 = QL[q, 1]
+    mderi_put_at(Gs, mderi_block_sph(ST, TS, shells, k1, k2, G), ST, shells, k1, k2, SH_SPH0, SH_NSPH)
+    return 0
+}
+
+#| Packed-8 ERIs over spherical functions, `M` the c2s matrix: each quartet
+#| moved to spherical functions as it is computed, so no Cartesian packed
+#| vector is built and none is read back. Schwarz screening as in
+#| `mderi_build` (a negative `tol` skips nothing).
+def mderi_sph_build(atoms: Arr, shells: Arr, prims: Arr, M: Arr, tol) {
+    ns = bas_nao_sph(shells)
+    ST = mderi_store(atoms, shells, prims)
+    G = mderi_grid(ST)
+    npl = ST[0]
+    Q = zeros(npl)
+    if tol >= 0.0 {
+        Q = mderi_schwarz(ST, G)
+    }
+    QL = mderi_qlist(Q, npl, tol)
+    TS = mderi_tstore(ST, shells, M)
+    #: rows write disjoint slots, so they run in parallel
+    Gs = zeros(es_len8(ns))
+    parallel for q to len(QL) {
+        mderi_sph_do(Gs, ST, TS, G, shells, QL, q)
+    }
+    return Gs
+}
+
+#| The production ERIs over spherical functions: Schwarz-screened at
+#| `MDERI_SCREEN_TOL`, transformed block by block. `mderi_screened`
+#| followed by `tr4_blocks` (lib/hf/transform) is the same thing in two
+#| passes and checks it.
+def mderi_sph(atoms: Arr, shells: Arr, prims: Arr, M: Arr) -> Arr {
+    return mderi_sph_build(atoms, shells, prims, M, MDERI_SCREEN_TOL)
+}
+
+#| `(ab|cd)` for four shells in any order, `[na nb, nc nd]`: the entry point
+#| for single quartets and for tests.
+def mderi_quartet(atoms: Arr, shells: Arr, prims: Arr, sa, sb, sc, sd) {
+    ST = mderi_store_pairs(atoms, shells, prims, [[sa, sb], [sc, sd]])
+    return mderi_block(ST, 0, 1, mderi_grid(ST))
+}
+
+#| Scratch entries `mderi_prim1` needs for components up to `lmax`.
+def mderi_prim1_size(lmax) {
+    L = MDERI_QUARTET * lmax
+    return 6 * herm_esize(lmax, lmax) + 2 * (L + 1) * (L + 1) * (L + 1)
+}
+
+#| Where `E(la, lb, 0)` sits in a table `herm_efill` wrote at `e0` for powers
+#| `la`, `lb`.
+def mderi_erow(e0, la, lb) {
+    return e0 + (la * (lb + 1) + lb) * (la + lb + 1)
+}
+
+#| One integral `(ab|cd)` over four unit-normalized primitive components.
+#| `PQ` is `[4, 7]`, a row `(exponent, x, y, z, lx, ly, lz)` per function;
+#| `G` is from `herm_grid` with order at least the total `l`; `W` is scratch
+#| of `mderi_prim1_size(lmax)` entries and `F` of `4 lmax + 1`. It builds only the E entries of these
+#| powers and only the R entries inside their box (`herm_rfill_box`), so one
+#| value costs far less than the shell block that holds it. It is the path
+#| for spot checks on bases too big for a full build, and it shares no
+#| matrix code with `mderi_block`.
+def mderi_prim1(PQ: Arr, G: Arr, W: Arr, F: Arr) {
+    a = PQ[0, 0]
+    b = PQ[1, 0]
+    c = PQ[2, 0]
+    d = PQ[3, 0]
+    p = a + b
+    q = c + d
+    lmax = 0
+    for f to len(PQ) {
+        lmax = max(lmax, max(PQ[f, 4], max(PQ[f, 5], PQ[f, 6])))
+    }
+    #: E only for these powers
+    es = herm_esize(lmax, lmax)
+    # E for the bra pair on x, y, z at 0, es, 2 es; the ket pair at 3 es ..
+    for ax to BAS_NDIM {
+        herm_efill(W, ax * es, PQ[0, 4 + ax], PQ[1, 4 + ax], a, b, PQ[0, 1 + ax] - PQ[1, 1 + ax])
+        herm_efill(W, (3 + ax) * es, PQ[2, 4 + ax], PQ[3, 4 + ax], c, d, PQ[2, 1 + ax] - PQ[3, 1 + ax])
+    }
+    #: R only inside the box these powers need
+    tx1 = PQ[0, 4] + PQ[1, 4]
+    ty1 = PQ[0, 5] + PQ[1, 5]
+    tz1 = PQ[0, 6] + PQ[1, 6]
+    tx2 = PQ[2, 4] + PQ[3, 4]
+    ty2 = PQ[2, 5] + PQ[3, 5]
+    tz2 = PQ[2, 6] + PQ[3, 6]
+    Tx = tx1 + tx2
+    Ty = ty1 + ty2
+    Tz = tz1 + tz2
+    L = Tx + Ty + Tz
+    X = (a * PQ[0, 1] + b * PQ[1, 1]) / p - (c * PQ[2, 1] + d * PQ[3, 1]) / q
+    Y = (a * PQ[0, 2] + b * PQ[1, 2]) / p - (c * PQ[2, 2] + d * PQ[3, 2]) / q
+    Z = (a * PQ[0, 3] + b * PQ[1, 3]) / p - (c * PQ[2, 3] + d * PQ[3, 3]) / q
+    al = p * q / (p + q)
+    s0 = 6 * es
+    herm_boys_fill(G, L, al * (X * X + Y * Y + Z * Z), F)
+    herm_rfill_box(W, s0, Tx, Ty, Tz, al, X, Y, Z, F, 2.0 * pow(MDERI_PI, 2.5) / (p * q * sqrt(p + q)))
+    #: ket terms signed (-1)^(t'+u'+v')
+    DV = Tz + 1
+    DU = (Ty + 1) * DV
+    # where E(i, j, 0) of each axis sits: herm_efill lays out (la, lb) as given
+    ex1 = mderi_erow(0, PQ[0, 4], PQ[1, 4])
+    ey1 = mderi_erow(es, PQ[0, 5], PQ[1, 5])
+    ez1 = mderi_erow(2 * es, PQ[0, 6], PQ[1, 6])
+    ex2 = mderi_erow(3 * es, PQ[2, 4], PQ[3, 4])
+    ey2 = mderi_erow(4 * es, PQ[2, 5], PQ[3, 5])
+    ez2 = mderi_erow(5 * es, PQ[2, 6], PQ[3, 6])
+    tot = 0.0
+    for t2 to tx2 + 1 {
+        for u2 to ty2 + 1 {
+            for v2 to tz2 + 1 {
+                e2 = W[ex2 + t2] * W[ey2 + u2] * W[ez2 + v2]
+                if mod(t2 + u2 + v2, 2) == 1 {
+                    e2 = -e2
+                }
+                inner = 0.0
+                for t1 to tx1 + 1 {
+                    for u1 to ty1 + 1 {
+                        e1 = W[ex1 + t1] * W[ey1 + u1]
+                        o = s0 + (t1 + t2) * DU + (u1 + u2) * DV + v2
+                        for v1 to tz1 + 1 {
+                            inner = inner + e1 * W[ez1 + v1] * W[o + v1]
+                        }
+                    }
+                }
+                tot = tot + e2 * inner
+            }
+        }
+    }
+    nrm = 1.0
+    for f to len(PQ) {
+        lf = PQ[f, 4] + PQ[f, 5] + PQ[f, 6]
+        nrm = nrm * bas_nr(PQ[f, 0], lf) * bas_nc(PQ[f, 4], PQ[f, 5], PQ[f, 6])
+    }
+    return nrm * tot
+}
+
+#| Test helper: the largest `|(ij|kl)| / sqrt((ij|ij)(kl|kl)) - 1` over every
+#| packed entry; the Schwarz bound holds when it is at most rounding.
+def mderi_schwarz_excess(Gp: Arr, n) {
+    npair = n * (n + 1) / 2
+    w = -1.0
+    for a to npair {
+        da = Gp[a * (a + 1) / 2 + a]
+        for b to a + 1 {
+            x = abs(Gp[a * (a + 1) / 2 + b])
+            w = max(w, x / sqrt(da * Gp[b * (b + 1) / 2 + b]) - 1.0)
+        }
+    }
+    return w
+}
+
+#| Test helper: the largest gap between the pair diagonal `(ij|ij)` of `Gp`
+#| and a reference list of it.
+def mderi_diag_gap(Gp: Arr, gd: Arr) {
+    w = 0.0
+    for a to len(gd) {
+        w = max(w, abs(Gp[a * (a + 1) / 2 + a] - gd[a]))
+    }
+    return w
+}
+
+#| Test helper: the largest of the relative checksum gaps and the sample
+#| and diagonal gaps of `Gp` against one reference set.
+def mderi_ref_gaps(Gp: Arr, seed, sumsq, wsum, idx: Arr, val: Arr, gd: Arr) {
+    cs = es_checksums(Gp, seed)
+    w = max(abs(cs[0] - sumsq) / abs(sumsq), abs(cs[1] - wsum) / abs(wsum))
+    return max(w, max(es_sample_gap(Gp, idx, val), mderi_diag_gap(Gp, gd)))
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

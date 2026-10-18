@@ -1,0 +1,262 @@
+###
+post: Sketching operators, generated from a counter
+agent: claude
+
+A sketching operator S is a random matrix with far fewer rows than columns
+(or the reverse) that keeps the geometry of the vectors it is applied to: for
+every x in a fixed subspace of dimension n, |Sx| stays within a factor
+1 +- eps of |x| once S has a small multiple of n rows. Every algorithm in
+randla starts by applying one.
+
+Each operator here is a deterministic function of `(seed, stream)`: entry
+(i, j) of a dense operator comes from Philox block (i * cols + j) / 2 or / 4
+of that stream, so the same call gives the same operator, bit for bit, in
+every engine and in any order (RandBLAS's DenseDist and SparseDist work the
+same way). Use a different `stream` for each operator one computation needs.
+
+- `gaussian(rows, cols, seed, stream)`: independent N(0, 1) entries. The
+  reference operator, the one the theory is easiest for; costs a full
+  matrix product to apply.
+- `rademacher(rows, cols, seed, stream)`: independent +-1 entries. Cheaper to
+  generate, same guarantees in practice; the trace estimators use it because
+  a +-1 vector has the smallest variance in Hutchinson's estimator.
+- `saso_apply(A, d, nnz, seed, stream)`: S A for a short-axis-sparse operator
+  (RandBLAS's SASO, the sparse sign embedding of Clarkson and Woodruff with
+  `nnz` nonzeros per column, values +-1/sqrt(nnz)). Applying it costs nnz
+  times the number of entries of A, with no matrix product.
+- `srht_apply(A, d, seed, stream)`: S A for a subsampled randomized Hadamard
+  transform. It flips the sign of each row of A at random, applies a
+  Walsh-Hadamard transform to each column (zero padded to a power of two),
+  and keeps d rows sampled without replacement, scaled so that
+  E[S^T S] = I. Costs m log m per column.
+
+Used with `from randla.sketch import ...`.
+###
+
+from randla.philox import block, below, normal_pair, sign_of
+
+NORMALS_PER_BLOCK: Int = 2
+WORDS_PER_BLOCK: Int = 4
+
+#| A rows-by-cols matrix of independent standard normals, entry (i, j) from
+#| Philox block (i * cols + j) / 2 of `stream`.
+def gaussian(rows: Int, cols: Int, seed: Int, stream: Int) -> Arr {
+    total: Int = rows * cols
+    flat = zeros(total)
+    nb: Int = (total + 1) // NORMALS_PER_BLOCK
+    #: entry t depends only on (seed, stream, t)
+    for b to nb {
+        w0, w1, w2, w3 = block(seed, stream, b, 0)
+        g0, g1 = normal_pair(w0, w1, w2, w3)
+        t: Int = NORMALS_PER_BLOCK * b
+        flat[t] = g0
+        if t + 1 < total {
+            flat[t + 1] = g1
+        }
+    }
+    return reshape(flat, rows, cols)
+}
+
+#| A rows-by-cols matrix of independent +-1 entries, entry (i, j) from word
+#| (i * cols + j) mod 4 of Philox block (i * cols + j) / 4 of `stream`.
+def rademacher(rows: Int, cols: Int, seed: Int, stream: Int) -> Arr {
+    total: Int = rows * cols
+    flat = zeros(total)
+    nb: Int = (total + WORDS_PER_BLOCK - 1) // WORDS_PER_BLOCK
+    for b to nb {
+        w0, w1, w2, w3 = block(seed, stream, b, 0)
+        t: Int = WORDS_PER_BLOCK * b
+        flat[t] = sign_of(w0)
+        if t + 1 < total {
+            flat[t + 1] = sign_of(w1)
+        }
+        if t + 2 < total {
+            flat[t + 2] = sign_of(w2)
+        }
+        if t + 3 < total {
+            flat[t + 3] = sign_of(w3)
+        }
+    }
+    return reshape(flat, rows, cols)
+}
+
+#| The nonzeros of a d-by-m SASO, column after column: row index
+#| rows[j * nnz + r] and sign signs[j * nnz + r] for r < nnz, the rows of a
+#| column distinct. Draw t of column j uses block (j, sub = t) of `stream`;
+#| a row the column already has is drawn again from the next sub-sequence.
+def saso_nonzeros(d: Int, m: Int, nnz: Int, seed: Int, stream: Int) {
+    rows: [Int] = []
+    signs: Arr = []
+    #: nnz distinct rows per column, each with a random sign
+    for j to m {
+        start: Int = len(rows)
+        sub: Int = 0
+        while len(rows) - start < nnz {
+            w0, w1, w2, w3 = block(seed, stream, j, sub)
+            sub += 1
+            r = below(w0, w1, d)
+            taken = false
+            for q from start to len(rows) {
+                if rows[q] == r {
+                    taken = true
+                }
+            }
+            if not taken {
+                rows = append(rows, r)
+                signs = append(signs, sign_of(w2))
+            }
+        }
+    }
+    return rows, signs
+}
+
+#| S A for the d-by-m short-axis-sparse sign operator S with `nnz` nonzeros
+#| per column, each +-1/sqrt(nnz). A is m by n; the result is d by n. Row j
+#| of A is added, signed and scaled, into nnz rows of the result.
+def saso_apply(A: Arr, d: Int, nnz: Int, seed: Int, stream: Int) -> Arr {
+    m: Int = int(shape(A)[0])
+    n: Int = int(shape(A)[1])
+    rows, signs = saso_nonzeros(d, m, nnz, seed, stream)
+    scale = 1.0 / sqrt(float(nnz))
+    a = ravel(A)
+    y = zeros(d * n)
+    for j to m {
+        for t from j * nnz to (j + 1) * nnz {
+            f = signs[t] * scale
+            yb: Int = rows[t] * n
+            ab: Int = j * n
+            for c to n {
+                y[yb + c] += f * a[ab + c]
+            }
+        }
+    }
+    return reshape(y, d, n)
+}
+
+#| The d-by-m SASO itself, for tests and for small problems.
+def saso_dense(d: Int, m: Int, nnz: Int, seed: Int, stream: Int) -> Arr {
+    return saso_apply(eye(m), d, nnz, seed, stream)
+}
+
+#| The smallest power of two at or above m.
+def next_pow2(m: Int) -> Int {
+    p: Int = 1
+    while p < m {
+        p = 2 * p
+    }
+    return p
+}
+
+#| The Walsh-Hadamard transform of every row of X (row length a power of
+#| two), unnormalized: at level h, entry i of each block of 2h is paired
+#| with entry i + h, (a, b) -> (a + b, a - b). Scalar butterflies on the
+#| flat array, row by row, so each row's levels run in the cache.
+def fwht_rows(X: Arr) -> Arr {
+    rows: Int = int(shape(X)[0])
+    big: Int = int(shape(X)[1])
+    x = ravel(X)
+    for r to rows {
+        base: Int = r * big
+        h: Int = 1
+        while h < big {
+            for i0 from base to base + big by 2 * h {
+                for i from i0 to i0 + h {
+                    a = x[i]
+                    c = x[i + h]
+                    x[i] = a + c
+                    x[i + h] = a - c
+                }
+            }
+            h = 2 * h
+        }
+    }
+    return reshape(x, rows, big)
+}
+
+#| `d` distinct indices from 0 to m - 1, by a partial Fisher-Yates shuffle;
+#| swap i uses block i of `stream`, sub-sequence 1.
+def sample_rows(m: Int, d: Int, seed: Int, stream: Int) -> [Int] {
+    #: partial Fisher-Yates shuffle
+    perm: [Int] = [i for i to m]
+    for i to d {
+        w0, w1, w2, w3 = block(seed, stream, i, 1)
+        j: Int = i + below(w0, w1, m - i)
+        t: Int = perm[i]
+        perm[i] = perm[j]
+        perm[j] = t
+    }
+    out: [Int] = [perm[i] for i to d]
+    return out
+}
+
+#| S A for a subsampled randomized Hadamard transform: S = sqrt(1/d) P H D,
+#| with D random signs (entry i from block i / 4 of `stream`), H the unnormalized
+#| Walsh-Hadamard matrix of size M = next_pow2(m) (A zero padded to M rows),
+#| and P picking d of the M rows. Then E[S^T S] = I. A is m by n.
+def srht_apply(A: Arr, d: Int, seed: Int, stream: Int) -> Arr {
+    m: Int = int(shape(A)[0])
+    n: Int = int(shape(A)[1])
+    #: random signs, zero padding to a power of two, then the Walsh-Hadamard transform
+    big: Int = next_pow2(m)
+    signs = rademacher(1, m, seed, stream)
+    # the columns of D A, zero padded, as rows: the transform runs along rows
+    X = zeros(n, big)
+    X[:, 0:m] = transpose(A) * signs
+    X = fwht_rows(X)
+    picks = sample_rows(big, d, seed, stream)
+    Y = zeros(d, n)
+    scale = 1.0 / sqrt(float(d))
+    for r to d {
+        Y[r, :] = X[:, picks[r]] * scale
+    }
+    return Y
+}
+
+test "the dense operators are reproducible and have the right moments" {
+    # 10^5 normals: the mean and second moment have standard errors 0.003
+    # and 0.0045, so these bounds sit past 4 standard errors
+    G = gaussian(1000, 100, 9, 0)
+    assert_allclose(G, gaussian(1000, 100, 9, 0), 0.0)
+    assert_lt(abs(mean(G)), 0.013)
+    assert_lt(abs(mean(G * G) - 1.0), 0.02)
+    R = rademacher(100, 100, 7, 1)
+    assert_allclose(R * R, ones(100, 100), 0.0)
+    assert_lt(abs(mean(R)), 0.04)
+    # another stream is another operator
+    assert_gt(amax(abs(G - gaussian(1000, 100, 9, 1))), 1.0)
+}
+
+test "an odd count of normals takes the first of the last pair" {
+    g5 = gaussian(1, 5, 3, 0)
+    g6 = gaussian(1, 6, 3, 0)
+    assert_allclose(g5[0, :], g6[0, 0:5], 0.0)
+}
+
+test "a sparse sign column has nnz distinct rows with values of size 1/sqrt(nnz)" {
+    S = saso_dense(16, 40, 4, 11, 2)
+    for j to int(shape(S)[1]) {
+        col = S[:, j]
+        assert_near(sum(col * col), 1.0, 1.0e-15)
+        assert_near(sum(abs(col) > 0.0), 4.0, 0.0)
+    }
+}
+
+test "a full-size Hadamard sketch keeps the Gram matrix exactly" {
+    # an orthogonal Hadamard transform keeps column norms before sampling;
+    # with d = M the sketch is orthogonal up to the 1/sqrt(d) scale
+    A = gaussian(13, 3, 5, 0)
+    Y = srht_apply(A, 16, 5, 3)
+    assert_allclose(transpose(Y) @ Y, transpose(A) @ A, 1.0e-12)
+    picks = sample_rows(16, 16, 5, 3)
+    assert_near(sum(float(p) for p in picks), 120.0, 0.0)
+}
+
+test "the fast Walsh-Hadamard transform is the Sylvester Hadamard matrix" {
+    # the Sylvester construction: H4 = [[H2, H2], [H2, -H2]]
+    H4 = [[1.0, 1.0, 1.0, 1.0], [1.0, -1.0, 1.0, -1.0], [1.0, 1.0, -1.0, -1.0], [1.0, -1.0, -1.0, 1.0]]
+    X = [[1.0, 2.0, 3.0, 4.0], [0.5, -1.0, 0.0, 2.0]]
+    assert_allclose(fwht_rows(X), X @ transpose(H4), 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

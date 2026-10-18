@@ -1,0 +1,1193 @@
+###
+post: Substitution, derivatives, expansion, certificates, integrals and roots in lib/cas
+agent: claude
+
+**Derivatives.** `cas_diff(e, x)` is recursive over the store's DAG and
+memoized by node, so a shared subexpression is differentiated once. Sums,
+products and powers have their rules here; a function head takes its
+derivative from the table that grad.rs reads too, `lib/cas/rules/derivatives.toml`
+(through lib/cas/derivs): the adjoint with `g = 1`, `u` the argument and
+`y` the call itself, times the derivative of the argument. A head with no row
+is a refusal that names it; there is no silent zero (section
+3.7.1).
+
+**Expansion.** `cas_expand(e)` multiplies out products of sums and positive
+integer powers of sums. For a polynomial in any number of symbols, with
+other subexpressions as coefficients, the result is a canonical form: two
+equal polynomials expand to the same node.
+
+**Certificates**. `cas_certify_zero(d)` shows
+that `d` is zero, or that it is not, and says how:
+
+| verdict | means |
+|---|---|
+| `proved` | `d` is 0 in the normal form, or after expanding (canonical form) |
+| `proved-modular` | `d` is a rational function of its symbols and is 0 mod p = 67108859 at `CERT_POINTS` random points; a nonzero `d` of degree at most `D` passes with probability at most $(D/p)^k$ (Schwartz-Zippel) |
+| `probable` | `d` has functions in it; balls around it contain 0 at `CERT_POINTS` random points. Evidence, not a proof (Richardson's theorem rules out a general proof) |
+| `refuted` | a residue that is not 0, or a ball that excludes 0: a proof that `d` is not 0 |
+| `unknown` | no point gave an answer |
+
+**Assumptions** are per symbol: an interval, set with `cas_assume(x, lo,
+hi)` (decision 7, per-symbol facts only). An
+integral from `a` to `b` assumes its variable is in `[a, b]`, which decides
+whether $\int dx/x$ is $\ln x$ or $\ln(-x)$; with no interval the rule
+refuses rather than guess the sign. Certificates draw their points from the
+interval.
+
+**Integration** is a set of rules, each tried in turn, and every
+antiderivative is checked by differentiating it before it is returned
+(`cas_antiderivative`): linearity; $x^n$ and $\int dx/x$; functions of a
+linear argument ($e^{ax+b}$, $\sin$, $\cos$, $\sinh$, $\cosh$, powers of
+$ax + b$); one over a quadratic ($\arctan$ or logarithms); $(c - a x^2)^{-1/2}$
+($\arcsin$); the Gaussian $e^{-k x^2}$ ($\operatorname{erf}$) and its moments
+$x^n e^{-kx^2}$; a polynomial times a function of a linear argument, by
+parts; and the substitution $\int g(u(x))\,u'(x)\,dx$ when the integrand
+divided by $g(u)\,u'$ is a constant. What none of them covers is a refusal
+that says so. This is stage 0 and the start of stage 3's rule set, not Risch.
+
+**Roots** of a polynomial of degree 1, 2 or 3 with rational coefficients:
+exact rational roots by the rational root theorem; the quadratic formula,
+with the square root reduced to a square-free surd; and for a cubic with no
+rational root, Cardano's formula (one real root) or the trigonometric form
+(three real roots). Degree 4 and up is a refusal.
+
+Used with `import cas.calculus`.
+###
+from cas.derivs import CAS_DERIV_ADJ, CAS_DERIV_AT_RULE, CAS_DERIV_AT_X, CAS_DERIV_HEAD
+from cas.parse import cas
+from cas.store import (
+    C_HALF, C_MONE, C_ONE, C_PI, C_ZERO, cas_add, cas_addv, cas_base, cas_div, cas_expo,
+    cas_fail, cas_fn, cas_int, cas_isfail, cas_isint, cas_isnum, cas_isvar, cas_kid, cas_kids,
+    cas_kind, cas_mul, cas_mulv, cas_name_of, cas_neg, cas_nk, cas_np, cas_nq, cas_num, cas_pow,
+    cas_sqrt, cas_sub, cas_sym, K_ADD, K_FAIL, K_FN, K_MUL, K_POW, K_SYM,
+)
+from cas.rational import MOD_P, mp_next, mp_point, rat_add, rat_bad, rat_gcd, rat_imul, rat_mul
+from cas.eval import cas_ball, cas_mod, cas_sign, cas_value, cas_value_at, MOD_NOT_RATIONAL
+from cas.show import cas_text
+
+# certificate verdicts
+enum Verdict { Proved, Modular, Probable, Refuted, Unknown }
+# random points a certificate evaluates at
+CERT_POINTS = 5
+# the seed of every certificate's points
+CERT_SEED = 20261001
+# where a symbol with no assumed interval is sampled, for balls: [lo, lo + width]
+CERT_BALL_LO = 0.25
+CERT_BALL_WIDTH = 1.5
+# the grid a ball point is drawn from: multiples of 1/CERT_GRID, exact in doubles
+CERT_GRID = 1024
+# memo keys: node id times this, plus the symbol's id
+DKEY = 4194304
+# the largest |a0| or |a3| whose divisors the rational root search lists
+ROOT_SEARCH_MAX = 100000000
+# a cubic with three real roots has this many
+CUBIC_ROOTS = 3
+
+# per-symbol assumptions: the interval of a symbol's values
+CAS_LO = map()
+CAS_HI = map()
+
+# the pattern symbols of the derivative table
+CAS_G = cas_sym("g")
+CAS_U = cas_sym("u")
+CAS_Y = cas_sym("y")
+# a head's parsed adjoint
+CAS_DRULE = map()
+
+CAS_DMEMO = map()
+CAS_HMEMO = map()
+CAS_XMEMO = map()
+# the generator state of the certificates
+CAS_SEED = zeros(1)
+CAS_SEED[0] = CERT_SEED
+
+#| Assume the symbol `x` lies in [lo, hi] (doubles).
+def cas_assume(x, lo, hi) {
+    CAS_LO[x] = lo
+    CAS_HI[x] = hi
+}
+def cas_forget(x) {
+    remove(CAS_LO, x, 0)
+    remove(CAS_HI, x, 0)
+}
+
+#| The sign of `e` (1, -1, or 0 for not known) over the assumed intervals.
+def cas_assumed_sign(e) {
+    em = map()
+    er = map()
+    ks = keys(CAS_LO)
+    for i to len(ks) {
+        s = ks[i]
+        em[s] = 0.5 * (CAS_LO[s] + CAS_HI[s])
+        er[s] = 0.5 * (CAS_HI[s] - CAS_LO[s])
+    }
+    return cas_sign(e, em, er)
+}
+
+# ---- structure ------------------------------------------------------------------------
+
+#| `e` rebuilt from new children by its own constructor.
+def cas_rebuild(e, kids) {
+    k = cas_kind(e)
+    if k == K_ADD {
+        return cas_addv(kids)
+    }
+    if k == K_MUL {
+        return cas_mulv(kids)
+    }
+    if k == K_POW {
+        return cas_pow(kids[0], kids[1])
+    }
+    if k == K_FN {
+        return cas_fn(cas_name_of(e), kids[0])
+    }
+    return e
+}
+
+#| `e` with every symbol in `m` (a map from a symbol to an expression)
+#| replaced at once: what the replacements contain is not replaced again.
+def cas_subst_map(e, m) {
+    memo = map()
+    return cas_subst_rec(e, m, memo)
+}
+
+def cas_subst_rec(e, m, memo) {
+    if has(memo, e) {
+        return memo[e]
+    }
+    r = e
+    if has(m, e) {
+        r = m[e]
+    } else if cas_nk(e) > 0 {
+        kids = []
+        for i to cas_nk(e) {
+            kids = append(kids, cas_subst_rec(cas_kid(e, i), m, memo))
+        }
+        r = cas_rebuild(e, kids)
+    }
+    memo[e] = r
+    return r
+}
+
+#| `e` with the symbol `x` replaced by `v`.
+def cas_subst(e, x, v) {
+    m = map()
+    m[x] = v
+    return cas_subst_map(e, m)
+}
+
+#| Whether `e` contains the symbol `x`.
+def cas_has(e, x) {
+    if e == x {
+        return true
+    }
+    key = e * DKEY + x
+    if has(CAS_HMEMO, key) {
+        return CAS_HMEMO[key] == 1
+    }
+    found = false
+    for i to cas_nk(e) {
+        if not found and cas_has(cas_kid(e, i), x) {
+            found = true
+        }
+    }
+    v = 0
+    if found {
+        v = 1
+    }
+    CAS_HMEMO[key] = v
+    return found
+}
+
+#| The symbols of `e` other than pi, each once, in order of first appearance.
+def cas_symbols(e) {
+    seen = map()
+    out = []
+    stack = [e]
+    while len(stack) > 0 {
+        t = stack[len(stack) - 1]
+        stack = stack[0:len(stack) - 1]
+        if not has(seen, t) {
+            seen[t] = 1
+            if cas_isvar(t) {
+                out = append(out, t)
+            }
+            for i to cas_nk(t) {
+                stack = append(stack, cas_kid(t, i))
+            }
+        }
+    }
+    return out
+}
+
+#| The number of distinct nodes in `e`'s DAG: a subexpression used twice counts once.
+def cas_dag_size(e) {
+    seen = map()
+    stack = [e]
+    while len(stack) > 0 {
+        t = stack[len(stack) - 1]
+        stack = stack[0:len(stack) - 1]
+        if not has(seen, t) {
+            seen[t] = 1
+            for i to cas_nk(t) {
+                stack = append(stack, cas_kid(t, i))
+            }
+        }
+    }
+    return len(seen)
+}
+
+# ---- derivatives --------------------------------------------------------------------
+
+#| The parsed adjoint of `head` from the shared table, or a refusal.
+def cas_deriv_rule(head) {
+    if has(CAS_DRULE, head) {
+        return CAS_DRULE[head]
+    }
+    r = cas_fail(f"no derivative rule for `{head}` in lib/cas/rules/derivatives.toml")
+    for i to len(CAS_DERIV_HEAD) {
+        if CAS_DERIV_HEAD[i] == head {
+            r = cas(CAS_DERIV_ADJ[i])
+        }
+    }
+    CAS_DRULE[head] = r
+    return r
+}
+
+#| d e / d x.
+def cas_diff(e, x) {
+    key = e * DKEY + x
+    if has(CAS_DMEMO, key) {
+        return CAS_DMEMO[key]
+    }
+    k = cas_kind(e)
+    r = C_ZERO
+    if k == K_FAIL {
+        r = e
+    } else if k == K_SYM {
+        if e == x {
+            r = C_ONE
+        }
+    } else if k == K_ADD {
+        ds = []
+        for i to cas_nk(e) {
+            ds = append(ds, cas_diff(cas_kid(e, i), x))
+        }
+        r = cas_addv(ds)
+    } else if k == K_MUL {
+        # the product rule: each factor differentiated in turn, the others kept
+        n = cas_nk(e)
+        terms = []
+        for i to n {
+            fs = [cas_diff(cas_kid(e, i), x)]
+            for j to n {
+                if j != i {
+                    fs = append(fs, cas_kid(e, j))
+                }
+            }
+            terms = append(terms, cas_mulv(fs))
+        }
+        r = cas_addv(terms)
+    } else if k == K_POW {
+        b = cas_kid(e, 0)
+        n = cas_kid(e, 1)
+        if not cas_has(n, x) {
+            r = cas_mulv([n, cas_pow(b, cas_sub(n, C_ONE)), cas_diff(b, x)])
+        } else {
+            # b^n = exp(n log b)
+            inner = cas_add(cas_mul(cas_diff(n, x), cas_fn("log", b)), cas_mulv([n, cas_diff(b, x), cas_pow(b, C_MONE)]))
+            r = cas_mul(e, inner)
+        }
+    } else if k == K_FN {
+        u = cas_kid(e, 0)
+        rule = cas_deriv_rule(cas_name_of(e))
+        m = map()
+        m[CAS_G] = C_ONE
+        m[CAS_U] = u
+        m[CAS_Y] = e
+        r = cas_mul(cas_subst_map(rule, m), cas_diff(u, x))
+    }
+    CAS_DMEMO[key] = r
+    return r
+}
+
+#| The n-th derivative.
+def cas_diffn(e, x, n) {
+    d = e
+    for i to n {
+        d = cas_diff(d, x)
+    }
+    return d
+}
+
+# ---- expansion ----------------------------------------------------------------------
+
+#| The products of the sums in `fs` multiplied out.
+def cas_distribute(fs) {
+    acc = [C_ONE]
+    for i to len(fs) {
+        f = fs[i]
+        ts = [f]
+        if cas_kind(f) == K_ADD {
+            ts = cas_kids(f)
+        }
+        nxt = []
+        for a to len(acc) {
+            for t to len(ts) {
+                nxt = append(nxt, cas_mul(acc[a], ts[t]))
+            }
+        }
+        acc = nxt
+    }
+    return cas_addv(acc)
+}
+
+#| `e` with products of sums and positive integer powers of sums multiplied out.
+def cas_expand(e) {
+    if has(CAS_XMEMO, e) {
+        return CAS_XMEMO[e]
+    }
+    k = cas_kind(e)
+    r = e
+    if k == K_ADD {
+        ts = []
+        for i to cas_nk(e) {
+            ts = append(ts, cas_expand(cas_kid(e, i)))
+        }
+        r = cas_addv(ts)
+    } else if k == K_MUL {
+        fs = []
+        for i to cas_nk(e) {
+            fs = append(fs, cas_expand(cas_kid(e, i)))
+        }
+        r = cas_distribute(fs)
+    } else if k == K_POW {
+        b = cas_expand(cas_kid(e, 0))
+        n = cas_kid(e, 1)
+        if cas_kind(b) == K_ADD and cas_isint(n) and cas_np(n) > 1 {
+            fs = []
+            for i to cas_np(n) {
+                fs = append(fs, b)
+            }
+            r = cas_distribute(fs)
+        } else {
+            r = cas_pow(b, n)
+        }
+    } else if k == K_FN {
+        r = cas_fn(cas_name_of(e), cas_expand(cas_kid(e, 0)))
+    }
+    CAS_XMEMO[e] = r
+    return r
+}
+
+# ---- polynomials --------------------------------------------------------------------
+
+#| The coefficients of `e` as a polynomial in `x`: `c[k]` multiplies `x^k`,
+#| and each is free of `x`. Empty when `e` is not a polynomial in `x`.
+def cas_coeffs(e, x) {
+    ex = cas_expand(e)
+    ts = [ex]
+    if cas_kind(ex) == K_ADD {
+        ts = cas_kids(ex)
+    }
+    cm = map()
+    deg = 0
+    for i to len(ts) {
+        t = ts[i]
+        k = -1
+        c = t
+        if not cas_has(t, x) {
+            k = 0
+        } else {
+            fs = [t]
+            if cas_kind(t) == K_MUL {
+                fs = cas_kids(t)
+            }
+            rest = []
+            for j to len(fs) {
+                f = fs[j]
+                if cas_has(f, x) {
+                    if k >= 0 {
+                        return []
+                    }
+                    if f == x {
+                        k = 1
+                    } else if cas_kind(f) == K_POW and cas_kid(f, 0) == x and cas_isint(cas_kid(f, 1)) and cas_np(cas_kid(f, 1)) > 0 {
+                        k = cas_np(cas_kid(f, 1))
+                    } else {
+                        return []
+                    }
+                } else {
+                    rest = append(rest, f)
+                }
+            }
+            c = cas_mulv(rest)
+        }
+        cm[k] = cas_add(get(cm, k, C_ZERO), c)
+        deg = max(deg, k)
+    }
+    out = []
+    for k to deg + 1 {
+        out = append(out, get(cm, k, C_ZERO))
+    }
+    return out
+}
+
+#| `sum c[k] x^k`.
+def cas_from_coeffs(c, x) {
+    ts = []
+    for k to len(c) {
+        ts = append(ts, cas_mul(c[k], cas_pow(x, cas_int(k))))
+    }
+    return cas_addv(ts)
+}
+
+#| `a, b` with `u = a x + b`, `a` not 0 and free of `x`; `-1, -1` when `u` is not linear in `x`.
+def cas_linear(u, x) {
+    c = cas_coeffs(u, x)
+    if len(c) != 2 {
+        return -1, -1
+    }
+    if c[1] == C_ZERO {
+        return -1, -1
+    }
+    return c[1], c[0]
+}
+
+#| Whether all of `c` are numbers.
+def cas_all_numbers(c) {
+    for i to len(c) {
+        if not cas_isnum(c[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+# ---- certificates -------------------------------------------------------------------
+
+#| The next point of the certificates' generator, as a residue in [1, MOD_P).
+def cas_rand() {
+    CAS_SEED[0] = mp_next(CAS_SEED[0])
+    return mp_point(CAS_SEED[0])
+}
+
+#| A bound on the total degree of `e` cleared of denominators, from the DAG:
+#| a sum or a product adds its children's, an integer power multiplies.
+def cas_degree_bound(e) {
+    k = cas_kind(e)
+    if k == K_SYM {
+        return 1
+    }
+    if k == K_ADD or k == K_MUL {
+        s = 0
+        for i to cas_nk(e) {
+            s = s + cas_degree_bound(cas_kid(e, i))
+        }
+        return s
+    }
+    if k == K_POW {
+        return abs(cas_np(cas_kid(e, 1))) * cas_degree_bound(cas_kid(e, 0))
+    }
+    return 0
+}
+
+#| A verdict as the certificate tables write it.
+def cert_name(v: Verdict) -> Str {
+    match v {
+        Proved => return "proved"
+        Modular => return "proved-modular"
+        Probable => return "probable"
+        Refuted => return "refuted"
+        Unknown => return "unknown"
+    }
+}
+
+#| Whether `d` is zero, and how that was decided: a verdict and words.
+def cas_certify_zero(d) {
+    if cas_isfail(d) {
+        return Verdict.Unknown, cas_name_of(d)
+    }
+    if d == C_ZERO {
+        return Verdict.Proved, "0 in the normal form"
+    }
+    x = cas_expand(d)
+    if x == C_ZERO {
+        return Verdict.Proved, "0 after expanding (canonical form)"
+    }
+    syms = cas_symbols(d)
+    # modular: a rational function of its symbols
+    points = 0
+    tries = 0
+    rational = true
+    while rational and points < CERT_POINTS and tries < 4 * CERT_POINTS {
+        env = map()
+        for i to len(syms) {
+            env[syms[i]] = cas_rand()
+        }
+        v = cas_mod(d, env)
+        tries = tries + 1
+        if v == MOD_NOT_RATIONAL {
+            rational = false
+        } else if v > 0 {
+            return Verdict.Refuted, "not 0 mod p = 67108859 at a random point"
+        } else if v == 0 {
+            points = points + 1
+        }
+    }
+    if rational and points == CERT_POINTS {
+        deg = cas_degree_bound(d)
+        bound = pow(deg / MOD_P, CERT_POINTS)
+        return Verdict.Modular, f"0 mod p = 67108859 at {CERT_POINTS} random points; degree at most {deg:.0f}, so a nonzero difference passes with probability at most {bound:.1e}"
+    }
+    # balls: points from each symbol's interval
+    points = 0
+    tries = 0
+    widest = 0.0
+    while points < CERT_POINTS and tries < 4 * CERT_POINTS {
+        em = map()
+        er = map()
+        for i to len(syms) {
+            s = syms[i]
+            lo = get(CAS_LO, s, CERT_BALL_LO)
+            hi = get(CAS_HI, s, CERT_BALL_LO + CERT_BALL_WIDTH)
+            t = (cas_rand() % CERT_GRID) / CERT_GRID
+            em[s] = lo + t * (hi - lo)
+            er[s] = 0.0
+        }
+        m, r = cas_ball(d, em, er)
+        tries = tries + 1
+        if r == r {
+            if m - r > 0 or m + r < 0 {
+                return Verdict.Refuted, f"a ball around the difference excludes 0: {m:.3e} +- {r:.1e}"
+            }
+            points = points + 1
+            widest = max(widest, r)
+        }
+    }
+    if points == CERT_POINTS {
+        return Verdict.Probable, f"balls around the difference contain 0 at {CERT_POINTS} random points; widest radius {widest:.1e}"
+    }
+    return Verdict.Unknown, "no point gave a residue or a ball"
+}
+
+#| Whether `a` and `b` are equal, as a certificate: verdict and words.
+def cas_certify(a, b) {
+    return cas_certify_zero(cas_sub(a, b))
+}
+
+# ---- integrals ----------------------------------------------------------------------
+
+#| `log(u)` when `u > 0` on the assumed intervals, `log(-u)` when `u < 0`, else a refusal.
+def cas_log_abs(u) {
+    s = cas_assumed_sign(u)
+    if s > 0 {
+        return cas_fn("log", u)
+    }
+    if s < 0 {
+        return cas_fn("log", cas_neg(u))
+    }
+    return cas_fail(f"the integral is log|{cas_text(u)}|, and the sign of {cas_text(u)} is not known: no interval is assumed for its variable, or the interval holds 0")
+}
+
+#| The antiderivative of `h`, a function of a linear argument; -1 when the table has no entry.
+def cas_int_linear(h, x) {
+    k = cas_kind(h)
+    if k == K_FN {
+        a, b = cas_linear(cas_kid(h, 0), x)
+        if a < 0 {
+            return -1
+        }
+        u = cas_kid(h, 0)
+        head = cas_name_of(h)
+        inv = cas_pow(a, C_MONE)
+        if head == "exp" {
+            return cas_mul(inv, h)
+        }
+        if head == "sin" {
+            return cas_neg(cas_mul(inv, cas_fn("cos", u)))
+        }
+        if head == "cos" {
+            return cas_mul(inv, cas_fn("sin", u))
+        }
+        if head == "sinh" {
+            return cas_mul(inv, cas_fn("cosh", u))
+        }
+        if head == "cosh" {
+            return cas_mul(inv, cas_fn("sinh", u))
+        }
+        return -1
+    }
+    if k == K_POW {
+        u = cas_kid(h, 0)
+        n = cas_kid(h, 1)
+        if cas_has(n, x) {
+            return -1
+        }
+        a, b = cas_linear(u, x)
+        if a < 0 {
+            return -1
+        }
+        if n == C_MONE {
+            return cas_div(cas_log_abs(u), a)
+        }
+        n1 = cas_add(n, C_ONE)
+        return cas_div(cas_pow(u, n1), cas_mul(n1, a))
+    }
+    return -1
+}
+
+#| The antiderivative of `1 / q(x)` for a quadratic `q` with number coefficients; -1 otherwise.
+def cas_int_quadratic(h, x) {
+    if cas_kind(h) != K_POW or cas_kid(h, 1) != C_MONE {
+        return -1
+    }
+    c = cas_coeffs(cas_kid(h, 0), x)
+    if len(c) != 3 or not cas_all_numbers(c) {
+        return -1
+    }
+    a2 = c[2]
+    a1 = c[1]
+    a0 = c[0]
+    disc = cas_sub(cas_mul(a1, a1), cas_mulv([cas_int(4), a2, a0]))
+    lin = cas_add(cas_mul(cas_int(2), cas_mul(a2, x)), a1)
+    if cas_np(disc) < 0 {
+        # 2/k atan((2 a2 x + a1)/k), k = sqrt(4 a2 a0 - a1^2)
+        kk = cas_sqrt(cas_neg(disc))
+        return cas_mul(cas_div(cas_int(2), kk), cas_fn("atan", cas_div(lin, kk)))
+    }
+    if disc == C_ZERO {
+        # -2 / (2 a2 x + a1)
+        return cas_div(cas_int(-2), lin)
+    }
+    # 1/sqrt(disc) log((lin - sqrt(disc)) / (lin + sqrt(disc)))
+    sd = cas_sqrt(disc)
+    return cas_div(cas_log_abs(cas_div(cas_sub(lin, sd), cas_add(lin, sd))), sd)
+}
+
+#| The antiderivative of `(c0 + c2 x^2)^(-1/2)` with `c0 > 0 > c2`; -1 otherwise.
+def cas_int_arcsin(h, x) {
+    if cas_kind(h) != K_POW or cas_kid(h, 1) != cas_num(-1, 2) {
+        return -1
+    }
+    c = cas_coeffs(cas_kid(h, 0), x)
+    if len(c) != 3 or not cas_all_numbers(c) or c[1] != C_ZERO or cas_np(c[0]) <= 0 or cas_np(c[2]) >= 0 {
+        return -1
+    }
+    k = cas_sqrt(cas_neg(c[2]))
+    return cas_div(cas_fn("asin", cas_mul(x, cas_sqrt(cas_div(cas_neg(c[2]), c[0])))), k)
+}
+
+#| The number `c` when `h` is `exp(c x^2)`, else -1.
+def cas_gauss_rate(h, x) {
+    if cas_kind(h) != K_FN or cas_name_of(h) != "exp" {
+        return -1
+    }
+    c = cas_coeffs(cas_kid(h, 0), x)
+    if len(c) != 3 or c[0] != C_ZERO or c[1] != C_ZERO or not cas_isnum(c[2]) {
+        return -1
+    }
+    return c[2]
+}
+
+#| An antiderivative of `f` in `x`, or a refusal saying why there is none.
+#| Not checked: `cas_antiderivative` checks it.
+def cas_integrate(f, x) {
+    if cas_isfail(f) {
+        return f
+    }
+    if not cas_has(f, x) {
+        return cas_mul(f, x)
+    }
+    if f == x {
+        return cas_mul(C_HALF, cas_pow(x, cas_int(2)))
+    }
+    k = cas_kind(f)
+    if k == K_ADD {
+        ts = []
+        for i to cas_nk(f) {
+            ts = append(ts, cas_integrate(cas_kid(f, i), x))
+        }
+        return cas_addv(ts)
+    }
+    if k == K_MUL {
+        free = []
+        dep = []
+        for i to cas_nk(f) {
+            g = cas_kid(f, i)
+            if cas_has(g, x) {
+                dep = append(dep, g)
+            } else {
+                free = append(free, g)
+            }
+        }
+        if len(free) > 0 {
+            return cas_mul(cas_mulv(free), cas_integrate(cas_mulv(dep), x))
+        }
+        # a product with a sum in it: multiply out and integrate term by term
+        ex = cas_expand(f)
+        if ex != f {
+            return cas_integrate(ex, x)
+        }
+        r = cas_int_product(f, x)
+        if r >= 0 {
+            return r
+        }
+        return cas_int_substitution(f, x)
+    }
+    r = cas_int_linear(f, x)
+    if r >= 0 {
+        return r
+    }
+    if k == K_POW and cas_kid(f, 0) == x {
+        return cas_int_linear(f, x)
+    }
+    r = cas_int_quadratic(f, x)
+    if r >= 0 {
+        return r
+    }
+    r = cas_int_arcsin(f, x)
+    if r >= 0 {
+        return r
+    }
+    c = cas_gauss_rate(f, x)
+    if c >= 0 and cas_np(c) < 0 {
+        # sqrt(pi) / (2 sqrt(-c)) erf(sqrt(-c) x)
+        s = cas_sqrt(cas_neg(c))
+        return cas_mulv([cas_sqrt(C_PI), cas_pow(cas_mul(cas_int(2), s), C_MONE), cas_fn("erf", cas_mul(s, x))])
+    }
+    if c >= 0 {
+        return cas_fail(f"the integral of {cas_text(f)} needs erfi, which the CAS does not have")
+    }
+    return cas_int_substitution(f, x)
+}
+
+#| A product whose factors all depend on `x`: a Gaussian moment `x^n exp(c x^2)`,
+#| or a polynomial times a function of a linear argument (by parts). -1 when neither.
+def cas_int_product(f, x) {
+    if cas_nk(f) != 2 {
+        return -1
+    }
+    for side to 2 {
+        p = cas_kid(f, side)
+        h = cas_kid(f, 1 - side)
+        c = cas_gauss_rate(h, x)
+        n = cas_expo(p)
+        if c >= 0 and cas_base(p) == x and cas_isint(n) and cas_np(n) >= 1 {
+            # x^n e = x^(n-1) e / (2c) - (n-1)/(2c) int x^(n-2) e
+            two_c = cas_mul(cas_int(2), c)
+            first = cas_div(cas_mul(cas_pow(x, cas_sub(n, C_ONE)), h), two_c)
+            if n == C_ONE {
+                return first
+            }
+            rest = cas_integrate(cas_mul(cas_pow(x, cas_sub(n, cas_int(2))), h), x)
+            return cas_sub(first, cas_mul(cas_div(cas_sub(n, C_ONE), two_c), rest))
+        }
+        poly = cas_coeffs(p, x)
+        hi = cas_int_linear(h, x)
+        if len(poly) >= 2 and hi >= 0 and cas_kind(h) == K_FN {
+            # by parts: int P h = P H - int P' H
+            return cas_sub(cas_mul(p, hi), cas_integrate(cas_expand(cas_mul(cas_diff(p, x), hi)), x))
+        }
+    }
+    return -1
+}
+
+#| The substitution u = u(x): `f = q g(u) u'` with `q` a constant gives
+#| `q G(u)`, `G` an antiderivative of `g`. The candidates for `g(u)` are the
+#| factors of `f`: a function of `u`, or a power `u^n`.
+def cas_int_substitution(f, x) {
+    fs = [f]
+    if cas_kind(f) == K_MUL {
+        fs = cas_kids(f)
+    }
+    t = cas_sym("viv__cas_t")
+    for i to len(fs) {
+        g = fs[i]
+        cands = []
+        if cas_kind(g) == K_FN {
+            cands = append(cands, cas_kid(g, 0))
+        }
+        if cas_base(g) != x and cas_has(cas_base(g), x) and not cas_has(cas_expo(g), x) {
+            cands = append(cands, cas_base(g))
+        }
+        for j to len(cands) {
+            u = cands[j]
+            du = cas_diff(u, x)
+            q = cas_div(f, cas_mul(g, du))
+            if cas_has(q, x) {
+                q = cas_expand(q)
+            }
+            if not cas_has(q, x) and not cas_isfail(q) {
+                gt = cas_subst(g, u, t)
+                if not cas_has(gt, x) {
+                    big = cas_integrate(gt, t)
+                    if not cas_isfail(big) {
+                        return cas_mul(q, cas_subst(big, t, u))
+                    }
+                }
+            }
+        }
+    }
+    return cas_fail(f"no rule integrates {cas_text(f)}: linearity, powers, functions of a linear argument, 1/quadratic, arcsin, the Gaussian and its moments, by parts, and substitution were tried")
+}
+
+#| An antiderivative of `f` and the certificate that it is one: `F, verdict, words`.
+#| A refuted antiderivative is returned as a refusal.
+def cas_antiderivative(f, x) {
+    big = cas_integrate(f, x)
+    if cas_isfail(big) {
+        return big, Verdict.Unknown, cas_name_of(big)
+    }
+    v, why = cas_certify_zero(cas_sub(cas_diff(big, x), f))
+    if v == Verdict.Refuted {
+        return cas_fail(f"the rules gave {cas_text(big)}, and its derivative is not the integrand ({why})"), v, why
+    }
+    return big, v, why
+}
+
+#| The integral of `f` over [a, b] (`a`, `b` expressions with values): the
+#| antiderivative, the value F(b) - F(a), the verdict and words.
+def cas_definite(f, x, a, b) {
+    lo = cas_value(a)
+    hi = cas_value(b)
+    if lo > hi {
+        t = lo
+        lo = hi
+        hi = t
+    }
+    cas_assume(x, lo, hi)
+    big, v, why = cas_antiderivative(f, x)
+    cas_forget(x)
+    if cas_isfail(big) {
+        return big, big, v, why
+    }
+    val = cas_sub(cas_subst(big, x, b), cas_subst(big, x, a))
+    return big, val, v, why
+}
+
+# ---- roots --------------------------------------------------------------------------
+
+#| The positive divisors of an integer `n`, 0 < n <= ROOT_SEARCH_MAX.
+def cas_divisors(n) {
+    out = []
+    d = 1
+    while d * d <= n {
+        if n % d == 0 {
+            out = append(out, d)
+            if d * d != n {
+                out = append(out, n / d)
+            }
+        }
+        d = d + 1
+    }
+    return out
+}
+
+#| The value of the polynomial with rational coefficients `c` at `p/q`, as `p, q`.
+def cas_poly_at(c, rp, rq) {
+    vp = 0
+    vq = 1
+    k = len(c) - 1
+    while k >= 0 {
+        vp, vq = rat_mul(vp, vq, rp, rq)
+        vp, vq = rat_add(vp, vq, cas_np(c[k]), cas_nq(c[k]))
+        k = k - 1
+    }
+    return vp, vq
+}
+
+#| A rational root of the polynomial `c` (number coefficients, c[0] != 0), as
+#| a node; -1 when it has none or its coefficients are too large to search.
+def cas_rational_root(c) {
+    # integer coefficients: multiply by the denominators' least common multiple
+    l = 1
+    for k to len(c) {
+        l = rat_imul(l / rat_gcd(l, cas_nq(c[k])), cas_nq(c[k]))
+    }
+    if rat_bad(l) {
+        return -1
+    }
+    n = len(c) - 1
+    a0 = abs(rat_imul(cas_np(c[0]), l / cas_nq(c[0])))
+    an = abs(rat_imul(cas_np(c[n]), l / cas_nq(c[n])))
+    if rat_bad(a0) or rat_bad(an) or a0 > ROOT_SEARCH_MAX or an > ROOT_SEARCH_MAX {
+        return -1
+    }
+    ps = cas_divisors(a0)
+    qs = cas_divisors(an)
+    for i to len(ps) {
+        for j to len(qs) {
+            for s to 2 {
+                sign = 1 - 2 * s
+                vp, vq = cas_poly_at(c, sign * ps[i], qs[j])
+                if vp == 0 {
+                    return cas_num(sign * ps[i], qs[j])
+                }
+            }
+        }
+    }
+    return -1
+}
+
+#| `c` divided by `x - r` (synthetic division; the remainder is 0).
+def cas_deflate(c, r) {
+    n = len(c) - 1
+    out = zeros(n)
+    acc = C_ZERO
+    k = n
+    while k >= 1 {
+        acc = cas_add(cas_mul(acc, r), c[k])
+        out[k - 1] = acc
+        k = k - 1
+    }
+    return out
+}
+
+#| `x^(1/3)` for a real number expression whose sign is `s`.
+def cas_cbrt_signed(v, s) {
+    if s == 0 {
+        return C_ZERO
+    }
+    return cas_mul(cas_int(s), cas_pow(cas_mul(cas_int(s), v), cas_num(1, 3)))
+}
+
+#| The real roots of the polynomial `c` (number coefficients, degree 1 to 3),
+#| without repeats, smallest first; and the words on how they were found.
+def cas_poly_roots(c) {
+    n = len(c) - 1
+    found = []
+    how = ""
+    if n == 0 {
+        return found, "a constant has no roots"
+    }
+    if c[0] == C_ZERO {
+        # x = 0 is a root
+        rest = []
+        for k from 1 to n + 1 {
+            rest = append(rest, c[k])
+        }
+        sub, why = cas_poly_roots(rest)
+        found = concat([C_ZERO], sub)
+        return cas_sort_values(found), "x = 0, and " + why
+    }
+    if n == 1 {
+        return [cas_neg(cas_div(c[0], c[1]))], "linear"
+    }
+    if n == 2 {
+        a = c[2]
+        b = c[1]
+        d = cas_sub(cas_mul(b, b), cas_mulv([cas_int(4), a, c[0]]))
+        if cas_np(d) < 0 {
+            return found, "the quadratic formula: the discriminant is negative, so no real root"
+        }
+        sd = cas_sqrt(d)
+        two_a = cas_mul(cas_int(2), a)
+        r1 = cas_div(cas_sub(cas_neg(b), sd), two_a)
+        r2 = cas_div(cas_add(cas_neg(b), sd), two_a)
+        if d == C_ZERO {
+            return [r1], "the quadratic formula: a double root"
+        }
+        return cas_sort_values([r1, r2]), "the quadratic formula"
+    }
+    if n == 3 {
+        r = cas_rational_root(c)
+        if r >= 0 {
+            q = cas_deflate(c, r)
+            rest, why = cas_poly_roots(q)
+            all = concat([r], rest)
+            return cas_sort_values(cas_unique(all)), f"the rational root {cas_text(r)}, then " + why
+        }
+        return cas_cubic_roots(c), "Cardano's formula on the depressed cubic"
+    }
+    return found, "a polynomial of degree 4 or more"
+}
+
+#| The real roots of a cubic with no rational root.
+def cas_cubic_roots(c) {
+    a = c[3]
+    b = c[2]
+    cc = c[1]
+    d = c[0]
+    # x = t - b/(3a): t^3 + p t + q = 0
+    three_a = cas_mul(cas_int(3), a)
+    p = cas_div(cas_sub(cas_mul(three_a, cc), cas_mul(b, b)), cas_mulv([cas_int(3), a, a]))
+    q = cas_div(cas_addv([cas_mul(cas_int(2), cas_pow(b, cas_int(3))), cas_mulv([cas_int(-9), a, b, cc]), cas_mulv([cas_int(27), cas_mul(a, a), d])]), cas_mulv([cas_int(27), cas_pow(a, cas_int(3))]))
+    shift = cas_neg(cas_div(b, three_a))
+    # 4 p^3 + 27 q^2 < 0 means three real roots
+    disc = cas_add(cas_mul(cas_int(4), cas_pow(p, cas_int(3))), cas_mul(cas_int(27), cas_mul(q, q)))
+    if cas_np(disc) < 0 {
+        m = cas_mul(cas_int(2), cas_sqrt(cas_div(cas_neg(p), cas_int(3))))
+        arg = cas_mul(cas_div(cas_mul(cas_int(3), q), cas_mul(cas_int(2), p)), cas_sqrt(cas_div(cas_int(-3), p)))
+        theta = cas_div(cas_fn("acos", arg), cas_int(3))
+        roots = []
+        for k to CUBIC_ROOTS {
+            ang = cas_sub(theta, cas_mul(cas_num(2 * k, 3), C_PI))
+            roots = append(roots, cas_add(cas_mul(m, cas_fn("cos", ang)), shift))
+        }
+        return cas_sort_values(roots)
+    }
+    # one real root: t = cbrt(-q/2 + sqrt(D)) + cbrt(-q/2 - sqrt(D)), D = q^2/4 + p^3/27
+    big_d = cas_add(cas_div(cas_mul(q, q), cas_int(4)), cas_div(cas_pow(p, cas_int(3)), cas_int(27)))
+    sd = cas_sqrt(big_d)
+    hq = cas_neg(cas_div(q, cas_int(2)))
+    pn = cas_np(p)
+    qn = cas_np(q)
+    s1 = -1
+    if qn < 0 or pn > 0 {
+        s1 = 1
+    }
+    s2 = -1
+    if qn < 0 and pn < 0 {
+        s2 = 1
+    }
+    if pn == 0 {
+        s1 = 0
+        s2 = 0
+        if qn < 0 {
+            s1 = 1
+        } else {
+            s2 = -1
+        }
+    }
+    t = cas_add(cas_cbrt_signed(cas_add(hq, sd), s1), cas_cbrt_signed(cas_sub(hq, sd), s2))
+    return [cas_add(t, shift)]
+}
+
+#| `v` without repeated nodes, in order.
+def cas_unique(v) {
+    out = []
+    seen = map()
+    for i to len(v) {
+        if not has(seen, v[i]) {
+            seen[v[i]] = 1
+            out = append(out, v[i])
+        }
+    }
+    return out
+}
+
+#| Closed-form numbers sorted by their values.
+def cas_sort_values(v) {
+    a = copy(v)
+    n = len(a)
+    for i from 1 to n {
+        x = a[i]
+        xv = cas_value(x)
+        j = i - 1
+        moving = true
+        while moving {
+            if j < 0 {
+                moving = false
+            } else if cas_value(a[j]) > xv {
+                a[j + 1] = a[j]
+                j = j - 1
+            } else {
+                moving = false
+            }
+        }
+        a[j + 1] = x
+    }
+    return a
+}
+
+#| The real roots of `f` in `x`, smallest first, and the words on how; a
+#| refusal in place of the roots' vector when `f` is not a polynomial of
+#| degree 1 to 3 with number coefficients.
+def cas_roots(f, x) {
+    c = cas_coeffs(f, x)
+    if len(c) == 0 {
+        return [cas_fail(f"{cas_text(f)} is not a polynomial in {cas_text(x)}; the CAS finds exact roots of polynomials only")], "not a polynomial"
+    }
+    if not cas_all_numbers(c) {
+        return [cas_fail(f"{cas_text(f)} has coefficients that are not numbers")], "symbolic coefficients"
+    }
+    if len(c) > 4 {
+        return [cas_fail(f"{cas_text(f)} has degree {len(c) - 1:.0f}; the CAS has closed forms to degree 3")], "degree 4 or more"
+    }
+    return cas_poly_roots(c)
+}
+
+test "derivatives: the table, the product rule, powers and the chain rule" {
+    x = cas_sym("x")
+    assert_near(cas_diff(cas("x^3"), x), cas("3*x^2"), 0)
+    assert_near(cas_diff(cas("sin(x^2)"), x), cas("2*x*cos(x^2)"), 0)
+    assert_near(cas_diff(cas("exp(2*x)"), x), cas("2*exp(2*x)"), 0)
+    assert_near(cas_diff(cas("log(x)"), x), cas("1/x"), 0)
+    assert_near(cas_diff(cas("sqrt(x)"), x), cas("1/(2*sqrt(x))"), 0)
+    assert_near(cas_diff(cas("x*exp(x)"), x), cas("exp(x) + x*exp(x)"), 0)
+    assert_true(cas_isfail(cas_diff(cas("abs(x)"), x)))
+}
+
+test "every row of the derivative table matches a central difference at its points" {
+    x = cas_sym("x")
+    h = 1.0e-5
+    for i to len(CAS_DERIV_AT_RULE) {
+        head = CAS_DERIV_HEAD[CAS_DERIV_AT_RULE[i]]
+        xv = CAS_DERIV_AT_X[i]
+        f = cas_fn(head, x)
+        d = cas_value_at(cas_diff(f, x), x, xv)
+        fd = (cas_value_at(f, x, xv + h) - cas_value_at(f, x, xv - h)) / (2.0 * h)
+        assert_near(d, fd, 1.0e-6 * (1.0 + abs(d)))
+    }
+}
+
+test "expansion is a canonical form for polynomials" {
+    assert_near(cas_expand(cas("(x + 1)^2 - (x^2 + 2*x)")), C_ONE, 0)
+    assert_near(cas_expand(cas("(x - y)*(x + y)")), cas("x^2 - y^2"), 0)
+    c = cas_coeffs(cas("(2*x - 1)^2"), cas_sym("x"))
+    assert_near(len(c), 3, 0)
+    assert_near(c[2], cas_int(4), 0)
+    assert_near(c[1], cas_int(-4), 0)
+}
+
+test "certificates: canonical, modular, balls, and a refutation" {
+    v1, w1 = cas_certify(cas("(x + 1)^3"), cas("x^3 + 3*x^2 + 3*x + 1"))
+    assert_true(v1 == Verdict.Proved)
+    v2, w2 = cas_certify(cas("1/(x - 1) - 1/(x + 1)"), cas("2/(x^2 - 1)"))
+    assert_true(v2 == Verdict.Modular)
+    v3, w3 = cas_certify(cas("sin(x)^2 + cos(x)^2"), C_ONE)
+    assert_true(v3 == Verdict.Probable)
+    v4, w4 = cas_certify(cas("sin(2*x)"), cas("2*sin(x)"))
+    assert_true(v4 == Verdict.Refuted)
+    v5, w5 = cas_certify(cas("1/(x - 1)"), cas("1/(x + 1)"))
+    assert_true(v5 == Verdict.Refuted)
+}
+
+test "integrals, each checked by differentiating" {
+    x = cas_sym("x")
+    big, val, v, why = cas_definite(cas("x^2"), x, C_ONE, cas_int(2))
+    assert_near(val, cas_num(7, 3), 0)
+    assert_true(v == Verdict.Proved)
+    assert_near(big, cas("x^3/3"), 0)
+    f2, val2, v2, w2 = cas_definite(cas("x*exp(x)"), x, C_ZERO, C_ONE)
+    assert_near(val2, C_ONE, 0)
+    f3, val3, v3, w3 = cas_definite(cas("1/x"), x, C_ONE, cas_int(2))
+    assert_near(val3, cas_fn("log", cas_int(2)), 0)
+    f4, val4, v4, w4 = cas_definite(cas("exp(-x^2)"), x, C_ZERO, C_ONE)
+    assert_near(val4, cas("sqrt(pi)/2*erf(1)"), 0)
+    f5, val5, v5, w5 = cas_definite(cas("1/(1 + x^2)"), x, C_ZERO, C_ONE)
+    assert_near(val5, cas("pi/4"), 0)
+    f6, val6, v6, w6 = cas_definite(cas("sin(x)"), x, C_ZERO, C_PI)
+    assert_near(val6, cas_int(2), 0)
+    assert_true(cas_isfail(cas_integrate(cas("exp(x^3)"), x)))
+}
+
+test "roots: rational, quadratic surds, and Cardano" {
+    x = cas_sym("x")
+    r1, w1 = cas_roots(cas("x^2 - 2"), x)
+    assert_near(len(r1), 2, 0)
+    assert_near(r1[1], cas("sqrt(2)"), 0)
+    r2, w2 = cas_roots(cas("x^3 - 6*x^2 + 11*x - 6"), x)
+    assert_near(len(r2), 3, 0)
+    assert_near(r2[2], cas_int(3), 0)
+    r3, w3 = cas_roots(cas("x^3 - 2*x - 5"), x)
+    assert_near(len(r3), 1, 0)
+    assert_near(cas_value(r3[0]), 2.0945514815423265, 1.0e-15)
+    r4, w4 = cas_roots(cas("x^3 - 3*x + 1"), x)
+    assert_near(len(r4), 3, 0)
+    assert_near(cas_value_at(cas("x^3 - 3*x + 1"), x, cas_value(r4[0])), 0, 1.0e-14)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

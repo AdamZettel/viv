@@ -1,0 +1,389 @@
+###
+post: Moving integrals from Cartesian to spherical functions
+agent: claude
+
+`lib/hf/cart2sph` builds `M`, the block-diagonal matrix whose column `m`
+holds the unit-Cartesian coefficients of spherical function `m`. The integral
+kernels produce everything in unit-Cartesian functions; this module moves the
+results into the spherical basis.
+
+A one-electron matrix has one function on each side, so it picks up one `M`
+on each side:
+
+    X_sph[p, q] = sum_ab M[a, p] X[a, b] M[b, q],     X_sph = M^T X M
+
+An electron repulsion integral `(ij|kl)` has four functions, so it picks up
+four:
+
+    G_sph[p, q, r, s] = sum_ijkl M[i, p] M[j, q] M[k, r] M[l, s] G[i, j, k, l]
+
+Done as written, that last sum costs `n^8`. Done one index at a time (sum
+over `l` first, keep the result, then `k`, then `j`, then `i`) it costs four
+passes of `n^5`. Those are the quarter transformations of `tr4_quarter`.
+
+**Two forms each.** The dense forms (`tr2_dense`, `tr4_quarter`) treat `M` as
+a full matrix and never look at the shell structure. The per-block forms
+(`tr2_blocks`, `tr4_blocks`) use the fact that `M` is zero between shells: a
+spherical function of shell `a` is built only from Cartesian components of
+shell `a`, so the spherical block of shells `(a, b)` comes from the Cartesian
+block of the same shells and nothing else. For the integrals, each shell
+quartet is read out of the packed vector, transformed with four small `M_l`
+blocks, and written back into the packed spherical vector. The per-block
+forms do far less arithmetic; the dense forms are simpler to trust. They share
+no loops, so agreement between them checks both.
+
+All four take the transform-stage signature `(X: Arr, M: Arr, shells: Arr)
+-> Arr`, so a registry of them runs through
+`sweep3_arr`. The ERI forms take and return packed-8 vectors. The two
+`tr2_back_*` forms go the other way, `M D M^T`: a spherical density becomes
+the Cartesian one whose contraction with Cartesian integrals gives the same
+energy, which is what a Cartesian J/K build needs.
+
+The tests hold the transforms to PySCF's own spherical integrals for water in
+6-31G*, cc-pVDZ and def2-SVP, within 1e-13.
+
+Used with `import hf.transform`, after `lib/hf/basis`, `lib/hf/eri_store`
+and `lib/hf/cart2sph`.
+###
+
+from hf.basis import bas_nao_cart, bas_nao_sph, SH_CART0, SH_L, SH_NCART, SH_NSPH, SH_SPH0
+from hf.eri_store import es_index8, es_len8, es_pack8, es_pair, es_unpack8
+import hf.cart2sph
+from hf.md_eri import mderi_screened
+
+# the fuzz test's seeds, 1 to 8
+TR4_FUZZ_NSEED = 8
+# tr4_rand_shells: 3 to 5 shells, each s to f (4 values of l), and a shell
+# that would take the Cartesian count past 15 becomes an s
+TR4_RAND_NSH_MIN = 3
+TR4_RAND_NSH_SPREAD = 3.0
+TR4_RAND_NL = 4.0
+TR4_RAND_NCART_MAX = 15
+
+# ---- one-electron matrices ----------------------------------------------------
+
+#| `M^T X M` as two full matrix products, `[nao_sph, nao_sph]`. The shells
+#| pack is used only for the two sizes.
+def tr2_dense(X: Arr, M: Arr, shells: Arr) -> Arr {
+    return transpose(M) @ (X @ M)
+}
+
+#| `M^T X M` one shell pair at a time: the (a, b) spherical block is
+#| `M_a^T X_ab M_b`, where `M_a` is shell a's diagonal block of M. Every pair
+#| is done, so X need not be symmetric.
+#@ 21711c66
+def tr2_blocks(X: Arr, M: Arr, shells: Arr) -> Arr {
+    ns = bas_nao_sph(shells)
+    Y = zeros(ns, ns)
+    for a to len(shells) {
+        ca = round(shells[a, SH_CART0])
+        sa = round(shells[a, SH_SPH0])
+        na = round(shells[a, SH_NCART])
+        ma = round(shells[a, SH_NSPH])
+        for b to len(shells) {
+            cb = round(shells[b, SH_CART0])
+            sb = round(shells[b, SH_SPH0])
+            nb = round(shells[b, SH_NCART])
+            mb = round(shells[b, SH_NSPH])
+            # X_ab M_b, then M_a^T times that
+            H = X[ca:ca + na, cb:cb + nb] @ M[cb:cb + nb, sb:sb + mb]
+            Y[sa:sa + ma, sb:sb + mb] = transpose(M[ca:ca + na, sa:sa + ma]) @ H
+        }
+    }
+    return Y
+}
+
+#| `M D M^T`, `[nao_cart, nao_cart]`: a spherical density as the Cartesian
+#| one with the same contractions, since Tr(D M^T X M) = Tr((M D M^T) X).
+def tr2_back_dense(D: Arr, M: Arr, shells: Arr) -> Arr {
+    return M @ D @ transpose(M)
+}
+
+#| `M D M^T` one shell pair at a time.
+def tr2_back_blocks(D: Arr, M: Arr, shells: Arr) -> Arr {
+    nc = bas_nao_cart(shells)
+    Y = zeros(nc, nc)
+    for a to len(shells) {
+        ca = round(shells[a, SH_CART0])
+        sa = round(shells[a, SH_SPH0])
+        na = round(shells[a, SH_NCART])
+        ma = round(shells[a, SH_NSPH])
+        for b to len(shells) {
+            cb = round(shells[b, SH_CART0])
+            sb = round(shells[b, SH_SPH0])
+            nb = round(shells[b, SH_NCART])
+            mb = round(shells[b, SH_NSPH])
+            H = M[ca:ca + na, sa:sa + ma] @ D[sa:sa + ma, sb:sb + mb]
+            Y[ca:ca + na, cb:cb + nb] = H @ transpose(M[cb:cb + nb, sb:sb + mb])
+        }
+    }
+    return Y
+}
+
+# ---- electron repulsion integrals ---------------------------------------------
+
+#| The dense four-index transform of a dense `[nc, nc, nc, nc]` tensor, one
+#| index per pass: l, then k, then j, then i. Returns `[ns, ns, ns, ns]`.
+def tr4_dense(G: Arr, M: Arr, nc, ns) -> Arr {
+    #: one index per pass: nc^4 ns work each, not nc^4 ns^4
+    A = zeros(nc, nc, nc, ns)
+    for i to nc {
+        for j to nc {
+            for k to nc {
+                for s to ns {
+                    t = 0.0
+                    for l to nc {
+                        t = t + G[i, j, k, l] * M[l, s]
+                    }
+                    A[i, j, k, s] = t
+                }
+            }
+        }
+    }
+    B = zeros(nc, nc, ns, ns)
+    for i to nc {
+        for j to nc {
+            for r to ns {
+                for s to ns {
+                    t = 0.0
+                    for k to nc {
+                        t = t + A[i, j, k, s] * M[k, r]
+                    }
+                    B[i, j, r, s] = t
+                }
+            }
+        }
+    }
+    C = zeros(nc, ns, ns, ns)
+    for i to nc {
+        for q to ns {
+            for r to ns {
+                for s to ns {
+                    t = 0.0
+                    for j to nc {
+                        t = t + B[i, j, r, s] * M[j, q]
+                    }
+                    C[i, q, r, s] = t
+                }
+            }
+        }
+    }
+    Y = zeros(ns, ns, ns, ns)
+    for p to ns {
+        for q to ns {
+            for r to ns {
+                for s to ns {
+                    t = 0.0
+                    for i to nc {
+                        t = t + C[i, q, r, s] * M[i, p]
+                    }
+                    Y[p, q, r, s] = t
+                }
+            }
+        }
+    }
+    return Y
+}
+
+#| Packed Cartesian ERIs to packed spherical ones through the dense view and
+#| four quarter transformations. Meant for n <= 30, like `es_unpack8`.
+def tr4_quarter(Gp: Arr, M: Arr, shells: Arr) -> Arr {
+    nc = bas_nao_cart(shells)
+    ns = bas_nao_sph(shells)
+    G = es_unpack8(Gp, nc)
+    Y = tr4_dense(G, M, nc, ns)
+    return es_pack8(Y, ns)
+}
+
+#| The spherical block `[ma, mb, mc, md]` of shells (a, b, c, d), from the
+#| Cartesian block read out of the packed vector and the four `M_l` blocks.
+#| Any order of the four shells works, because `es_index8` accepts any order.
+#| A shell up to p is the same in both sets, so its pass is skipped.
+#@ df9ccdbc
+def tr4_quartet(Gp: Arr, M: Arr, shells: Arr, a, b, c, d) -> Arr {
+    ca = round(shells[a, SH_CART0])
+    cb = round(shells[b, SH_CART0])
+    cc = round(shells[c, SH_CART0])
+    cd = round(shells[d, SH_CART0])
+    sa = round(shells[a, SH_SPH0])
+    sb = round(shells[b, SH_SPH0])
+    sc = round(shells[c, SH_SPH0])
+    sd = round(shells[d, SH_SPH0])
+    na = round(shells[a, SH_NCART])
+    nb = round(shells[b, SH_NCART])
+    nk = round(shells[c, SH_NCART])
+    nd = round(shells[d, SH_NCART])
+    ma = round(shells[a, SH_NSPH])
+    mb = round(shells[b, SH_NSPH])
+    mc = round(shells[c, SH_NSPH])
+    md = round(shells[d, SH_NSPH])
+    g = zeros(na, nb, nk, nd)
+    for i to na {
+        for j to nb {
+            for k to nk {
+                for l to nd {
+                    g[i, j, k, l] = Gp[es_index8(ca + i, cb + j, cc + k, cd + l)]
+                }
+            }
+        }
+    }
+    # the last index first, then the third, second and first. A shell up to
+    # p has the same functions in both sets (its block of M is the identity,
+    # [test "a shell up to p is the same in both sets"]), so its pass is
+    # skipped and the block goes on as it is.
+    h = g
+    if shells[d, SH_L] > 1 {
+        h = zeros(na, nb, nk, md)
+        for i to na {
+            for j to nb {
+                for k to nk {
+                    for s to md {
+                        t = 0.0
+                        for l to nd {
+                            t = t + g[i, j, k, l] * M[cd + l, sd + s]
+                        }
+                        h[i, j, k, s] = t
+                    }
+                }
+            }
+        }
+    }
+    e = h
+    if shells[c, SH_L] > 1 {
+        e = zeros(na, nb, mc, md)
+        for i to na {
+            for j to nb {
+                for r to mc {
+                    for s to md {
+                        t = 0.0
+                        for k to nk {
+                            t = t + h[i, j, k, s] * M[cc + k, sc + r]
+                        }
+                        e[i, j, r, s] = t
+                    }
+                }
+            }
+        }
+    }
+    f = e
+    if shells[b, SH_L] > 1 {
+        f = zeros(na, mb, mc, md)
+        for i to na {
+            for q to mb {
+                for r to mc {
+                    for s to md {
+                        t = 0.0
+                        for j to nb {
+                            t = t + e[i, j, r, s] * M[cb + j, sb + q]
+                        }
+                        f[i, q, r, s] = t
+                    }
+                }
+            }
+        }
+    }
+    y = f
+    if shells[a, SH_L] > 1 {
+        y = zeros(ma, mb, mc, md)
+        for p to ma {
+            for q to mb {
+                for r to mc {
+                    for s to md {
+                        t = 0.0
+                        for i to na {
+                            t = t + f[i, q, r, s] * M[ca + i, sa + p]
+                        }
+                        y[p, q, r, s] = t
+                    }
+                }
+            }
+        }
+    }
+    return y
+}
+
+#| Packed Cartesian ERIs to packed spherical ones, one canonical shell
+#| quartet at a time: a >= b, c >= d and pair(a, b) >= pair(c, d). Every
+#| canonical spherical (pq|rs) lies in one of those quartets, since the
+#| symmetry that maps a function quartet to its canonical order maps its
+#| shell quartet the same way.
+#@ 1d51440b
+def tr4_blocks(Gp: Arr, M: Arr, shells: Arr) -> Arr {
+    ns = bas_nao_sph(shells)
+    out = zeros(es_len8(ns))
+    nsh = len(shells)
+    #: canonical shell quartets only (a >= b, c >= d, cd <= ab)
+    for a to nsh {
+        for b to a + 1 {
+            for c to a + 1 {
+                for d to c + 1 {
+                    if es_pair(c, d) <= es_pair(a, b) {
+                        y = tr4_quartet(Gp, M, shells, a, b, c, d)
+                        sa = round(shells[a, SH_SPH0])
+                        sb = round(shells[b, SH_SPH0])
+                        sc = round(shells[c, SH_SPH0])
+                        sd = round(shells[d, SH_SPH0])
+                        for p to round(shells[a, SH_NSPH]) {
+                            for q to round(shells[b, SH_NSPH]) {
+                                for r to round(shells[c, SH_NSPH]) {
+                                    for s to round(shells[d, SH_NSPH]) {
+                                        out[es_index8(sa + p, sb + q, sc + r, sd + s)] = y[p, q, r, s]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return out
+}
+
+#| The ERIs over spherical functions in two passes: every Cartesian quartet
+#| by `mderi_screened` (lib/hf/md_eri), then `tr4_blocks`. The production
+#| build, `mderi_sph`, moves each quartet as it is computed; this is the path
+#| it is held to, with the same signature, `(atoms, shells, prims, M)`.
+#@ 0aa86860
+def tr4_two_pass(atoms: Arr, shells: Arr, prims: Arr, M: Arr) -> Arr {
+    return tr4_blocks(mderi_screened(atoms, shells, prims), M, shells)
+}
+
+# ---- test helpers ---------------------------------------------------------------
+
+#| The per-quartet form computed for a shell quartet and for three of its
+#| symmetric images, (b a | d c), (c d | a b) and (d c | b a); the largest
+#| gap between matching entries. `tr4_blocks` computes only the canonical
+#| order, so this checks that the order it picks does not matter.
+def tr4_block_sym_defect(Gp: Arr, M: Arr, shells: Arr) {
+    nsh = len(shells)
+    w = 0.0
+    for a to nsh {
+        for b to nsh {
+            for c to nsh {
+                for d to nsh {
+                    y = tr4_quartet(Gp, M, shells, a, b, c, d)
+                    y1 = tr4_quartet(Gp, M, shells, b, a, d, c)
+                    y2 = tr4_quartet(Gp, M, shells, c, d, a, b)
+                    y3 = tr4_quartet(Gp, M, shells, d, c, b, a)
+                    for p to round(shells[a, SH_NSPH]) {
+                        for q to round(shells[b, SH_NSPH]) {
+                            for r to round(shells[c, SH_NSPH]) {
+                                for s to round(shells[d, SH_NSPH]) {
+                                    v = y[p, q, r, s]
+                                    w = max(w, abs(v - y1[q, p, s, r]))
+                                    w = max(w, abs(v - y2[r, s, p, q]))
+                                    w = max(w, abs(v - y3[s, r, q, p]))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return w
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

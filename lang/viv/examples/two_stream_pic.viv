@@ -1,0 +1,177 @@
+# The two-stream instability by a 1D electrostatic particle-in-cell (PIC) code:
+# the kinetic model in its rawest form -- push real particles, let them make their
+# own field, and watch a beam-plasma instability grow out of noise.
+#
+# Two cold electron beams counter-stream at +/- v0 through a fixed neutralizing ion
+# background. Interpenetrating streams are unstable: a small density ripple bunches
+# the beams, the bunching strengthens the field, and the field deepens the bunching.
+# For two equal cold beams the linear theory gives a fastest-growing mode at
+# k v0 = sqrt(3/8) omega_p with growth rate
+#
+#     gamma_max = omega_p / (2 sqrt 2)  ~  0.3536 omega_p .
+#
+# We work in units omega_p = 1, v0 = 1, and size the periodic box so its fundamental
+# IS that fastest mode (L = 2 pi / k_max). A quiet start (evenly loaded beams, one
+# seeded mode) makes the growth clean, so a log-linear fit of the field energy
+# recovers gamma_max.
+#
+# The PIC cycle each step: deposit charge to the grid (CIC) -> solve Poisson for the
+# field -> gather the field to particles -> push them (leapfrog). This is model #99
+# on the plasma-models list, running the two-stream problem (#108).
+
+pi = 3.141592653589793
+
+# --- deposit particle charge to the grid (cloud-in-cell), on the ion background ---
+def deposit(px, qp, Np, rho, Ng, dx, n0) {
+    for i to Ng {
+        rho[i] = n0
+    }
+    for j to Np {
+        xg = px[j] / dx
+        ic = floor(xg)
+        f = xg - ic
+        ip = ic + 1.0
+        if ip == Ng {
+            ip = 0.0
+        }
+        rho[ic] = rho[ic] + qp * (1.0 - f) / dx
+        rho[ip] = rho[ip] + qp * f / dx
+    }
+}
+
+# --- 1D periodic field: dE/dx = rho (eps0 = 1), integrate then remove the mean ---
+def solve_field(rho, E, Ng, dx) {
+    E[0] = 0.0
+    for i to Ng {
+        if i > 0 {
+            E[i] = E[i - 1.0] + rho[i] * dx
+        }
+    }
+    emean = 0.0
+    for i to Ng {
+        emean = emean + E[i]
+    }
+    emean = emean / Ng
+    for i to Ng {
+        E[i] = E[i] - emean
+    }
+}
+
+# --- gather the field to each particle and advance it (leapfrog) ---
+def push(px, pv, E, Np, Ng, dx, dt, qm, L) {
+    for j to Np {
+        xg = px[j] / dx
+        ic = floor(xg)
+        f = xg - ic
+        ip = ic + 1.0
+        if ip == Ng {
+            ip = 0.0
+        }
+        Ep = E[ic] * (1.0 - f) + E[ip] * f
+        pv[j] = pv[j] + qm * Ep * dt
+        px[j] = px[j] + pv[j] * dt
+        if px[j] < 0.0 {
+            px[j] = px[j] + L
+        }
+        if px[j] >= L {
+            px[j] = px[j] - L
+        }
+    }
+}
+
+# --- setup: box sized to the fastest-growing mode ---
+kmax = sqrt(3.0 / 8.0)
+L = 2.0 * pi / kmax
+Ng = 32
+Nppb = 2000
+Np = 2.0 * Nppb
+n0 = 1.0
+v0 = 1.0
+qm = -1.0
+qp = -n0 * L / Np
+dx = L / Ng
+dt = 0.05
+Nsteps = 340
+delta = 0.0001 * L
+
+px = zeros(Np)
+pv = zeros(Np)
+for j to Nppb {
+    x0 = (j + 0.5) * L / Nppb
+    xp = x0 + delta * sin(2.0 * pi * x0 / L)
+    if xp < 0.0 {
+        xp = xp + L
+    }
+    if xp >= L {
+        xp = xp - L
+    }
+    px[j] = xp
+    pv[j] = v0
+    px[j + Nppb] = xp
+    pv[j + Nppb] = -v0
+}
+
+# --- run the PIC cycle, recording the field energy each step ---
+rho = zeros(Ng)
+E = zeros(Ng)
+WE = zeros(Nsteps)
+for step to Nsteps {
+    deposit(px, qp, Np, rho, Ng, dx, n0)
+    solve_field(rho, E, Ng, dx)
+    w = 0.0
+    for i to Ng {
+        w = w + 0.5 * E[i] * E[i] * dx
+    }
+    WE[step] = w
+    push(px, pv, E, Np, Ng, dx, dt, qm, L)
+}
+
+# --- measure the growth rate: fit ln(field energy) over the clean exponential
+# phase, auto-selected as the band between 1e-3 and 0.1 of the saturation peak
+# (above the seed transient, below the nonlinear rollover) ---
+wpeak = 0.0
+for s to Nsteps {
+    if WE[s] > wpeak {
+        wpeak = WE[s]
+    }
+}
+wlo = 1.0e-3 * wpeak
+whi = 0.1 * wpeak
+sn = 0.0
+st = 0.0
+sy = 0.0
+sty = 0.0
+stt = 0.0
+tfirst = -1.0
+tlast = 0.0
+for s to Nsteps {
+    if WE[s] > wlo {
+        if WE[s] < whi {
+            tt = s * dt
+            yy = log(WE[s])
+            sn = sn + 1.0
+            st = st + tt
+            sy = sy + yy
+            sty = sty + tt * yy
+            stt = stt + tt * tt
+            if tfirst < 0.0 {
+                tfirst = tt
+            }
+            tlast = tt
+        }
+    }
+}
+slope = (sn * sty - st * sy) / (sn * stt - st * st)
+gamma_meas = slope / 2.0
+gamma_theory = 1.0 / (2.0 * sqrt(2.0))
+amp = wpeak / WE[0]
+
+show tfirst       # start of the fitted exponential window (time)
+show tlast        # end of the fitted window (time)
+show L            # box length = 2pi/k_max in units of v0/omega_p
+show gamma_meas   # measured growth rate (omega_p)
+show gamma_theory # theory: 1/(2 sqrt 2) = 0.35355
+show amp          # field-energy amplification, seed to saturation
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

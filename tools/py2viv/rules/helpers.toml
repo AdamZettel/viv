@@ -1,0 +1,4763 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# The Viv helper defs a translation may call (format: ../RULES.md, "Helpers").
+#
+# A rule names a helper in a case's `use` list; py2viv.py's own translation of operators,
+# printing and literals uses them by name too. A translation carries each helper it used, and
+# the helpers their `deps` name, once, in the order of this file.
+
+# ---------------------------------------------------------------- the prelude
+#
+# Helpers the translation may call, emitted only when used (with the helpers their `deps`
+# name), in the order of this file. Each is plain Viv, so all three engines run the same
+# code. The calling-convention adapters (py_sort, py_solve, py_cholesky, py_eigvalsh,
+# py_fft_*, py_inv) exist because the Viv builtin writes into an argument or sorts in place,
+# where NumPy returns a new array.
+
+[helper.py_b01]
+group = "prelude"
+viv = '''
+#| A Bool as 1 or 0.
+def py_b01(c) {
+    if c {
+        return 1
+    }
+    return 0
+}
+'''
+
+[helper.py_iota]
+group = "prelude"
+viv = '''
+#| 0, 1, ..., n - 1.
+def py_iota(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+'''
+
+[helper.py_flat]
+group = "prelude"
+deps = ["py_iota"]
+viv = '''
+#| Every entry of a real array, row-major, as a vector (a copy).
+def py_flat(a: Arr) {
+    return take(a, py_iota(numel(a)))
+}
+'''
+
+[helper.py_round]
+group = "prelude"
+deps = ["py_rint"]
+viv = '''
+#| Python's round(x): halves go to the even neighbor (round(2.5) is 2, round(-2.5) is -2).
+def py_round(x) {
+    if x != x {
+        stop("{E:round_nan}")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("{E:round_inf}")
+    }
+    return py_rint(x) + 0.0
+}
+'''
+
+[helper.py_rint]
+group = "prelude"
+viv = '''
+#| Round half to even (C's rint, NumPy's round); a zero result comes back +0.
+def py_rint(x) {
+    if abs(x) >= 4503599627370496 or x != x {
+        return x
+    }
+    f = floor(x)
+    d = x - f
+    if d > 0.5 {
+        return f + 1
+    }
+    if d < 0.5 {
+        return f
+    }
+    if f % 2 == 0 {
+        return f
+    }
+    return f + 1
+}
+'''
+
+[helper.py_npround]
+group = "prelude"
+deps = ["py_rint"]
+viv = '''
+#| np.round(x) of a number: half to even, a float, -0.0 kept (np.round(-0.4) is -0.0).
+def py_npround(x) {
+    r = py_rint(x)
+    if r == 0 {
+        return 0.0 * x
+    }
+    return r
+}
+'''
+
+[helper.py_trunc]
+group = "prelude"
+viv = '''
+#| Python's int(x) on a float: toward zero (int(-2.5) is -2).
+def py_trunc(x) {
+    if x != x {
+        stop("{E:int_nan}")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("{E:int_inf}")
+    }
+    if x < 0 {
+        return ceil(x) + 0.0
+    }
+    return floor(x)
+}
+'''
+
+[helper.py_sign]
+group = "prelude"
+viv = '''
+#| np.sign of a number: -1, 0 or 1 (and nan for nan).
+def py_sign(x) {
+    if x > 0 {
+        return 1
+    }
+    if x < 0 {
+        return -1
+    }
+    if x == 0 {
+        return 0.0
+    }
+    return x
+}
+'''
+
+[helper.py_copy]
+group = "prelude"
+viv = '''
+#| A copy of a real array (np.copy, a.copy(), np.array(a)).
+def py_copy(a: Arr) {
+    return a * 1.0
+}
+'''
+
+[helper.py_ones]
+group = "prelude"
+viv = '''
+#| np.ones(n).
+def py_ones(n) {
+    return zeros(n) + 1.0
+}
+'''
+
+[helper.py_ones2]
+group = "prelude"
+viv = '''
+#| np.ones((n, m)).
+def py_ones2(n, m) {
+    return zeros(n, m) + 1.0
+}
+'''
+
+[helper.py_arange]
+group = "prelude"
+viv = '''
+#| np.arange(start, stop, step), as NumPy fills it: ceil((stop - start) / step) entries,
+#| entry k = start + k * delta with delta = (start + step) - start.
+def py_arange(start, stop_, step) {
+    if step == 0 {
+        stop("ZeroDivisionError: division by zero")
+    }
+    if not (abs((stop_ - start) / step) < 1.0 / 0.0) {
+        stop("py2viv: np.arange of a length that is not finite (NumPy raises ValueError)")
+    }
+    n = max(ceil((stop_ - start) / step), 0)
+    a = zeros(n)
+    delta = (start + step) - start
+    for k to n {
+        a[k] = start + k * delta
+    }
+    return a
+}
+'''
+
+[helper.py_eye]
+group = "prelude"
+viv = '''
+#| np.eye(n, k=d): ones on the d-th diagonal.
+def py_eye(n, d) {
+    E = zeros(n, n)
+    for i to n {
+        j = i + d
+        if j >= 0 and j < n {
+            E[i, j] = 1
+        }
+    }
+    return E
+}
+'''
+
+[helper.py_diag]
+group = "prelude"
+viv = '''
+#| np.diag(v) for a vector: the square matrix with v on its diagonal.
+def py_diag(v: Arr) {
+    n = len(v)
+    D = zeros(n, n)
+    for i to n {
+        D[i, i] = v[i]
+    }
+    return D
+}
+'''
+
+[helper.py_diagonal]
+group = "prelude"
+viv = '''
+#| np.diag(A) for a matrix: its diagonal, as a vector.
+def py_diagonal(A: Arr) {
+    n = min(shape(A)[0], shape(A)[1])
+    d = zeros(n)
+    for i to n {
+        d[i] = A[i, i]
+    }
+    return d
+}
+'''
+
+[helper.py_trace]
+group = "prelude"
+deps = ["py_diagonal", "py_pw"]
+viv = '''
+#| np.trace(A): NumPy's pairwise sum of the diagonal.
+def py_trace(A: Arr) {
+    d = py_diagonal(A)
+    return py_pw(d, 0, len(d))
+}
+'''
+
+[helper.py_outer]
+group = "prelude"
+viv = '''
+#| np.outer(u, v).
+def py_outer(u: Arr, v: Arr) {
+    M = zeros(len(u), len(v))
+    for i to len(u) {
+        for j to len(v) {
+            M[i, j] = u[i] * v[j]
+        }
+    }
+    return M
+}
+'''
+
+[helper.py_cumsum]
+group = "prelude"
+viv = '''
+#| np.cumsum(a) of a vector: entry i is entry i - 1 plus a[i], from a[0] itself (so a -0.0
+#| first stays -0.0).
+def py_cumsum(a: Arr) {
+    c = zeros(len(a))
+    if len(a) == 0 {
+        return c
+    }
+    s = a[0]
+    c[0] = s
+    for i from 1 to len(a) {
+        s += a[i]
+        c[i] = s
+    }
+    return c
+}
+'''
+
+[helper.py_prod]
+group = "prelude"
+deps = ["py_flat"]
+viv = '''
+#| np.prod(a): the product of every entry, left to right.
+def py_prod(a: Arr) {
+    f = py_flat(a)
+    p = 1.0
+    for i to len(f) {
+        p *= f[i]
+    }
+    return p
+}
+'''
+
+[helper.py_argmax]
+group = "prelude"
+deps = ["py_flat"]
+viv = '''
+#| np.argmax(a): the flat index of the first largest entry.
+def py_argmax(a: Arr) {
+    f = py_flat(a)
+    k = 0
+    if f[0] != f[0] {
+        return 0
+    }
+    for i from 1 to len(f) {
+        if f[i] != f[i] {
+            return i
+        }
+        if f[i] > f[k] {
+            k = i
+        }
+    }
+    return k
+}
+'''
+
+[helper.py_argmin]
+group = "prelude"
+deps = ["py_flat"]
+viv = '''
+#| np.argmin(a): the flat index of the first smallest entry.
+def py_argmin(a: Arr) {
+    f = py_flat(a)
+    k = 0
+    if f[0] != f[0] {
+        return 0
+    }
+    for i from 1 to len(f) {
+        if f[i] != f[i] {
+            return i
+        }
+        if f[i] < f[k] {
+            k = i
+        }
+    }
+    return k
+}
+'''
+
+[helper.py_mean]
+group = "prelude"
+deps = ["py_npsum"]
+viv = '''
+#| np.mean(a): NumPy's pairwise sum over numel(a).
+def py_mean(a: Arr) {
+    return py_npsum(a) / numel(a)
+}
+'''
+
+[helper.py_var]
+group = "prelude"
+deps = ["py_mean"]
+viv = '''
+#| np.var(a): the pairwise sum of the squared deviations over n, as NumPy's _var computes it.
+def py_var(a: Arr) {
+    d = a - py_mean(a)
+    return py_npsum(d * d) / numel(a)
+}
+'''
+
+[helper.py_std]
+group = "prelude"
+deps = ["py_var"]
+viv = '''
+#| np.std(a): divides by n, as NumPy does (lib/stats `std`).
+def py_std(a: Arr) {
+    return sqrt(py_var(a))
+}
+'''
+
+[helper.py_sort]
+group = "prelude"
+viv = '''
+#| np.sort(a) / sorted(a): a sorted COPY. Viv's sort(a) sorts in place and returns 0.
+def py_sort(a: Arr) {
+    if any(a != a) {
+        stop("py2viv: sorting a NaN (Python's sorted and NumPy's sort each put it somewhere of their own)")
+    }
+    if any(a == 0) and any(1.0 / a == -1.0 / 0.0) and any(1.0 / a == 1.0 / 0.0) {
+        stop("py2viv: sorting 0.0 and -0.0 together (their order is the sort algorithm's)")
+    }
+    b = a * 1.0
+    sort(b)
+    return b
+}
+'''
+
+[helper.py_sort_ip]
+group = "prelude"
+viv = '''
+#| a.sort(), list.sort(): in place, with py_sort's checks.
+def py_sort_ip(a: Arr) {
+    if any(a != a) {
+        stop("py2viv: sorting a NaN (Python's sorted and NumPy's sort each put it somewhere of their own)")
+    }
+    if any(a == 0) and any(1.0 / a == -1.0 / 0.0) and any(1.0 / a == 1.0 / 0.0) {
+        stop("py2viv: sorting 0.0 and -0.0 together (their order is the sort algorithm's)")
+    }
+    sort(a)
+    return 0
+}
+'''
+
+[helper.py_solve]
+group = "prelude"
+viv = '''
+#| np.linalg.solve(A, b) for a vector b. Viv's lin_solve(A, b, x) writes x and returns 0.
+def py_solve(A: Arr, b: Arr) {
+    if not (all(abs(A) < 1.0 / 0.0) and all(abs(b) < 1.0 / 0.0)) {
+        stop("py2viv: np.linalg.solve with a NaN or an infinity (LAPACK's answer is its own)")
+    }
+    x = zeros(len(b))
+    lin_solve(A, b, x)
+    if all(abs(A) < 1.0 / 0.0) and all(abs(b) < 1.0 / 0.0) and not all(abs(x) < 1.0 / 0.0) {
+        stop("numpy.linalg.LinAlgError: Singular matrix")
+    }
+    return x
+}
+'''
+
+[helper.py_solve_multi]
+group = "prelude"
+viv = '''
+#| np.linalg.solve(A, B) for a matrix B: one factorization, every column.
+def py_solve_multi(A: Arr, B: Arr) {
+    if not (all(abs(A) < 1.0 / 0.0) and all(abs(B) < 1.0 / 0.0)) {
+        stop("py2viv: np.linalg.solve with a NaN or an infinity (LAPACK's answer is its own)")
+    }
+    X = zeros(shape(B)[0], shape(B)[1])
+    lin_solve_multi(A, B, X)
+    if all(abs(A) < 1.0 / 0.0) and all(abs(B) < 1.0 / 0.0) and not all(abs(X) < 1.0 / 0.0) {
+        stop("numpy.linalg.LinAlgError: Singular matrix")
+    }
+    return X
+}
+'''
+
+[helper.py_inv]
+group = "prelude"
+deps = ["py_eye"]
+viv = '''
+#| np.linalg.inv(A): A X = I, solved by lin_solve_multi.
+def py_inv(A: Arr) {
+    if not all(abs(A) < 1.0 / 0.0) {
+        stop("py2viv: np.linalg.inv of a matrix with a NaN or an infinity (LAPACK's answer is its own)")
+    }
+    X = zeros(len(A), len(A))
+    lin_solve_multi(A, py_eye(len(A), 0), X)
+    if all(abs(A) < 1.0 / 0.0) and not all(abs(X) < 1.0 / 0.0) {
+        stop("numpy.linalg.LinAlgError: Singular matrix")
+    }
+    return X
+}
+'''
+
+[helper.py_lower_sym]
+group = "prelude"
+viv = '''
+#| The symmetric matrix whose lower triangle is A's (what LAPACK's UPLO='L' routines read).
+def py_lower_sym(A: Arr) {
+    n = len(A)
+    S = zeros(n, n)
+    for i to n {
+        for j to n {
+            if j <= i {
+                S[i, j] = A[i, j]
+            }
+            else {
+                S[i, j] = A[j, i]
+            }
+        }
+    }
+    return S
+}
+'''
+
+[helper.py_cholesky]
+group = "prelude"
+deps = ["py_lower_sym"]
+viv = '''
+#| np.linalg.cholesky(A): the lower factor. Viv's cholesky(A, L) writes L. LAPACK reads only
+#| the lower triangle of A, and raises where a pivot is not positive.
+def py_cholesky(A: Arr) {
+    S = py_lower_sym(A)
+    if not all(abs(S) < 1.0 / 0.0) {
+        stop("py2viv: np.linalg.cholesky of a matrix with a NaN or an infinity (LAPACK's answer is its own)")
+    }
+    L = zeros(len(A), len(A))
+    cholesky(S, L)
+    if all(abs(S) < 1.0 / 0.0) and not all(abs(L) < 1.0 / 0.0) {
+        stop("numpy.linalg.LinAlgError: Matrix is not positive definite")
+    }
+    return L
+}
+'''
+
+[helper.py_eigvalsh]
+group = "prelude"
+deps = ["py_lower_sym"]
+viv = '''
+#| np.linalg.eigvalsh(H): ascending eigenvalues. Viv's spectrum_sym(H, w) writes w. LAPACK
+#| reads only the lower triangle of H (UPLO='L').
+def py_eigvalsh(H: Arr) {
+    if not all(abs(H) < 1.0 / 0.0) {
+        stop("py2viv: np.linalg.eigvalsh of a matrix with a NaN or an infinity (LAPACK's answer is its own)")
+    }
+    w = zeros(len(H))
+    spectrum_sym(py_lower_sym(H), w)
+    return w
+}
+'''
+
+[helper.py_fft_r]
+group = "prelude"
+viv = '''
+#| np.fft.fft(x) of a real vector: copied into a complex array, then transformed in place.
+def py_fft_r(x: Arr) {
+    if not all(abs(x) < 1.0 / 0.0) {
+        stop("py2viv: an FFT of an array with a NaN or an infinity (pocketfft's answer is its own)")
+    }
+    X = czeros(len(x))
+    for i to len(x) {
+        X[i] = x[i]
+    }
+    fft(X)
+    return X
+}
+'''
+
+[helper.py_fft_c]
+group = "prelude"
+viv = '''
+#| np.fft.fft(x) of a complex vector: a copy, transformed in place.
+def py_fft_c(x: CArr) {
+    if not all(abs(x) < 1.0 / 0.0) {
+        stop("py2viv: an FFT of an array with a NaN or an infinity (pocketfft's answer is its own)")
+    }
+    X = czeros(len(x))
+    for i to len(x) {
+        X[i] = x[i]
+    }
+    fft(X)
+    return X
+}
+'''
+
+[helper.py_ifft_r]
+group = "prelude"
+viv = '''
+#| np.fft.ifft(x) of a real vector (carries 1/n, as NumPy's does).
+def py_ifft_r(x: Arr) {
+    if not all(abs(x) < 1.0 / 0.0) {
+        stop("py2viv: an FFT of an array with a NaN or an infinity (pocketfft's answer is its own)")
+    }
+    X = czeros(len(x))
+    for i to len(x) {
+        X[i] = x[i]
+    }
+    ifft(X)
+    return X
+}
+'''
+
+[helper.py_ifft_c]
+group = "prelude"
+viv = '''
+#| np.fft.ifft(x) of a complex vector (carries 1/n, as NumPy's does).
+def py_ifft_c(x: CArr) {
+    if not all(abs(x) < 1.0 / 0.0) {
+        stop("py2viv: an FFT of an array with a NaN or an infinity (pocketfft's answer is its own)")
+    }
+    X = czeros(len(x))
+    for i to len(x) {
+        X[i] = x[i]
+    }
+    ifft(X)
+    return X
+}
+'''
+
+[helper.py_diff]
+group = "prelude"
+viv = '''
+#| np.diff(a) of a vector: a[i + 1] - a[i].
+def py_diff(a: Arr) {
+    d = zeros(len(a) - 1)
+    for i to len(a) - 1 {
+        d[i] = a[i + 1] - a[i]
+    }
+    return d
+}
+'''
+
+[helper.py_cross]
+group = "prelude"
+viv = '''
+#| np.cross(u, v) of two 3-vectors.
+def py_cross(u: Arr, v: Arr) {
+    if len(u) != 3 or len(v) != 3 {
+        stop("py2viv: np.cross of vectors that are not both 3-vectors (NumPy gives a number for 2-vectors)")
+    }
+    c = zeros(3)
+    c[0] = u[1] * v[2] - u[2] * v[1]
+    c[1] = u[2] * v[0] - u[0] * v[2]
+    c[2] = u[0] * v[1] - u[1] * v[0]
+    return c
+}
+'''
+
+[helper.py_mod]
+group = "prelude"
+deps = ["py_fdm"]
+viv = '''
+#| a % b for a vector a and a number b, as NumPy's remainder: npy_divmod entry by entry; a
+#| zero divisor gives fmod's nan for a float array and 0 for an integer one (`isint`).
+def py_mod(a: Arr, b, isint) {
+    r = zeros(len(a))
+    for i to len(a) {
+        if b == 0 {
+            if isint {
+                r[i] = 0
+            }
+            else {
+                r[i] = mod(a[i], b)
+            }
+        }
+        else {
+            r[i] = py_fdm(a[i], b, 1)
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_floordiv]
+group = "prelude"
+deps = ["py_fdm"]
+viv = '''
+#| a // b for a vector a and a number b, as NumPy's floor_divide: a zero divisor gives a / b
+#| for a float array and 0 for an integer one (`isint`).
+def py_floordiv(a: Arr, b, isint) {
+    r = zeros(len(a))
+    for i to len(a) {
+        if b == 0 {
+            if isint {
+                r[i] = 0
+            }
+            else {
+                r[i] = a[i] / b
+            }
+        }
+        else {
+            r[i] = py_fdm(a[i], b, 0)
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_full]
+group = "prelude"
+viv = '''
+#| [v] * n, np.full(n, v): n copies of v.
+def py_full(n, v) {
+    a = zeros(n)
+    fill(a, v)
+    return a
+}
+'''
+
+[helper.py_full2]
+group = "prelude"
+viv = '''
+#| np.full((n, m), v).
+def py_full2(n, m, v) {
+    a = zeros(n, m)
+    fill(a, v)
+    return a
+}
+'''
+
+# ---------------------------------------------------------------- guards
+#
+# Where Python raises (or is exact) and a double would silently differ, the translation calls
+# one of these, which stops the run (`stop`) with the traceback's last line as this CPython
+# writes it ({E:key}, filled from py2viv.py's HOST_ERRORS), or with a py2viv message where
+# Python would not raise at all but the translation cannot follow it exactly.
+
+[helper.py_int]
+group = "guards"
+viv = '''
+#| An int result, as Python's int: a -0.0 becomes 0 (an int has no sign on zero), and the run
+#| stops at 2^53, past which a double no longer holds every integer (Python's int does).
+def py_int(x) {
+    if abs(x) >= 9007199254740992 {
+        stop("py2viv: an integer reached 2^53; Python's int is exact there and a double is not")
+    }
+    return x + 0.0
+}
+'''
+
+[helper.py_int_arr]
+group = "guards"
+viv = '''
+#| An integer-array result: every entry below 2^53 in size (NumPy's int64 is exact to 2^63).
+def py_int_arr(a: Arr) {
+    if max(abs(a)) >= 9007199254740992 {
+        stop("py2viv: an integer array entry reached 2^53; NumPy's int64 is exact there and a double is not")
+    }
+    return a + 0.0
+}
+'''
+
+[helper.py_zero_f]
+group = "guards"
+viv = '''
+#| 0.0 with the sign of w (C's copysign(0.0, w)).
+def py_zero_f(w) {
+    if w < 0 or (w == 0 and 1.0 / w < 0) {
+        return -0.0
+    }
+    return 0.0
+}
+'''
+
+[helper.py_fdm]
+group = "guards"
+deps = ["py_zero_f"]
+viv = '''
+#| Floored division (k = 0) or remainder (k = 1) of doubles, as CPython's float_divmod and
+#| NumPy's npy_divmod compute them (fmod first, then the sign fix and the rounding fix).
+def py_fdm(a, b, k) {
+    m = mod(a, b)
+    d = (a - m) / b
+    if m != 0 {
+        if (b < 0) != (m < 0) {
+            m = m + b
+            d = d - 1.0
+        }
+    }
+    else {
+        m = py_zero_f(b)
+    }
+    if k == 1 {
+        return m
+    }
+    if d != 0 {
+        f = floor(d)
+        if d - f > 0.5 {
+            f = f + 1.0
+        }
+        return f
+    }
+    return py_zero_f(a / b)
+}
+'''
+
+[helper.py_div_i]
+group = "guards"
+viv = '''
+#| a / b of two ints: ZeroDivisionError on a zero divisor.
+def py_div_i(a, b) {
+    if b == 0 {
+        stop("{E:div_int}")
+    }
+    return a / b
+}
+'''
+
+[helper.py_div_f]
+group = "guards"
+viv = '''
+#| a / b with a float: ZeroDivisionError on a zero divisor.
+def py_div_f(a, b) {
+    if b == 0 {
+        stop("{E:div_float}")
+    }
+    return a / b
+}
+'''
+
+[helper.py_floordiv_i]
+group = "guards"
+deps = ["py_fdm", "py_int"]
+viv = '''
+#| a // b of two ints.
+def py_floordiv_i(a, b) {
+    if b == 0 {
+        stop("{E:floordiv_int}")
+    }
+    return py_int(py_fdm(a, b, 0))
+}
+'''
+
+[helper.py_floordiv_f]
+group = "guards"
+deps = ["py_fdm"]
+viv = '''
+#| a // b with a float.
+def py_floordiv_f(a, b) {
+    if b == 0 {
+        stop("{E:floordiv_float}")
+    }
+    return py_fdm(a, b, 0)
+}
+'''
+
+[helper.py_mod_i]
+group = "guards"
+deps = ["py_fdm", "py_int"]
+viv = '''
+#| a % b of two ints.
+def py_mod_i(a, b) {
+    if b == 0 {
+        stop("{E:mod_int}")
+    }
+    return py_int(py_fdm(a, b, 1))
+}
+'''
+
+[helper.py_ifloordiv]
+group = "guards"
+viv = '''
+#| a // b of two Ints (ints.py): Viv's Int // floors, as Python's does; a zero divisor raises
+#| ZeroDivisionError.
+def py_ifloordiv(a: Int, b: Int) -> Int {
+    if b == 0 {
+        stop("{E:floordiv_int}")
+    }
+    return a // b
+}
+'''
+
+[helper.py_imod]
+group = "guards"
+viv = '''
+#| a % b of two Ints (ints.py): Viv's Int % takes the divisor's sign, as Python's does; a zero
+#| divisor raises ZeroDivisionError.
+def py_imod(a: Int, b: Int) -> Int {
+    if b == 0 {
+        stop("{E:mod_int}")
+    }
+    return a % b
+}
+'''
+
+[helper.py_idiv]
+group = "guards"
+viv = '''
+#| a / b of two Ints (ints.py): Python's true division, each Int converted exactly (Viv stops
+#| past 2^53); a zero divisor raises ZeroDivisionError.
+def py_idiv(a: Int, b: Int) {
+    if b == 0 {
+        stop("{E:div_int}")
+    }
+    return a / b
+}
+'''
+
+[helper.py_mod_f]
+group = "guards"
+deps = ["py_fdm"]
+viv = '''
+#| a % b with a float.
+def py_mod_f(a, b) {
+    if b == 0 {
+        stop("{E:mod_float}")
+    }
+    return py_fdm(a, b, 1)
+}
+'''
+
+[helper.py_ipow]
+group = "guards"
+deps = ["py_int"]
+viv = '''
+#| a ** b of two ints, b >= 0: exact (by squaring, every step checked below 2^53).
+def py_ipow(a, b) {
+    if b < 0 {
+        stop("py2viv: an int to a negative power is a float in Python; this translation typed it as an int")
+    }
+    r = 1
+    base = a
+    e = b
+    while e > 0 {
+        if e % 2 == 1 {
+            r = py_int(r * base)
+        }
+        e = floor(e / 2)
+        if e > 0 {
+            base = py_int(base * base)
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_fpow]
+group = "guards"
+viv = '''
+#| a ** b with a float, as CPython's float_pow: ZeroDivisionError for 0.0 to a negative
+#| power, OverflowError when a finite pair overflows; a negative base to a fractional power
+#| (a complex number in Python) stops.
+def py_fpow(a, b) {
+    if a == 0 and b < 0 {
+        stop("{E:pow_zero_neg}")
+    }
+    if a < 0 and abs(a) < 1.0 / 0.0 and floor(b) != b and abs(b) < 1.0 / 0.0 {
+        stop("py2viv: a negative number to a fractional power is a complex number in Python")
+    }
+    r = a ^ b
+    if abs(r) == 1.0 / 0.0 and abs(a) < 1.0 / 0.0 and abs(b) < 1.0 / 0.0 {
+        stop("{E:pow_range}")
+    }
+    return r
+}
+'''
+
+[helper.py_mpow]
+group = "guards"
+viv = '''
+#| math.pow(a, b): ValueError on a domain error, OverflowError on overflow.
+def py_mpow(a, b) {
+    if a == 0 and b < 0 {
+        stop("{E:mpow_domain}")
+    }
+    if a < 0 and abs(a) < 1.0 / 0.0 and floor(b) != b and abs(b) < 1.0 / 0.0 {
+        stop("{E:mpow_domain}")
+    }
+    r = a ^ b
+    if abs(r) == 1.0 / 0.0 and abs(a) < 1.0 / 0.0 and abs(b) < 1.0 / 0.0 {
+        stop("{E:mpow_range}")
+    }
+    return r
+}
+'''
+
+[helper.py_msqrt]
+group = "guards"
+viv = '''
+#| math.sqrt(x).
+def py_msqrt(x) {
+    if x < 0 {
+        stop("{E:sqrt}")
+    }
+    return sqrt(x)
+}
+'''
+
+[helper.py_mlog]
+group = "guards"
+viv = '''
+#| math.log(x).
+def py_mlog(x) {
+    if x == 0 {
+        stop("{E:log_zero}")
+    }
+    if x < 0 {
+        stop("{E:log_neg}")
+    }
+    return log(x)
+}
+'''
+
+[helper.py_masin]
+group = "guards"
+viv = '''
+#| math.asin(x).
+def py_masin(x) {
+    if abs(x) > 1 {
+        stop("{E:asin}")
+    }
+    return asin(x)
+}
+'''
+
+[helper.py_macos]
+group = "guards"
+viv = '''
+#| math.acos(x).
+def py_macos(x) {
+    if abs(x) > 1 {
+        stop("{E:acos}")
+    }
+    return acos(x)
+}
+'''
+
+[helper.py_mexp]
+group = "guards"
+viv = '''
+#| math.exp(x): OverflowError when a finite x overflows.
+def py_mexp(x) {
+    r = exp(x)
+    if r == 1.0 / 0.0 and x < 1.0 / 0.0 {
+        stop("{E:exp_range}")
+    }
+    return r
+}
+'''
+
+[helper.py_mtrig]
+group = "guards"
+viv = '''
+#| The argument of math.sin, cos or tan: ValueError for an infinity.
+def py_mtrig(x) {
+    if abs(x) == 1.0 / 0.0 {
+        stop("{E:trig_inf}")
+    }
+    return x
+}
+'''
+
+[helper.py_mhyp]
+group = "guards"
+viv = '''
+#| math.sinh or cosh's value r at x: OverflowError when a finite x overflows.
+def py_mhyp(r, x) {
+    if abs(r) == 1.0 / 0.0 and abs(x) < 1.0 / 0.0 {
+        stop("{E:sinh_range}")
+    }
+    return r
+}
+'''
+
+[helper.py_mgamma]
+group = "guards"
+viv = '''
+#| math.gamma(x): ValueError at a pole (0, a negative integer, -inf), OverflowError past 171.6.
+def py_mgamma(x) {
+    if x == -1.0 / 0.0 or (x <= 0 and floor(x) == x) {
+        stop("{E:gamma_pole}")
+    }
+    if x == 1.0 / 0.0 {
+        return x
+    }
+    r = gamma(x)
+    if abs(r) == 1.0 / 0.0 and abs(x) < 1.0 / 0.0 {
+        stop("{E:gamma_range}")
+    }
+    return r
+}
+'''
+
+[helper.py_mfmod]
+group = "guards"
+viv = '''
+#| math.fmod(x, y): ValueError for y = 0 or an infinite x.
+def py_mfmod(x, y) {
+    if y == 0 or abs(x) == 1.0 / 0.0 {
+        stop("{E:fmod}")
+    }
+    return mod(x, y)
+}
+'''
+
+[helper.py_mfloor]
+group = "guards"
+viv = '''
+#| math.floor(x), an int.
+def py_mfloor(x) {
+    if x != x {
+        stop("{E:floor_nan}")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("{E:floor_inf}")
+    }
+    return floor(x) + 0.0
+}
+'''
+
+[helper.py_mceil]
+group = "guards"
+viv = '''
+#| math.ceil(x), an int.
+def py_mceil(x) {
+    if x != x {
+        stop("{E:floor_nan}")
+    }
+    if abs(x) == 1.0 / 0.0 {
+        stop("{E:floor_inf}")
+    }
+    return ceil(x) + 0.0
+}
+'''
+
+[helper.py_bits]
+group = "guards"
+deps = ["py_int"]
+viv = '''
+#| The operands of a bit operation: whole numbers (Python ints) below 2^53 in size.
+def py_bits(x) {
+    if floor(x) != x or abs(x) >= 9007199254740992 {
+        stop("py2viv: a bit operation on a number that is not an integer below 2^53")
+    }
+    return x
+}
+'''
+
+[helper.py_band]
+group = "guards"
+deps = ["py_bits"]
+viv = '''
+#| a & b, a | b, a ^ b (k = 0, 1, 2) of Python ints below 2^53, exactly: each operand splits
+#| into a signed high part (below 2^27 in size) and an unsigned low 26 bits, which the 32-bit
+#| builtins combine without loss (a sign-extended high part keeps Python's infinite two's
+#| complement).
+def py_band(a, b, k) {
+    x = py_bits(a)
+    y = py_bits(b)
+    xh = floor(x / 67108864)
+    yh = floor(y / 67108864)
+    xl = x - xh * 67108864
+    yl = y - yh * 67108864
+    if k == 0 {
+        return i32(band(xh, yh)) * 67108864 + band(xl, yl)
+    }
+    if k == 1 {
+        return i32(bor(xh, yh)) * 67108864 + bor(xl, yl)
+    }
+    return i32(bxor(xh, yh)) * 67108864 + bxor(xl, yl)
+}
+'''
+
+[helper.py_shl]
+group = "guards"
+deps = ["py_bits", "py_int"]
+viv = '''
+#| a << k of Python ints: a * 2^k, exact below 2^53.
+def py_shl(a, k) {
+    x = py_bits(a)
+    s = py_bits(k)
+    if s < 0 {
+        stop("{E:neg_shift}")
+    }
+    if x == 0 {
+        return 0
+    }
+    r = x
+    for i to s {
+        r = py_int(r * 2)
+    }
+    return r
+}
+'''
+
+[helper.py_shr]
+group = "guards"
+deps = ["py_bits", "py_int"]
+viv = '''
+#| a >> k of Python ints: floor(a / 2^k), exact for every k.
+def py_shr(a, k) {
+    x = py_bits(a)
+    s = py_bits(k)
+    if s < 0 {
+        stop("{E:neg_shift}")
+    }
+    p = 1.0
+    for i to min(s, 60) {
+        p = p * 2
+    }
+    return py_int(floor(x / p))
+}
+'''
+
+# ---------------------------------------------------------------- orders of operation
+#
+# NumPy's and CPython's own orders of operation, so that reductions agree bit for bit (each
+# checked against NumPy 1.24 / CPython 3.11 and 3.12 on random data; see SUBSET.md).
+
+[helper.py_pw]
+group = "numeric"
+viv = '''
+#| NumPy's pairwise sum of f[lo], ..., f[lo + n - 1] (numpy/core/src/umath/loops_utils.h):
+#| below 8 terms left to right from 0; to 128, eight running sums combined as a tree, then
+#| the rest; above, the two halves (the first a multiple of 8 long) summed apart.
+def py_pw(f: Arr, lo, n) {
+    if n < 8 {
+        s = 0.0
+        for i to n {
+            s += f[lo + i]
+        }
+        return s
+    }
+    if n <= 128 {
+        r = zeros(8)
+        for j to 8 {
+            r[j] = f[lo + j]
+        }
+        i = 8
+        while i < n - n % 8 {
+            for j to 8 {
+                r[j] += f[lo + i + j]
+            }
+            i += 8
+        }
+        s = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+        while i < n {
+            s += f[lo + i]
+            i += 1
+        }
+        return s
+    }
+    n2 = floor(n / 2)
+    n2 = n2 - n2 % 8
+    return py_pw(f, lo, n2) + py_pw(f, lo + n2, n - n2)
+}
+'''
+
+[helper.py_blk]
+group = "numeric"
+deps = ["py_pw"]
+viv = '''
+#| NumPy's sum of f[lo], ..., f[lo + n - 1] along one axis: from 0.0, a pairwise sum of each
+#| block of NumPy's buffer size (8192 entries), added in order.
+def py_blk(f: Arr, lo, n) {
+    bufsize = 8192
+    s = 0.0
+    b = 0
+    while b < n {
+        s = s + py_pw(f, lo + b, min(bufsize, n - b))
+        b += bufsize
+    }
+    return s
+}
+'''
+
+[helper.py_npsum]
+group = "numeric"
+deps = ["py_blk", "py_flat"]
+viv = '''
+#| np.sum(a), a.sum() of a float array: NumPy's sum over the entries in row-major order (py_blk).
+def py_npsum(a: Arr) {
+    f = py_flat(a)
+    return py_blk(f, 0, len(f))
+}
+'''
+
+[helper.py_lsum]
+group = "numeric"
+viv = '''
+#| CPython's builtin sum of a float array or list before 3.12: left to right from 0.0
+#| (Viv's own sum adds in NumPy's pairwise order).
+def py_lsum(a: Arr) {
+    s = 0.0
+    for i to len(a) {
+        s += a[i]
+    }
+    return s
+}
+'''
+
+[helper.py_isum]
+group = "numeric"
+deps = ["py_flat", "py_int"]
+viv = '''
+#| The sum of an integer array or list, exactly: every partial sum checked below 2^53.
+def py_isum(a: Arr) {
+    f = py_flat(a)
+    s = 0
+    for i to len(f) {
+        s = py_int(s + f[i])
+    }
+    return s
+}
+'''
+
+[helper.py_fsum312]
+group = "numeric"
+viv = '''
+#| Python 3.12's builtin sum of floats: Neumaier's compensated sum, as CPython's
+#| builtin_sum_impl writes it (the compensation is added at the end when finite and nonzero).
+def py_fsum312(a: Arr) {
+    f = 0.0
+    c = 0.0
+    for i to len(a) {
+        x = a[i]
+        t = f + x
+        if abs(f) >= abs(x) {
+            c += (f - t) + x
+        }
+        else {
+            c += (x - t) + f
+        }
+        f = t
+    }
+    if c != 0 and abs(c) < 1.0 / 0.0 {
+        f += c
+    }
+    return f
+}
+'''
+
+[helper.py_npmax]
+group = "numeric"
+deps = ["py_flat", "py_zmax2"]
+viv = '''
+#| np.max(a): NaN if any entry is NaN, else the largest (+0 over -0).
+def py_npmax(a: Arr) {
+    if any(a != a) {
+        return 0.0 / 0.0
+    }
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        m = py_zmax2(m, f[i])
+    }
+    return m
+}
+'''
+
+[helper.py_npmin]
+group = "numeric"
+deps = ["py_flat", "py_zmin2"]
+viv = '''
+#| np.min(a): NaN if any entry is NaN, else the smallest (-0 under +0).
+def py_npmin(a: Arr) {
+    if any(a != a) {
+        return 0.0 / 0.0
+    }
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        m = py_zmin2(m, f[i])
+    }
+    return m
+}
+'''
+
+[helper.py_bmax]
+group = "numeric"
+deps = ["py_flat"]
+viv = '''
+#| Python's max over a sequence: the first entry, replaced by each later one that is greater
+#| (so a NaN first stays, a NaN later is skipped, and of -0.0 and 0.0 the first wins).
+def py_bmax(a: Arr) {
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        if f[i] > m {
+            m = f[i]
+        }
+    }
+    return m
+}
+'''
+
+[helper.py_bmin]
+group = "numeric"
+deps = ["py_flat"]
+viv = '''
+#| Python's min over a sequence (the first of equals wins).
+def py_bmin(a: Arr) {
+    f = py_flat(a)
+    m = f[0]
+    for i from 1 to len(f) {
+        if f[i] < m {
+            m = f[i]
+        }
+    }
+    return m
+}
+'''
+
+[helper.py_npmax2]
+group = "numeric"
+deps = ["py_zmax2"]
+viv = '''
+#| np.maximum of two numbers: NaN if either is; +0 over -0.
+def py_npmax2(a, b) {
+    if a != a or b != b {
+        return a + b
+    }
+    return py_zmax2(a, b)
+}
+'''
+
+[helper.py_npmin2]
+group = "numeric"
+deps = ["py_zmin2"]
+viv = '''
+#| np.minimum of two numbers: NaN if either is; -0 under +0.
+def py_npmin2(a, b) {
+    if a != a or b != b {
+        return a + b
+    }
+    return py_zmin2(a, b)
+}
+'''
+
+[helper.py_isclose]
+group = "numeric"
+viv = '''
+#| math.isclose(a, b, rel_tol=r, abs_tol=t), as CPython's math_isclose_impl computes it.
+def py_isclose(a, b, r, t) {
+    if r < 0 or t < 0 {
+        stop("ValueError: tolerances must be non-negative")
+    }
+    if a == b {
+        return true
+    }
+    if abs(a) == 1.0 / 0.0 or abs(b) == 1.0 / 0.0 {
+        return false
+    }
+    d = abs(b - a)
+    return d <= abs(r * b) or d <= abs(r * a) or d <= t
+}
+'''
+
+[helper.py_npisclose]
+group = "numeric"
+viv = '''
+#| np.isclose(a, b, rtol, atol) of two numbers: |a - b| <= atol + rtol |b| when both are
+#| finite, a == b otherwise (a NaN is never close).
+def py_npisclose(a, b, rtol, atol) {
+    if abs(a) < 1.0 / 0.0 and abs(b) < 1.0 / 0.0 {
+        return abs(a - b) <= atol + rtol * abs(b)
+    }
+    return a == b
+}
+'''
+
+[helper.py_allclose]
+group = "numeric"
+deps = ["py_npisclose", "py_flat"]
+viv = '''
+#| np.allclose(a, b, rtol, atol) of two arrays of one shape: np.isclose entry by entry.
+def py_allclose(a: Arr, b: Arr, rtol, atol) {
+    fa = py_flat(a)
+    fb = py_flat(b)
+    if len(fa) != len(fb) {
+        stop("py2viv: np.allclose of two arrays of different sizes (NumPy broadcasts them)")
+    }
+    for i to len(fa) {
+        if not py_npisclose(fa[i], fb[i], rtol, atol) {
+            return false
+        }
+    }
+    return true
+}
+'''
+
+[helper.py_npmaxs]
+group = "numeric"
+deps = ["py_npmaxv"]
+viv = '''
+#| np.maximum(a, y) of an array and a number: NaN where either is.
+def py_npmaxs(a: Arr, y) {
+    b = a * 0.0
+    fill(b, y)
+    return py_npmaxv(a, b)
+}
+'''
+
+[helper.py_npmins]
+group = "numeric"
+deps = ["py_npminv"]
+viv = '''
+#| np.minimum(a, y) of an array and a number: NaN where either is.
+def py_npmins(a: Arr, y) {
+    b = a * 0.0
+    fill(b, y)
+    return py_npminv(a, b)
+}
+'''
+
+[helper.py_bmax2]
+group = "numeric"
+viv = '''
+#| Python's max(a, b): b only if b > a.
+def py_bmax2(a, b) {
+    if b > a {
+        return b
+    }
+    return a
+}
+'''
+
+[helper.py_bmin2]
+group = "numeric"
+viv = '''
+#| Python's min(a, b): b only if b < a.
+def py_bmin2(a, b) {
+    if b < a {
+        return b
+    }
+    return a
+}
+'''
+
+[helper.py_linspace]
+group = "numeric"
+viv = '''
+#| np.linspace(start, stop, num), as NumPy 1.24 computes it: entry k is k * step + start with
+#| step = (stop - start) / (num - 1), and the last entry is stop itself.
+def py_linspace(start, stop_, num) {
+    if num < 0 {
+        stop("py2viv: np.linspace of a negative count (NumPy raises ValueError)")
+    }
+    y = zeros(num)
+    if num == 0 {
+        return y
+    }
+    if num == 1 {
+        y[0] = start
+        return y
+    }
+    step = (stop_ - start) / (num - 1)
+    for k to num {
+        y[k] = k * step + start
+    }
+    y[num - 1] = stop_
+    return y
+}
+'''
+
+[helper.py_fill]
+group = "numeric"
+viv = '''
+#| n copies of v (np.full, [v] * n), keeping v's sign on zero.
+def py_fill(n, v) {
+    a = zeros(n)
+    fill(a, v)
+    return a
+}
+'''
+
+[helper.py_nptrunc]
+group = "numeric"
+viv = '''
+#| np.trunc(x) of a number: toward zero, as a float (-0.5 gives -0.0; NaN and the infinities
+#| pass through), as C's trunc.
+def py_nptrunc(x) {
+    if x < 0 {
+        return ceil(x)
+    }
+    return floor(x)
+}
+'''
+
+[helper.py_size]
+group = "guards"
+viv = '''
+#| An array size, as NumPy takes it: ValueError for a negative one (Viv would make an empty
+#| array).
+def py_size(n) {
+    if n < 0 {
+        stop("ValueError: negative dimensions are not allowed")
+    }
+    return n
+}
+'''
+
+[helper.py_fillin]
+group = "numeric"
+viv = '''
+#| Every entry of a real array set to v (np.full_like: the sign of a zero kept); returns it.
+def py_fillin(a: Arr, v) {
+    fill(a, v)
+    return a
+}
+'''
+
+[helper.py_cfillin]
+group = "numeric"
+viv = '''
+#| Every entry of a complex array set to v (np.ones_like, np.full_like of a complex array).
+def py_cfillin(a: CArr, v) {
+    fill(a, v)
+    return a
+}
+'''
+
+[helper.py_cdot]
+group = "numeric"
+viv = '''
+#| np.dot of two complex vectors: the sum of the products (no conjugate).
+def py_cdot(x: CArr, y: CArr) {
+    p = x * y
+    return complex(sum(re(p)), sum(im(p)))
+}
+'''
+
+[helper.py_cvdot]
+group = "numeric"
+viv = '''
+#| np.vdot of two complex vectors: the first one conjugated.
+def py_cvdot(x: CArr, y: CArr) {
+    p = conj(x) * y
+    return complex(sum(re(p)), sum(im(p)))
+}
+'''
+
+[helper.py_cnorm]
+group = "numeric"
+viv = '''
+#| np.linalg.norm of a complex array: sqrt(re . re + im . im), as NumPy's norm computes it.
+def py_cnorm(x: CArr) {
+    r = re(x)
+    i = im(x)
+    return sqrt(sum(r * r) + sum(i * i))
+}
+'''
+
+[helper.py_hypot]
+group = "numeric"
+viv = '''
+#| hypot(x, y): sqrt(x*x + y*y) where the squares neither overflow nor underflow, scaled by
+#| the larger where they would; an infinity wins over a NaN, as C's hypot.
+def py_hypot(x, y) {
+    ax = abs(x)
+    ay = abs(y)
+    if ax == 1.0 / 0.0 or ay == 1.0 / 0.0 {
+        return 1.0 / 0.0
+    }
+    if ax != ax or ay != ay {
+        return ax + ay
+    }
+    s = ax * ax + ay * ay
+    if s < 1.0 / 0.0 and s >= 2.2250738585072014e-308 {
+        return sqrt(s)
+    }
+    m = max(ax, ay)
+    if m == 0 {
+        return 0.0
+    }
+    r = min(ax, ay) / m
+    return m * sqrt(1.0 + r * r)
+}
+'''
+
+[helper.py_hypot_vv]
+group = "numeric"
+deps = ["py_hypot"]
+viv = '''
+#| np.hypot of two vectors, entry by entry.
+def py_hypot_vv(x: Arr, y: Arr) {
+    if len(x) != len(y) {
+        stop("py2viv: np.hypot of vectors of different lengths (NumPy broadcasts them)")
+    }
+    r = zeros(len(x))
+    for i to len(x) {
+        r[i] = py_hypot(x[i], y[i])
+    }
+    return r
+}
+'''
+
+[helper.py_hypot_vs]
+group = "numeric"
+deps = ["py_hypot"]
+viv = '''
+#| np.hypot of a vector and a number, entry by entry.
+def py_hypot_vs(x: Arr, y) {
+    r = zeros(len(x))
+    for i to len(x) {
+        r[i] = py_hypot(x[i], y)
+    }
+    return r
+}
+'''
+
+[helper.py_signs]
+group = "numeric"
+viv = '''
+#| np.sign of an array: -1, 0 or 1 per entry, and NaN where the entry is NaN.
+def py_signs(a: Arr) {
+    return where(a != a, a, (a > 0.0) - (a < 0.0))
+}
+'''
+
+[helper.py_zmax2]
+group = "numeric"
+viv = '''
+#| The larger of two numbers that are not NaN, +0 over -0 (NumPy's rule; Viv's max of two
+#| zeros differs between engines).
+def py_zmax2(a, b) {
+    if a > b {
+        return a
+    }
+    if b > a {
+        return b
+    }
+    if a == 0 {
+        return a + b
+    }
+    return a
+}
+'''
+
+[helper.py_zmin2]
+group = "numeric"
+viv = '''
+#| The smaller of two numbers that are not NaN, -0 under +0.
+def py_zmin2(a, b) {
+    if a < b {
+        return a
+    }
+    if b < a {
+        return b
+    }
+    if a == 0 {
+        return -1.0 * ((-1.0 * a) + (-1.0 * b))
+    }
+    return a
+}
+'''
+
+[helper.py_npmaxv]
+group = "numeric"
+viv = '''
+#| np.maximum of two arrays of one shape: NaN where either is, +0 over -0.
+def py_npmaxv(a: Arr, b: Arr) {
+    m = where(a > b, a, where(b > a, b, where(a == 0.0, a + b, a)))
+    return where(a != a, a, where(b != b, b, m))
+}
+'''
+
+[helper.py_npminv]
+group = "numeric"
+viv = '''
+#| np.minimum of two arrays of one shape: NaN where either is, -0 under +0.
+def py_npminv(a: Arr, b: Arr) {
+    m = where(a < b, a, where(b < a, b, where(a == 0.0, -1.0 * ((-1.0 * a) + (-1.0 * b)), a)))
+    return where(a != a, a, where(b != b, b, m))
+}
+'''
+
+[helper.py_fmax2]
+group = "numeric"
+deps = ["py_zmax2"]
+viv = '''
+#| np.fmax of two numbers: a NaN loses to a number; +0 over -0.
+def py_fmax2(a, b) {
+    if a != a {
+        return b
+    }
+    if b != b {
+        return a
+    }
+    return py_zmax2(a, b)
+}
+'''
+
+[helper.py_fmin2]
+group = "numeric"
+deps = ["py_zmin2"]
+viv = '''
+#| np.fmin of two numbers: a NaN loses to a number; -0 under +0.
+def py_fmin2(a, b) {
+    if a != a {
+        return b
+    }
+    if b != b {
+        return a
+    }
+    return py_zmin2(a, b)
+}
+'''
+
+[helper.py_fmaxv]
+group = "numeric"
+viv = '''
+#| np.fmax of two arrays of one shape.
+def py_fmaxv(a: Arr, b: Arr) {
+    m = where(a > b, a, where(b > a, b, where(a == 0.0, a + b, a)))
+    return where(a != a, b, where(b != b, a, m))
+}
+'''
+
+[helper.py_fminv]
+group = "numeric"
+viv = '''
+#| np.fmin of two arrays of one shape.
+def py_fminv(a: Arr, b: Arr) {
+    m = where(a < b, a, where(b < a, b, where(a == 0.0, -1.0 * ((-1.0 * a) + (-1.0 * b)), a)))
+    return where(a != a, b, where(b != b, a, m))
+}
+'''
+
+[helper.py_fmaxs]
+group = "numeric"
+deps = ["py_fmaxv"]
+viv = '''
+#| np.fmax of an array and a number.
+def py_fmaxs(a: Arr, y) {
+    b = a * 0.0
+    fill(b, y)
+    return py_fmaxv(a, b)
+}
+'''
+
+[helper.py_fmins]
+group = "numeric"
+deps = ["py_fminv"]
+viv = '''
+#| np.fmin of an array and a number.
+def py_fmins(a: Arr, y) {
+    b = a * 0.0
+    fill(b, y)
+    return py_fminv(a, b)
+}
+'''
+
+[helper.py_clip]
+group = "numeric"
+viv = '''
+#| np.clip(x, lo, hi) of a number, as NumPy's clip loop: a NaN x stays, a NaN bound is
+#| ignored, and x is replaced by a bound unless x > lo (then unless x < hi), so of two
+#| equal zeros the bound's sign wins.
+def py_clip(x, lo, hi) {
+    m = x
+    if x == x and lo == lo and not (x > lo) {
+        m = lo
+    }
+    r = m
+    if m == m and hi == hi and not (m < hi) {
+        r = hi
+    }
+    return r
+}
+'''
+
+[helper.py_clipv]
+group = "numeric"
+viv = '''
+#| np.clip(a, lo, hi) of an array and two numbers, entry by entry as py_clip.
+def py_clipv(a: Arr, lo, hi) {
+    m = a * 1.0
+    if lo == lo {
+        L = a * 0.0
+        fill(L, lo)
+        m = where(a != a, a, where(a > L, a, L))
+    }
+    r = m
+    if hi == hi {
+        H = a * 0.0
+        fill(H, hi)
+        r = where(m != m, m, where(m < H, m, H))
+    }
+    return r
+}
+'''
+
+[helper.py_merf]
+group = "guards"
+viv = '''
+#| math.erf(x): 1 and -1 at the infinities (Viv's erf gives NaN there).
+def py_merf(x) {
+    if x == 1.0 / 0.0 {
+        return 1.0
+    }
+    if x == -1.0 / 0.0 {
+        return -1.0
+    }
+    return erf(x)
+}
+'''
+
+[helper.py_apow]
+group = "numeric"
+viv = '''
+#| a ^ y of an array: through this def, whose parameter is typed an array (Viv types `a ^ y`
+#| of an array a def returned as a number).
+def py_apow(a: Arr, y) {
+    return a ^ y
+}
+'''
+
+[helper.py_mm]
+group = "numeric"
+viv = '''
+#| A @ B of two matrices, the shapes checked (Viv's compiled engines do not check them).
+def py_mm(A: Arr, B: Arr) {
+    if shape(A)[1] != shape(B)[0] {
+        stop("py2viv: a matrix product of shapes that do not align (NumPy raises ValueError)")
+    }
+    return A @ B
+}
+'''
+
+[helper.py_mv]
+group = "numeric"
+viv = '''
+#| A @ v of a matrix and a vector, the shapes checked.
+def py_mv(A: Arr, v: Arr) {
+    if shape(A)[1] != len(v) {
+        stop("py2viv: a matrix product of shapes that do not align (NumPy raises ValueError)")
+    }
+    return A @ v
+}
+'''
+
+[helper.py_vm]
+group = "numeric"
+viv = '''
+#| v @ A of a vector and a matrix, the shapes checked.
+def py_vm(v: Arr, A: Arr) {
+    if len(v) != shape(A)[0] {
+        stop("py2viv: a matrix product of shapes that do not align (NumPy raises ValueError)")
+    }
+    return v @ A
+}
+'''
+
+[helper.py_vdot]
+group = "numeric"
+viv = '''
+#| sum(u * v) of two real vectors, the lengths checked (Viv's compiled engines do not check
+#| them).
+def py_vdot(u: Arr, v: Arr) {
+    if len(u) != len(v) {
+        stop("py2viv: a dot product of vectors of different lengths (NumPy raises ValueError)")
+    }
+    return sum(u * v)
+}
+'''
+
+[helper.py_vmul]
+group = "numeric"
+viv = '''
+#| u * v of two vectors, the lengths checked (Viv's compiled engines do not check them).
+def py_vmul(u: Arr, v: Arr) {
+    if len(u) != len(v) {
+        stop("py2viv: a dot product of vectors of different lengths (NumPy raises ValueError)")
+    }
+    return u * v
+}
+'''
+
+[helper.py_atan2v]
+group = "numeric"
+viv = '''
+#| np.arctan2 of two vectors, entry by entry (Viv's atan2 takes numbers).
+def py_atan2v(y: Arr, x: Arr) {
+    if len(y) != len(x) {
+        stop("py2viv: np.arctan2 of vectors of different lengths (NumPy broadcasts them)")
+    }
+    r = zeros(len(y))
+    for i to len(y) {
+        r[i] = atan2(y[i], x[i])
+    }
+    return r
+}
+'''
+
+[helper.py_atan2vs]
+group = "numeric"
+viv = '''
+#| np.arctan2 of a vector and a number.
+def py_atan2vs(y: Arr, x) {
+    r = zeros(len(y))
+    for i to len(y) {
+        r[i] = atan2(y[i], x)
+    }
+    return r
+}
+'''
+
+[helper.py_atan2sv]
+group = "numeric"
+viv = '''
+#| np.arctan2 of a number and a vector.
+def py_atan2sv(y, x: Arr) {
+    r = zeros(len(x))
+    for i to len(x) {
+        r[i] = atan2(y, x[i])
+    }
+    return r
+}
+'''
+
+# ---------------------------------------------------------------- indexing
+#
+# Python's slice bounds (slice.indices with a positive step): a negative bound counts from the
+# end, and a bound past either end is clamped, so no range is out of bounds. Viv's ranges need
+# 0 <= lo <= hi <= n and stop otherwise, so each bound is normalized first.
+
+[helper.py_lo]
+group = "prelude"
+viv = '''
+#| A slice bound as Python reads it on an axis of length n: a negative one counts from the
+#| end; the result is clamped to 0 ... n.
+def py_lo(lo, n) {
+    b = lo
+    if b < 0 {
+        b = b + n
+        if b < 0 {
+            b = 0
+        }
+    }
+    if b > n {
+        b = n
+    }
+    return b
+}
+'''
+
+[helper.py_hi]
+group = "prelude"
+deps = ["py_lo"]
+viv = '''
+#| The end of the slice lo:hi on an axis of length n, as Python reads it, and never before
+#| the start (Python's slice is then empty).
+def py_hi(lo, hi, n) {
+    b = py_lo(hi, n)
+    a = py_lo(lo, n)
+    if b < a {
+        b = a
+    }
+    return b
+}
+'''
+
+[helper.py_ix]
+group = "prelude"
+viv = '''
+#| An index next to a slice, as NumPy reads it on an axis of length n: a negative one counts
+#| from the end (one still out of bounds stops the run, as NumPy raises IndexError).
+def py_ix(i, n) {
+    if i < 0 {
+        return i + n
+    }
+    return i
+}
+'''
+
+[helper.py_fit]
+group = "prelude"
+viv = '''
+#| A value stored into a slice or written back in place: NumPy broadcasts it into the target's
+#| shape, and Viv stores only an array of exactly that shape, so the run stops unless the
+#| shapes are equal (where NumPy cannot broadcast either, it raises ValueError).
+def py_fit(v: Arr, s: Arr) {
+    if any(shape(v) != shape(s)) {
+        stop("py2viv: a value of another shape stored into a slice or an array in place (NumPy broadcasts it, or raises ValueError)")
+    }
+    return v
+}
+'''
+
+[helper.py_cfit]
+group = "prelude"
+viv = '''
+#| py_fit of a complex value.
+def py_cfit(v: CArr, s: CArr) {
+    if any(shape(v) != shape(s)) {
+        stop("py2viv: a value of another shape stored into a slice or an array in place (NumPy broadcasts it, or raises ValueError)")
+    }
+    return v
+}
+'''
+
+# ---------------------------------------------------------------- broadcasting
+#
+# NumPy broadcasts two arrays of different shapes: aligned at their last axes, each pair of
+# lengths must be equal or one of them 1, and the result takes the larger. Each entry of the
+# result is one operation (+, -, *, /, a comparison, np.maximum, ...) on the entries it
+# reads, so a broadcast result is exact when the operands are expanded first and then
+# combined entry by entry: py_bto copies the entries (`take`), and Viv's elementwise
+# operation rounds each entry once, as NumPy's loop does (no fused multiply-add: the C
+# backend compiles with FP_CONTRACT OFF, wasm has no fused instruction, and the interpreter
+# is Rust, which does not contract). Where two shapes do not broadcast, NumPy raises
+# ValueError and the run stops with the start of NumPy's message (`stops`: diff.py compares
+# a helper's stop with the start of Python's line).
+
+[helper.py_bdims]
+group = "prelude"
+stops = ["ValueError: operands could not be broadcast together with shapes"]
+viv = '''
+#| The shape NumPy broadcasts two shapes da and db to (aligned at the last axis, a length 1
+#| stretched); the run stops where NumPy raises ValueError.
+def py_bdims(da: Arr, db: Arr) {
+    n = len(da)
+    if len(db) > n {
+        n = len(db)
+    }
+    e = zeros(n)
+    for i to n {
+        x = 1
+        y = 1
+        if i >= n - len(da) {
+            x = da[i - n + len(da)]
+        }
+        if i >= n - len(db) {
+            y = db[i - n + len(db)]
+        }
+        if x == y or y == 1 {
+            e[i] = x
+        }
+        else {
+            if x == 1 {
+                e[i] = y
+            }
+            else {
+                stop("ValueError: operands could not be broadcast together with shapes")
+            }
+        }
+    }
+    return e
+}
+'''
+
+[helper.py_bdimsq]
+group = "prelude"
+deps = ["py_bdims"]
+viv = '''
+#| py_bdims for `==` and `!=`, where NumPy 1.24 gives one False (with a DeprecationWarning)
+#| for shapes that do not broadcast and NumPy 2 raises: the run stops.
+def py_bdimsq(da: Arr, db: Arr) {
+    n = len(da)
+    if len(db) > n {
+        n = len(db)
+    }
+    for i to n {
+        if i >= n - len(da) and i >= n - len(db) {
+            x = da[i - n + len(da)]
+            y = db[i - n + len(db)]
+            if x != y and x != 1 and y != 1 {
+                stop("py2viv: `==` or `!=` of arrays whose shapes do not broadcast (NumPy 1.24 gives one False with a DeprecationWarning, NumPy 2 raises ValueError)")
+            }
+        }
+    }
+    return py_bdims(da, db)
+}
+'''
+
+[helper.py_bdimsi]
+group = "prelude"
+stops = ["IndexError: shape mismatch: indexing arrays could not be broadcast together with shapes"]
+viv = '''
+#| py_bdims of the shapes of index arrays (A[I, J]): NumPy raises IndexError where they do
+#| not broadcast.
+def py_bdimsi(da: Arr, db: Arr) {
+    n = len(da)
+    if len(db) > n {
+        n = len(db)
+    }
+    e = zeros(n)
+    for i to n {
+        x = 1
+        y = 1
+        if i >= n - len(da) {
+            x = da[i - n + len(da)]
+        }
+        if i >= n - len(db) {
+            y = db[i - n + len(db)]
+        }
+        if x == y or y == 1 {
+            e[i] = x
+        }
+        else {
+            if x == 1 {
+                e[i] = y
+            }
+            else {
+                stop("IndexError: shape mismatch: indexing arrays could not be broadcast together with shapes")
+            }
+        }
+    }
+    return e
+}
+'''
+
+[helper.py_bidx]
+group = "prelude"
+viv = '''
+#| The flat indices, in row-major order of the shape e, of the entries of an array of shape d
+#| that broadcasting to e reads (a length 1 of d is read again along that axis of e).
+def py_bidx(d: Arr, e: Arr) {
+    n = len(e)
+    m = len(d)
+    st = zeros(n)
+    s = 1
+    for k to m {
+        j = m - 1 - k
+        if d[j] != 1 {
+            st[j + n - m] = s
+        }
+        s = s * d[j]
+    }
+    idx = zeros(1)
+    for i to n {
+        w = e[i]
+        nxt = zeros(len(idx) * w)
+        for p to len(idx) {
+            for c to w {
+                nxt[p * w + c] = idx[p] + c * st[i]
+            }
+        }
+        idx = nxt
+    }
+    return idx
+}
+'''
+
+[helper.py_bto]
+group = "prelude"
+deps = ["py_bidx", "py_shaped"]
+viv = '''
+#| a broadcast to the shape e (a shape py_bdims gave for a and another array): a itself when
+#| it has that shape, else a new array whose entries are copies of a's.
+def py_bto(a: Arr, e: Arr) {
+    d = shape(a)
+    if len(d) == len(e) {
+        if all(d == e) {
+            return a
+        }
+    }
+    return py_shaped(take(a, py_bidx(d, e)), e)
+}
+'''
+
+[helper.py_cshaped]
+group = "prelude"
+deps = ["py_iota"]
+viv = '''
+#| The entries of a complex vector f, row-major, as a complex array of shape e (1 to 4
+#| lengths).
+def py_cshaped(f: CArr, e: Arr) {
+    if len(e) == 1 {
+        return f
+    }
+    if len(e) == 2 {
+        z = czeros(e[0], e[1])
+    }
+    else {
+        if len(e) == 3 {
+            z = czeros(e[0], e[1], e[2])
+        }
+        else {
+            z = czeros(e[0], e[1], e[2], e[3])
+        }
+    }
+    put(z, py_iota(numel(z)), f)
+    return z
+}
+'''
+
+[helper.py_cbto]
+group = "prelude"
+deps = ["py_bidx", "py_cshaped"]
+viv = '''
+#| py_bto of a complex array.
+def py_cbto(a: CArr, e: Arr) {
+    d = shape(a)
+    if len(d) == len(e) {
+        if all(d == e) {
+            return a
+        }
+    }
+    return py_cshaped(take(a, py_bidx(d, e)), e)
+}
+'''
+
+[helper.py_badd]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a + b of two real arrays, broadcast as NumPy broadcasts them.
+def py_badd(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) + py_bto(b, e)
+}
+'''
+
+[helper.py_bsub]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a - b of two real arrays, broadcast.
+def py_bsub(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) - py_bto(b, e)
+}
+'''
+
+[helper.py_bmul]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a * b of two real arrays, broadcast.
+def py_bmul(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) * py_bto(b, e)
+}
+'''
+
+[helper.py_bdiv]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a / b of two real arrays, broadcast (a zero divisor gives inf or NaN, as NumPy).
+def py_bdiv(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) / py_bto(b, e)
+}
+'''
+
+[helper.py_blt]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a < b of two real arrays, broadcast: 1 where it holds, 0 where not.
+def py_blt(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) < py_bto(b, e)
+}
+'''
+
+[helper.py_ble]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a <= b of two real arrays, broadcast.
+def py_ble(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) <= py_bto(b, e)
+}
+'''
+
+[helper.py_bgt]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a > b of two real arrays, broadcast.
+def py_bgt(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) > py_bto(b, e)
+}
+'''
+
+[helper.py_bge]
+group = "prelude"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| a >= b of two real arrays, broadcast.
+def py_bge(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) >= py_bto(b, e)
+}
+'''
+
+[helper.py_beq]
+group = "prelude"
+deps = ["py_bdimsq", "py_bto"]
+viv = '''
+#| a == b of two real arrays, broadcast.
+def py_beq(a: Arr, b: Arr) {
+    e = py_bdimsq(shape(a), shape(b))
+    return py_bto(a, e) == py_bto(b, e)
+}
+'''
+
+[helper.py_bne]
+group = "prelude"
+deps = ["py_bdimsq", "py_bto"]
+viv = '''
+#| a != b of two real arrays, broadcast.
+def py_bne(a: Arr, b: Arr) {
+    e = py_bdimsq(shape(a), shape(b))
+    return py_bto(a, e) != py_bto(b, e)
+}
+'''
+
+[helper.py_cbadd]
+group = "prelude"
+deps = ["py_bdims", "py_cbto"]
+viv = '''
+#| a + b of two complex arrays, broadcast.
+def py_cbadd(a: CArr, b: CArr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_cbto(a, e) + py_cbto(b, e)
+}
+'''
+
+[helper.py_cbsub]
+group = "prelude"
+deps = ["py_bdims", "py_cbto"]
+viv = '''
+#| a - b of two complex arrays, broadcast.
+def py_cbsub(a: CArr, b: CArr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_cbto(a, e) - py_cbto(b, e)
+}
+'''
+
+[helper.py_cbmul]
+group = "prelude"
+deps = ["py_bdims", "py_cbto"]
+viv = '''
+#| a * b of two complex arrays, broadcast.
+def py_cbmul(a: CArr, b: CArr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_cbto(a, e) * py_cbto(b, e)
+}
+'''
+
+[helper.py_cbmulcr]
+group = "prelude"
+deps = ["py_bdims", "py_cbto", "py_bto"]
+viv = '''
+#| a * b of a complex array and a real one, broadcast.
+def py_cbmulcr(a: CArr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_cbto(a, e) * py_bto(b, e)
+}
+'''
+
+[helper.py_cbmulrc]
+group = "prelude"
+deps = ["py_bdims", "py_cbto", "py_bto"]
+viv = '''
+#| a * b of a real array and a complex one, broadcast.
+def py_cbmulrc(a: Arr, b: CArr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_bto(a, e) * py_cbto(b, e)
+}
+'''
+
+[helper.py_inpl]
+group = "prelude"
+stops = ["ValueError: non-broadcastable output operand with shape"]
+viv = '''
+#| The result r of `x += v` (and -=, *=, /=), which NumPy writes into x: the run stops where
+#| broadcasting made r larger than x (NumPy raises ValueError).
+def py_inpl(r: Arr, x: Arr) {
+    if len(shape(r)) != len(shape(x)) {
+        stop("ValueError: non-broadcastable output operand with shape")
+    }
+    if any(shape(r) != shape(x)) {
+        stop("ValueError: non-broadcastable output operand with shape")
+    }
+    return r
+}
+'''
+
+[helper.py_cinpl]
+group = "prelude"
+stops = ["ValueError: non-broadcastable output operand with shape"]
+viv = '''
+#| py_inpl of a complex result.
+def py_cinpl(r: CArr, x: CArr) {
+    if len(shape(r)) != len(shape(x)) {
+        stop("ValueError: non-broadcastable output operand with shape")
+    }
+    if any(shape(r) != shape(x)) {
+        stop("ValueError: non-broadcastable output operand with shape")
+    }
+    return r
+}
+'''
+
+[helper.py_bfits]
+group = "prelude"
+viv = '''
+#| 1 when a value of shape dv broadcasts to exactly the shape e (each of its lengths,
+#| aligned at the last axis, is e's or 1), else 0.
+def py_bfits(dv: Arr, e: Arr) {
+    n = len(e)
+    m = len(dv)
+    if m > n {
+        return 0
+    }
+    for k to m {
+        x = dv[m - 1 - k]
+        if x != 1 and x != e[n - 1 - k] {
+            return 0
+        }
+    }
+    return 1
+}
+'''
+
+[helper.py_bset]
+group = "prelude"
+deps = ["py_bfits", "py_bto"]
+stops = ["ValueError: could not broadcast input array from shape"]
+viv = '''
+#| A value stored into a slice or a row of the shape of s: NumPy broadcasts it into that
+#| shape, and raises ValueError where it cannot.
+def py_bset(v: Arr, s: Arr) {
+    if py_bfits(shape(v), shape(s)) == 0 {
+        stop("ValueError: could not broadcast input array from shape")
+    }
+    return py_bto(v, shape(s))
+}
+'''
+
+[helper.py_cbset]
+group = "prelude"
+deps = ["py_bfits", "py_cbto"]
+stops = ["ValueError: could not broadcast input array from shape"]
+viv = '''
+#| py_bset of a complex value.
+def py_cbset(v: CArr, s: CArr) {
+    if py_bfits(shape(v), shape(s)) == 0 {
+        stop("ValueError: could not broadcast input array from shape")
+    }
+    return py_cbto(v, shape(s))
+}
+'''
+
+[helper.py_newax]
+group = "prelude"
+deps = ["py_shaped", "py_flat"]
+viv = '''
+#| a with an axis of length 1 inserted at each position of k (ascending positions in the
+#| result): NumPy's `a[None]`, `a[:, None]`, `a[:, np.newaxis, :]`.
+def py_newax(a: Arr, k: Arr) {
+    d = shape(a)
+    e = zeros(len(d) + len(k))
+    j = 0
+    q = 0
+    for i to len(e) {
+        one = 0
+        if q < len(k) {
+            if k[q] == i {
+                one = 1
+            }
+        }
+        if one == 1 {
+            e[i] = 1
+            q += 1
+        }
+        else {
+            e[i] = d[j]
+            j += 1
+        }
+    }
+    return py_shaped(py_flat(a), e)
+}
+'''
+
+# ---------------------------------------------------------------- masks and integer indices
+#
+# `a[m]` with a Bool array m, `a[idx]` with an integer array, `A[:, idx]`, `A[I, J]`: NumPy
+# gives a new array (a copy), gathered in row-major order of the result; a store through one
+# (`a[m] = v`, `a[idx] = v`) writes the entries in that order, so of repeated indices the
+# last write wins, and `a[idx] += v` reads a[idx] once, adds, and writes back (a repeated
+# index is incremented once). Viv's take and put gather and scatter by flat index in that
+# order.
+
+[helper.py_ixchk]
+group = "prelude"
+stops = ["IndexError: index"]
+viv = '''
+#| One entry of an integer index array on an axis of length n: a negative one counts from the
+#| end; NumPy raises IndexError for one out of bounds.
+def py_ixchk(i, n) {
+    j = i
+    if j < 0 {
+        j = j + n
+    }
+    if j < 0 or j >= n {
+        stop("IndexError: index")
+    }
+    return j
+}
+'''
+
+[helper.py_nzflat]
+group = "prelude"
+deps = ["py_flat"]
+viv = '''
+#| The flat indices of the nonzero entries of m, in order (a NaN is nonzero, -0.0 is zero).
+def py_nzflat(m: Arr) {
+    f = py_flat(m)
+    c = 0
+    for i to len(f) {
+        if f[i] != 0 {
+            c += 1
+        }
+    }
+    r = zeros(c)
+    c = 0
+    for i to len(f) {
+        if f[i] != 0 {
+            r[c] = i
+            c += 1
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_mchk]
+group = "prelude"
+stops = ["IndexError: boolean index did not match indexed array along dimension"]
+viv = '''
+#| A Bool mask m on the leading axes of a from axis k on: NumPy raises IndexError unless its
+#| lengths are a's there.
+def py_mchk(a: Arr, m: Arr, k) {
+    d = shape(a)
+    dm = shape(m)
+    for i to len(dm) {
+        if dm[i] != d[k + i] {
+            stop("IndexError: boolean index did not match indexed array along dimension")
+        }
+    }
+    return 0
+}
+'''
+
+[helper.py_mask]
+group = "prelude"
+deps = ["py_mchk", "py_nzflat"]
+viv = '''
+#| a[m] with a Bool mask m of a's shape: the entries where m holds, in row-major order.
+def py_mask(a: Arr, m: Arr) {
+    ok = py_mchk(a, m, 0)
+    return take(a, py_nzflat(m))
+}
+'''
+
+[helper.py_gath]
+group = "prelude"
+deps = ["py_ax", "py_flat", "py_ixchk", "py_shaped"]
+viv = '''
+#| a with an integer index array idx on axis k (the other axes whole): the result's shape is
+#| a's with axis k replaced by idx's shape; a negative index counts from the end.
+def py_gath(a: Arr, idx: Arr, k) {
+    s = py_ax(a, k)
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    f = py_flat(idx)
+    for q to len(f) {
+        f[q] = py_ixchk(f[q], along)
+    }
+    src = zeros(before * len(f) * after)
+    p = 0
+    for o to before {
+        for q to len(f) {
+            for i to after {
+                src[p] = (o * along + f[q]) * after + i
+                p += 1
+            }
+        }
+    }
+    d = shape(a)
+    di = shape(idx)
+    e = []
+    for t to k {
+        e = append(e, d[t])
+    }
+    for t to len(di) {
+        e = append(e, di[t])
+    }
+    for t from k + 1 to len(d) {
+        e = append(e, d[t])
+    }
+    return py_shaped(take(a, src), e)
+}
+'''
+
+[helper.py_maskax]
+group = "prelude"
+deps = ["py_mchk", "py_nzflat", "py_gath"]
+viv = '''
+#| a with a Bool vector m on axis k (the other axes whole): the slabs along axis k where m
+#| holds.
+def py_maskax(a: Arr, m: Arr, k) {
+    ok = py_mchk(a, m, k)
+    return py_gath(a, py_nzflat(m), k)
+}
+'''
+
+[helper.py_gath2]
+group = "prelude"
+deps = ["py_bdimsi", "py_bto", "py_flat", "py_ixchk", "py_shaped"]
+viv = '''
+#| A[I, J] of a matrix with integer index arrays I and J (broadcast together): A[I[q], J[q]]
+#| for each entry q of the broadcast shape.
+def py_gath2(a: Arr, I: Arr, J: Arr) {
+    e = py_bdimsi(shape(I), shape(J))
+    fi = py_flat(py_bto(I, e))
+    fj = py_flat(py_bto(J, e))
+    d = shape(a)
+    src = zeros(len(fi))
+    for q to len(fi) {
+        src[q] = py_ixchk(fi[q], d[0]) * d[1] + py_ixchk(fj[q], d[1])
+    }
+    return py_shaped(take(a, src), e)
+}
+'''
+
+[helper.py_gath3]
+group = "prelude"
+deps = ["py_bdimsi", "py_bto", "py_flat", "py_ixchk", "py_shaped"]
+viv = '''
+#| T[I, J, K] of a rank-3 array with integer index arrays (broadcast together).
+def py_gath3(a: Arr, I: Arr, J: Arr, K: Arr) {
+    e = py_bdimsi(py_bdimsi(shape(I), shape(J)), shape(K))
+    fi = py_flat(py_bto(I, e))
+    fj = py_flat(py_bto(J, e))
+    fk = py_flat(py_bto(K, e))
+    d = shape(a)
+    src = zeros(len(fi))
+    for q to len(fi) {
+        src[q] = (py_ixchk(fi[q], d[0]) * d[1] + py_ixchk(fj[q], d[1])) * d[2] + py_ixchk(fk[q], d[2])
+    }
+    return py_shaped(take(a, src), e)
+}
+'''
+
+[helper.py_vals]
+group = "prelude"
+deps = ["py_bfits", "py_bto", "py_flat"]
+stops = ["ValueError: shape mismatch: value array of shape"]
+viv = '''
+#| The entries a store through integer indices writes: v broadcast to the shape e of the
+#| indexed result, row-major; NumPy raises ValueError where v does not broadcast to e.
+def py_vals(v: Arr, e: Arr) {
+    if py_bfits(shape(v), e) == 0 {
+        stop("ValueError: shape mismatch: value array of shape")
+    }
+    return py_flat(py_bto(v, e))
+}
+'''
+
+[helper.py_setax]
+group = "prelude"
+deps = ["py_ax", "py_flat", "py_ixchk", "py_vals"]
+viv = '''
+#| a[..., idx, ...] = v with an integer index array idx on axis k (the other axes whole):
+#| the entries of v (broadcast) written in row-major order of the indexed result, so of
+#| repeated indices the last write wins.
+def py_setax(a: Arr, idx: Arr, k, v: Arr) {
+    s = py_ax(a, k)
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    f = py_flat(idx)
+    for q to len(f) {
+        f[q] = py_ixchk(f[q], along)
+    }
+    dst = zeros(before * len(f) * after)
+    p = 0
+    for o to before {
+        for q to len(f) {
+            for i to after {
+                dst[p] = (o * along + f[q]) * after + i
+                p += 1
+            }
+        }
+    }
+    d = shape(a)
+    di = shape(idx)
+    e = []
+    for t to k {
+        e = append(e, d[t])
+    }
+    for t to len(di) {
+        e = append(e, di[t])
+    }
+    for t from k + 1 to len(d) {
+        e = append(e, d[t])
+    }
+    put(a, dst, py_vals(v, e))
+    return 0
+}
+'''
+
+[helper.py_msetax]
+group = "prelude"
+deps = ["py_mchk", "py_nzflat", "py_setax"]
+viv = '''
+#| a[..., m, ...] = v with a Bool vector m on axis k of a matrix or deeper array: the store
+#| through the indices where m holds.
+def py_msetax(a: Arr, m: Arr, k, v: Arr) {
+    ok = py_mchk(a, m, k)
+    return py_setax(a, py_nzflat(m), k, v)
+}
+'''
+
+[helper.py_mset]
+group = "prelude"
+deps = ["py_mchk", "py_nzflat", "py_flat"]
+stops = ["ValueError: NumPy boolean array indexing assignment cannot assign"]
+viv = '''
+#| a[m] = v with a Bool mask m of a's shape and a vector v: v's entries (or its one entry)
+#| written where m holds, in row-major order.
+def py_mset(a: Arr, m: Arr, v: Arr) {
+    ok = py_mchk(a, m, 0)
+    dst = py_nzflat(m)
+    f = py_flat(v)
+    if len(f) == len(dst) {
+        put(a, dst, f)
+        return 0
+    }
+    if len(f) == 1 {
+        w = zeros(len(dst))
+        fill(w, f[0])
+        put(a, dst, w)
+        return 0
+    }
+    stop("ValueError: NumPy boolean array indexing assignment cannot assign")
+    return 0
+}
+'''
+
+[helper.py_set2]
+group = "prelude"
+deps = ["py_bdimsi", "py_bto", "py_flat", "py_ixchk", "py_vals"]
+viv = '''
+#| A[I, J] = v of a matrix: v (broadcast to the shape of I and J broadcast together) written
+#| entry by entry in row-major order, the last write winning.
+def py_set2(a: Arr, I: Arr, J: Arr, v: Arr) {
+    e = py_bdimsi(shape(I), shape(J))
+    fi = py_flat(py_bto(I, e))
+    fj = py_flat(py_bto(J, e))
+    d = shape(a)
+    dst = zeros(len(fi))
+    for q to len(fi) {
+        dst[q] = py_ixchk(fi[q], d[0]) * d[1] + py_ixchk(fj[q], d[1])
+    }
+    put(a, dst, py_vals(v, e))
+    return 0
+}
+'''
+
+[helper.py_set3]
+group = "prelude"
+deps = ["py_bdimsi", "py_bto", "py_flat", "py_ixchk", "py_vals"]
+viv = '''
+#| T[I, J, K] = v of a rank-3 array.
+def py_set3(a: Arr, I: Arr, J: Arr, K: Arr, v: Arr) {
+    e = py_bdimsi(py_bdimsi(shape(I), shape(J)), shape(K))
+    fi = py_flat(py_bto(I, e))
+    fj = py_flat(py_bto(J, e))
+    fk = py_flat(py_bto(K, e))
+    d = shape(a)
+    dst = zeros(len(fi))
+    for q to len(fi) {
+        dst[q] = (py_ixchk(fi[q], d[0]) * d[1] + py_ixchk(fj[q], d[1])) * d[2] + py_ixchk(fk[q], d[2])
+    }
+    put(a, dst, py_vals(v, e))
+    return 0
+}
+'''
+
+[helper.py_nzax]
+group = "prelude"
+deps = ["py_nzflat"]
+viv = '''
+#| np.nonzero(a)[k]: for each nonzero entry of a, in row-major order, its index along axis k.
+def py_nzax(a: Arr, k) {
+    f = py_nzflat(a)
+    d = shape(a)
+    after = 1
+    for i from k + 1 to len(d) {
+        after = after * d[i]
+    }
+    r = zeros(len(f))
+    for q to len(f) {
+        r[q] = floor(f[q] / after) % d[k]
+    }
+    return r
+}
+'''
+
+[helper.py_nz2]
+group = "prelude"
+deps = ["py_nzax"]
+viv = '''
+#| i, j = np.nonzero(A) of a matrix: the row and the column of each nonzero entry.
+def py_nz2(a: Arr) {
+    return py_nzax(a, 0), py_nzax(a, 1)
+}
+'''
+
+[helper.py_argwhere]
+group = "prelude"
+deps = ["py_nzflat"]
+viv = '''
+#| np.argwhere(a): one row per nonzero entry of a, in row-major order, holding its index along
+#| each axis.
+def py_argwhere(a: Arr) {
+    f = py_nzflat(a)
+    d = shape(a)
+    r = zeros(len(f), len(d))
+    for q to len(f) {
+        x = f[q]
+        for t to len(d) {
+            k = len(d) - 1 - t
+            c = x % d[k]
+            r[q, k] = c
+            x = (x - c) / d[k]
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_npmaxb]
+group = "numeric"
+deps = ["py_bdims", "py_bto", "py_npmaxv"]
+viv = '''
+#| np.maximum of two arrays, broadcast.
+def py_npmaxb(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_npmaxv(py_bto(a, e), py_bto(b, e))
+}
+'''
+
+[helper.py_npminb]
+group = "numeric"
+deps = ["py_bdims", "py_bto", "py_npminv"]
+viv = '''
+#| np.minimum of two arrays, broadcast.
+def py_npminb(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_npminv(py_bto(a, e), py_bto(b, e))
+}
+'''
+
+[helper.py_fmaxb]
+group = "numeric"
+deps = ["py_bdims", "py_bto", "py_fmaxv"]
+viv = '''
+#| np.fmax of two arrays, broadcast.
+def py_fmaxb(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_fmaxv(py_bto(a, e), py_bto(b, e))
+}
+'''
+
+[helper.py_fminb]
+group = "numeric"
+deps = ["py_bdims", "py_bto", "py_fminv"]
+viv = '''
+#| np.fmin of two arrays, broadcast.
+def py_fminb(a: Arr, b: Arr) {
+    e = py_bdims(shape(a), shape(b))
+    return py_fminv(py_bto(a, e), py_bto(b, e))
+}
+'''
+
+[helper.py_bwhere]
+group = "numeric"
+deps = ["py_bdims", "py_bto"]
+viv = '''
+#| np.where(m, x, y) of three arrays, broadcast together (a number is passed as a vector of
+#| one entry, which broadcasts to any shape).
+def py_bwhere(m: Arr, x: Arr, y: Arr) {
+    e = py_bdims(py_bdims(shape(m), shape(x)), shape(y))
+    return where(py_bto(m, e), py_bto(x, e), py_bto(y, e))
+}
+'''
+
+[helper.py_batan2]
+group = "numeric"
+deps = ["py_bdims", "py_bto", "py_flat", "py_atan2v", "py_shaped"]
+viv = '''
+#| np.arctan2(y, x) of two arrays, broadcast (a number as a vector of one entry).
+def py_batan2(y: Arr, x: Arr) {
+    e = py_bdims(shape(y), shape(x))
+    return py_shaped(py_atan2v(py_flat(py_bto(y, e)), py_flat(py_bto(x, e))), e)
+}
+'''
+
+[helper.py_bhypot]
+group = "numeric"
+deps = ["py_bdims", "py_bto", "py_flat", "py_hypot_vv", "py_shaped"]
+viv = '''
+#| np.hypot(x, y) of two arrays, broadcast (a number as a vector of one entry).
+def py_bhypot(x: Arr, y: Arr) {
+    e = py_bdims(shape(x), shape(y))
+    return py_shaped(py_hypot_vv(py_flat(py_bto(x, e)), py_flat(py_bto(y, e))), e)
+}
+'''
+
+[helper.py_ballclose]
+group = "numeric"
+deps = ["py_bdims", "py_bto", "py_allclose"]
+viv = '''
+#| np.allclose(a, b, rtol, atol) of two arrays, broadcast.
+def py_ballclose(a: Arr, b: Arr, rtol, atol) {
+    e = py_bdims(shape(a), shape(b))
+    return py_allclose(py_bto(a, e), py_bto(b, e), rtol, atol)
+}
+'''
+
+# ---------------------------------------------------------------- reductions along an axis
+#
+# NumPy reduces a C-ordered array along axis k as a loop over the entries before the axis
+# (`before`), along it (`along`) and after it (`after`), with a flat index
+# (o * along + j) * after + i. Checked against NumPy 1.24 on random arrays of ranks 1 to 3
+# (the study of 2026-09-27, tools/py2viv/results/axis_order.txt):
+#   - a sum along the last axis (every axis after k of length 1) is py_blk per output entry;
+#   - a sum along any other axis adds the slabs in order, from 0.0, entry by entry;
+#   - np.mean divides that by `along`; np.var subtracts the mean (kept per entry), squares, and
+#     sums again in the same order, over `along`;
+#   - max, min, argmax and argmin do not depend on the order; prod multiplies in order; cumsum
+#     runs along the axis from its first entry.
+# `k` is the axis (0 ... rank - 1), or -1 for every axis at once (the array flat); `keep` is 1
+# for keepdims=True.
+
+[helper.py_ax]
+group = "numeric"
+viv = '''
+#| The sizes around axis k of a (k = -1: every axis, the array flat): [before, along, after].
+def py_ax(a: Arr, k) {
+    d = shape(a)
+    if k < 0 {
+        return [1, numel(a), 1]
+    }
+    before = 1
+    for i to k {
+        before = before * d[i]
+    }
+    after = 1
+    for i from k + 1 to len(d) {
+        after = after * d[i]
+    }
+    return [before, d[k], after]
+}
+'''
+
+[helper.py_cax]
+group = "numeric"
+viv = '''
+#| py_ax of a complex array.
+def py_cax(a: CArr, k) {
+    d = shape(a)
+    before = 1
+    for i to k {
+        before = before * d[i]
+    }
+    after = 1
+    for i from k + 1 to len(d) {
+        after = after * d[i]
+    }
+    return [before, d[k], after]
+}
+'''
+
+[helper.py_rdims]
+group = "numeric"
+viv = '''
+#| The shape of a reduction of a along axis k (k = -1: every axis): the axis dropped, or kept
+#| with length 1 when keep is 1.
+def py_rdims(a: Arr, k, keep) {
+    d = shape(a)
+    e = []
+    for i to len(d) {
+        if i == k or k < 0 {
+            if keep == 1 {
+                e = append(e, 1)
+            }
+        }
+        else {
+            e = append(e, d[i])
+        }
+    }
+    return e
+}
+'''
+
+[helper.py_shaped]
+group = "numeric"
+deps = ["py_iota"]
+viv = '''
+#| The entries of f, row-major, as an array of shape e (a vector of 1 to 4 lengths).
+def py_shaped(f: Arr, e: Arr) {
+    if len(e) == 1 {
+        return f
+    }
+    if len(e) == 2 {
+        z = zeros(e[0], e[1])
+    }
+    else {
+        if len(e) == 3 {
+            z = zeros(e[0], e[1], e[2])
+        }
+        else {
+            z = zeros(e[0], e[1], e[2], e[3])
+        }
+    }
+    put(z, py_iota(numel(z)), f)
+    return z
+}
+'''
+
+[helper.py_sum_fl]
+group = "numeric"
+deps = ["py_blk"]
+viv = '''
+#| NumPy's sums of f, a C-ordered array seen as [before, along, after] (s), along the middle:
+#| py_blk when the axis is the last one, else the slabs added in order from 0.0.
+def py_sum_fl(f: Arr, s: Arr) {
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    r = zeros(before * after)
+    for o to before {
+        if after == 1 {
+            r[o] = py_blk(f, o * along, along)
+        }
+        else {
+            for i to after {
+                t = 0.0
+                for j to along {
+                    t += f[(o * along + j) * after + i]
+                }
+                r[o * after + i] = t
+            }
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_sum_ax]
+group = "numeric"
+deps = ["py_ax", "py_rdims", "py_shaped", "py_sum_fl", "py_flat"]
+viv = '''
+#| np.sum(a, axis=k, keepdims=keep) of a real array.
+def py_sum_ax(a: Arr, k, keep) {
+    return py_shaped(py_sum_fl(py_flat(a), py_ax(a, k)), py_rdims(a, k, keep))
+}
+'''
+
+[helper.py_mean_ax]
+group = "numeric"
+deps = ["py_ax", "py_rdims", "py_shaped", "py_sum_fl", "py_flat"]
+viv = '''
+#| np.mean(a, axis=k, keepdims=keep): the sums (py_sum_fl) over the axis's length.
+def py_mean_ax(a: Arr, k, keep) {
+    s = py_ax(a, k)
+    return py_shaped(py_sum_fl(py_flat(a), s) / s[1], py_rdims(a, k, keep))
+}
+'''
+
+[helper.py_var_fl]
+group = "numeric"
+deps = ["py_sum_fl"]
+viv = '''
+#| NumPy's _var of f seen as [before, along, after] (s): the mean of each entry of the result,
+#| kept, subtracted from every term, squared, summed in the same order, over along.
+def py_var_fl(f: Arr, s: Arr) {
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    mu = py_sum_fl(f, s) / along
+    x = zeros(len(f))
+    for o to before {
+        for j to along {
+            for i to after {
+                x[(o * along + j) * after + i] = f[(o * along + j) * after + i] - mu[o * after + i]
+            }
+        }
+    }
+    return py_sum_fl(x * x, s) / along
+}
+'''
+
+[helper.py_var_ax]
+group = "numeric"
+deps = ["py_ax", "py_rdims", "py_shaped", "py_var_fl", "py_flat"]
+viv = '''
+#| np.var(a, axis=k, keepdims=keep) (ddof 0).
+def py_var_ax(a: Arr, k, keep) {
+    return py_shaped(py_var_fl(py_flat(a), py_ax(a, k)), py_rdims(a, k, keep))
+}
+'''
+
+[helper.py_std_ax]
+group = "numeric"
+deps = ["py_ax", "py_rdims", "py_shaped", "py_var_fl", "py_flat"]
+viv = '''
+#| np.std(a, axis=k, keepdims=keep): the square root of py_var_ax.
+def py_std_ax(a: Arr, k, keep) {
+    return py_shaped(sqrt(py_var_fl(py_flat(a), py_ax(a, k))), py_rdims(a, k, keep))
+}
+'''
+
+[helper.py_prod_ax]
+group = "numeric"
+deps = ["py_ax", "py_rdims", "py_shaped", "py_flat"]
+viv = '''
+#| np.prod(a, axis=k, keepdims=keep): each product in order along the axis, from 1.0.
+def py_prod_ax(a: Arr, k, keep) {
+    f = py_flat(a)
+    s = py_ax(a, k)
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    r = zeros(before * after)
+    for o to before {
+        for i to after {
+            p = 1.0
+            for j to along {
+                p *= f[(o * along + j) * after + i]
+            }
+            r[o * after + i] = p
+        }
+    }
+    return py_shaped(r, py_rdims(a, k, keep))
+}
+'''
+
+[helper.py_max_ax]
+group = "numeric"
+deps = ["py_ax", "py_rdims", "py_shaped", "py_flat", "py_zmax2", "py_zmin2"]
+viv = '''
+#| np.max (big = 1) or np.min (big = 0) of a along axis k: NaN if any entry is NaN, else the
+#| largest (+0 over -0) or smallest (-0 under +0); NumPy raises for an empty axis.
+def py_max_ax(a: Arr, k, keep, big) {
+    f = py_flat(a)
+    s = py_ax(a, k)
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    r = zeros(before * after)
+    if along == 0 and before * after > 0 {
+        if big == 1 {
+            stop("ValueError: zero-size array to reduction operation maximum which has no identity")
+        }
+        stop("ValueError: zero-size array to reduction operation minimum which has no identity")
+    }
+    for o to before {
+        for i to after {
+            m = f[o * along * after + i]
+            for j from 1 to along {
+                x = f[(o * along + j) * after + i]
+                if m != m or x != x {
+                    m = 0.0 / 0.0
+                }
+                else {
+                    if big == 1 {
+                        m = py_zmax2(m, x)
+                    }
+                    else {
+                        m = py_zmin2(m, x)
+                    }
+                }
+            }
+            r[o * after + i] = m
+        }
+    }
+    return py_shaped(r, py_rdims(a, k, keep))
+}
+'''
+
+[helper.py_argmax_ax]
+group = "numeric"
+deps = ["py_ax", "py_rdims", "py_shaped", "py_flat"]
+viv = '''
+#| np.argmax (big = 1) or np.argmin (big = 0) of a along axis k: the index of the first
+#| largest or smallest entry, or of the first NaN.
+def py_argmax_ax(a: Arr, k, keep, big) {
+    f = py_flat(a)
+    s = py_ax(a, k)
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    r = zeros(before * after)
+    if along == 0 and before * after > 0 {
+        if big == 1 {
+            stop("ValueError: attempt to get argmax of an empty sequence")
+        }
+        stop("ValueError: attempt to get argmin of an empty sequence")
+    }
+    for o to before {
+        for i to after {
+            best = 0
+            m = f[o * along * after + i]
+            j = 1
+            while j < along and m == m {
+                x = f[(o * along + j) * after + i]
+                if x != x or (big == 1 and x > m) or (big == 0 and x < m) {
+                    best = j
+                    m = x
+                }
+                j += 1
+            }
+            r[o * after + i] = best
+        }
+    }
+    return py_shaped(r, py_rdims(a, k, keep))
+}
+'''
+
+[helper.py_cumsum_ax]
+group = "numeric"
+deps = ["py_ax", "py_shaped", "py_flat"]
+viv = '''
+#| np.cumsum(a, axis=k): each running sum along the axis, from its first entry (a -0.0 first
+#| stays -0.0), the array's shape kept.
+def py_cumsum_ax(a: Arr, k) {
+    f = py_flat(a)
+    s = py_ax(a, k)
+    before = s[0]
+    along = s[1]
+    after = s[2]
+    c = zeros(len(f))
+    for o to before {
+        for i to after {
+            t = 0.0
+            for j to along {
+                q = (o * along + j) * after + i
+                if j == 0 {
+                    t = f[q]
+                }
+                else {
+                    t += f[q]
+                }
+                c[q] = t
+            }
+        }
+    }
+    return py_shaped(c, shape(a))
+}
+'''
+
+[helper.py_isum_ax]
+group = "numeric"
+deps = ["py_sum_ax", "py_int_arr"]
+viv = '''
+#| np.sum(a, axis=k, keepdims=keep) of an integer or Bool array, exactly: the sums of the
+#| magnitudes are checked below 2^53 (py_int_arr), so no partial sum is rounded.
+def py_isum_ax(a: Arr, k, keep) {
+    bound = py_int_arr(py_sum_ax(abs(a), k, keep))
+    return py_int_arr(py_sum_ax(a, k, keep))
+}
+'''
+
+# ---------------------------------------------------------------- reshaping and joining
+
+[helper.py_reshape]
+group = "numeric"
+deps = ["py_shaped", "py_flat"]
+viv = '''
+#| np.reshape(a, d) in row-major order: a's entries in the shape d, where one length may be
+#| negative (NumPy 1.24 reads any negative length as -1: the one that makes the sizes agree).
+#| NumPy raises ValueError where they cannot agree.
+def py_reshape(a: Arr, d: Arr) {
+    e = copy(d)
+    known = 1
+    free = -1
+    for i to len(e) {
+        if e[i] < 0 {
+            if free >= 0 {
+                stop("ValueError: can only specify one unknown dimension")
+            }
+            free = i
+        }
+        else {
+            known = known * e[i]
+        }
+    }
+    if free >= 0 {
+        if known == 0 or numel(a) % known != 0 {
+            stop("ValueError: cannot reshape the array into that shape")
+        }
+        e[free] = numel(a) / known
+        known = numel(a)
+    }
+    if known != numel(a) {
+        stop("ValueError: cannot reshape the array into that shape")
+    }
+    return py_shaped(py_flat(a), e)
+}
+'''
+
+[helper.py_meshgrid]
+group = "numeric"
+viv = '''
+#| np.meshgrid(x, y): X repeats x along each row and Y repeats y down each column, both
+#| len(y) x len(x) (indexing='xy', ij = 0); or both len(x) x len(y), X[i, j] = x[i] and
+#| Y[i, j] = y[j] (indexing='ij', ij = 1).
+def py_meshgrid(x: Arr, y: Arr, ij) {
+    nx = len(x)
+    ny = len(y)
+    if ij == 1 {
+        X = zeros(nx, ny)
+        Y = zeros(nx, ny)
+        for i to nx {
+            for j to ny {
+                X[i, j] = x[i]
+                Y[i, j] = y[j]
+            }
+        }
+        return X, Y
+    }
+    X = zeros(ny, nx)
+    Y = zeros(ny, nx)
+    for i to ny {
+        for j to nx {
+            X[i, j] = x[j]
+            Y[i, j] = y[i]
+        }
+    }
+    return X, Y
+}
+'''
+
+# ---------------------------------------------------------------- np.random (lib/nprandom)
+#
+# NumPy's generators are the library lib/nprandom, carried into a translation from its files
+# (`file`: the module's header, `#!` lines and tests are left out; `deps` stand for its
+# `#! use` lines). The py_npr_* defs are np.random's legacy functions over the module's
+# global MT19937 state `py_np_mt`; the py_npg_* defs are a Generator's methods over the PCG64
+# state a `default_rng(seed)` made. Each checks its arguments where NumPy does, in NumPy's
+# order, and stops with NumPy's exception line.
+
+[helper.npr_bits]
+group = "nprandom"
+file = "lib/nprandom/bits.viv"
+
+[helper.npr_mt19937]
+group = "nprandom"
+deps = ["npr_bits"]
+file = "lib/nprandom/mt19937.viv"
+
+[helper.npr_legacy]
+group = "nprandom"
+deps = ["npr_mt19937"]
+file = "lib/nprandom/legacy.viv"
+
+[helper.npr_seedseq]
+group = "nprandom"
+deps = ["npr_bits"]
+file = "lib/nprandom/seedseq.viv"
+
+[helper.npr_pcg64]
+group = "nprandom"
+deps = ["npr_seedseq"]
+file = "lib/nprandom/pcg64.viv"
+
+[helper.npr_zig]
+group = "nprandom"
+file = "lib/nprandom/ziggurat_tables.viv"
+
+[helper.npr_generator]
+group = "nprandom"
+deps = ["npr_pcg64", "npr_zig", "npr_legacy"]
+file = "lib/nprandom/generator.viv"
+
+[helper.py_np_mt]
+group = "nprandom"
+deps = ["npr_legacy"]
+viv = '''
+#| np.random's global generator (the RandomState behind np.random.rand and the rest): unseeded
+#| until np.random.seed runs.
+py_np_mt = npr_mt_new()
+'''
+
+[helper.py_npr_signbit]
+group = "nprandom"
+viv = '''
+#| The sign bit of x (a -0.0 has it), false for NaN: NumPy's check of a non-negative parameter.
+def py_npr_signbit(x) {
+    return x < 0.0 or x == 0.0 and 1.0 / x < 0.0
+}
+'''
+
+[helper.py_npr_st]
+group = "nprandom"
+deps = ["py_np_mt"]
+viv = '''
+#| The global generator, for a draw: the run stops if np.random.seed has not run yet (NumPy
+#| seeds it from the operating system, so its values cannot be reproduced).
+def py_npr_st() {
+    if py_np_mt[NPR_MT_SEEDED] == 0 {
+        stop("py2viv: a draw from np.random before np.random.seed; NumPy seeds it from the operating system, so its values are not reproducible")
+    }
+    return py_np_mt
+}
+'''
+
+[helper.py_npr_seed]
+group = "nprandom"
+deps = ["py_np_mt"]
+viv = '''
+#| np.random.seed(s) of an int (mt19937_seed).
+def py_npr_seed(s) {
+    if s < 0 or s > NPR_U32_MAX {
+        stop("ValueError: Seed must be between 0 and 2**32 - 1")
+    }
+    npr_mt_seed(py_np_mt, s)
+    return 0
+}
+'''
+
+[helper.py_npr_seed_array]
+group = "nprandom"
+deps = ["py_np_mt"]
+viv = '''
+#| np.random.seed(key) of a list of ints (init_by_array).
+def py_npr_seed_array(key: Arr) {
+    if len(key) == 0 {
+        stop("ValueError: Seed must be non-empty")
+    }
+    for i to len(key) {
+        if key[i] < 0 or key[i] > NPR_U32_MAX {
+            stop("ValueError: Seed must be between 0 and 2**32 - 1")
+        }
+    }
+    npr_mt_seed_array(py_np_mt, key)
+    return 0
+}
+'''
+
+[helper.py_npr_rand]
+group = "nprandom"
+deps = ["py_npr_st", "py_size"]
+viv = '''
+#| np.random.rand(), random_sample(): one double. _v and _m fill a vector or a matrix row by
+#| row, after NumPy's check of the size.
+def py_npr_rand() {
+    return npr_mt_double(py_npr_st())
+}
+
+def py_npr_rand_v(n) {
+    a = zeros(py_size(n))
+    st = py_npr_st()
+    for i to n {
+        a[i] = npr_mt_double(st)
+    }
+    return a
+}
+
+def py_npr_rand_m(rows, cols) {
+    A = zeros(py_size(rows), py_size(cols))
+    st = py_npr_st()
+    for i to rows {
+        for j to cols {
+            A[i, j] = npr_mt_double(st)
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npr_uniform]
+group = "nprandom"
+deps = ["py_npr_st", "py_size"]
+viv = '''
+#| np.random.uniform(low, high): low + (high - low) * a double; OverflowError when high - low
+#| is not finite (checked before the size, as NumPy does).
+def py_npr_urange(low, high) {
+    r = high - low
+    if not (abs(r) < 1.0 / 0.0) {
+        stop("OverflowError: Range exceeds valid bounds")
+    }
+    return r
+}
+
+def py_npr_uniform(low, high) {
+    r = py_npr_urange(low, high)
+    return npr_lg_uniform(py_npr_st(), low, r)
+}
+
+def py_npr_uniform_v(low, high, n) {
+    r = py_npr_urange(low, high)
+    a = zeros(py_size(n))
+    st = py_npr_st()
+    for i to n {
+        a[i] = npr_lg_uniform(st, low, r)
+    }
+    return a
+}
+
+def py_npr_uniform_m(low, high, rows, cols) {
+    r = py_npr_urange(low, high)
+    A = zeros(py_size(rows), py_size(cols))
+    st = py_npr_st()
+    for i to rows {
+        for j to cols {
+            A[i, j] = npr_lg_uniform(st, low, r)
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npr_randint]
+group = "nprandom"
+deps = ["py_npr_st", "py_size"]
+viv = '''
+#| np.random.randint(low, high): low + a masked draw in [0, high - 1 - low]. NumPy returns an
+#| empty array for an empty size before it checks the bounds, and checks them before a
+#| negative size; the messages are its format_bounds_error's.
+def py_npr_irange(low, high) {
+    hi = high - 1
+    if low > hi {
+        if low == 0 {
+            stop("ValueError: high <= 0")
+        }
+        stop("ValueError: low >= high")
+    }
+    r = hi - low
+    if r >= NPR_TWO53 {
+        stop("py2viv: a random int range of 2^53 or more; a double holds the ints exactly only below it")
+    }
+    return r
+}
+
+def py_npr_randint(low, high) {
+    r = py_npr_irange(low, high)
+    return low + npr_lg_bounded(py_npr_st(), r)
+}
+
+def py_npr_randint_v(low, high, n) {
+    if n == 0 {
+        return zeros(0)
+    }
+    r = py_npr_irange(low, high)
+    a = zeros(py_size(n))
+    st = py_npr_st()
+    for i to n {
+        a[i] = low + npr_lg_bounded(st, r)
+    }
+    return a
+}
+
+def py_npr_randint_m(low, high, rows, cols) {
+    if rows * cols == 0 {
+        return zeros(py_size(rows), py_size(cols))
+    }
+    r = py_npr_irange(low, high)
+    A = zeros(py_size(rows), py_size(cols))
+    st = py_npr_st()
+    for i to rows {
+        for j to cols {
+            A[i, j] = low + npr_lg_bounded(st, r)
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npr_shuffle]
+group = "nprandom"
+deps = ["py_npr_st"]
+viv = '''
+#| np.random.shuffle(x) of a vector (or a Python list) and of a matrix's rows, in place. An
+#| array with no entries is left alone without a draw.
+def py_npr_shuffle(a: Arr) {
+    if len(a) > 1 {
+        npr_lg_shuffle(py_npr_st(), a)
+    }
+    return 0
+}
+
+def py_npr_shuffle_rows(A: Arr) {
+    if numel(A) > 0 and shape(A)[0] > 1 {
+        npr_lg_shuffle_rows(py_npr_st(), A)
+    }
+    return 0
+}
+'''
+
+[helper.py_npr_permutation]
+group = "nprandom"
+deps = ["py_npr_shuffle"]
+viv = '''
+#| np.random.permutation: of an int n, arange(n) shuffled (empty for n <= 0); of a vector, a
+#| shuffled copy; of a matrix, its rows in the order a shuffled arange puts them.
+def py_npr_perm_n(n) {
+    a = zeros(max(n, 0))
+    for i to len(a) {
+        a[i] = i
+    }
+    py_npr_shuffle(a)
+    return a
+}
+
+def py_npr_perm_v(x: Arr) {
+    a = x * 1.0
+    py_npr_shuffle(a)
+    return a
+}
+
+def py_npr_perm_m(X: Arr) {
+    rows = shape(X)[0]
+    cols = shape(X)[1]
+    idx = py_npr_perm_n(rows)
+    A = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            A[i, j] = X[idx[i], j]
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npr_pcheck]
+group = "nprandom"
+deps = ["npr_legacy"]
+viv = '''
+#| choice's check of p (the same in RandomState and Generator, whose messages differ: gen is 1
+#| for Generator's): its length, a NaN sum, a negative entry, a sum more than sqrt(eps) from 1.
+def py_npr_pcheck(p: Arr, pop, gen) {
+    if len(p) != pop {
+        if gen == 1 {
+            stop("ValueError: a and p must have same size")
+        }
+        stop("ValueError: 'a' and 'p' must have same size")
+    }
+    s = npr_kahan_sum(p)
+    if s != s {
+        stop("ValueError: probabilities contain NaN")
+    }
+    for i to len(p) {
+        if p[i] < 0 {
+            stop("ValueError: probabilities are not non-negative")
+        }
+    }
+    if abs(s - 1.0) > 1.4901161193847656e-08 {
+        stop("ValueError: probabilities do not sum to 1")
+    }
+    return 0
+}
+
+#| choice with p and without replacement, one round (np.unique with return_index, sorted):
+#| x are the round's draws; the indices they pick, in order of first appearance, are added to
+#| found after its first n_uniq entries, whose p q the round sets to 0 first. Returns the new
+#| count. The caller draws len(x) = n - n_uniq doubles a round until it has n.
+def py_npr_unique_round(q: Arr, found: Arr, n_uniq, x: Arr) {
+    for i to n_uniq {
+        q[found[i]] = 0.0
+    }
+    cdf = npr_lg_cdf(q)
+    seen = zeros(len(q))
+    m = n_uniq
+    for i to len(x) {
+        v = npr_lg_search(cdf, x[i])
+        if seen[v] == 0 {
+            seen[v] = 1
+            found[m] = v
+            m = m + 1
+        }
+    }
+    return m
+}
+
+#| NumPy's check that p has at least n entries above 0.
+def py_npr_nonzero_check(p: Arr, n) {
+    nz = 0
+    for i to len(p) {
+        if p[i] > 0 {
+            nz = nz + 1
+        }
+    }
+    if nz < n {
+        stop("ValueError: Fewer non-zero entries in p than size")
+    }
+    return 0
+}
+'''
+
+[helper.py_npr_choice]
+group = "nprandom"
+deps = ["py_npr_st", "py_npr_permutation", "py_npr_pcheck", "py_size"]
+viv = '''
+#| np.random.choice's population checks: an int must be positive, an array not empty, unless
+#| no samples are taken (n is the sample count; 1 for no size).
+def py_npr_pop_int(pop, n) {
+    if pop <= 0 and n != 0 {
+        stop("ValueError: a must be greater than 0 unless no samples are taken")
+    }
+    return pop
+}
+
+def py_npr_pop_arr(a: Arr, n) {
+    if len(a) == 0 and n != 0 {
+        stop("ValueError: 'a' cannot be empty unless no samples are taken")
+    }
+    return len(a)
+}
+
+#| The indices np.random.choice draws: n of them (n = 1 for a single draw), from pop, with
+#| replace 1 or 0, and p (checked) when has_p is 1.
+def py_npr_choice_idx(pop, n, replace, p: Arr, has_p) {
+    if has_p == 1 {
+        py_npr_pcheck(p, pop, 0)
+    }
+    if replace == 1 {
+        if has_p == 1 {
+            cdf = npr_lg_cdf(p)
+            u = zeros(py_size(n))
+            st = py_npr_st()
+            for i to n {
+                u[i] = npr_mt_double(st)
+            }
+            idx = zeros(n)
+            for i to n {
+                idx[i] = npr_lg_search(cdf, u[i])
+            }
+            return idx
+        }
+        idx = zeros(py_size(n))
+        if n > 0 {
+            st = py_npr_st()
+            for i to n {
+                idx[i] = npr_lg_bounded(st, pop - 1)
+            }
+        }
+        return idx
+    }
+    if n > pop {
+        stop("ValueError: Cannot take a larger sample than population when 'replace=False'")
+    }
+    if n < 0 {
+        stop("ValueError: Negative dimensions are not allowed")
+    }
+    if has_p == 1 {
+        py_npr_nonzero_check(p, n)
+        st = py_npr_st()
+        q = p * 1.0
+        found = zeros(n)
+        m = 0
+        while m < n {
+            x = zeros(n - m)
+            for i to len(x) {
+                x[i] = npr_mt_double(st)
+            }
+            m = py_npr_unique_round(q, found, m, x)
+        }
+        return found
+    }
+    perm = py_npr_perm_n(pop)
+    idx = zeros(n)
+    for i to n {
+        idx[i] = perm[i]
+    }
+    return idx
+}
+
+#| np.random.choice(a) of an int a: one index; of n; of a vector a: one entry, n entries.
+def py_npr_choice1(pop, replace, p: Arr, has_p) {
+    idx = py_npr_choice_idx(py_npr_pop_int(pop, 1), 1, replace, p, has_p)
+    return idx[0]
+}
+
+def py_npr_choice_n(pop, n, replace, p: Arr, has_p) {
+    return py_npr_choice_idx(py_npr_pop_int(pop, n), n, replace, p, has_p)
+}
+
+def py_npr_choice_a1(a: Arr, replace, p: Arr, has_p) {
+    idx = py_npr_choice_idx(py_npr_pop_arr(a, 1), 1, replace, p, has_p)
+    return a[idx[0]]
+}
+
+def py_npr_choice_a(a: Arr, n, replace, p: Arr, has_p) {
+    idx = py_npr_choice_idx(py_npr_pop_arr(a, n), n, replace, p, has_p)
+    out = zeros(len(idx))
+    for i to len(idx) {
+        out[i] = a[idx[i]]
+    }
+    return out
+}
+'''
+
+[helper.py_npg_new]
+group = "nprandom"
+deps = ["npr_generator"]
+viv = '''
+#| np.random.default_rng(seed) of an int: SeedSequence(seed), then PCG64.
+def py_npg_new(seed) {
+    if seed < 0 {
+        stop("ValueError: expected non-negative integer")
+    }
+    return npr_pcg_from_entropy(npr_ss_words(seed))
+}
+
+#| default_rng of an array of ints: each entry's words in turn (_coerce_to_uint32_array).
+def py_npg_new_arr(seeds: Arr) {
+    words = []
+    for i to len(seeds) {
+        if seeds[i] < 0 {
+            stop("ValueError: expected non-negative integer")
+        }
+        w = npr_ss_words(seeds[i])
+        for k to len(w) {
+            words = append(words, w[k])
+        }
+    }
+    return npr_pcg_from_entropy(words)
+}
+'''
+
+[helper.py_npg_random]
+group = "nprandom"
+deps = ["npr_generator", "py_size"]
+viv = '''
+#| Generator.random(): one double; _v and _m fill a vector or matrix row by row.
+def py_npg_random_v(st: [Int], n) {
+    a = zeros(py_size(n))
+    for i to n {
+        a[i] = npr_pcg_double(st)
+    }
+    return a
+}
+
+def py_npg_random_m(st: [Int], rows, cols) {
+    A = zeros(py_size(rows), py_size(cols))
+    for i to rows {
+        for j to cols {
+            A[i, j] = npr_pcg_double(st)
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npg_normal]
+group = "nprandom"
+deps = ["npr_generator", "py_size", "py_npr_signbit"]
+viv = '''
+#| Generator.standard_normal() and normal(loc, scale) = loc + scale * z. The ziggurat returns
+#| NaN where NumPy's value depends on the platform's libm (the tail's log1p, a near-tie of the
+#| wedge test's exp); the run stops there. scale must not carry a sign bit (NumPy's "scale <
+#| 0", checked before the size).
+def py_npg_z(st: [Int]) {
+    v = npr_gn_normal(st)
+    if v != v {
+        stop("py2viv: a normal draw reached the ziggurat's tail (or a near-tie in its wedge test), where NumPy's value depends on the platform's log1p (or exp), which Viv's libm does not reproduce bit for bit")
+    }
+    return v
+}
+
+def py_npg_scale(scale) {
+    if py_npr_signbit(scale) {
+        stop("ValueError: scale < 0")
+    }
+    return scale
+}
+
+def py_npg_normal(st: [Int], loc, scale) {
+    s = py_npg_scale(scale)
+    return loc + s * py_npg_z(st)
+}
+
+def py_npg_normal_v(st: [Int], loc, scale, n) {
+    s = py_npg_scale(scale)
+    a = zeros(py_size(n))
+    for i to n {
+        a[i] = loc + s * py_npg_z(st)
+    }
+    return a
+}
+
+def py_npg_normal_m(st: [Int], loc, scale, rows, cols) {
+    s = py_npg_scale(scale)
+    A = zeros(py_size(rows), py_size(cols))
+    for i to rows {
+        for j to cols {
+            A[i, j] = loc + s * py_npg_z(st)
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npg_uniform]
+group = "nprandom"
+deps = ["npr_generator", "py_size", "py_npr_signbit"]
+viv = '''
+#| Generator.uniform(low, high): OverflowError when high - low is not finite, ValueError when
+#| it carries a sign bit (both before the size), then low + (high - low) * a double.
+def py_npg_urange(low, high) {
+    r = high - low
+    if not (abs(r) < 1.0 / 0.0) {
+        stop("OverflowError: high - low range exceeds valid bounds")
+    }
+    if py_npr_signbit(r) {
+        stop("ValueError: high - low < 0")
+    }
+    return r
+}
+
+def py_npg_uniform(st: [Int], low, high) {
+    r = py_npg_urange(low, high)
+    return npr_gn_uniform(st, low, r)
+}
+
+def py_npg_uniform_v(st: [Int], low, high, n) {
+    r = py_npg_urange(low, high)
+    a = zeros(py_size(n))
+    for i to n {
+        a[i] = npr_gn_uniform(st, low, r)
+    }
+    return a
+}
+
+def py_npg_uniform_m(st: [Int], low, high, rows, cols) {
+    r = py_npg_urange(low, high)
+    A = zeros(py_size(rows), py_size(cols))
+    for i to rows {
+        for j to cols {
+            A[i, j] = npr_gn_uniform(st, low, r)
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npg_integers]
+group = "nprandom"
+deps = ["npr_generator", "py_size"]
+viv = '''
+#| Generator.integers(low, high, endpoint): low + a Lemire draw in [0, high - low] (high - 1
+#| without the endpoint). An empty size gives an empty array before the bounds are checked.
+def py_npg_irange(low, high, closed) {
+    hi = high
+    if closed == 0 {
+        hi = high - 1
+    }
+    if low > hi {
+        if closed == 1 {
+            if low == 0 {
+                stop("ValueError: high < 0")
+            }
+            stop("ValueError: low > high")
+        }
+        if low == 0 {
+            stop("ValueError: high <= 0")
+        }
+        stop("ValueError: low >= high")
+    }
+    r = hi - low
+    if r >= NPR_TWO53 {
+        stop("py2viv: a random int range of 2^53 or more; a double holds the ints exactly only below it")
+    }
+    return r
+}
+
+def py_npg_integers(st: [Int], low, high, closed) {
+    r = py_npg_irange(low, high, closed)
+    return low + npr_gn_bounded(st, r)
+}
+
+def py_npg_integers_v(st: [Int], low, high, n, closed) {
+    if n == 0 {
+        return zeros(0)
+    }
+    r = py_npg_irange(low, high, closed)
+    a = zeros(py_size(n))
+    for i to n {
+        a[i] = low + npr_gn_bounded(st, r)
+    }
+    return a
+}
+
+def py_npg_integers_m(st: [Int], low, high, rows, cols, closed) {
+    if rows * cols == 0 {
+        return zeros(py_size(rows), py_size(cols))
+    }
+    r = py_npg_irange(low, high, closed)
+    A = zeros(py_size(rows), py_size(cols))
+    for i to rows {
+        for j to cols {
+            A[i, j] = low + npr_gn_bounded(st, r)
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npg_shuffle]
+group = "nprandom"
+deps = ["npr_generator"]
+viv = '''
+#| Generator.shuffle(x) of a vector (or a Python list), and of a matrix's rows, in place; and
+#| Generator.permutation of an int, a vector and a matrix.
+def py_npg_shuffle(st: [Int], a: Arr) {
+    if len(a) > 1 {
+        npr_gn_shuffle(st, a)
+    }
+    return 0
+}
+
+def py_npg_shuffle_rows(st: [Int], A: Arr) {
+    if numel(A) > 0 and shape(A)[0] > 1 {
+        npr_gn_shuffle_rows(st, A)
+    }
+    return 0
+}
+
+def py_npg_perm_n(st: [Int], n) {
+    a = zeros(max(n, 0))
+    for i to len(a) {
+        a[i] = i
+    }
+    py_npg_shuffle(st, a)
+    return a
+}
+
+def py_npg_perm_v(st: [Int], x: Arr) {
+    a = x * 1.0
+    py_npg_shuffle(st, a)
+    return a
+}
+
+def py_npg_perm_m(st: [Int], X: Arr) {
+    rows = shape(X)[0]
+    cols = shape(X)[1]
+    idx = py_npg_perm_n(st, rows)
+    A = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            A[i, j] = X[idx[i], j]
+        }
+    }
+    return A
+}
+'''
+
+[helper.py_npg_choice]
+group = "nprandom"
+deps = ["npr_generator", "py_npr_pcheck", "py_size"]
+viv = '''
+#| Generator.choice's population checks (its messages), and the indices it draws: n of them
+#| (n = 1 for a single draw), with replace and p as np.random.choice, without replacement by
+#| Floyd's algorithm and a shuffle (do_shuffle 1) or a partial shuffle of a large population.
+def py_npg_pop_int(pop, n) {
+    if pop <= 0 and n != 0 {
+        stop("ValueError: a must be a positive integer unless no samples are taken")
+    }
+    return pop
+}
+
+def py_npg_pop_arr(a: Arr, n) {
+    if len(a) == 0 and n != 0 {
+        stop("ValueError: a cannot be empty unless no samples are taken")
+    }
+    return len(a)
+}
+
+def py_npg_choice_idx(st: [Int], pop, n, replace, p: Arr, has_p, do_shuffle) {
+    if has_p == 1 {
+        py_npr_pcheck(p, pop, 1)
+    }
+    if replace == 1 {
+        if has_p == 1 {
+            cdf = npr_lg_cdf(p)
+            u = zeros(py_size(n))
+            for i to n {
+                u[i] = npr_pcg_double(st)
+            }
+            idx = zeros(n)
+            for i to n {
+                idx[i] = npr_lg_search(cdf, u[i])
+            }
+            return idx
+        }
+        idx = zeros(py_size(n))
+        for i to n {
+            idx[i] = npr_gn_bounded(st, pop - 1)
+        }
+        return idx
+    }
+    if n > pop {
+        stop("ValueError: Cannot take a larger sample than population when replace is False")
+    }
+    if n < 0 {
+        stop("ValueError: negative dimensions are not allowed")
+    }
+    if has_p == 1 {
+        py_npr_nonzero_check(p, n)
+        q = p * 1.0
+        found = zeros(n)
+        m = 0
+        while m < n {
+            x = zeros(n - m)
+            for i to len(x) {
+                x[i] = npr_pcg_double(st)
+            }
+            m = py_npr_unique_round(q, found, m, x)
+        }
+        return found
+    }
+    return npr_gn_choice_noreplace(st, pop, n, do_shuffle)
+}
+
+#| Generator.choice(a) of an int a: one index; of n; of a vector a: one entry, n entries.
+def py_npg_choice1(st: [Int], pop, replace, p: Arr, has_p, do_shuffle) {
+    idx = py_npg_choice_idx(st, py_npg_pop_int(pop, 1), 1, replace, p, has_p, do_shuffle)
+    return idx[0]
+}
+
+def py_npg_choice_n(st: [Int], pop, n, replace, p: Arr, has_p, do_shuffle) {
+    return py_npg_choice_idx(st, py_npg_pop_int(pop, n), n, replace, p, has_p, do_shuffle)
+}
+
+def py_npg_choice_a1(st: [Int], a: Arr, replace, p: Arr, has_p, do_shuffle) {
+    idx = py_npg_choice_idx(st, py_npg_pop_arr(a, 1), 1, replace, p, has_p, do_shuffle)
+    return a[idx[0]]
+}
+
+def py_npg_choice_a(st: [Int], a: Arr, n, replace, p: Arr, has_p, do_shuffle) {
+    idx = py_npg_choice_idx(st, py_npg_pop_arr(a, n), n, replace, p, has_p, do_shuffle)
+    out = zeros(len(idx))
+    for i to len(idx) {
+        out[i] = a[idx[i]]
+    }
+    return out
+}
+'''
+
+# ---------------------------------------------------------------- lists (funcs.py)
+#
+# Python's list operations that Viv has no builtin for: a stable sort by keys (sorted with
+# key= or reverse=, list.sort), and the rows and columns it reads.
+
+[helper.py_msort]
+group = "lists"
+viv = '''
+#| The indices p ordered by the keys k[p[i]], stably, as Python's sorted orders its items: by
+#| `<`, equal keys in their order; with rev, descending, and equal keys still in their order
+#| (sorted(..., reverse=True)). A merge sort: every stable sort of the same keys gives the same
+#| order, so this is Python's Timsort's. A NaN key makes `<` inconsistent, and the order then
+#| depends on the algorithm: the run stops.
+def py_msort(k: Arr, p: Arr, rev) {
+    n = len(p)
+    for i to n {
+        if k[p[i]] != k[p[i]] {
+            stop("py2viv: sorting by a NaN (Python's order then depends on its sort algorithm)")
+        }
+    }
+    a = p * 1.0
+    b = zeros(n)
+    w = 1
+    while w < n {
+        lo = 0
+        while lo < n {
+            mid = min(lo + w, n)
+            hi = min(lo + 2 * w, n)
+            i = lo
+            j = mid
+            o = lo
+            while o < hi {
+                right = false
+                if i >= mid {
+                    right = true
+                }
+                else if j < hi {
+                    if rev != 0 {
+                        right = k[a[j]] > k[a[i]]
+                    }
+                    else {
+                        right = k[a[j]] < k[a[i]]
+                    }
+                }
+                if right {
+                    b[o] = a[j]
+                    j += 1
+                }
+                else {
+                    b[o] = a[i]
+                    i += 1
+                }
+                o += 1
+            }
+            lo = hi
+        }
+        t = a
+        a = b
+        b = t
+        w = w * 2
+    }
+    return a
+}
+'''
+
+[helper.py_ncols]
+group = "lists"
+viv = '''
+#| The row length of a list of rows (0 when it has no rows: Viv's empty list is a vector).
+def py_ncols(m: Arr) {
+    s = shape(m)
+    if len(s) < 2 {
+        return 0
+    }
+    return s[1]
+}
+'''
+
+[helper.py_col]
+group = "lists"
+viv = '''
+#| Column j of a matrix, as a vector.
+def py_col(m: Arr, j) {
+    c = zeros(len(m))
+    for i to len(m) {
+        c[i] = m[i, j]
+    }
+    return c
+}
+'''
+
+[helper.py_rowsat]
+group = "lists"
+viv = '''
+#| The rows m[p[0]], m[p[1]], ... of a matrix, as a new matrix (a list of rows in that order).
+def py_rowsat(m: Arr, p: Arr) {
+    if len(p) == 0 {
+        return m * 1.0
+    }
+    w = shape(m)[1]
+    r = zeros(len(p), w)
+    for i to len(p) {
+        for j to w {
+            r[i, j] = m[p[i], j]
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_popk]
+group = "lists"
+viv = '''
+#| The index list.pop(i) removes from a list of n items, as CPython checks it: IndexError on
+#| an empty list, and for an index outside -n..n-1 (a negative one counts from the end).
+def py_popk(n, i) {
+    if n == 0 {
+        stop("{E:pop_empty}")
+    }
+    k = i
+    if k < 0 {
+        k = k + n
+    }
+    if k < 0 or k >= n {
+        stop("{E:pop_index}")
+    }
+    return k
+}
+'''
+
+[helper.py_dropv]
+group = "lists"
+viv = '''
+#| The vector a without its item k (a new array).
+def py_dropv(a: Arr, k) {
+    n = len(a)
+    r = zeros(n - 1)
+    for i to k {
+        r[i] = a[i]
+    }
+    for i from k + 1 to n {
+        r[i - 1] = a[i]
+    }
+    return r
+}
+'''
+
+[helper.py_dropm]
+group = "lists"
+viv = '''
+#| The rows of m without row k (a new matrix; the empty list when none is left).
+def py_dropm(m: Arr, k) {
+    n = len(m)
+    if n == 1 {
+        return []
+    }
+    w = shape(m)[1]
+    r = zeros(n - 1, w)
+    for i to n {
+        if i != k {
+            d = i
+            if i > k {
+                d = i - 1
+            }
+            for j to w {
+                r[d, j] = m[i, j]
+            }
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_insk]
+group = "lists"
+viv = '''
+#| Where list.insert(i, x) puts x in a list of n items: a negative i counts from the end, and
+#| an index past either end is clamped to it (CPython's ins1).
+def py_insk(n, i) {
+    k = i
+    if k < 0 {
+        k = k + n
+        if k < 0 {
+            k = 0
+        }
+    }
+    if k > n {
+        k = n
+    }
+    return k
+}
+'''
+
+[helper.py_insv]
+group = "lists"
+viv = '''
+#| The vector a with x inserted before item k (a new array).
+def py_insv(a: Arr, k, x) {
+    n = len(a)
+    r = zeros(n + 1)
+    for i to k {
+        r[i] = a[i]
+    }
+    r[k] = x
+    for i from k to n {
+        r[i + 1] = a[i]
+    }
+    return r
+}
+'''
+
+[helper.py_insm]
+group = "lists"
+viv = '''
+#| The rows of m with the row x inserted before row k (a new matrix); the rows share one length.
+def py_insm(m: Arr, k, x: Arr) {
+    n = len(m)
+    w = len(x)
+    if n > 0 {
+        if shape(m)[1] != w {
+            stop("py2viv: a list of rows of different lengths; Viv's rows share one length")
+        }
+    }
+    r = zeros(n + 1, w)
+    for i to n + 1 {
+        for j to w {
+            if i < k {
+                r[i, j] = m[i, j]
+            }
+            else if i == k {
+                r[i, j] = x[j]
+            }
+            else {
+                r[i, j] = m[i - 1, j]
+            }
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_findv]
+group = "lists"
+viv = '''
+#| The first k with a[k] == x, or -1. Python's list compares by identity first, so a NaN can be
+#| found in a list only as the very object stored there, which Viv cannot tell: the run stops.
+def py_findv(a: Arr, x) {
+    if x != x {
+        stop("py2viv: looking for a NaN in a list (Python finds it only as the same object)")
+    }
+    for i to len(a) {
+        if a[i] == x {
+            return i
+        }
+    }
+    return -1
+}
+'''
+
+[helper.py_removev]
+group = "lists"
+deps = ["py_findv", "py_dropv"]
+viv = '''
+#| list.remove(x): the vector without its first item equal to x; ValueError when there is none.
+def py_removev(a: Arr, x) {
+    k = py_findv(a, x)
+    if k < 0 {
+        stop("{E:remove_missing}")
+    }
+    return py_dropv(a, k)
+}
+'''
+
+[helper.py_indexv]
+group = "lists"
+deps = ["py_findv"]
+stops = ["ValueError: "]
+viv = '''
+#| list.index(x): the first k with a[k] == x; ValueError (whose message shows x) when there is none.
+def py_indexv(a: Arr, x) {
+    k = py_findv(a, x)
+    if k < 0 {
+        stop("ValueError: ")
+    }
+    return k
+}
+'''
+
+[helper.py_countv]
+group = "lists"
+viv = '''
+#| list.count(x): how many items equal x (a NaN stops the run: Python counts it only as the same
+#| object).
+def py_countv(a: Arr, x) {
+    if x != x {
+        stop("py2viv: counting a NaN in a list (Python counts it only as the same object)")
+    }
+    c = 0
+    for i to len(a) {
+        if a[i] == x {
+            c += 1
+        }
+    }
+    return c
+}
+'''
+
+[helper.py_inlist]
+group = "lists"
+viv = '''
+#| x in a (a Python list): whether an item equals x (a NaN stops the run: Python finds it only as
+#| the same object).
+def py_inlist(a: Arr, x) {
+    if x != x {
+        stop("py2viv: looking for a NaN in a list (Python finds it only as the same object)")
+    }
+    for i to len(a) {
+        if a[i] == x {
+            return true
+        }
+    }
+    return false
+}
+'''
+
+[helper.py_listeq]
+group = "lists"
+deps = ["py_iota"]
+viv = '''
+#| a == b of two Python lists (of numbers, or of rows): the same length and each item equal.
+#| Python compares items by identity first, so a NaN in both at one place is equal only when it is
+#| the same object, which Viv cannot tell: the run stops.
+def py_listeq(a: Arr, b: Arr) {
+    if len(a) != len(b) {
+        return false
+    }
+    if len(a) == 0 {
+        return true
+    }
+    if numel(a) != numel(b) {
+        return false
+    }
+    fa = take(a, py_iota(numel(a)))
+    fb = take(b, py_iota(numel(b)))
+    same = true
+    for i to len(fa) {
+        if fa[i] != fb[i] {
+            if fa[i] != fa[i] and fb[i] != fb[i] {
+                stop("py2viv: comparing lists that hold a NaN at one place (Python compares the objects first)")
+            }
+            same = false
+        }
+    }
+    return same
+}
+'''
+
+[helper.py_revv]
+group = "lists"
+viv = '''
+#| The items of a vector in reverse order (a new array).
+def py_revv(a: Arr) {
+    n = len(a)
+    r = zeros(n)
+    for i to n {
+        r[i] = a[n - 1 - i]
+    }
+    return r
+}
+'''
+
+[helper.py_revm]
+group = "lists"
+viv = '''
+#| The rows of a matrix in reverse order (a new matrix).
+def py_revm(m: Arr) {
+    n = len(m)
+    if n == 0 {
+        return m * 1.0
+    }
+    w = shape(m)[1]
+    r = zeros(n, w)
+    for i to n {
+        for j to w {
+            r[i, j] = m[n - 1 - i, j]
+        }
+    }
+    return r
+}
+'''
+
+[helper.py_setall]
+group = "lists"
+viv = '''
+#| Write b's entries into a, in place (a sorted list replaces its items; every name holding it
+#| sees them).
+def py_setall(a: Arr, b: Arr) {
+    fa = numel(a)
+    if len(shape(a)) == 1 {
+        for i to fa {
+            a[i] = b[i]
+        }
+        return 0
+    }
+    for i to len(a) {
+        for j to shape(a)[1] {
+            a[i, j] = b[i, j]
+        }
+    }
+    return 0
+}
+'''
+
+[helper.py_rslice]
+group = "lists"
+viv = '''
+#| a[lo:hi:st] of a vector with a negative step st: the entries from lo down to (not including)
+#| hi, a new array. The bounds are read as Python's slice.indices reads them for a negative step
+#| (CPython's PySlice_AdjustIndices): a missing lo is the last entry, a missing hi is before the
+#| first, a negative one counts from the end, and one past either end is clamped.
+def py_rslice(a: Arr, has_lo, lo, has_hi, hi, st) {
+    n = len(a)
+    s = n - 1
+    if has_lo != 0 {
+        s = lo
+        if s < 0 {
+            s = s + n
+            if s < 0 {
+                s = -1
+            }
+        }
+        else if s >= n {
+            s = n - 1
+        }
+    }
+    e = -1
+    if has_hi != 0 {
+        e = hi
+        if e < 0 {
+            e = e + n
+            if e < 0 {
+                e = -1
+            }
+        }
+        else if e >= n {
+            e = n - 1
+        }
+    }
+    m = 0
+    if e < s {
+        m = floor((s - e - 1) / (0 - st)) + 1
+    }
+    r = zeros(m)
+    for k to m {
+        r[k] = a[s + k * st]
+    }
+    return r
+}
+'''
+
+# ---------------------------------------------------------------- strings (strs.py, rules/strings.toml)
+
+[helper.py_bstr]
+group = "strings"
+viv = '''
+#| Python's str of a Bool: True or False (Viv's str writes true and false).
+def py_bstr(c) {
+    if c {
+        return "True"
+    }
+    return "False"
+}
+'''
+
+[helper.py_chars]
+group = "strings"
+viv = '''
+#| A string's characters, as a list of strings: Python's list(s).
+def py_chars(s) {
+    out = []
+    for c in s {
+        out = append(out, c)
+    }
+    return out
+}
+'''
+
+[helper.py_keeplines]
+group = "strings"
+viv = '''
+#| The lines of a text file as Python iterates it (open(p), f.readlines()): each with its line
+#| end, the last without one when the text does not end with a newline. read_text has already
+#| made every \r\n and \r a \n, as Python's universal newlines do.
+def py_keeplines(t) {
+    parts = split(t, "\n")
+    out = []
+    n = len(parts)
+    for i to n - 1 {
+        out = append(out, parts[i] + "\n")
+    }
+    if len(parts[n - 1]) > 0 {
+        out = append(out, parts[n - 1])
+    }
+    return out
+}
+'''
+
+[helper.py_ascii_text]
+group = "strings"
+viv = '''
+#| Text read at run time (a file, chr of a computed number) where the Python the program was
+#| translated under has Unicode data other than Viv's (CPython 3.11's): the two agree on ASCII.
+def py_ascii_text(s) {
+    if not isascii(s) {
+        stop("py2viv: text beyond ASCII, translated under a Python whose Unicode data is not Viv's (14.0.0)")
+    }
+    return s
+}
+'''
+
+[helper.py_removeprefix]
+group = "strings"
+viv = '''
+#| Python's str.removeprefix: the string without the prefix when it starts with it.
+def py_removeprefix(s, p) {
+    if startswith(s, p) {
+        return s[len(p):]
+    }
+    return s
+}
+'''
+
+[helper.py_removesuffix]
+group = "strings"
+viv = '''
+#| Python's str.removesuffix: an empty suffix leaves the string as it is.
+def py_removesuffix(s, p) {
+    if len(p) > 0 and endswith(s, p) {
+        return s[:len(s) - len(p)]
+    }
+    return s
+}
+'''
+
+[helper.py_excline]
+group = "strings"
+viv = '''
+#| The last line of the traceback of an exception raised with a message computed at run time:
+#| the type alone when the message is empty, as Python writes it.
+def py_excline(t, m) {
+    if len(m) > 0 {
+        return t + ": " + m
+    }
+    return t
+}
+'''

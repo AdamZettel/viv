@@ -1,0 +1,35 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// /vipyr/map/<function>: the code map of the Viv program behind one vipyr
+// function, full window (components/CodeMap.jsx). The maps are written by
+// `python -m vipyr.docs` (python/vipyr/_codemap.py) from the compiler's
+// `viv graph --map`; src/data/codemap.json is their index.
+import Base from '../../../layouts/Base.astro';
+import CodeMap from '../../../components/CodeMap.jsx';
+import index from '../../../data/codemap.json';
+import vipyr from '../../../data/vipyr.json';
+import explore from '../../../data/explore.json';
+import '../../../styles/codemap.css';
+
+export function getStaticPaths() {
+  return Object.keys(index.functions).map((fn) => ({ params: { fn } }));
+}
+const { fn } = Astro.params as { fn: string };
+const entry = (index.functions as Record<string, any>)[fn];
+const m = (index.maps as Record<string, any>)[entry.map];
+const spec = (vipyr.functions as Record<string, any>)[fn];
+const refHref = spec ? `/vipyr/${spec.family}/${spec.name}` : '/vipyr/api';
+const ex = entry.explore ? (explore as any).programs.find((p: any) => p.slug === entry.explore) : null;
+const from = m.entry === '<main>' ? `the top level of ${m.file}` : `${m.entry} in ${m.file}`;
+---
+
+<Base
+  title={`Map of vp.${fn} · vipyr`}
+  description={`The Viv code behind vp.${fn}: ${m.defs} defs in ${m.modules} modules reached from ${from}, with the calls between them and each def's source.`}
+  icon="/brand/vipyr/vipyr-icon.svg"
+  theme="vipyr"
+  app>
+  <CodeMap client:only="react" fn={fn} mapKey={entry.map} explore={ex ? ex.slug : null} exploreTitle={ex ? ex.title : null} refHref={refHref} />
+  <noscript><p class="cm-empty">The map needs JavaScript. The source is {m.file} on GitHub.</p></noscript>
+</Base>

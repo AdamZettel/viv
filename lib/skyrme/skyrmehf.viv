@@ -1,0 +1,181 @@
+# Skyrme Hartree-Fock of a spherical closed-shell nucleus, as a program with
+# its settings at the top level: the nucleus, the force (one of four, or its
+# ten parameters given one by one), the mesh, and the iteration's mixing,
+# tolerance and limit. It runs lib/skyrme/spherical's solver once and copies
+# what it finds into the globals below the run.
+#
+#     viv run lib/skyrme/skyrmehf.viv
+#     viv export lib/skyrme/skyrmehf.export.toml     (one C file and a Python wrapper)
+#
+# The orbitals are filled by energy, lowest first, across every (n, l, j); a
+# nucleus whose last orbital would be partly filled is refused (the solver
+# has no pairing). Oxygen-16, calcium-40 and -48, nickel-56, zirconium-90,
+# tin-132 and lead-208 are closed in both kinds.
+#
+# The defaults are oxygen-16 with SLy5 on 150 points of 0.1 fm, the
+# settings of lib/skyrme/story_o16.viv and of the post's first mesh
+# (posts/2026-09-25-skyrme-hartree-fock-of-oxygen-16.viv); a run with no
+# settings changed gives lib/skyrme/skyrme's bits, and the post's numpy twin
+# to 1e-7 (tools/export/test_skyrmehf.py checks it).
+from scf.mix import MixDensities, MixHistory, MixStep, broyden, linear, mix_densities, pulay
+from skyrme.spherical import Force, SIII, SKMS, SLY4, SLY5, nucleus_n, nucleus_z, solve_with
+from skyrme.skyrme import NEUTRON, PROTON, particle_number
+
+#: SkyrmeName  the forces the program has
+enum SkyrmeName {
+    Sly4
+    Sly5
+    Siii
+    Skms
+}
+
+#: NUCLEUS  the nucleus: its mass number and element, as "208Pb" (or "Pb208", "pb-208")
+NUCLEUS: Str = "16O"
+#: FORCE  the Skyrme force: SLy4, SLy5, SIII or SkM*; T0 ... J2 below start from its values
+FORCE = SkyrmeName.Sly5
+
+preset = SLY5
+match FORCE {
+    Sly4 => {
+        preset = SLY4
+    }
+    Sly5 => {
+        preset = SLY5
+    }
+    Siii => {
+        preset = SIII
+    }
+    Skms => {
+        preset = SKMS
+    }
+}
+
+# ---- the force's parameters: FORCE's, unless given
+#: T0  the force's t0, MeV fm^3
+T0 = preset.t0
+#: T1  the force's t1, MeV fm^5
+T1 = preset.t1
+#: T2  the force's t2, MeV fm^5
+T2 = preset.t2
+#: T3  the force's t3, MeV fm^(3 + 3 ALPHA)
+T3 = preset.t3
+#: X0  the force's x0, the spin exchange of the t0 term
+X0 = preset.x0
+#: X1  the force's x1, the spin exchange of the t1 term
+X1 = preset.x1
+#: X2  the force's x2, the spin exchange of the t2 term
+X2 = preset.x2
+#: X3  the force's x3, the spin exchange of the t3 term
+X3 = preset.x3
+#: W0  the spin-orbit strength, MeV fm^5
+W0 = preset.w0
+#: ALPHA  the power of the density in the t3 term
+ALPHA = preset.alpha
+#: J2  whether the J^2 terms of t1 and t2 are kept (SLy5 and SIII keep them, SLy4 and SkM* drop them)
+J2 = preset.j2
+
+Z_NUC = nucleus_z(NUCLEUS)
+N_NUC = nucleus_n(NUCLEUS)
+
+# ---- the mesh: r_i = (i + 1) SPACING for i below round(BOX / SPACING)
+#: SPACING  the mesh spacing, fm
+SPACING = 0.1
+#: BOX  the width of the box, fm: the orbitals are zero past it. The default grows with the nucleus: 15 fm, or 1.2 A^(1/3) + 11.5 fm when that is wider (18.6 fm for lead-208)
+BOX = max(15.0, 1.2 * pow(Z_NUC + N_NUC, 1.0 / 3.0) + 11.5)
+
+# ---- the iteration
+#: MIXING  how the next pass's densities are made (lib/scf/mix): pulay, the
+#:     default, and broyden combine the last HISTORY passes; linear keeps MIX
+#:     of the new densities and needs more passes; every runs all three on
+#:     each pass, checks that they see the same residual, and continues with
+#:     pulay's densities (the contract's default)
+MIXING = MixDensities.Pulay
+#: MIX  the fraction of each pass's new densities mixed into the old ones;
+#:     pulay and broyden take this fraction of their combined residual
+MIX = 0.5
+#: HISTORY  how many passes pulay and broyden combine, the current one
+#:     included; pulay and broyden only, ignored by linear
+HISTORY: Int = 6
+#: E_TOL  the iteration stops when the energy changes by less than this between passes, MeV
+E_TOL = 1.0e-9
+#: MAX_ITER  at most this many passes
+MAX_ITER = 300
+
+using mix_densities = MIXING
+settings linear(alpha = MIX)
+settings pulay(alpha = MIX, history = HISTORY)
+settings broyden(alpha = MIX, history = HISTORY)
+
+#: x_in  the densities a pass started from, packed (lib/skyrme/spherical)
+#: x_out  the densities the pass produced
+#: hist  the earlier passes the mixer remembers
+#: x_next  the densities the next pass starts from
+#: hist_next  the history the next call is given
+#: residual  the largest |x_out - x_in|
+#| One mixing step by the method MIXING selects.
+#@ f44d5be6
+def mixer(x_in: Arr, x_out: Arr, hist: MixHistory) -> MixStep {
+    x_next, hist_next, residual = mix_densities(x_in, x_out, hist)
+    return MixStep { x: x_next, hist: hist_next, residual: residual }
+}
+
+hf_force = Force { t0: T0, t1: T1, t2: T2, t3: T3, x0: X0, x1: X1, x2: X2, x3: X3, w0: W0, alpha: ALPHA, j2: J2 }
+hf_res = solve_with(SPACING, round(BOX / SPACING), hf_force, Z_NUC, N_NUC, mixer, E_TOL, MAX_ITER)
+
+# ---- what the run found
+#: Z  the protons
+Z: Int = round(Z_NUC)
+#: N  the neutrons
+N: Int = round(N_NUC)
+#: E_PER_A  the energy per nucleon, MeV
+E_PER_A = hf_res.e_per_a
+#: ENERGY  the total energy, MeV
+ENERGY = hf_res.energy
+#: R_P  the protons' root mean square radius, fm
+R_P = hf_res.r_p
+#: R_N  the neutrons' root mean square radius, fm
+R_N = hf_res.r_n
+#: R_CH  the charge radius: the proton density folded with a Gaussian of range 0.65 fm, fm
+R_CH = hf_res.r_ch
+#: LEVELS  the occupied orbitals' energies, MeV: the neutrons' lowest first, then the protons'
+LEVELS = hf_res.levels
+#: LABELS  the names of LEVELS, comma-separated: "n 1s1/2,n 1p3/2,...,p 1s1/2,..."
+LABELS = hf_res.labels
+#: SPECTRUM  every bound orbital of the converged fields, MeV: the neutrons' lowest first, then the protons'
+SPECTRUM = hf_res.spectrum
+#: SPECTRUM_LABELS  the names of SPECTRUM, comma-separated
+SPECTRUM_LABELS = hf_res.spectrum_labels
+#: SPECTRUM_OCC  the nucleons in each SPECTRUM orbital: 2j + 1 if occupied, else 0
+SPECTRUM_OCC = hf_res.spectrum_occ
+#: ITERATIONS  the passes run
+ITERATIONS = hf_res.iterations
+#: CONVERGED  whether the energy settled to E_TOL within MAX_ITER passes
+CONVERGED = hf_res.converged
+#: REFILLS  the passes after the first in which the occupation was chosen again, because an orbital changed places
+REFILLS = hf_res.refills
+#: MESH  the mesh points, fm
+MESH = hf_res.r
+#: RHO  the number densities, fm^-3, [2, round(BOX / SPACING)]: row 0 neutrons, row 1 protons
+RHO = hf_res.rho
+#: TAU  the kinetic-energy densities, fm^-5, [2, round(BOX / SPACING)]
+TAU = hf_res.tau
+#: JSO  the spin-orbit densities, fm^-4, [2, round(BOX / SPACING)]
+JSO = hf_res.jso
+
+print(NUCLEUS, "Z", Z, "N", N)
+print("E/A (MeV)", E_PER_A)
+print("radii of the protons, the neutrons and the charge (fm)", R_P, R_N, R_CH)
+print("occupied orbitals", LABELS)
+print("their energies (MeV)", LEVELS)
+print("passes", ITERATIONS, "converged", CONVERGED)
+
+test "the energy settled to E_TOL within MAX_ITER passes" {
+    assert_true(CONVERGED)
+}
+test "the densities hold N neutrons and Z protons" {
+    assert_near(particle_number(RHO, NEUTRON, MESH, SPACING), N, 1.0e-9 * N)
+    assert_near(particle_number(RHO, PROTON, MESH, SPACING), Z, 1.0e-9 * Z)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

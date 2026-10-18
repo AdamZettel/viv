@@ -1,0 +1,108 @@
+###
+Translated from lj.py by py2viv 0.2.0 (numeric Python -> Viv).
+Python source sha256: 29c5c7b86e6401d1105545f61e98e530145deb7a8a44b8dc2a86ae10c3acab40
+Each print(...) is one print(...) line; fmt(x) writes a float as Python's repr does.
+A `raise`, a failed assert and every guard `stop` with Python's exception line.
+###
+
+#| An int result, as Python's int: a -0.0 becomes 0 (an int has no sign on zero), and the run
+#| stops at 2^53, past which a double no longer holds every integer (Python's int does).
+def py_int(x) {
+    if abs(x) >= 9007199254740992 {
+        stop("py2viv: an integer reached 2^53; Python's int is exact there and a double is not")
+    }
+    return x + 0.0
+}
+
+#| a / b with a float: ZeroDivisionError on a zero divisor.
+def py_div_f(a, b) {
+    if b == 0 {
+        stop("ZeroDivisionError: float division by zero")
+    }
+    return a / b
+}
+
+#| a ** b with a float, as CPython's float_pow: ZeroDivisionError for 0.0 to a negative
+#| power, OverflowError when a finite pair overflows; a negative base to a fractional power
+#| (a complex number in Python) stops.
+def py_fpow(a, b) {
+    if a == 0 and b < 0 {
+        stop("ZeroDivisionError: 0.0 cannot be raised to a negative power")
+    }
+    if a < 0 and abs(a) < 1.0 / 0.0 and floor(b) != b and abs(b) < 1.0 / 0.0 {
+        stop("py2viv: a negative number to a fractional power is a complex number in Python")
+    }
+    r = a ^ b
+    if abs(r) == 1.0 / 0.0 and abs(a) < 1.0 / 0.0 and abs(b) < 1.0 / 0.0 {
+        stop("OverflowError: (34, 'Result too large')")
+    }
+    return r
+}
+
+#| An array size, as NumPy takes it: ValueError for a negative one (Viv would make an empty
+#| array).
+def py_size(n) {
+    if n < 0 {
+        stop("ValueError: negative dimensions are not allowed")
+    }
+    return n
+}
+
+# Lennard-Jones energy of 4096 atoms on a simple cubic lattice: 8,386,560 pairs.
+# 
+# A Lennard-Jones kernel: scalar indexing into an
+# (n, 3) NumPy array, a double loop over pairs, reduced units (epsilon = sigma = 1),
+# no cutoff. Every operation is +, -, * or /, so CPython and every Viv engine
+# round identically and the energy must agree to the last bit.
+def lj_energy(pos: Arr, n) {
+    e = 0.0
+    for i to n {
+        xi = pos[i, 0]
+        yi = pos[i, 1]
+        zi = pos[i, 2]
+        for j from py_int(i + 1) to n {
+            dx = xi - pos[j, 0]
+            dy = yi - pos[j, 1]
+            dz = zi - pos[j, 2]
+            r2 = dx * dx + dy * dy + dz * dz
+            s6 = py_div_f(1.0, r2 * r2 * r2)
+            e += 4.0 * (s6 * s6 - s6)
+        }
+    }
+    return e
+}
+n_side = 16
+spacing = 1.1
+n = py_int(py_int(n_side * n_side) * n_side)
+pos = zeros(py_size(n), 3)
+p = 0
+for ix to n_side {
+    for iy to n_side {
+        for iz to n_side {
+            pos[p, 0] = ix * spacing
+            pos[p, 1] = iy * spacing
+            pos[p, 2] = iz * spacing
+            p = py_int(p + 1)
+        }
+    }
+}
+energy = lj_energy(pos, n)
+print(fmt(energy))
+
+def py_test_test_two_atoms_at_the_minimum() {
+    r = py_fpow(2.0, 1.0 / 6.0)
+    two = zeros(2, 3)
+    two[1, 0] = r
+    if not (abs(lj_energy(two, 2) - -1.0) < 1e-12) {
+        assert_true(false)
+        return 0
+    }
+    assert_true(true)
+    return 0
+}
+test "test_two_atoms_at_the_minimum" {
+    py_test_test_two_atoms_at_the_minimum()
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

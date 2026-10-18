@@ -1,0 +1,106 @@
+###
+title: Spectral derivatives beat every power of N
+line: The spectral error is below $10^{-12}$ by $N = 32$; the central difference falls like $h^2$ and is above $10^{-4}$ at $N = 128$.
+claim: For the periodic function $e^{\sin x}$ on $N$ equally spaced points, the Fourier (spectral) derivative's largest error falls faster than any power of $N$, below $10^{-12}$ by $N = 32$, while the second-order central difference's error falls only like $h^2$ (by a factor between 3.9 and 4.1 each time $N$ doubles from 32 to 128) and is still above $10^{-4}$ at $N = 128$.
+topic: math
+section: approximation
+reference: The exact derivative $\cos x \, e^{\sin x}$; Trefethen, Spectral Methods in MATLAB (2000), chapters 3 and 4 (the spectral derivative of an analytic periodic function converges geometrically).
+scope: The spectral derivative is computed by a direct discrete Fourier transform ($O(N^2)$, no FFT) with the Nyquist mode set to zero; one function, analytic in a strip. A function with a jump or a kink converges only algebraically by either method.
+lane: ai
+by: claude
+cost: fast
+###
+
+#: pi
+PI_K = 4.0 * atan(1.0)
+SIZES = [8, 16, 32, 64, 128]
+
+def f(x: Num) -> Num {
+    return exp(sin(x))
+}
+
+def df(x: Num) -> Num {
+    return cos(x) * exp(sin(x))
+}
+
+#| The largest error of the spectral derivative on n points: transform, multiply mode k by i k, transform back.
+def spectral_error(n: Int) -> Num {
+    h = 2.0 * PI_K / n
+    re = zeros(n)
+    im = zeros(n)
+    for k to n {
+        for j to n {
+            re[k] = re[k] + f(j * h) * cos(k * j * h)
+            im[k] = im[k] - f(j * h) * sin(k * j * h)
+        }
+    }
+    worst = 0.0
+    for j to n {
+        d = 0.0
+        for k to n {
+            #: the wavenumber of mode k: k below n / 2, k - n above, the Nyquist mode dropped
+            w = 0.0
+            if 2 * k < n {
+                w = k * 1.0
+            }
+            if 2 * k > n {
+                w = k - n * 1.0
+            }
+            #: Re of (i w)(re + i im) e^(i w x)
+            c = cos(k * j * h)
+            s = sin(k * j * h)
+            d = d + w * (-im[k] * c - re[k] * s)
+        }
+        worst = max(worst, abs(d / n - df(j * h)))
+    }
+    return worst
+}
+
+#| The largest error of the central difference (f(x + h) - f(x - h)) / (2 h) on n points.
+def fd_error(n: Int) -> Num {
+    h = 2.0 * PI_K / n
+    worst = 0.0
+    for j to n {
+        worst = max(worst, abs((f((j + 1) * h) - f((j - 1) * h)) / (2.0 * h) - df(j * h)))
+    }
+    return worst
+}
+
+n_sizes: Int = len(SIZES)
+err_spectral = zeros(n_sizes)
+err_fd = zeros(n_sizes)
+for k to n_sizes {
+    err_spectral[k] = spectral_error(int(SIZES[k]))
+    err_fd[k] = fd_error(int(SIZES[k]))
+}
+show err_spectral
+show err_fd
+spectral_at_32 = err_spectral[2]
+fd_at_128 = err_fd[4]
+show spectral_at_32
+show fd_at_128
+
+#: the figure: both errors against N
+figure("Derivative error for exp(sin x)", "grid points N", "largest error")
+xscale("log")
+yscale("log")
+plot(SIZES * 1.0, err_fd, "central difference")
+style("central difference", "s2 square")
+plot(SIZES * 1.0, err_spectral, "spectral (Fourier)")
+style("spectral (Fourier)", "s1 circle")
+
+test "the spectral derivative's error is below 1e-12 by N = 32" {
+    assert_lt(spectral_at_32, 1.0e-12)
+}
+test "the central difference's error falls by 3.9 to 4.1 per doubling from 32 to 128" {
+    for k from 2 to n_sizes - 1 {
+        assert_gt(err_fd[k] / err_fd[k + 1], 3.9)
+        assert_lt(err_fd[k] / err_fd[k + 1], 4.1)
+    }
+}
+test "and is still above 1e-4 at N = 128" {
+    assert_gt(fd_at_128, 1.0e-4)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

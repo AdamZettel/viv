@@ -1,0 +1,30 @@
+kernel def blur(u: Arr, v: Arr) {
+    i = block_id() * block_size() + thread_id()
+    n = len(u)
+    if i < n {
+        if i == 0 or i == n - 1 {
+            v[i] = u[i]
+        }
+        else {
+            v[i] = 0.25 * u[i - 1] + 0.5 * u[i] + 0.25 * u[i + 1]
+        }
+    }
+}
+
+STEPS: Int = 3
+u = [0.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0]
+v = copy(u)
+on device u, v {
+    for s to STEPS {
+        v = blur(u, v)
+        u, v = v, u
+    }
+}
+show u
+show device_transfers()
+test "two arrays in, two out, one launch per step" {
+    assert_allclose(device_transfers(), [2.0, 2.0, STEPS], 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,139 @@
+###
+Translated from driver.py by py2viv 0.2.0 (numeric Python -> Viv).
+Python source sha256: 82fff4192afc29d0eed3e10d6e0e733e3eb2388cb5f8b64ed24c1d6b6b2f83c1
+Each print(...) is one print(...) line; fmt(x) writes a float as Python's repr does.
+A `raise`, a failed assert and every guard `stop` with Python's exception line.
+###
+
+#| 0, 1, ..., n - 1.
+def py_iota(n) {
+    a = zeros(n)
+    for i to n {
+        a[i] = i
+    }
+    return a
+}
+
+#| Every entry of a real array, row-major, as a vector (a copy).
+def py_flat(a: Arr) {
+    return take(a, py_iota(numel(a)))
+}
+
+#| An int result, as Python's int: a -0.0 becomes 0 (an int has no sign on zero), and the run
+#| stops at 2^53, past which a double no longer holds every integer (Python's int does).
+def py_int(x) {
+    if abs(x) >= 9007199254740992 {
+        stop("py2viv: an integer reached 2^53; Python's int is exact there and a double is not")
+    }
+    return x + 0.0
+}
+
+#| a ** b with a float, as CPython's float_pow: ZeroDivisionError for 0.0 to a negative
+#| power, OverflowError when a finite pair overflows; a negative base to a fractional power
+#| (a complex number in Python) stops.
+def py_fpow(a, b) {
+    if a == 0 and b < 0 {
+        stop("ZeroDivisionError: 0.0 cannot be raised to a negative power")
+    }
+    if a < 0 and abs(a) < 1.0 / 0.0 and floor(b) != b and abs(b) < 1.0 / 0.0 {
+        stop("py2viv: a negative number to a fractional power is a complex number in Python")
+    }
+    r = a ^ b
+    if abs(r) == 1.0 / 0.0 and abs(a) < 1.0 / 0.0 and abs(b) < 1.0 / 0.0 {
+        stop("OverflowError: (34, 'Result too large')")
+    }
+    return r
+}
+
+#| NumPy's pairwise sum of f[lo], ..., f[lo + n - 1] (numpy/core/src/umath/loops_utils.h):
+#| below 8 terms left to right from 0; to 128, eight running sums combined as a tree, then
+#| the rest; above, the two halves (the first a multiple of 8 long) summed apart.
+def py_pw(f: Arr, lo, n) {
+    if n < 8 {
+        s = 0.0
+        for i to n {
+            s += f[lo + i]
+        }
+        return s
+    }
+    if n <= 128 {
+        r = zeros(8)
+        for j to 8 {
+            r[j] = f[lo + j]
+        }
+        i = 8
+        while i < n - n % 8 {
+            for j to 8 {
+                r[j] += f[lo + i + j]
+            }
+            i += 8
+        }
+        s = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+        while i < n {
+            s += f[lo + i]
+            i += 1
+        }
+        return s
+    }
+    n2 = floor(n / 2)
+    n2 = n2 - n2 % 8
+    return py_pw(f, lo, n2) + py_pw(f, lo + n2, n - n2)
+}
+
+#| NumPy's sum of f[lo], ..., f[lo + n - 1] along one axis: from 0.0, a pairwise sum of each
+#| block of NumPy's buffer size (8192 entries), added in order.
+def py_blk(f: Arr, lo, n) {
+    bufsize = 8192
+    s = 0.0
+    b = 0
+    while b < n {
+        s = s + py_pw(f, lo + b, min(bufsize, n - b))
+        b += bufsize
+    }
+    return s
+}
+
+#| np.sum(a), a.sum() of a float array: NumPy's sum over the entries in row-major order (py_blk).
+def py_npsum(a: Arr) {
+    f = py_flat(a)
+    return py_blk(f, 0, len(f))
+}
+
+#| a ^ y of an array: through this def, whose parameter is typed an array (Viv types `a ^ y`
+#| of an array a def returned as a number).
+def py_apow(a: Arr, y) {
+    return a ^ y
+}
+
+#setup: import numpy as np ; np.random.seed(0); N = 100000 ; a = np.random.random(N); b = 0.1; c =1.1
+#run: log_likelihood(a, b, c)
+#from: http://arogozhnikov.github.io/2015/09/08/SpeedBenchmarks.html
+#pythran export log_likelihood(float64[], float64, float64)
+def log_likelihood(data: Arr, mean, sigma) {
+    s = py_apow(data - mean, 2) / (2 * py_fpow(sigma, 2))
+    pdfs = exp(-1.0 * s)
+    pdfs /= sqrt(2 * 3.141592653589793) * sigma
+    return py_npsum(log(pdfs))
+}
+# ---- harness ----
+py_s2 = split(read_text("in0.txt"))
+py_l1 = zeros(len(py_s2))
+for py_i3 to len(py_s2) {
+    py_t4 = py_s2[py_i3]
+    py_l1[py_i3] = float(py_t4)
+}
+_a0 = py_l1
+_s1 = float(read_text("s1.txt"))
+_s2 = float(read_text("s2.txt"))
+reps = py_int(int(read_text("reps.txt")))
+res = log_likelihood(_a0, _s1, _s2)
+print(fmt(res))
+_chk = 0.0
+for _i to reps {
+    res = log_likelihood(_a0, _s1, _s2)
+    _chk = _chk + res
+}
+print(fmt(_chk))
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

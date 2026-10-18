@@ -1,0 +1,117 @@
+module lib/hf/jk_direct
+  Direct J and K: the members of the J/K stage that recompute the electron
+  repulsion integrals from the basis each time instead of reading stored
+  ones. The production member screens shell quartets by the Schwarz bound
+  and by the density; the second screens by the Schwarz bound only and
+  checks the first.
+
+int_jk_is_direct  @c3b8369d
+  why   A direct run hands the SCF the basis blob instead of packed
+        integrals, whichever direct member it picks; the pipeline asks this
+        in one place.
+  k     the J/K member number
+
+int_basis_blob  @c629c54a
+  why   The SCF drivers pass one integral array to every J/K member. The direct
+        members need the whole basis instead, so the basis travels as one flat
+        array in that slot. The Schwarz factors of the shell pairs depend on
+        the basis only, so they are computed here, once per run, instead of
+        at every J/K build.
+  atoms      the atoms table
+  shells     the shells table
+  prims      the primitives table
+  M          the Cartesian-to-spherical matrix, `[nao_cart, nao_sph]`; read only for a spherical basis
+  spherical  `1` for a spherical basis, `0` for Cartesian
+  natm       how many atoms
+  nsh        how many shells
+  npr        how many primitives
+  atw        the atoms table's row width
+  shw        the shells table's row width
+  prw        the primitives table's row width
+  nc         how many Cartesian basis functions
+  ns         how many spherical basis functions, `0` for a Cartesian basis
+  sph        `1` for a spherical basis, so the Schwarz factors are those of spherical quartets
+  Q          the Schwarz factor of each pair of the store
+  npair      how many pairs
+  b          the blob: the counts and the row widths, then atoms, shells, primitives, M and Q
+  k          the next free position in b
+
+  = ns#2  a spherical basis also carries M, so its size goes into the header
+  = Q     the Schwarz factors, computed once with the blob
+  = b     room for the header and every table
+  = k     the tables start after the header
+  = b#11  the atoms table, row by row; shells, primitives and M follow the same way, then Q
+
+int_blob_pack  @60676db1
+  why   int_blob_basis and the fuzz tests read the atoms, shells, primitives
+        and M back out of a blob with it.
+  b     the blob
+  k0    where the table starts in it
+  rows  the table's rows
+  cols  the table's columns
+  P     the table
+  k     the next position to read
+  r     the row being read
+  c     the column being read
+
+int_blob_basis  @3fee6987
+  why   Both direct members read the same tables out of the blob; the record
+        names them.
+  b       the blob
+  natm    how many atoms
+  nsh     how many shells
+  npr     how many primitives
+  nc      how many Cartesian functions
+  ns      how many spherical functions; `0` means the basis is Cartesian
+  npair   how many shell pairs Q covers
+  k       the position in the blob of the next table
+  atoms   the atoms table
+  shells  the shells table
+  prims   the primitives table
+  sph     `1` for a spherical basis
+  M       the Cartesian-to-spherical matrix, `[nc, ns]`, or a placeholder
+
+int_dens_cart  @0b6db683
+  why   The integrals are computed over Cartesian functions, so a spherical
+        density is moved there first: `Tr(D M^T X M) = Tr((M D M^T) X)`.
+  B     the basis read from the blob
+  D     the densities, `[nd, ns, ns]`
+  nd    how many densities
+  nc    how many Cartesian functions
+  Dc    the densities over Cartesian functions, `M D M^T`
+  d     a density
+
+int_jk_run  @5b6946ee
+  why   J and K built over Cartesian functions go back to the run's
+        functions, `M^T J M`.
+  B     the basis read from the blob
+  R     J and K over Cartesian functions, `[2 nd, nc, nc]`
+  ns    how many spherical functions
+  out   J and K in spherical functions, `[2 nd, ns, ns]`
+  r     a J or K matrix
+
+int_jk_direct  @ef1933d1
+  why   It lets the SCF run without storing any ERIs: J and K come from
+        integrals recomputed each iteration on the generated kernels
+        (lib/hf/mdg_eri), in the run's functions, screened by
+        the density as PySCF's direct SCF screens, and the member fits the
+        same registry as the in-core ones, so the same loop and the same
+        cross-check serve both
+        [test "direct J/K agrees with the in-core members, Cartesian and spherical"].
+  X1    not read
+  X2    the basis blob of int_basis_blob
+  X3    not read
+  D     the densities, `[nd, ns, ns]` in the run's basis functions
+  opts  the run's options: the Schwarz and the density thresholds
+  B     the basis read from the blob
+
+int_jk_direct_full  @e2125d5f
+  why   The direct build that skips only what the Schwarz bound allows, the
+        path the production member replaced; the registry runs it beside
+        the others on small cases.
+  X1    not read
+  X2    the basis blob of int_basis_blob
+  X3    not read
+  D     the densities, `[nd, ns, ns]` in the run's basis functions
+  opts  the run's options: the Schwarz threshold
+  B     the basis read from the blob

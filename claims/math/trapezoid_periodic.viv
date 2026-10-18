@@ -1,0 +1,75 @@
+###
+title: The trapezoid rule is spectrally accurate on periodic functions
+line: 16 points give $\int e^{\cos t}\,dt$ to $10^{-14}$, while $e^{x}$ on $[0, 1]$ is off by $3.3 \times 10^{-4}$.
+claim: With 16 points the trapezoid rule integrates the periodic $e^{\cos t}$ over a full period to a relative error below $10^{-14}$, while on the non-periodic $e^{x}$ over $[0, 1]$ its relative error is about $3.3 \times 10^{-4}$ and falls only like $h^2$ (by a factor between 3.9 and 4.1 per halving of $h$).
+topic: math
+section: quadrature
+reference: The integral of $e^{\cos t}$ over $[0, 2\pi]$ is $2\pi I_0(1)$ with $I_0(1) = 1.2660658777520082$ (Abramowitz and Stegun 9.8.1 tables); the integral of $e^{x}$ over $[0, 1]$ is $e - 1$. Trefethen and Weideman, "The exponentially convergent trapezoidal rule", SIAM Review 56 (2014) 385-458.
+scope: Two integrands; the exponential convergence needs the integrand smooth and periodic over the interval.
+lane: ai
+by: claude
+cost: fast
+###
+
+#: pi
+PI_K = 4.0 * atan(1.0)
+N_POINTS: Int = 16
+I0_OF_1 = 1.2660658777520082
+
+def trap_periodic(n: Int) -> Num {
+    s = 0.0
+    for k to n {
+        s = s + exp(cos(2.0 * PI_K * k / n))
+    }
+    return s * 2.0 * PI_K / n
+}
+
+def trap_exp(n: Int) -> Num {
+    h = 1.0 / n
+    s = 0.5 * (exp(0.0) + exp(1.0))
+    for k from 1 to n {
+        s = s + exp(k * h)
+    }
+    return s * h
+}
+
+exact_periodic = 2.0 * PI_K * I0_OF_1
+exact_exp = exp(1.0) - 1.0
+rel_err_periodic = abs(trap_periodic(N_POINTS) - exact_periodic) / exact_periodic
+rel_err_exp = abs(trap_exp(N_POINTS) - exact_exp) / exact_exp
+halving_factor = abs(trap_exp(N_POINTS) - exact_exp) / abs(trap_exp(2 * N_POINTS) - exact_exp)
+show rel_err_periodic
+show rel_err_exp
+show halving_factor
+
+#: the figure: relative error against the number of points for both integrands
+N_SWEEP: Int = 16
+fg_n = zeros(N_SWEEP)
+fg_per = zeros(N_SWEEP)
+fg_exp = zeros(N_SWEEP)
+for fg_k to N_SWEEP {
+    fg_m: Int = 2 * (fg_k + 1)
+    fg_n[fg_k] = fg_m * 1.0
+    fg_per[fg_k] = abs(trap_periodic(fg_m) - exact_periodic) / exact_periodic
+    fg_exp[fg_k] = abs(trap_exp(fg_m) - exact_exp) / exact_exp
+}
+figure("Trapezoid rule error", "points", "relative error")
+yscale("log")
+plot(fg_n, fg_exp, "exp(x) on [0, 1]")
+style("exp(x) on [0, 1]", "s2 square")
+plot(fg_n, fg_per, "exp(cos t) over a period")
+style("exp(cos t) over a period", "s1 circle")
+
+test "the periodic integrand: relative error below 1e-14 with 16 points" {
+    assert_lt(rel_err_periodic, 1.0e-14)
+}
+test "exp over [0, 1]: relative error about 3.3e-4" {
+    assert_near(rel_err_exp, 3.3e-4, 0.05e-4)
+}
+test "halving h divides the error by between 3.9 and 4.1" {
+    assert_gt(halving_factor, 3.9)
+    assert_lt(halving_factor, 4.1)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

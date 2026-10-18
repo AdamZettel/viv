@@ -1,0 +1,45 @@
+#! timing
+# PolyBench/C 4.2.1 gramschmidt: the QR factorization A = Q R by modified
+# Gram-Schmidt, one column of Q at a time.
+# Reference: upstream/polybench-c-4.2.1/linear-algebra/solvers/gramschmidt/gramschmidt.c
+# The sizes are the MINI dataset; the harness gives the others with --set.
+M = 20
+N = 30
+DUMP = 1
+
+from polybench import dump
+
+def init() {
+    return [[(((i * j) % M) / M) * 100 + 10 for j to N] for i to M]
+}
+
+# Column k of Q is column k of A normalized; row k of R is that column's
+# projection on the columns to its right, which are then made orthogonal to it.
+def kernel(A) {
+    Q = zeros(M, N)
+    R = zeros(N, N)
+    for k to N {
+        a = A[:, k]
+        R[k, k] = sqrt(dot(a, a))
+        Q[:, k] = a / R[k, k]
+        if k + 1 < N {
+            q = Q[:, k]
+            R[k, k + 1:N] = q @ A[:, k + 1:N]
+            A[:, k + 1:N] = A[:, k + 1:N] - outer(q, R[k, k + 1:N])
+        }
+    }
+    return R, Q
+}
+
+A = init()
+t0 = clock()
+R, Q = kernel(A)
+t1 = clock()
+print("time", fmt(t1 - t0))
+if DUMP == 1 {
+    dump("R", R)
+    dump("Q", Q)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

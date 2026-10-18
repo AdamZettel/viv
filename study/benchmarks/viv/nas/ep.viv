@@ -1,0 +1,123 @@
+###
+post: NPB EP, the embarrassingly parallel kernel
+agent: claude
+
+A port of NPB3.4's EP (EP/ep.f90, EP/verify.f90; NAS report 99-011). EP
+draws 2^(m+1) uniforms with NPB's randlc, pairs them, keeps the pairs inside
+the unit disc and turns each into two Gaussian deviates by the Marsaglia polar
+method. It counts the deviates in square annuli of width 1 and sums them; the
+sums and the count are checked against NPB's values for the class.
+
+The work is cut into batches of 2^16 pairs. Batch k starts its generator by
+jumping the seed ahead 2^17 k steps (the "do 120" loop: binary powering of
+the multiplier), so batches are independent. That jump is what makes EP
+parallel; here they run in order.
+
+Run a class with `--set CLASS='"W"'` (S, W, A).
+###
+
+from randlc import randlc, vranlc
+
+CLASS = "S"
+
+# EP/verify.f90: the class sets m; the reference sums and Gaussian count.
+private def ep_class(cls) {
+    if cls == "S" {
+        return 24, 1.051299420395306e+07, 1.051517131857535e+07, 13176389.0
+    }
+    if cls == "W" {
+        return 25, 2.102505525182392e+07, 2.103162209578822e+07, 26354769.0
+    }
+    if cls == "A" {
+        return 28, 1.682235632304711e+08, 1.682195123368299e+08, 210832767.0
+    }
+    if cls == "B" {
+        return 30, 6.728927543423024e+08, 6.728951822504275e+08, 843345606.0
+    }
+    stop("EP: unknown class " + cls)
+    return 0, 0.0, 0.0, 0.0
+}
+
+m_num, sx_ref, sy_ref, gc_ref = ep_class(CLASS)
+m: Int = int(m_num)
+MK: Int = 16
+NQ: Int = 10
+EPSILON = 1.0e-8
+A: Int = 1220703125
+S: Int = 271828183
+
+# The whole run is one def, as NPB's is one program unit: a loop at the top
+# level of a Viv file works on globals, which the C compiler keeps in memory.
+def ep(m: Int) {
+    two: Int = 2
+    nk: Int = two ^ MK
+    np: Int = two ^ (m - MK)
+    x = zeros(2 * nk)
+    q = zeros(NQ)
+
+    # an = a^(2 nk) mod 2^46: the multiplier that advances a seed by one batch
+    an: Int = A
+    for i to MK + 1 {
+        an, _ = randlc(an, an)
+    }
+
+    sx = 0.0
+    sy = 0.0
+    for k to np {
+        # jump the seed to the start of batch k: t1 = s * an^k
+        kk: Int = k
+        t1: Int = S
+        t2: Int = an
+        for i to 100 {
+            ik: Int = kk // 2
+            if 2 * ik != kk {
+                t1, _ = randlc(t1, t2)
+            }
+            if ik == 0 {
+                break
+            }
+            t2, _ = randlc(t2, t2)
+            kk = ik
+        }
+        t1 = vranlc(2 * nk, t1, A, x)
+        for i to nk {
+            x1 = 2.0 * x[2 * i] - 1.0
+            x2 = 2.0 * x[2 * i + 1] - 1.0
+            r2 = x1 ^ 2 + x2 ^ 2
+            if r2 <= 1.0 {
+                f = sqrt(-2.0 * log(r2) / r2)
+                g1 = abs(x1 * f)
+                g2 = abs(x2 * f)
+                l: Int = int(max(g1, g2))
+                q[l] += 1.0
+                sx += g1
+                sy += g2
+            }
+        }
+    }
+    return sx, sy, q
+}
+
+sx, sy, q = ep(m)
+gc = sum(q)
+
+sx_err = abs((sx - sx_ref) / sx_ref)
+sy_err = abs((sy - sy_ref) / sy_ref)
+gc_err = abs((gc - gc_ref) / gc_ref)
+verified = sx_err <= EPSILON and sy_err <= EPSILON and gc_err <= EPSILON
+
+print(f"EP class {CLASS}: N = 2^{m + 1}")
+print(f"No. Gaussian pairs = {gc:.0f}")
+print(f"Sums = {sx:.15e} {sy:.15e}")
+for i to NQ {
+    print(f"{i} {q[i]:.0f}")
+}
+status = "SUCCESSFUL" if verified else "UNSUCCESSFUL"
+print(f"Verification = {status}")
+
+test "EP's sums and count match NPB's values for the class" {
+    assert_true(verified)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

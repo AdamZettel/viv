@@ -1,0 +1,99 @@
+#! timing
+###
+title: Sparse Newton power flow time grows like $n^{1.2}$ to $n^{1.4}$
+line: Up to 2,383 buses Newton converges in at most 6 iterations, and its solve time grows with the bus count at a fitted log-log slope between 1.0 and 1.6.
+claim: On six MATPOWER cases from 9 to 2,383 buses, Newton-Raphson power flow with Viv's sparse LU converges in at most 6 iterations, and from 118 to 2,383 buses its solve time grows with the bus count at a log-log slope between 1.0 and 1.6.
+topic: power
+section: power flow
+reference: MATPOWER 7 case files (lib/power/cases); iteration counts equal those of PYPOWER 5.1.21's runpf and of the SciPy/SuperLU power flow in lib/power/oracle/pf_scipy.py (lib/power/COMPARISON.md).
+scope: Times are wall-clock on one machine under load, best of several runs, so only the slope is claimed, not milliseconds. MATPOWER's case9241pegase (17,036 Jacobian rows) is solved by the same Newton code in 6 iterations in lib/power/COMPARISON.md but is not shipped in the repository, so it is not part of this claim. Nothing is claimed about ill-conditioned or non-converging cases.
+lane: ai
+by: claude
+cost: heavy
+agree: 1e-12
+related: /vipyr/power/runpf, lib/power/pf.viv, lib/power/splu.viv
+###
+
+from power.case import Case, read_case
+from power.pf import NR, runpf
+
+CASES = ["case9", "case14", "case30", "case118", "case300", "case2383wp"]
+REPS: Int = 5
+TOL = 1.0e-8
+MAX_IT: Int = 10
+#: the slope is fitted from this bus count up, where the fixed costs no longer dominate
+FIT_FROM: Int = 118
+
+#| The fastest of `REPS` Newton solves of case `c`, in seconds, and its result.
+def time_newton(c: Case) {
+    best = 1.0e30
+    r = runpf(c, NR, false, TOL, MAX_IT)
+    for k to REPS {
+        t0 = clock()
+        r = runpf(c, NR, false, TOL, MAX_IT)
+        best = min(best, clock() - t0)
+    }
+    return best, r
+}
+
+#| The least-squares slope of log y against log x.
+def loglog_slope(x: Arr, y: Arr) -> Num {
+    lx = log(x)
+    ly = log(y)
+    mx = mean(lx)
+    my = mean(ly)
+    return sum((lx - mx) * (ly - my)) / sum((lx - mx) * (lx - mx))
+}
+
+ncase: Int = len(CASES)
+buses = zeros(ncase)
+iters = int_zeros(ncase)
+converged = 0
+t_sparse = zeros(ncase)
+for ci to ncase {
+    pcase = read_case("lib/power/cases/" + CASES[ci] + ".m")
+    t_nr, pf_res = time_newton(pcase)
+    buses[ci] = shape(pcase.bus)[0]
+    iters[ci] = pf_res.iterations
+    if pf_res.success {
+        converged = converged + 1
+    }
+    t_sparse[ci] = t_nr
+    print(CASES[ci] + ".iterations: " + str(pf_res.iterations))
+}
+
+#: the bus counts and times of the cases from FIT_FROM buses up
+fit_n = []
+fit_sparse = []
+for ci to ncase {
+    if buses[ci] >= FIT_FROM {
+        fit_n = append(fit_n, buses[ci])
+        fit_sparse = append(fit_sparse, t_sparse[ci])
+    }
+}
+time_slope_sparse = loglog_slope(fit_n, fit_sparse)
+show time_slope_sparse
+max_iterations: Int = max(iters)
+show max_iterations
+min_buses = min(buses)
+max_buses = max(buses)
+show min_buses
+show max_buses
+#: the figure: wall time of the sparse Newton solve against bus count
+figure("Newton power flow time against grid size", "buses", "time (s)")
+xscale("log")
+yscale("log")
+plot(buses, t_sparse, "whole sparse Newton solve")
+style("whole sparse Newton solve", "s1 circle")
+
+test "Newton converges on every case in at most 6 iterations" {
+    assert_near(converged, ncase, 0.0)
+    assert_true(max_iterations <= 6)
+}
+test "the sparse Newton solve's time grows with a log-log slope between 1.0 and 1.6" {
+    assert_gt(time_slope_sparse, 1.0)
+    assert_lt(time_slope_sparse, 1.6)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

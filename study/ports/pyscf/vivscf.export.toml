@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# study/ports/pyscf/vivscf.export.toml -- the manifest of `viv export` for
+# vivscf.viv.
+#
+#     viv export study/ports/pyscf/vivscf.export.toml -o dist/vivscf
+#
+# writes vivscf.c, vivscf.h, vivscf.py, README.md, test_vivscf.py and
+# cases.json. vivscf.run(...) takes the parameters below by keyword and
+# returns the results below as a dict; study/ports/pyscf/test_vivscf_vs_pyscf.py
+# (VIVSCF_BACKEND=export) holds it to PySCF 2.5.0 for every case of port.toml,
+# and tools/export/check.py holds it to the native build and the interpreter
+# bit for bit (vivscf.exact_hashes.json).
+
+name = "vivscf"
+about = "study/ports/pyscf/vivscf.viv"      # the opening paragraph of its ### block
+files = ["study/ports/pyscf/vivscf.viv"]
+# the 11 cases of port.toml at the verification settings, by name
+cases = "study/ports/pyscf/vivscf.cases.json"
+# no [decks]: the program is its own deck. Its top-level assignments are the
+# defaults (water, STO-3G, RHF), so it has no `material` parameter.
+
+[params]
+# Each key is a top-level global of vivscf.viv, assigned once, before any
+# read; an omitted parameter keeps the program's value. The `#:` line above
+# the assignments is its help text.
+
+# atomic numbers; the basis tables cover H to Ar
+atoms = { type = "[Int]", min = 1, max = 18 }
+# positions, angstrom: one row per atom
+coords = { type = "Arr", shape = ["atoms", 3] }
+# enums declared in the program; the labels are the names users type, which
+# are not Viv identifiers. Python reads a basis name as PySCF does.
+basis = { type = "BasisSet", labels = { "sto-3g" = "Sto3g", "6-31g" = "Pople631g", "6-31g*" = "Pople631gs", "cc-pvdz" = "CcPvdz", "cc-pvtz" = "CcPvtz" }, normalize = "pyscf_basis" }
+charge = { type = "Int", min = -18, max = 18 }
+# 2S; RHF with spin != 0, a spin of the wrong parity, or more unpaired
+# electrons than electrons stops with the program's message
+spin = { type = "Int", min = 0 }
+method = { type = "Method", labels = { "rhf" = "Rhf", "uhf" = "Uhf" }, normalize = "lower" }
+jk = { type = "JkMode", labels = { "auto" = "Auto", "incore" = "Incore", "direct" = "Direct" }, normalize = "lower" }
+
+# convergence (port.toml [verify] sets e_tol 1e-12, grad_tol 1e-9)
+e_tol = { type = "Num", min = 0.0 }
+grad_tol = { type = "Num", min = 0.0 }
+max_iter = { type = "Int", min = 1 }
+diis_size = { type = "Int", min = 1 }
+diis_start = { type = "Int", min = 0 }
+
+# print_arrays is not a parameter: it prints the arrays for the native adapter
+# (vivscf_native.py); an export run returns them as results.
+
+[groups]
+# the defaults are one molecule: atoms without coords is an error, not water's coords
+geometry = ["atoms", "coords"]
+
+[results]
+e_tot = "Num"
+e_nuc = "Num"
+converged = "Bool"
+iterations = "Int"
+# PySCF's shapes: rhf gives mo_energy [nmo], mo_coeff [nao, nmo] and dm
+# [nao, nao] (the total density); uhf gives [2, nmo], [2, nao, nmo] and
+# [2, nao, nao] (alpha, beta). nmo = nao unless canonical orthogonalization
+# drops a near-dependent combination.
+mo_energy = { type = "Arr", rank = { by = "method", rhf = 1, uhf = 2 } }
+mo_coeff = { type = "Arr", rank = { by = "method", rhf = 2, uhf = 3 } }
+dm = { type = "Arr", rank = { by = "method", rhf = 2, uhf = 3 } }
+
+[reference]
+program = "PySCF 2.5.0, run live by study/ports/pyscf/test_vivscf_vs_pyscf.py (VIVSCF_BACKEND=export)"
+cases = "study/ports/pyscf/port.toml, the 11 cases"
+energy_tol = "1e-10 hartree, |E - E_PySCF|"
+mo_energy_tol = "1e-8 hartree, each orbital energy"

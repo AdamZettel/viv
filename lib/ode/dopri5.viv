@@ -1,0 +1,227 @@
+###
+post: Dormand and Prince's explicit 5(4) pair
+agent: claude
+
+Seven stages give a fifth-order solution and an embedded fourth-order one;
+their difference estimates the local error, and the step is accepted when
+that error, weighted by atol + rtol |y|, has RMS norm below 1. The seventh
+stage is evaluated at the new point, so it is the next step's first stage
+("first same as last"): six evaluations per step.
+
+The step controller is the elementary one SciPy's RK45 uses: the next step
+is h (0.9 / err)^(1/5), changed by at most a factor 10 up and 5 down, and
+not grown right after a rejection. The dense output is Hairer's
+fifth-order continuous extension, from the stages already computed.
+
+Each accepted step also estimates h |lambda|, the step times the stiffest
+eigenvalue the stages saw (Hairer's test, Solving ODEs II, IV.2): 15 steps
+in a row with h |lambda| above 3.25 mark the problem stiff, which `method =
+AUTO` uses to change to Radau IIA.
+
+J. R. Dormand and P. J. Prince, A family of embedded Runge-Kutta formulae,
+Journal of Computational and Applied Mathematics 6, 19-26 (1980), doi:10.1016/0771-050X(80)90013-3.
+###
+
+from ode.core import (
+    Dense, OdeCfg, OdeState, DOPRI5, MAX_FACTOR, MIN_FACTOR, NOT_FINITE, SAFETY, STEP_TOO_SMALL,
+    all_finite, min_step_at,
+)
+
+# the nodes
+C2 = 1.0 / 5.0
+C3 = 3.0 / 10.0
+C4 = 4.0 / 5.0
+C5 = 8.0 / 9.0
+# the stage weights a_ij
+A21 = 1.0 / 5.0
+A31 = 3.0 / 40.0
+A32 = 9.0 / 40.0
+A41 = 44.0 / 45.0
+A42 = -56.0 / 15.0
+A43 = 32.0 / 9.0
+A51 = 19372.0 / 6561.0
+A52 = -25360.0 / 2187.0
+A53 = 64448.0 / 6561.0
+A54 = -212.0 / 729.0
+A61 = 9017.0 / 3168.0
+A62 = -355.0 / 33.0
+A63 = 46732.0 / 5247.0
+A64 = 49.0 / 176.0
+A65 = -5103.0 / 18656.0
+# the fifth-order weights (also row 7 of the tableau)
+B1 = 35.0 / 384.0
+B3 = 500.0 / 1113.0
+B4 = 125.0 / 192.0
+B5 = -2187.0 / 6784.0
+B6 = 11.0 / 84.0
+# fifth-order minus fourth-order weights: the error estimate
+E1 = -71.0 / 57600.0
+E3 = 71.0 / 16695.0
+E4 = -71.0 / 1920.0
+E5 = 17253.0 / 339200.0
+E6 = -22.0 / 525.0
+E7 = 1.0 / 40.0
+# the dense output's fifth-order correction (Hairer's d_i)
+D1 = -12715105075.0 / 11282082432.0
+D3 = 87487479700.0 / 32700410799.0
+D4 = -10690763975.0 / 1880347072.0
+D5 = 701980252875.0 / 199316789632.0
+D6 = -1453857185.0 / 822651844.0
+D7 = 69997945.0 / 29380423.0
+# the controller's exponent, -1 / (order of the error estimate + 1)
+ERR_EXPONENT = -1.0 / 5.0
+# rhs evaluations per step (the seventh is reused)
+STAGE_EVALS: Int = 6
+# the dense output's coefficient rows
+DENSE_ROWS = 5
+# the stiffness test: h |lambda| above this bound, this many steps in a row
+STIFF_BOUND = 3.25
+STIFF_STEPS: Int = 15
+# this many non-stiff steps in a row forget a stiff run
+NONSTIFF_RESET: Int = 6
+
+#| One accepted Dormand-Prince step from s, retrying with smaller steps
+#| until the error test passes. Returns the state at the new point, with its
+#| dense output; status STEP_TOO_SMALL when the step underflows.
+def dopri_step(f, s0: OdeState, c: OdeCfg, p: Arr) -> OdeState {
+    s = s0
+    t = s.t
+    y = s.y
+    k1 = s.fy
+    n = len(y)
+    min_step = min_step_at(t)
+    h_abs = min(s.h_abs, c.max_step)
+    if h_abs < min_step {
+        h_abs = min_step
+    }
+    rejected = false
+    accepted = false
+    h_next = h_abs
+    while not accepted {
+        if h_abs < min_step {
+            s.status = STEP_TOO_SMALL
+            return s
+        }
+        t_new = t + h_abs * s.dir
+        if s.dir * (t_new - c.t_bound) > 0.0 {
+            t_new = c.t_bound
+        }
+        h = t_new - t
+        h_abs = abs(h)
+        #: the six new stages (element loops: no temporary arrays in the hot path)
+        yt = zeros(n)
+        for i to n {
+            yt[i] = y[i] + h * (A21 * k1[i])
+        }
+        k2 = f(t + C2 * h, yt, p)
+        for i to n {
+            yt[i] = y[i] + h * (A31 * k1[i] + A32 * k2[i])
+        }
+        k3 = f(t + C3 * h, yt, p)
+        for i to n {
+            yt[i] = y[i] + h * (A41 * k1[i] + A42 * k2[i] + A43 * k3[i])
+        }
+        k4 = f(t + C4 * h, yt, p)
+        for i to n {
+            yt[i] = y[i] + h * (A51 * k1[i] + A52 * k2[i] + A53 * k3[i] + A54 * k4[i])
+        }
+        k5 = f(t + C5 * h, yt, p)
+        y6 = zeros(n)
+        for i to n {
+            y6[i] = y[i] + h * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] + A65 * k5[i])
+        }
+        k6 = f(t + h, y6, p)
+        y_new = zeros(n)
+        for i to n {
+            y_new[i] = y[i] + h * (B1 * k1[i] + B3 * k3[i] + B4 * k4[i] + B5 * k5[i] + B6 * k6[i])
+        }
+        k7 = f(t + h, y_new, p)
+        s.nfev += STAGE_EVALS
+        if not all_finite(y_new) {
+            s.status = NOT_FINITE
+            return s
+        }
+        #: the error test, in the weighted RMS norm
+        acc = 0.0
+        for i to n {
+            e = h * (E1 * k1[i] + E3 * k3[i] + E4 * k4[i] + E5 * k5[i] + E6 * k6[i] + E7 * k7[i])
+            w = e / (c.atol[i] + max(abs(y[i]), abs(y_new[i])) * c.rtol)
+            acc += w * w
+        }
+        err_norm = sqrt(acc / n)
+        if err_norm < 1.0 {
+            factor = MAX_FACTOR
+            if err_norm > 0.0 {
+                factor = min(MAX_FACTOR, SAFETY * pow(err_norm, ERR_EXPONENT))
+            }
+            if rejected {
+                factor = min(1.0, factor)
+            }
+            h_next = h_abs * factor
+            accepted = true
+            #: Hairer's stiffness estimate: h |lambda| ~ h |k7 - k6| / |y_new - y6|
+            num2 = 0.0
+            den2 = 0.0
+            for i to n {
+                num2 += (k7[i] - k6[i]) * (k7[i] - k6[i])
+                den2 += (y_new[i] - y6[i]) * (y_new[i] - y6[i])
+            }
+            if den2 > 0.0 {
+                hlamb = abs(h) * sqrt(num2 / den2)
+                if hlamb > STIFF_BOUND {
+                    s.nonstiff_count = 0
+                    s.stiff_count += 1
+                    if s.stiff_count >= STIFF_STEPS {
+                        s.stiff = true
+                    }
+                }
+                else {
+                    s.nonstiff_count += 1
+                    if s.nonstiff_count >= NONSTIFF_RESET {
+                        s.stiff_count = 0
+                    }
+                }
+            }
+            #: the dense output's coefficients
+            Q = zeros(DENSE_ROWS, n)
+            for i to n {
+                ydiff = y_new[i] - y[i]
+                bspl = h * k1[i] - ydiff
+                Q[0, i] = y[i]
+                Q[1, i] = ydiff
+                Q[2, i] = bspl
+                Q[3, i] = ydiff - h * k7[i] - bspl
+                Q[4, i] = h * (D1 * k1[i] + D3 * k3[i] + D4 * k4[i] + D5 * k5[i] + D6 * k6[i] + D7 * k7[i])
+            }
+            s.dense = Dense { kind: DOPRI5, t_old: t, t_new: t_new, h: h, Q: Q, y_old: y, order: 0 }
+            s.has_dense = true
+            s.t = t_new
+            s.y = y_new
+            s.fy = k7
+        }
+        else {
+            h_abs = h_abs * max(MIN_FACTOR, SAFETY * pow(err_norm, ERR_EXPONENT))
+            rejected = true
+            s.nreject += 1
+        }
+    }
+    s.h_abs = h_next
+    s.naccept += 1
+    return s
+}
+
+test "the tableau is consistent: rows sum to the nodes, the weights to 1" {
+    assert_near(A21, C2, 1.0e-16)
+    assert_near(A31 + A32, C3, 1.0e-16)
+    assert_near(A41 + A42 + A43, C4, 1.0e-15)
+    assert_near(A51 + A52 + A53 + A54, C5, 1.0e-14)
+    assert_near(A61 + A62 + A63 + A64 + A65, 1.0, 1.0e-14)
+    assert_near(B1 + B3 + B4 + B5 + B6, 1.0, 1.0e-15)
+    # the embedded fourth-order weights also sum to 1, so the error weights sum to 0
+    assert_near(E1 + E3 + E4 + E5 + E6 + E7, 0.0, 1.0e-16)
+    # the fifth-order weights integrate t^4 exactly: sum b_i c_i^4 = 1/5
+    assert_near(B3 * pow(C3, 4.0) + B4 * pow(C4, 4.0) + B5 * pow(C5, 4.0) + B6, 0.2, 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

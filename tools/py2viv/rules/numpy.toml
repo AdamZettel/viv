@@ -1,0 +1,2574 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors
+# NumPy (and the math functions NumPy shares): py2viv's translation rules (format: ../RULES.md).
+#
+# Tried after builtins.toml. Within a name, rules are tried in file order; a pattern with `*`
+# only refuses, and is tried after every rule spelled out for that name has declined. The
+# evidence cites SUBSET.md's "What is exact" and the differential runs in ../results/
+# (mapping.py unless another file is named); every rule's `tests` feed its generated
+# differential test (check_rules.py).
+#
+# Parameters carry NumPy's names where NumPy accepts them as keywords (np.zeros(shape, dtype),
+# np.roll(a, shift, axis)), and are positional-only (`/`) for NumPy's ufuncs, which take no
+# keywords for their operands. An argument no parameter takes is refused (RULES.md, "Binding").
+#
+# The result's type follows NumPy's dtype: an int array stays an int array where NumPy keeps
+# int64 (np.abs, np.maximum, np.cumsum, ...), and becomes float where NumPy's ufunc gives
+# float64 (np.sqrt, np.floor, np.hypot, ...). A Bool array into a ufunc (float16 in NumPy) and
+# an integer power or remainder (wrap-around, 0 for a zero divisor) are refused.
+
+# ---------------------------------------------------------------- constructors
+
+[[rule]]
+id = "np.array"
+match = "np.array(object, dtype=None)"
+params = { dtype = "dtype" }
+exactness = "exact"
+evidence = "mapping.py:51 np.array of a comprehension: bitwise; a literal or a copy"
+cases = [
+  { eval = [] },
+  { keywords = ["dtype"], refuse = "{name}(..., {kw}=)", hint = "Drop it." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64', 'complex', 'np.complex128']", refuse = "dtype={dtype}", hint = "Viv arrays hold float64 (or complex); NumPy would round or wrap the entries to this dtype." },
+  { if = "object.syntax in ['List', 'Tuple', 'ListComp'] and dtype in ['complex', 'np.complex128'] and object.kind != 'carr'", refuse = "np.array(..., dtype=complex) of real numbers", hint = "Write the entries as complex numbers (1.0 + 0j)." },
+  { if = "object.syntax in ['List', 'Tuple', 'ListComp'] and dtype in ['complex', 'np.complex128']", viv = "{object}", type = "T('carr', object.rank, 'complex', 'nd')", prec = "object.prec" },
+  { if = "object.syntax in ['List', 'Tuple', 'ListComp'] and dtype in ['int', 'np.int64'] and object.py != 'int'", refuse = "np.array(..., dtype=int) of floats", hint = "NumPy truncates each entry; write the ints." },
+  { if = "object.syntax in ['List', 'Tuple', 'ListComp'] and object.kind == 'carr' and dtype != None", refuse = "np.array(..., dtype={dtype}) of complex numbers", hint = "NumPy discards the imaginary parts (with a warning); take .real." },
+  { if = "object.syntax in ['List', 'Tuple', 'ListComp'] and object.kind == 'carr'", viv = "{object}", type = "T('carr', object.rank, 'complex', 'nd')", prec = "object.prec" },
+  { if = "object.syntax in ['List', 'Tuple', 'ListComp']", viv = "{object}", type = "T('arr', object.rank, 'float' if dtype in ['float', 'np.float64'] else ('int' if dtype in ['int', 'np.int64'] else object.py), 'nd')", prec = "object.prec" },
+  { if = "not object.arr", refuse = "{name} of {object.words}", hint = "Pass an array." },
+  { if = "object.kind == 'carr'", refuse = "copying a complex array", hint = "Allocate czeros(n) and copy in a loop." },
+  { if = "dtype in ['complex', 'np.complex128']", refuse = "np.array(a, dtype=complex) of a real array", hint = "Allocate czeros(n) and copy in a loop." },
+  { if = "dtype in ['int', 'np.int64'] and object.py not in ['int', 'bool']", refuse = "np.array(a, dtype=int) of {object.words} of floats", hint = "NumPy truncates each entry toward zero; convert them in a loop with int(...)." },
+  { use = ["py_copy"], viv = "py_copy({object})", type = "T('arr', object.rank, 'float' if dtype in ['float', 'np.float64'] else ('int' if dtype in ['int', 'np.int64'] else object.py), 'nd')" },
+]
+tests = [{ object = [[1.0, 2.0], [3.0, 4.0]] }, { object = [1, 2, 3] }, { object = [1, 2, 3], dtype = "float" }, { object = [1.5, 2.5], dtype = "float" }]
+
+[[rule]]
+id = "np.asarray"
+match = "np.asarray(a, dtype=None)"
+params = { dtype = "dtype" }
+exactness = "exact"
+evidence = "the same array (NumPy returns its argument when it is an array of that dtype), or a copy of a list"
+cases = [
+  { eval = [] },
+  { keywords = ["dtype"], refuse = "{name}(..., {kw}=)", hint = "Drop it." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64']", refuse = "dtype={dtype}", hint = "Viv arrays hold float64 (or complex); NumPy would round or wrap the entries to this dtype." },
+  { if = "a.syntax in ['List', 'Tuple', 'ListComp'] and dtype in ['int', 'np.int64'] and a.py != 'int'", refuse = "np.asarray(..., dtype=int) of floats", hint = "NumPy truncates each entry; write the ints." },
+  { if = "a.syntax in ['List', 'Tuple', 'ListComp'] and a.kind == 'carr' and dtype != None", refuse = "np.asarray(..., dtype={dtype}) of complex numbers", hint = "NumPy discards the imaginary parts (with a warning); take .real." },
+  { if = "a.syntax in ['List', 'Tuple', 'ListComp'] and a.kind == 'carr'", viv = "{a}", type = "T('carr', a.rank, 'complex', 'nd')", prec = "a.prec" },
+  { if = "a.syntax in ['List', 'Tuple', 'ListComp']", viv = "{a}", type = "T('arr', a.rank, 'float' if dtype in ['float', 'np.float64'] else ('int' if dtype in ['int', 'np.int64'] else a.py), 'nd')", prec = "a.prec" },
+  { if = "not a.arr", refuse = "{name} of {a.words}", hint = "Pass an array." },
+  { if = "a.kind == 'carr' and dtype == None and a.container == 'nd'", viv = "{a}", type = "a", prec = "a.prec" },
+  { if = "a.kind == 'carr'", refuse = "copying a complex array", hint = "Allocate czeros(n) and copy in a loop." },
+  { if = "dtype in ['int', 'np.int64'] and a.py not in ['int', 'bool']", refuse = "np.asarray(a, dtype=int) of {a.words} of floats", hint = "NumPy truncates each entry toward zero; convert them in a loop with int(...)." },
+  { if = "a.container == 'nd' and (dtype == None or (dtype in ['float', 'np.float64'] and a.py == 'float') or (dtype in ['int', 'np.int64'] and a.py == 'int'))", viv = "{a}", type = "a", prec = "a.prec" },
+  { use = ["py_copy"], viv = "py_copy({a})", type = "T('arr', a.rank, 'float' if dtype in ['float', 'np.float64'] else ('int' if dtype in ['int', 'np.int64'] else a.py), 'nd')" },
+]
+tests = [{ a = [[1.0, 2.0], [3.0, 4.0]] }, { a = [1, 2, 3] }, { a = [1, 2, 3], dtype = "float" }]
+
+[[rule]]
+id = "np.zeros"
+match = ["np.zeros(shape, dtype=None)", "np.empty(shape, dtype=None)"]
+params = { shape = "shape", dtype = "dtype" }
+exactness = "exact"
+evidence = "mapping.py:18 np.zeros(3), np.zeros((2, 2)): bitwise"
+note = "np.empty is zeros, which NumPy's uninitialized memory is allowed to be."
+cases = [
+  { eval = ["shape"] },
+  { keywords = ["dtype"], refuse = "{name}(..., {kw}=)", hint = "Drop it." },
+  { if = "not shape.dims_int", refuse = "{name} of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "dtype in ['complex', 'np.complex128'] and shape.ndims > 4", refuse = "an array of rank {shape.ndims}", hint = "Viv arrays have rank 1 to 4." },
+  { if = "dtype in ['complex', 'np.complex128']", viv = "czeros({sizes(shape)})", type = "T('carr', shape.ndims, 'complex', 'nd')" },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64', 'bool', 'np.bool_']", refuse = "dtype={dtype}", hint = "Viv arrays hold float64 (or complex)." },
+  { if = "shape.ndims > 4", refuse = "an array of rank {shape.ndims}", hint = "Viv arrays have rank 1 to 4." },
+  { viv = "zeros({sizes(shape)})", type = "T('arr', shape.ndims, 'int' if dtype in ['int', 'np.int64'] else ('bool' if dtype in ['bool', 'np.bool_'] else 'float'), 'nd')" },
+]
+tests = [{ shape = 3 }, { shape = [2, 2] }, { shape = 3, dtype = "int" }, { shape = 2, dtype = "complex" }]
+
+[[rule]]
+id = "np.ones"
+match = "np.ones(shape, dtype=None)"
+params = { shape = "shape", dtype = "dtype" }
+exactness = "exact"
+evidence = "mapping.py:19 np.ones(3): bitwise"
+cases = [
+  { eval = ["shape"] },
+  { keywords = ["dtype"], refuse = "{name}(..., {kw}=)", hint = "Drop it." },
+  { if = "not shape.dims_int", refuse = "{name} of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "dtype in ['complex', 'np.complex128']", refuse = "a complex {name}", hint = "Use np.zeros(n, dtype=complex) and fill it." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64', 'bool', 'np.bool_']", refuse = "dtype={dtype}", hint = "Viv arrays hold float64 (or complex)." },
+  { if = "shape.ndims > 4", refuse = "an array of rank {shape.ndims}", hint = "Viv arrays have rank 1 to 4." },
+  { viv = "zeros({sizes(shape)}) + 1.0", prec = "60", type = "T('arr', shape.ndims, 'int' if dtype in ['int', 'np.int64'] else ('bool' if dtype in ['bool', 'np.bool_'] else 'float'), 'nd')" },
+]
+tests = [{ shape = 3 }, { shape = [2, 3] }, { shape = 2, dtype = "int" }]
+
+[[rule]]
+id = "np.full"
+match = "np.full(shape, fill_value, dtype=None)"
+params = { shape = "shape", dtype = "dtype" }
+exactness = "exact"
+evidence = "mapping.py:19 np.full(3, 2.5), np.full((2, 2), -1.0): bitwise; fill keeps the sign of a zero"
+cases = [
+  { eval = ["shape"] },
+  { keywords = ["dtype", "fill_value"], refuse = "{name}(..., {kw}=)", hint = "Drop it." },
+  { if = "not shape.dims_int", refuse = "{name} of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "dtype in ['complex', 'np.complex128']", refuse = "a complex {name}", hint = "Use np.zeros(n, dtype=complex) and fill it." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64', 'bool', 'np.bool_']", refuse = "dtype={dtype}", hint = "Viv arrays hold float64 (or complex)." },
+  { if = "shape.ndims > 4", refuse = "an array of rank {shape.ndims}", hint = "Viv arrays have rank 1 to 4." },
+  { eval = ["fill_value"] },
+  { if = "not fill_value.scalar or fill_value.kind == 'cnum'", refuse = "{name} with a fill value that is {fill_value.words}", hint = "Fill with a real number." },
+  { if = "dtype in ['int', 'np.int64'] and fill_value.py != 'int'", refuse = "{name}(..., dtype=int) of a fill value that is not an int", hint = "NumPy truncates it; pass an int." },
+  { if = "dtype in ['bool', 'np.bool_'] and fill_value.kind != 'bool'", refuse = "{name}(..., dtype=bool) of a number", hint = "Fill with True or False." },
+  { if = "fill_value.kind == 'bool'", use = ["py_b01"] },
+  { if = "shape.ndims == 1", use = ["py_full"], viv = "py_full({sizes(shape)}, {'py_b01(' + fill_value.code + ')' if fill_value.kind == 'bool' else fill_value.code})", type = "T('arr', shape.ndims, 'int' if dtype in ['int', 'np.int64'] else ('bool' if dtype in ['bool', 'np.bool_'] else ('float' if dtype != None else fill_value.py)), 'nd')" },
+  { if = "shape.ndims == 2", use = ["py_full2"], viv = "py_full2({sizes(shape)}, {'py_b01(' + fill_value.code + ')' if fill_value.kind == 'bool' else fill_value.code})", type = "T('arr', shape.ndims, 'int' if dtype in ['int', 'np.int64'] else ('bool' if dtype in ['bool', 'np.bool_'] else ('float' if dtype != None else fill_value.py)), 'nd')" },
+  { refuse = "np.full of rank {shape.ndims}", hint = "Allocate np.zeros and fill it." },
+]
+tests = [{ shape = 3, fill_value = 2.5 }, { shape = [2, 2], fill_value = -1.0 }, { shape = 3, fill_value = 2 }, { shape = 2, fill_value = true }]
+
+[[rule]]
+id = "np.zeros_like"
+match = ["np.zeros_like(x, /)", "np.empty_like(x, /)"]
+exactness = "exact"
+evidence = "mapping.py:23 np.zeros_like(M): bitwise"
+cases = [
+  { if = "not x.arr", refuse = "{name} of {x.words}", hint = "Pass an array." },
+  { if = "nkw > 0", refuse = "{name} with keywords", hint = "Drop them." },
+  { if = "x.kind == 'carr'", viv = "czeros({dims_like(x)})", type = "x" },
+  { viv = "zeros({dims_like(x)})", type = "T('arr', x.rank, x.py, 'nd')" },
+]
+tests = [{ x = [[1.0, 2.0], [3.0, 4.0]] }, { x = [1, 2, 3] }]
+
+[[rule]]
+id = "np.ones_like"
+match = "np.ones_like(x, /)"
+exactness = "exact"
+evidence = "mapping.py:23 np.ones_like(v): bitwise"
+cases = [
+  { if = "not x.arr", refuse = "{name} of {x.words}", hint = "Pass an array." },
+  { if = "nkw > 0", refuse = "{name} with keywords", hint = "Drop them." },
+  { if = "x.kind == 'carr'", use = ["py_cfillin"], viv = "py_cfillin(czeros({dims_like(x)}), 1.0)", type = "x" },
+  { viv = "zeros({dims_like(x)}) + 1.0", prec = "60", type = "T('arr', x.rank, x.py, 'nd')" },
+]
+tests = [{ x = [3.0, -1.0, 2.5] }, { x = [1, 2, 3] }, { x = ["1+1j", "2-0.5j"] }]
+
+[[rule]]
+id = "np.full_like"
+match = "np.full_like(x, v, /)"
+exactness = "exact"
+evidence = "mapping.py:23 np.full_like(v, 4.0): bitwise; fill keeps the sign of a zero"
+cases = [
+  { eval = ["x"] },
+  { if = "not x.arr", refuse = "{name} of {x.words}", hint = "Pass an array." },
+  { if = "nkw > 0", refuse = "{name} with keywords", hint = "Drop them." },
+  { eval = ["v"] },
+  { if = "not v.scalar", refuse = "{name} with a fill value that is {v.words}", hint = "Fill with a number." },
+  { if = "x.kind == 'carr'", use = ["py_cfillin"], viv = "py_cfillin(czeros({dims_like(x)}), {v})", type = "x" },
+  { if = "v.kind == 'cnum'", refuse = "{name} of a real array with a complex value", hint = "NumPy discards the imaginary part (with a warning); take .real." },
+  { if = "x.py == 'int' and v.py != 'int'", refuse = "{name} of an int array with a value that is not an int", hint = "NumPy truncates the value to the array's int dtype; pass an int." },
+  { if = "x.py == 'bool' and v.kind != 'bool'", refuse = "{name} of a Bool array with a number", hint = "Fill with True or False." },
+  { if = "v.kind == 'bool'", use = ["py_b01"] },
+  { use = ["py_fillin"], viv = "py_fillin(zeros({dims_like(x)}), {'py_b01(' + v.code + ')' if v.kind == 'bool' else v.code})", type = "T('arr', x.rank, x.py, 'nd')" },
+]
+tests = [{ x = [3.0, -1.0, 2.5], v = 4.0 }, { x = [1, 2], v = 7 }, { x = [3.0, -1.0], v = -0.0 }, { x = ["1+1j", "2-0.5j"], v = 2.5 }]
+
+[[rule]]
+id = "np.linspace"
+match = "np.linspace(start, stop, num=50)"
+exactness = "exact"
+evidence = "mapping.py:21 x = np.linspace(-1.5, 2.0, 8): bitwise; py_linspace is NumPy 1.24's formula (k * step + start, the last entry stop, one entry for num = 1)"
+cases = [
+  { if = "len(extra_kws) > 0", refuse = "linspace with {extra_kws[0]}=", hint = "Only linspace(start, stop, num) is in the subset (endpoint=False: np.arange)." },
+  { eval = ["start", "stop", "num"] },
+  { if = "not (start.kind == 'num' and stop.kind == 'num')", refuse = "np.linspace from {start.words} to {stop.words}", hint = "Only real numbers for start and stop." },
+  { if = "num.kind != 'num' or num.py != 'int'", refuse = "np.linspace with a count that is not an int", hint = "NumPy raises TypeError; pass an int." },
+  { use = ["py_linspace"], viv = "py_linspace({start}, {stop}, {num})", type = "arr(1)" },
+]
+tests = [{ start = -1.5, stop = 2.0, num = 8 }, { start = 0.0, stop = 1.0, num = 11 }, { start = 0, stop = 1, num = 1 }]
+
+[[rule]]
+id = "np.arange"
+match = "np.arange(a, b=None, c=None, /, dtype=None)"
+params = { dtype = "dtype" }
+exactness = "exact"
+evidence = "mapping.py:20 np.arange(5), (1.0, 2.0, 0.25), (10, 0, -3): bitwise; py_arange fills as NumPy does, start + k * delta with delta = (start + step) - start"
+cases = [
+  { if = "len(extra_kws) > 0", refuse = "arange with keywords", hint = "Pass start, stop, step positionally." },
+  { eval = ["a", "b", "c"] },
+  { if = "not (a.kind == 'num' and (b.kind == 'num' or not b.given) and (c.kind == 'num' or not c.given))", refuse = "np.arange of something other than real numbers", hint = "Pass start, stop and step as numbers." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64']", refuse = "np.arange(..., dtype={dtype})", hint = "Only float and int." },
+  { if = "dtype in ['int', 'np.int64'] and not all_int(a, b, c)", refuse = "np.arange(..., dtype=int) of floats", hint = "NumPy computes the length in floats and the entries in ints; pass ints." },
+  { if = "not b.given", use = ["py_arange"], viv = "py_arange(0, {a}, 1)", type = "arr(1, 'float' if dtype in ['float', 'np.float64'] else ('int' if all_int(a) else 'float'))" },
+  { if = "not c.given", use = ["py_arange"], viv = "py_arange({a}, {b}, 1)", type = "arr(1, 'float' if dtype in ['float', 'np.float64'] else ('int' if all_int(a, b) else 'float'))" },
+  { use = ["py_arange"], viv = "py_arange({a}, {b}, {c})", type = "arr(1, 'float' if dtype in ['float', 'np.float64'] else ('int' if all_int(a, b, c) else 'float'))" },
+]
+tests = [{ a = 5 }, { a = 1.0, b = 2.0, c = 0.25 }, { a = 10, b = 0, c = -3 }, { a = 4, dtype = "float" }]
+
+[[rule]]
+id = "np.eye"
+match = "np.eye(N, M=None, k=0, dtype=None)"
+params = { dtype = "dtype" }
+exactness = "exact"
+evidence = "mapping.py:22 np.eye(3), np.eye(3, k=1): bitwise; the builtin eye(n, m, k), checked against NumPy in tools/arrays/numpy_cases.py"
+cases = [
+  { keywords = ["k", "dtype", "M"], refuse = "np.eye(..., {kw}=)", hint = "Drop it." },
+  { eval = ["N", "M", "k"] },
+  { if = "N.kind != 'num' or N.py != 'int' or k.kind != 'num' or k.py != 'int'", refuse = "np.eye of a size or offset that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "M.given and not (M.syntax == 'Constant' and M.lit == None) and (M.kind != 'num' or M.py != 'int')", refuse = "np.eye of a size or offset that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64']", refuse = "np.eye(..., dtype={dtype})", hint = "Only float and int." },
+  { if = "M.given and not (M.syntax == 'Constant' and M.lit == None)", viv = "eye({size(N)}, {size(M)}, {k})", type = "arr(2, 'int' if dtype in ['int', 'np.int64'] else 'float')" },
+  { viv = "eye({size(N)}, {size(N)}, {k})", type = "arr(2, 'int' if dtype in ['int', 'np.int64'] else 'float')" },
+]
+tests = [{ N = 3 }, { N = 3, k = 1 }, { N = 2, dtype = "int" }, { N = 2, M = 4, k = -1 }]
+
+[[rule]]
+id = "np.identity"
+match = "np.identity(n, dtype=None)"
+params = { dtype = "dtype" }
+exactness = "exact"
+evidence = "mapping.py:22 np.identity(2): bitwise"
+cases = [
+  { eval = ["n"] },
+  { if = "n.kind != 'num' or n.py != 'int'", refuse = "np.identity of a size that is not an int", hint = "NumPy raises TypeError; pass an int." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'int', 'np.int64']", refuse = "np.identity(..., dtype={dtype})", hint = "Only float and int." },
+  { viv = "eye({size(n)})", type = "arr(2, 'int' if dtype in ['int', 'np.int64'] else 'float')" },
+]
+tests = [{ n = 2 }, { n = 3, dtype = "int" }]
+
+[[rule]]
+id = "np.diag"
+match = "np.diag(v, k=0)"
+exactness = "exact"
+evidence = "mapping.py:24 np.diag(v), np.diag(M): bitwise; the builtin diag(v, k), checked against NumPy in tools/arrays/numpy_cases.py"
+cases = [
+  { eval = ["v", "k"] },
+  { if = "k.kind != 'num' or k.py != 'int'", refuse = "np.diag with an offset that is not an int", hint = "NumPy raises TypeError; pass an int." },
+  { if = "not v.arr or v.kind == 'carr' or v.rank > 2", refuse = "np.diag of {v.words}", hint = "Pass a real vector or matrix." },
+  { if = "v.rank == 1", viv = "diag({v}, k={k})", type = "T('arr', 2, v.py, 'nd')" },
+  { viv = "diag({v}, k={k})", type = "T('arr', 1, v.py, 'nd')" },
+]
+tests = [{ v = [3.0, -1.0, 2.5] }, { v = [[1.0, 2.0], [3.0, 4.0]] }, { v = [1, 2] }, { v = [3.0, -1.0], k = -1 }, { v = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], k = 1 }]
+
+# ---------------------------------------------------------------- rearrangements
+
+[[rule]]
+id = "np.roll"
+match = "np.roll(a, shift, axis=None)"
+exactness = "exact"
+evidence = "mapping.py:40 np.roll(x, 2), np.roll(x, -1): bitwise (rank 1)"
+cases = [
+  { eval = ["a", "shift"] },
+  { keywords = ["axis", "shift"], refuse = "np.roll(..., {kw}=)", hint = "Drop it." },
+  { eval = ["axis"] },
+  { if = "not a.arr or a.kind == 'carr'", refuse = "np.roll of {a.words}", hint = "Pass a real array." },
+  { if = "shift.kind != 'num' or shift.py != 'int'", refuse = "np.roll by a shift that is not an int", hint = "NumPy raises TypeError; pass an int." },
+  { if = "axis.given and (axis.lit == None or axis.lit < 0 or axis.lit >= a.rank)", refuse = "np.roll with axis={axis.code}", hint = "Pass the axis as a literal from 0 to {a.rank - 1}." },
+  { if = "not axis.given and a.rank != 1", refuse = "np.roll of a matrix without axis (NumPy rolls it flat)", hint = "Pass axis=.", gap = "R10" },
+  { if = "not axis.given", viv = "roll({a}, {shift})", type = "T(a.kind, a.rank, a.py, 'nd')" },
+  { viv = "roll({a}, {shift}, {axis})", type = "T(a.kind, a.rank, a.py, 'nd')" },
+]
+tests = [{ a = [1.0, 2.0, 3.0, 4.0], shift = 2 }, { a = [1.0, 2.0, 3.0, 4.0], shift = -1 }, { a = [[1.0, 2.0], [3.0, 4.0]], shift = 1, axis = 1 }]
+
+[[rule]]
+id = "np.diff"
+match = "np.diff(a, n=1, axis=-1)"
+exactness = "exact"
+evidence = "mapping.py:40 np.diff(x): bitwise"
+cases = [
+  { if = "n.given or axis.given", refuse = "np.diff of a matrix, or of order n", hint = "Write the loop." },
+  { eval = ["a"] },
+  { if = "not a.arr or a.rank != 1 or a.kind == 'carr'", refuse = "np.diff of a matrix, or of order n", hint = "Write the loop." },
+  { if = "a.py == 'bool'", refuse = "np.diff of a Bool array", hint = "NumPy compares neighbors (not_equal) for Bools; use numbers." },
+  { if = "a.py == 'int'", use = ["py_diff", "py_int_arr"], viv = "py_int_arr(py_diff({a}))", type = "T('arr', 1, 'int', 'nd')" },
+  { use = ["py_diff"], viv = "py_diff({a})", type = "arr(1)" },
+]
+tests = [{ a = [1.0, 1.5, 3.0, 2.0] }, { a = [1, 4, 9] }]
+
+[[rule]]
+id = "np.cross"
+match = "np.cross(a, b)"
+exactness = "exact"
+evidence = "mapping.py:40 np.cross(v, w): bitwise; the same products and differences NumPy forms"
+cases = [
+  { eval = ["a", "b"] },
+  { if = "not (a.kind == 'arr' and b.kind == 'arr' and a.rank == 1 and b.rank == 1) or a.py == 'bool' or b.py == 'bool'", refuse = "np.cross of anything but two 3-vectors", hint = "Write the components out." },
+  { if = "a.py == 'int' and b.py == 'int'", use = ["py_cross", "py_int_arr"], viv = "py_int_arr(py_cross({a}, {b}))", type = "T('arr', 1, 'int', 'nd')" },
+  { use = ["py_cross"], viv = "py_cross({a}, {b})", type = "arr(1)" },
+]
+tests = [{ a = [3.0, -1.0, 2.5], b = [0.5, 4.0, -1.0] }, { a = [1, 2, 3], b = [4, 5, 6] }]
+
+[[rule]]
+id = "np.transpose"
+match = "np.transpose(a, axes=None)"
+exactness = "exact"
+evidence = "mapping.py:31 np.transpose(M): bitwise"
+note = "NumPy's transpose is a view of `a`; a name bound to it may not be written, nor `a` after it (py2viv.py, the row-alias check)."
+cases = [
+  { if = "axes.given", refuse = "np.transpose with axes", hint = "Only the 2-D transpose is in the subset.", gap = "R10" },
+  { eval = ["a"] },
+  { if = "not a.arr", refuse = "np.transpose of {a.words}", hint = "Pass an array." },
+  { if = "a.rank > 2", refuse = "np.transpose of {a.words}", hint = "Only the 2-D transpose is in the subset.", gap = "R10" },
+  { if = "a.rank == 2", viv = "transpose({a})", type = "T(a.kind, 2, a.py, 'nd')" },
+  { if = "a.container == 'list'", use = ["py_copy"], viv = "py_copy({a})", type = "T(a.kind, 1, a.py, 'nd')" },
+  { viv = "{a}", type = "a", prec = "a.prec" },
+]
+tests = [{ a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] }, { a = [1.0, 2.0] }]
+
+# ---------------------------------------------------------------- reductions
+
+[[rule]]
+id = "np.max"
+match = ["np.max(a, axis=None, *, keepdims=False)", "np.amax(a, axis=None, *, keepdims=False)"]
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:29 np.max(M), np.amax(v): bitwise; py_npmax gives NaN if any entry is NaN, as NumPy does"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr or a.kind == 'carr' or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Pass a real number array." },
+  { if = "a.py == 'int'", viv = "max({a})", type = "NUM_I" },
+  { use = ["py_npmax"], viv = "py_npmax({a})", type = "NUM_F" },
+]
+tests = [{ a = [3.0, -1.0, 2.5] }, { a = [[1, 5], [3, 2]] }]
+
+[[rule]]
+id = "np.min"
+match = ["np.min(a, axis=None, *, keepdims=False)", "np.amin(a, axis=None, *, keepdims=False)"]
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:29 np.min(x), np.amin(v): bitwise; py_npmin gives NaN if any entry is NaN, as NumPy does"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr or a.kind == 'carr' or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Pass a real number array." },
+  { if = "a.py == 'int'", viv = "min({a})", type = "NUM_I" },
+  { use = ["py_npmin"], viv = "py_npmin({a})", type = "NUM_F" },
+]
+tests = [{ a = [3.0, -1.0, 2.5] }, { a = [[1, 5], [3, 2]] }]
+
+[[rule]]
+id = "np.maximum"
+match = ["np.maximum(x, y, /)", "np.minimum(x, y, /)"]
+exactness = "exact"
+evidence = "mapping.py:35 np.maximum(x, 0.0), np.minimum(x, w[0]): bitwise; a NaN in either operand gives NaN, and +0 over -0, as NumPy (the np_maxmin hook)"
+cases = [
+  { eval = ["x", "y"] },
+  { if = "x.kind not in ['num', 'arr'] or y.kind not in ['num', 'arr'] or (x.arr and x.py == 'bool') or (y.arr and y.py == 'bool')", refuse = "{name} of {x.words} and {y.words}", hint = "Only real numbers and real arrays." },
+  { if = "x.arr and y.arr and max(x.rank, y.rank) > 4", refuse = "{name} of a rank-{x.rank} and a rank-{y.rank} array", hint = "Viv's arrays have at most 4 axes." },
+  { hook = "np_maxmin", args = ["{short[:3]}", "x", "y"] },
+]
+tests = [{ x = [-1.5, 0.5, 2.0], y = 0.0 }, { x = 0.0, y = -0.0 }, { x = [1, 5, 3], y = 2 }, { x = [[-1.5, 0.5, 2.0], [0.0, -0.0, 7.0]], y = [0.0, 1.0, -0.0] }]
+
+[[rule]]
+id = "np.fmax"
+match = ["np.fmax(x, y, /)", "np.fmin(x, y, /)"]
+exactness = "exact"
+evidence = "np.fmax and np.fmin skip a NaN (py_fmax2, py_fmaxv), and put +0 over -0, as NumPy"
+cases = [
+  { eval = ["x", "y"] },
+  { if = "x.kind not in ['num', 'arr'] or y.kind not in ['num', 'arr'] or (x.arr and x.py == 'bool') or (y.arr and y.py == 'bool')", refuse = "{name} of {x.words} and {y.words}", hint = "Only real numbers and real arrays." },
+  { if = "x.arr and y.arr and max(x.rank, y.rank) > 4", refuse = "{name} of a rank-{x.rank} and a rank-{y.rank} array", hint = "Viv's arrays have at most 4 axes." },
+  { if = "x.arr and y.arr", use = ["py_{short}b"], viv = "py_{short}b({x}, {y})", type = "arr(max(x.rank, y.rank), py_of(x, y))" },
+  { if = "x.arr", use = ["py_{short}s"], viv = "py_{short}s({x}, {y})", type = "arr(x.rank, py_of(x, y))" },
+  { if = "y.arr", use = ["py_{short}s"], viv = "py_{short}s({y}, {x})", type = "arr(y.rank, py_of(x, y))" },
+  { use = ["py_{short}2"], viv = "py_{short}2({x}, {y})", type = "num_of(x, y)" },
+]
+tests = [{ x = [-1.5, 0.5, 2.0], y = 0.25 }, { x = [1, 5, 3], y = 2 }, { x = [[-1.5], ["nan"]], y = [0.25, "nan", -0.0] }]
+
+[[rule]]
+id = "np.trace"
+match = "np.trace(a, offset=0)"
+exactness = "exact"
+evidence = "mapping.py:25 np.trace(M): bitwise; the builtin trace(A, k) sums the diagonal in NumPy's order (SUBSET.md 'What is exact', tools/arrays/numpy_cases.py)"
+cases = [
+  { eval = ["a", "offset"] },
+  { if = "offset.kind != 'num' or offset.py != 'int'", refuse = "np.trace with an offset that is not an int", hint = "NumPy raises TypeError; pass an int." },
+  { if = "not a.arr or a.rank != 2 or a.kind == 'carr' or a.py == 'bool'", refuse = "np.trace of {a.words}", hint = "Pass a real matrix." },
+  { if = "a.py == 'int'", use = ["py_int"], viv = "py_int(trace({a}, offset={offset}))", type = "NUM_I" },
+  { viv = "trace({a}, offset={offset})", type = "NUM_F" },
+]
+tests = [{ a = [[1.0, 2.0], [3.0, -1.5]] }, { a = [[1, 2, 3], [4, 5, 6]] }, { a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], offset = 1 }]
+
+[[rule]]
+id = "np.outer"
+match = "np.outer(a, b)"
+exactness = "exact"
+evidence = "mapping.py:25 np.outer(v, w): bitwise; one product per entry"
+cases = [
+  { eval = ["a", "b"] },
+  { if = "not (a.kind == 'arr' and b.kind == 'arr' and a.rank == 1 and b.rank == 1) or a.py == 'bool' or b.py == 'bool'", refuse = "np.outer of {a.words} and {b.words}", hint = "Pass two real vectors (NumPy flattens anything else)." },
+  { if = "a.py == 'int' and b.py == 'int'", use = ["py_int_arr"], viv = "py_int_arr(outer({a}, {b}))", type = "T('arr', 2, 'int', 'nd')" },
+  { viv = "outer({a}, {b})", type = "arr(2)" },
+]
+tests = [{ a = [3.0, -1.0], b = [0.5, 4.0, 2.0] }, { a = [1, 2], b = [3, 4] }]
+
+[[rule]]
+id = "np.cumsum"
+match = "np.cumsum(a, axis=None)"
+exactness = "exact"
+evidence = "mapping.py:26 np.cumsum(x): bitwise; NumPy's cumsum is sequential along its axis (a probe of 2000 random vectors: all bitwise; results/axis_order.txt for matrices)"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr or a.kind == 'carr' or a.py in ['bool', 'mixed']", refuse = "np.cumsum of {a.words}", hint = "Pass a real number array.", gap = "R9" },
+  { if = "axis.given and not (axis.syntax == 'Constant' and axis.lit == None) and axis.axis_lit == None", refuse = "np.cumsum with an axis that is not an int literal", hint = "Write the axis as a number.", at = "axis" },
+  { if = "axis.axis_lit != None and (axis.axis_lit < 0 - a.rank or axis.axis_lit >= a.rank)", refuse = "np.cumsum with axis={axis.axis_lit} of {a.words}", hint = "NumPy raises AxisError: the axes of a rank-{a.rank} array are {0 - a.rank} to {a.rank - 1}.", at = "axis" },
+  { if = "a.rank > 1 and axis.axis_lit != None and a.py == 'int'", use = ["py_cumsum_ax", "py_int_arr"], viv = "py_int_arr(py_cumsum_ax({a}, {axk(axis, a)}))", type = "T('arr', a.rank, 'int', 'nd')" },
+  { if = "a.rank > 1 and axis.axis_lit != None", use = ["py_cumsum_ax"], viv = "py_cumsum_ax({a}, {axk(axis, a)})", type = "arr(a.rank)" },
+  { if = "a.rank > 1 and a.py == 'int'", use = ["py_cumsum", "py_flat", "py_int_arr"], viv = "py_int_arr(py_cumsum(py_flat({a})))", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "a.rank > 1", use = ["py_cumsum", "py_flat"], viv = "py_cumsum(py_flat({a}))", type = "arr(1)" },
+  { if = "a.py == 'int'", use = ["py_cumsum", "py_int_arr"], viv = "py_int_arr(py_cumsum({a}))", type = "T('arr', 1, 'int', 'nd')" },
+  { use = ["py_cumsum"], viv = "py_cumsum({a})", type = "arr(1)" },
+]
+tests = [{ a = [-1.5, 0.5, 0.25, 2.0] }, { a = [1, 2, 3] }, { a = [[1.0, -2.5, 3.0], [0.5, 0.25, -1.0]], axis = 1 }, { a = [[1, 2], [3, 4]], axis = 0 }]
+
+[[rule]]
+id = "np.prod"
+match = "np.prod(a, axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:26 np.prod(v): bitwise; NumPy's product is sequential (a probe of 2000 random vectors: all bitwise)"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr or a.kind == 'carr' or a.py == 'bool'", refuse = "np.prod of {a.words}", hint = "Pass a real number array." },
+  { if = "a.py == 'int'", use = ["py_flat", "py_prod", "py_int"], viv = "py_int(py_prod({a}))", type = "NUM_I" },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed and a.py == 'float'", use = ["py_flat", "py_prod"], viv = "py_prod(transpose({a}))", type = "NUM_F" },
+  { use = ["py_flat", "py_prod"], viv = "py_prod({a})", type = "NUM_F" },
+]
+tests = [{ a = [3.0, -1.0, 2.5] }, { a = [2, 3, 4] }]
+
+[[rule]]
+id = "np.argmax"
+match = ["np.argmax(a, axis=None, *, keepdims=False)", "np.argmin(a, axis=None, *, keepdims=False)"]
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:27 np.argmax(x), np.argmin(M): bitwise"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr or a.kind == 'carr'", refuse = "{name} of {a.words}", hint = "Pass a real array." },
+  { use = ["py_flat", "py_{short}"], viv = "py_{short}({a})", type = "NUM_I" },
+]
+tests = [{ a = [1.0, 3.0, 3.0, -2.0] }, { a = [[1, 5], [7, 2]] }]
+
+[[rule]]
+id = "np.mean"
+match = "np.mean(a, axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:28 np.mean(x): bitwise; NumPy's pairwise sum (SUBSET.md 'What is exact')"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr or a.kind == 'carr'", refuse = "np.mean of {a.words}", hint = "Pass a real array." },
+  { if = "in_grad", inexact = "np.mean left to right inside a differentiated def", viv = "sum({a}) / numel({a})", type = "NUM_F", prec = "70", exactness = "tolerance", rtol = 1e-13, atol = 1e-16, evidence = "as sum inside grad: mlp_grad.py's declared tolerance" },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed and not in_grad and a.py == 'float'", use = ["py_mean"], viv = "py_mean(transpose({a}))", type = "NUM_F" },
+  { use = ["py_mean"], viv = "py_mean({a})", type = "NUM_F" },
+]
+tests = [{ a = [-1.5, 0.5, 0.25, 2.0] }, { a = [1, 2, 4] }]
+
+[[rule]]
+id = "np.std"
+match = ["np.std(a, axis=None, *, keepdims=False)", "np.var(a, axis=None, *, keepdims=False)"]
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:28 np.std(x), np.var(x): bitwise; divides by n, NumPy's pairwise sums (SUBSET.md 'What is exact')"
+cases = [
+  { eval = ["a"] },
+  { if = "in_grad", refuse = "{name} inside a differentiated def", hint = "Write it out with sum(...) / n; NumPy's pairwise order cannot be differentiated here." },
+  { if = "not a.arr or a.kind == 'carr'", refuse = "{name} of {a.words}", hint = "Pass a real array." },
+  { if = "len(extra_kws) > 0", refuse = "{name} with ddof= or another keyword", hint = "Write it out: sqrt(sum(d * d) / (n - 1))." },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed", use = ["py_mean", "py_var", "py_{short}"], viv = "py_{short}(transpose({a}))", type = "NUM_F" },
+  { use = ["py_mean", "py_var", "py_{short}"], viv = "py_{short}({a})", type = "NUM_F" },
+]
+tests = [{ a = [-1.5, 0.5, 0.25, 2.0] }, { a = [1, 2, 4] }]
+
+# ---------------------------------------------------------------- products
+
+[[rule]]
+id = "np.dot"
+match = ["np.dot(x, y, /)", "np.matmul(x, y, /)", "np.inner(x, y, /)", "np.vdot(x, y, /)"]
+exactness = "tolerance"
+rtol = 1e-15
+atol = 0.0
+evidence = "mapping.py:30 np.dot(v, w), np.dot(M, v), np.matmul(M, M): bitwise (3x3); held to mapping.py's declared rtol 1e-15"
+note = "NumPy calls BLAS, which may reorder the sums. np.vdot conjugates its first argument (py_cvdot)."
+cases = [
+  { inexact = "{name} (BLAS sums in its own order)" },
+  { eval = ["x", "y"] },
+  { if = "x.kind not in ['num', 'arr', 'carr'] or y.kind not in ['num', 'arr', 'carr'] or (x.arr and x.py == 'bool') or (y.arr and y.py == 'bool')", refuse = "{name} of {x.words} and {y.words}", hint = "Only numbers and number arrays." },
+  { if = "x.rank > 2 or y.rank > 2", refuse = "{name} of {x.words} and {y.words}", hint = "Only vectors and matrices (np.dot and np.matmul differ above rank 2)." },
+  { if = "x.kind == 'carr' and y.kind == 'carr' and x.rank == 1 and y.rank == 1 and name == 'np.vdot'", use = ["py_cvdot"], viv = "py_cvdot({x}, {y})", type = "CNUM" },
+  { if = "x.kind == 'carr' and y.kind == 'carr' and x.rank == 1 and y.rank == 1", use = ["py_cdot"], viv = "py_cdot({x}, {y})", type = "CNUM" },
+  { if = "x.kind == 'carr' or y.kind == 'carr'", refuse = "{name} of {x.words} and {y.words}", hint = "Only two complex vectors; write the complex products out." },
+  { if = "x.rank == 1 and y.rank == 1 and x.py == 'int' and y.py == 'int'", use = ["py_isum", "py_int_arr", "py_vmul"], viv = "py_isum(py_int_arr(py_vmul({x}, {y})))", type = "NUM_I", exactness = "exact", evidence = "integer products and sums, checked below 2^53" },
+  { if = "x.rank == 1 and y.rank == 1", use = ["py_vdot"], viv = "py_vdot({x}, {y})", type = "NUM_F" },
+  { if = "name in ['np.inner', 'np.vdot'] and x.arr and y.arr", refuse = "{name} of matrices", hint = "Write it with @ and transpose." },
+  { if = "name == 'np.matmul' and not (x.arr and y.arr)", refuse = "np.matmul of a number", hint = "NumPy raises ValueError; use *." },
+  { if = "x.py == 'int' and y.py == 'int'", refuse = "{name} of two integer operands", hint = "NumPy's integer products wrap at 2^63; make one of them float." },
+  { if = "not (x.arr and y.arr)", viv = "{x:70} * {y:71}", type = "arr(x.rank if x.arr else y.rank) if x.arr or y.arr else num_of(x, y)", prec = "70" },
+  { if = "x.rank == 2 and y.rank == 2", use = ["py_mm"], viv = "py_mm({x}, {y})", type = "arr(2)" },
+  { if = "x.rank == 2", use = ["py_mv"], viv = "py_mv({x}, {y})", type = "arr(1)" },
+  { use = ["py_vm"], viv = "py_vm({x}, {y})", type = "arr(1)" },
+]
+tests = [{ x = [3.0, -1.0, 2.5], y = [0.5, 4.0, -1.0] }, { x = [[1.0, 2.0], [3.0, 4.0]], y = [0.5, -1.0], only = ["np.dot", "np.matmul"] }, { x = [1, 2, 3], y = [4, 5, 6] }, { x = ["1+2j", "-0.5+1j"], y = ["2-1j", "0.5+0.5j"] }]
+
+[[rule]]
+id = "np.linalg.norm"
+match = "np.linalg.norm(x, ord=None, axis=None)"
+exactness = "tolerance"
+rtol = 1e-15
+atol = 0.0
+evidence = "mapping.py:39 np.linalg.norm(v), np.linalg.norm(M): bitwise; held to mapping.py's declared rtol 1e-15"
+note = "NumPy's norm uses a BLAS dot for a vector; of a complex array it sums the squares of the real and imaginary parts (py_cnorm)."
+cases = [
+  { inexact = "np.linalg.norm (NumPy's dot is BLAS, summed in its own order)" },
+  { if = "ord.given or axis.given or nkw > 0", refuse = "np.linalg.norm with ord= or axis=", hint = "Write the norm out: sqrt(sum(v * v))." },
+  { eval = ["x"] },
+  { if = "x.kind not in ['num', 'arr', 'carr', 'cnum'] or (x.arr and x.py == 'bool')", refuse = "np.linalg.norm of {x.words}", hint = "Pass a number array." },
+  { if = "x.rank > 2", refuse = "np.linalg.norm of {x.words}", hint = "NumPy raises ValueError above rank 2 without axis=." },
+  { if = "x.kind == 'carr'", use = ["py_cnorm"], viv = "py_cnorm({x})", type = "NUM_F" },
+  { if = "x.arr", viv = "sqrt(sum({x:71} * {x:71}))", type = "NUM_F" },
+  { viv = "abs({x})", type = "NUM_F" },
+]
+tests = [{ x = [3.0, -1.0, 2.5] }, { x = [[1.0, 2.0], [3.0, 4.0]] }, { x = [1, 2, 2] }, { x = ["3+4j", "-1-0.5j"] }]
+
+# ---------------------------------------------------------------- elementwise, written out
+
+[[rule]]
+id = "np.where"
+match = "np.where(m, x=None, y=None, /)"
+exactness = "exact"
+evidence = "mapping.py:36 np.where(x > 0.0, x, -x): bitwise"
+cases = [
+  { if = "nargs != 3", refuse = "np.where with one argument (indices)", hint = "Loop and test each entry." },
+  { eval = ["m", "x", "y"] },
+  { if = "not m.arr", refuse = "np.where on a scalar condition", hint = "Use `a if c else b`." },
+  { if = "m.kind == 'carr' or x.kind not in ['num', 'arr', 'bool'] or y.kind not in ['num', 'arr', 'bool'] or x.kind == 'bool' or y.kind == 'bool' or (x.arr and x.py == 'bool') or (y.arr and y.py == 'bool')", refuse = "np.where choosing between {x.words} and {y.words}", hint = "Choose between real numbers or real arrays." },
+  { if = "max(m.rank, x.rank, y.rank) > 4", refuse = "np.where of a rank-{max(m.rank, x.rank, y.rank)} array", hint = "Viv's arrays have at most 4 axes." },
+  { if = "not x.arr and not y.arr", viv = "where({m}, {x}, {y})", type = "arr(m.rank, py_of(x, y))" },
+  { use = ["py_bwhere"], viv = "py_bwhere({m}, {vec(x)}, {vec(y)})", type = "arr(max(m.rank, x.rank, y.rank), py_of(x, y))" },
+]
+tests = [{ m = [1.0, 0.0, 1.0], x = [1.0, 2.0, 3.0], y = [-1.0, -2.0, -3.0] }, { m = [0.0, 2.0], x = 1, y = 0 }, { m = [[1.0], [0.0]], x = [1.0, 2.0, 3.0], y = -0.5 }]
+
+[[rule]]
+id = "np.clip"
+match = "np.clip(a, a_min, a_max)"
+exactness = "exact"
+evidence = "mapping.py:35 np.clip(x, -1.0, 1.0): bitwise; NumPy's clip loop (py_clip): a NaN in x stays, a NaN bound is ignored, of equal zeros the bound's sign wins"
+cases = [
+  { eval = ["a", "a_min", "a_max"] },
+  { if = "a.kind not in ['num', 'arr'] or a_min.kind != 'num' or a_max.kind != 'num' or (a.arr and a.py == 'bool')", refuse = "np.clip of {a.words} between {a_min.words} and {a_max.words}", hint = "Clip a real number or array between two numbers." },
+  { if = "a.arr", use = ["py_clipv"], viv = "py_clipv({a}, {a_min}, {a_max})", type = "arr(a.rank, py_of(a, a_min, a_max))" },
+  { use = ["py_clip"], viv = "py_clip({a}, {a_min}, {a_max})", type = "num_of(num_of(a, a_min), a_max)" },
+]
+tests = [{ a = [-1.5, 0.5, 2.0], a_min = -1.0, a_max = 1.0 }, { a = [1, 5, 9], a_min = 2, a_max = 6 }, { a = [1, 5, 9], a_min = 2.5, a_max = 6 }]
+
+[[rule]]
+id = "np.sign"
+match = "np.sign(x, /)"
+exactness = "exact"
+evidence = "mapping.py:36 np.sign(x): bitwise; NaN gives NaN and -0.0 gives 0.0, as NumPy"
+cases = [
+  { eval = ["x"] },
+  { if = "x.kind not in ['num', 'arr'] or (x.arr and x.py == 'bool')", refuse = "np.sign of {x.words}", hint = "Pass a real number or array." },
+  { if = "x.arr", use = ["py_signs"], viv = "py_signs({x})", type = "T('arr', x.rank, 'int' if x.py == 'int' else 'float', 'nd')" },
+  { use = ["py_sign"], viv = "py_sign({x})", type = "NUM_I if x.py == 'int' else NUM_F" },
+]
+tests = [{ x = [-1.5, 0.0, 2.0] }, { x = -0.5 }, { x = [-3, 0, 2] }]
+
+[[rule]]
+id = "np.square"
+match = "np.square(x, /)"
+exactness = "exact"
+evidence = "mapping.py:36 np.square(x): bitwise; one product"
+cases = [
+  { eval = ["x"] },
+  { if = "x.kind not in ['num', 'arr'] or (x.arr and x.py == 'bool')", refuse = "np.square of {x.words}", hint = "Pass a real number or array." },
+  { if = "x.py == 'int' and x.arr", use = ["py_int_arr"], viv = "py_int_arr({x:71} * {x:71})", type = "x" },
+  { if = "x.py == 'int'", use = ["py_int"], viv = "py_int({x:71} * {x:71})", type = "NUM_I" },
+  { viv = "{x:71} * {x:71}", type = "arr(x.rank) if x.arr else NUM_F", prec = "70" },
+]
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = -3 }, { x = [1, -2, 3] }]
+
+[[rule]]
+id = "math.hypot"
+match = "math.hypot(x, y, /)"
+exactness = "tolerance"
+rtol = 4.5e-16
+atol = 0.0
+evidence = "mapping.py:45 math.hypot(3.0, 4.0): bitwise; sqrt(x * x + y * y) rounds twice, CPython's hypot about once (the bound is 1 ulp); py_hypot scales where the squares would overflow or underflow; check_rules.py: 3.2e-16 relative at hypot(2.5, 3.5) (two roundings)"
+cases = [
+  { eval = ["x", "y"] },
+  { if = "not (x.kind in ['num', 'unknown'] and y.kind in ['num', 'unknown'])", refuse = "math.hypot of {x.words} and {y.words}", hint = "math.hypot takes numbers (Python raises TypeError otherwise); use np.hypot for arrays." },
+  { inexact = "hypot as sqrt(x*x + y*y) (libm's hypot rounds once)" },
+  { use = ["py_hypot"], viv = "py_hypot({x}, {y})", type = "NUM_F" },
+]
+tests = [{ x = 3.0, y = 4.0 }, { x = 1e-3, y = 2.5 }, { x = 1e200, y = 1e200 }, { x = 3e-200, y = 4e-200 }]
+
+[[rule]]
+id = "np.hypot"
+match = "np.hypot(x, y, /)"
+exactness = "tolerance"
+rtol = 4.5e-16
+atol = 0.0
+evidence = "sqrt(x * x + y * y) rounds twice, libm's hypot about once (the bound is 1 ulp); py_hypot scales where the squares would overflow or underflow; check_rules.py: as math.hypot"
+cases = [
+  { eval = ["x", "y"] },
+  { if = "x.kind not in ['num', 'arr'] or y.kind not in ['num', 'arr'] or (x.arr and x.py == 'bool') or (y.arr and y.py == 'bool')", refuse = "np.hypot of {x.words} and {y.words}", hint = "Only real numbers and real arrays." },
+  { if = "max(x.rank, y.rank) > 4", refuse = "np.hypot of {x.words} and {y.words}", hint = "Viv's arrays have at most 4 axes." },
+  { inexact = "hypot as sqrt(x*x + y*y) (libm's hypot rounds once)" },
+  { if = "(x.arr or y.arr) and (x.rank != 1 or y.rank != 1) and not (x.rank == 1 and not y.arr) and not (y.rank == 1 and not x.arr)", use = ["py_bhypot"], viv = "py_bhypot({vec(x)}, {vec(y)})", type = "arr(max(x.rank, y.rank))" },
+  { if = "x.arr and y.arr", use = ["py_hypot_vv"], viv = "py_hypot_vv({x}, {y})", type = "arr(1)" },
+  { if = "x.arr", use = ["py_hypot_vs"], viv = "py_hypot_vs({x}, {y})", type = "arr(1)" },
+  { if = "y.arr", use = ["py_hypot_vs"], viv = "py_hypot_vs({y}, {x})", type = "arr(1)" },
+  { use = ["py_hypot"], viv = "py_hypot({x}, {y})", type = "NUM_F" },
+]
+tests = [{ x = 3.0, y = 4.0 }, { x = 1e-3, y = 2.5 }, { x = [3.0, 1e200, 0.0], y = [4.0, 1e200, -0.0] }, { x = [3.0, 5.0], y = 4.0 }, { x = [[3.0], [5.0]], y = [4.0, 12.0] }]
+
+[[rule]]
+id = "log-base"
+match = "math.log(x, b, /)"
+when = "nargs == 2"
+exactness = "tolerance"
+rtol = 4.4e-16
+atol = 0.0
+evidence = "mapping.py:42 math.log(8.0, 2.0): bitwise; CPython computes log(x) / log(b) too, each log to 1 ulp against the platform libm (2 ulp); a base of 1 raises ZeroDivisionError as CPython's division does"
+cases = [
+  { eval = ["x", "b"] },
+  { if = "not (x.kind in ['num', 'unknown'] and b.kind in ['num', 'unknown'])", refuse = "math.log of {x.words} to base {b.words}", hint = "math.log takes numbers (Python raises TypeError otherwise)." },
+  { inexact = "log(x, b) as log(x) / log(b)" },
+  { use = ["py_mlog", "py_div_f"], viv = "py_div_f(py_mlog({x}), py_mlog({b}))", type = "NUM_F" },
+]
+tests = [{ x = 8.0, b = 2.0 }, { x = 10.0, b = 3.0 }, { x = 8.0, b = 1.0 }]
+
+[[rule]]
+id = "log10-log2"
+match = ["math.log10(x, /)", "np.log10(x, /)", "math.log2(x, /)", "np.log2(x, /)"]
+exactness = "tolerance"
+rtol = 4.5e-16
+atol = 0.0
+evidence = "mapping.py:42 math.log10(1000.0) = 2.9999999999999996 (1.5e-16 relative), math.log2(0.125): bitwise; check_rules.py: log10(0.5) and log2(0.001) 2 ulp off (3e-16 relative)"
+cases = [
+  { eval = ["x"] },
+  { if = "x.kind not in ['num', 'arr', 'unknown'] or (x.arr and x.py == 'bool')", refuse = "{name} of {x.words}", hint = "Pass a real number or array." },
+  { if = "module == 'math' and x.arr", refuse = "{name} of {x.words}", hint = "math functions take one number (Python raises TypeError); use np.{short} for an array." },
+  { inexact = "{short} as log(x) / log({'10.0' if '10' in name else '2.0'}) (log10(1000) is 2.9999999999999996)" },
+  { if = "module == 'math'", use = ["py_mlog"], viv = "py_mlog({x}) / log({'10.0' if '10' in name else '2.0'})", type = "NUM_F", prec = "70" },
+  { viv = "log({x}) / log({'10.0' if '10' in name else '2.0'})", type = "arr(x.rank) if x.arr else NUM_F", prec = "70" },
+]
+tests = [{ x = 1000.0 }, { x = 0.125 }, { x = [1.0, 100.0, 8.0] }]
+
+[[rule]]
+id = "log1p-expm1"
+match = ["math.log1p(...)", "np.log1p(...)", "math.expm1(...)", "np.expm1(...)"]
+exactness = "refuse"
+lift = "log1p and expm1 builtins in Viv (lang/viv/src/vmath)"
+cases = [
+  { refuse = "{name}", hint = "Viv has no {short} builtin; write log(1 + x) / exp(x) - 1 if the precision loss near 0 is acceptable." },
+]
+
+[[rule]]
+id = "atan2"
+match = ["math.atan2(y, x, /)", "np.arctan2(y, x, /)"]
+exactness = "tolerance"
+rtol = 2.2e-16
+atol = 0.0
+evidence = "mapping.py:43 math.atan2(1.0, -2.0): bitwise; a libm function (1 ulp against the platform libm, SUBSET.md)"
+cases = [
+  { eval = ["y", "x"] },
+  { if = "y.kind not in ['num', 'arr', 'unknown'] or x.kind not in ['num', 'arr', 'unknown'] or (y.arr and y.py == 'bool') or (x.arr and x.py == 'bool')", refuse = "{name} of {y.words} and {x.words}", hint = "Pass real numbers or real arrays." },
+  { if = "module == 'math' and (x.arr or y.arr)", refuse = "{name} of an array", hint = "math functions take numbers (Python raises TypeError); use np.arctan2 for arrays." },
+  { if = "max(x.rank, y.rank) > 4", refuse = "{name} of a rank-{y.rank} and a rank-{x.rank} array", hint = "Viv's arrays have at most 4 axes." },
+  { inexact = "atan2 (Viv's libm is not the platform's)" },
+  { if = "(x.arr or y.arr) and (x.rank != 1 or y.rank != 1) and not (x.rank == 1 and not y.arr) and not (y.rank == 1 and not x.arr)", use = ["py_batan2"], viv = "py_batan2({vec(y)}, {vec(x)})", type = "arr(max(x.rank, y.rank))" },
+  { if = "y.arr and x.arr", use = ["py_atan2v"], viv = "py_atan2v({y}, {x})", type = "arr(1)" },
+  { if = "y.arr", use = ["py_atan2vs"], viv = "py_atan2vs({y}, {x})", type = "arr(1)" },
+  { if = "x.arr", use = ["py_atan2sv"], viv = "py_atan2sv({y}, {x})", type = "arr(1)" },
+  { viv = "atan2({y}, {x})", type = "NUM_F" },
+]
+tests = [{ y = 1.0, x = -2.0 }, { y = [1.0, -1.0, 0.0], x = [-2.0, 0.5, -1.0] }, { y = [[1.0], [-1.0]], x = [-2.0, 0.5, -0.0] }]
+
+[[rule]]
+id = "np.isclose"
+match = ["np.isclose(a, b, rtol=1e-05, atol=1e-08, equal_nan=False)", "np.allclose(a, b, rtol=1e-05, atol=1e-08, equal_nan=False)"]
+exactness = "exact"
+evidence = "mapping.py:41 np.isclose(0.1 + 0.2, 0.3), np.allclose(v, v + 1e-12): bitwise; NumPy's formula and defaults (py_npisclose, py_allclose)"
+cases = [
+  { eval = ["a", "b"] },
+  { if = "equal_nan.given", refuse = "{name} with equal_nan=", hint = "Test for NaN separately." },
+  { eval = ["rtol", "atol"] },
+  { if = "not (rtol.kind == 'num' and atol.kind == 'num')", refuse = "{name} with a tolerance that is not a number", hint = "Pass numbers." },
+  { if = "a.kind in ['cnum', 'carr', 'bool'] or b.kind in ['cnum', 'carr', 'bool'] or (a.arr and a.py == 'bool') or (b.arr and b.py == 'bool')", refuse = "{name} of {a.words} and {b.words}", hint = "Compare real numbers or real arrays." },
+  { if = "(name == 'np.allclose' or a.arr or b.arr) and name == 'np.isclose'", refuse = "np.isclose of arrays", hint = "Use np.allclose, or loop." },
+  { if = "(name == 'np.allclose' or a.arr or b.arr) and not (a.arr and b.arr)", refuse = "np.allclose of an array and a number", hint = "Compare with an array of the same shape." },
+  { if = "max(a.rank, b.rank) > 4", refuse = "np.allclose of a rank-{a.rank} and a rank-{b.rank} array", hint = "Viv's arrays have at most 4 axes." },
+  { if = "name == 'np.allclose' or a.arr or b.arr", use = ["py_ballclose"], viv = "py_ballclose({a}, {b}, {rtol}, {atol})", type = "BOOL" },
+  { use = ["py_npisclose"], viv = "py_npisclose({a}, {b}, {rtol}, {atol})", type = "BOOL" },
+]
+tests = [{ a = 0.30000000000000004, b = 0.3, only = ["np.isclose"] }, { a = [1.0, 2.0], b = [1.0, 2.000000001], only = ["np.allclose"] }, { a = 1.0, b = 1.1, rtol = 0.2, only = ["np.isclose"] }, { a = [1.0, 2.0], b = [1.5, 2.0], atol = 0.6, only = ["np.allclose"] }, { a = [[1.0, 2.0], [1.0, 2.0]], b = [1.0, 2.000000001], only = ["np.allclose"] }]
+
+# ---------------------------------------------------------------- linear algebra (calling-convention adapters)
+
+[[rule]]
+id = "np.linalg.solve"
+match = "np.linalg.solve(a, b)"
+exactness = "tolerance"
+rtol = 1e-12
+atol = 1e-13
+evidence = "adapters.py:37 sol: bitwise (3x3); held to adapters.py's declared rtol 1e-12, atol 1e-13"
+note = "Viv's LU is its own, not LAPACK's dgesv; the heat-equation post needed rtol 1e-8 after 16 solves (corpus.py POST_TOL)."
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { eval = ["a", "b"] },
+  { if = "not (a.kind == 'arr' and a.rank == 2 and b.kind == 'arr' and b.rank in [1, 2]) or a.py == 'bool' or b.py == 'bool'", refuse = "np.linalg.solve of {a.words} and {b.words}", hint = "Pass a real square matrix and a real vector or matrix." },
+  { if = "b.rank == 1", use = ["py_solve"], viv = "py_solve({a}, {b})", type = "arr(1)" },
+  { use = ["py_solve_multi"], viv = "py_solve_multi({a}, {b})", type = "arr(2)" },
+]
+tests = [{ a = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]], b = [1.0, 2.0, 3.0] }, { a = [[2.0, 1.0], [1.0, 3.0]], b = [[1.0, 0.0], [0.0, 1.0]] }]
+
+[[rule]]
+id = "np.linalg.inv"
+match = "np.linalg.inv(a)"
+exactness = "tolerance"
+rtol = 2e-15
+atol = 1e-15
+evidence = "adapters.py:42 Ainv: within 1.5e-16 relative; check_rules.py: 2.7e-16 relative on a shifted 3x3"
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { eval = ["a"] },
+  { if = "not (a.kind == 'arr' and a.rank == 2) or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Pass a real square matrix." },
+  { use = ["py_eye", "py_inv"], viv = "py_inv({a})", type = "arr(2)" },
+]
+tests = [{ a = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]] }]
+
+[[rule]]
+id = "np.linalg.cholesky"
+match = "np.linalg.cholesky(a)"
+exactness = "tolerance"
+rtol = 1e-12
+atol = 1e-13
+evidence = "adapters.py:40 L: bitwise (3x3); held to adapters.py's declared rtol 1e-12, atol 1e-13"
+note = "Viv's Cholesky is its own, not LAPACK's dpotrf."
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { eval = ["a"] },
+  { if = "not (a.kind == 'arr' and a.rank == 2) or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Pass a real square matrix." },
+  { use = ["py_cholesky"], viv = "py_cholesky({a})", type = "arr(2)" },
+]
+tests = [{ a = [[4.0, 2.0, 0.0], [2.0, 5.0, 1.0], [0.0, 1.0, 3.0]] }]
+
+[[rule]]
+id = "np.linalg.eigvalsh"
+match = "np.linalg.eigvalsh(a, UPLO='L')"
+exactness = "tolerance"
+rtol = 2e-15
+atol = 1e-15
+evidence = "adapters.py:52 np.linalg.eigvalsh(A): within 3.7e-16 relative (Jacobi, not LAPACK); check_rules.py: 5e-16 relative on the seed matrix"
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { if = "UPLO.given", refuse = "np.linalg.eigvalsh with UPLO=", hint = "Pass the full symmetric matrix." },
+  { eval = ["a"] },
+  { if = "not (a.kind == 'arr' and a.rank == 2) or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Pass a real symmetric matrix." },
+  { use = ["py_eigvalsh"], viv = "py_eigvalsh({a})", type = "arr(1)" },
+]
+tests = [{ a = [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 4.0]] }]
+
+[[rule]]
+id = "np.linalg.eigh"
+match = "w, V = np.linalg.eigh(...)"
+exactness = "refuse"
+lift = "none planned: each eigenvector's sign (and a degenerate pair's basis) is the solver's choice; np.linalg.eigvalsh gives the eigenvalues"
+cases = [
+  { refuse = "np.linalg.eigh's eigenvectors", hint = "Each eigenvector's sign (and a degenerate pair's basis) is the solver's choice, so Viv's Jacobi and LAPACK disagree; use np.linalg.eigvalsh for the eigenvalues." },
+]
+
+[[rule]]
+id = "divmod-unpack"
+match = "q, r = divmod(a, b, /)"
+when = "nargs == 2 and nkw == 0"
+exactness = "exact"
+evidence = "a rewrite: q, r = a // b, a % b, whose operators are exact (SUBSET.md 'What is exact')"
+cases = [
+  { eval = [] },
+  { if = "not targets_plain", next = true },
+  { if = "ntargets != 2", refuse = "unpacking divmod into {ntargets} names", hint = "divmod gives two values." },
+  { python = "(a // b, a % b)" },
+]
+tests = [{ a = -7, b = 2 }, { a = 7.5, b = -2.0 }]
+
+[[rule]]
+id = "np.linalg.eigh-as-a-value"
+match = "np.linalg.eigh(...)"
+exactness = "refuse"
+gap = "R5"
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { refuse = "np.linalg.eigh outside `w, V = np.linalg.eigh(H)`", hint = "Unpack it on its own line.", gap = "R5" },
+]
+
+[[rule]]
+id = "np.linalg.unmapped"
+match = ["np.linalg.det(...)", "np.linalg.eig(...)", "np.linalg.svd(...)", "np.linalg.qr(...)", "np.linalg.lstsq(...)", "np.linalg.matrix_rank(...)", "np.linalg.pinv(...)"]
+exactness = "refuse"
+lift = "adapters over eig_general (eig) and lib/svd (svd); det from an LU is planned"
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { refuse = "{name}", hint = "Not mapped yet: eig_general(A, re, im) for eig, lib/svd for svd; det from an LU is planned." },
+]
+
+# ---------------------------------------------------------------- FFT and complex parts
+
+[[rule]]
+id = "np.fft.fft"
+match = "np.fft.fft(a, n=None, axis=-1, norm=None)"
+exactness = "tolerance"
+rtol = 1e-15
+atol = 1e-15
+evidence = "adapters.py:27-29 X = np.fft.fft of an 8-vector: within 3.4e-16 absolute (Viv's FFT is not pocketfft); check_rules.py: 5.1e-16 absolute where NumPy gives an exact 0"
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { if = "n.given or axis.given or norm.given", refuse = "{name} with n= or axis=", hint = "Pad the input yourself." },
+  { eval = ["a"] },
+  { if = "not a.arr or a.rank != 1 or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Transform vectors (fft3 for rank 3)." },
+  { if = "a.kind == 'carr'", use = ["py_fft_c"], viv = "py_fft_c({a})", type = "T('carr', 1, 'complex', 'nd')" },
+  { use = ["py_fft_r"], viv = "py_fft_r({a})", type = "T('carr', 1, 'complex', 'nd')" },
+]
+tests = [{ a = [0.5, -1.0, 2.0, 0.25, 1.0, 0.0, -0.5, 1.5] }]
+
+[[rule]]
+id = "np.fft.ifft"
+match = "np.fft.ifft(a, n=None, axis=-1, norm=None)"
+exactness = "tolerance"
+rtol = 1e-15
+atol = 1e-15
+evidence = "adapters.py:31 y = np.fft.ifft(np.fft.fft(x)): within 1.1e-16 absolute, 2.4e-16 relative; check_rules.py: as np.fft.fft"
+cases = [
+  { inexact = "{name} (Viv's own LU, Cholesky, Jacobi or FFT, not LAPACK or pocketfft)" },
+  { if = "n.given or axis.given or norm.given", refuse = "{name} with n= or axis=", hint = "Pad the input yourself." },
+  { eval = ["a"] },
+  { if = "not a.arr or a.rank != 1 or a.py == 'bool'", refuse = "{name} of {a.words}", hint = "Transform vectors (fft3 for rank 3)." },
+  { if = "a.kind == 'carr'", use = ["py_ifft_c"], viv = "py_ifft_c({a})", type = "T('carr', 1, 'complex', 'nd')" },
+  { use = ["py_ifft_r"], viv = "py_ifft_r({a})", type = "T('carr', 1, 'complex', 'nd')" },
+]
+tests = [{ a = [0.5, -1.0, 2.0, 0.25, 1.0, 0.0, -0.5, 1.5] }]
+
+[[rule]]
+id = "np.real"
+match = "np.real(val)"
+exactness = "exact"
+evidence = "adapters.py:27 X.real: the parts are copied, not computed"
+note = "NumPy's real part of an array is a view (a name bound to it may not be written: the row-alias check); of a real array it is the array itself."
+cases = [
+  { eval = ["val"] },
+  { if = "val.kind in ['carr', 'cnum']", viv = "re({val})", type = "arr(val.rank) if val.arr else NUM_F" },
+  { if = "val.kind not in ['num', 'arr', 'unknown'] or (val.arr and val.py == 'bool')", refuse = "np.real of {val.words}", hint = "Pass a number or a number array." },
+  { if = "val.arr and val.container == 'list'", use = ["py_copy"], viv = "py_copy({val})", type = "T('arr', val.rank, val.py, 'nd')" },
+  { viv = "{val}", type = "val", prec = "val.prec" },
+]
+tests = [{ val = [1.0, 2.0] }, { val = -2.5 }, { val = 3 }, { val = ["1+2j", "-0.5+1j"] }]
+
+[[rule]]
+id = "np.imag"
+match = "np.imag(val)"
+exactness = "exact"
+evidence = "adapters.py:28 X.imag: the parts are copied, not computed"
+cases = [
+  { eval = ["val"] },
+  { if = "val.kind in ['carr', 'cnum']", viv = "im({val})", type = "arr(val.rank) if val.arr else NUM_F" },
+  { refuse = "np.imag of a real value", hint = "It is 0." },
+]
+tests = [{ val = ["2+0.5j", "-1.5-1j"] }, { val = "1-2j" }]
+
+[[rule]]
+id = "np.conj"
+match = ["np.conj(x, /)", "np.conjugate(x, /)"]
+exactness = "exact"
+evidence = "a sign flip; of a real array a copy (NumPy returns a new array)"
+cases = [
+  { eval = ["x"] },
+  { if = "x.kind in ['carr', 'cnum']", viv = "conj({x})", type = "x" },
+  { if = "x.kind not in ['num', 'arr', 'unknown'] or (x.arr and x.py == 'bool')", refuse = "{name} of {x.words}", hint = "Pass a number or a number array." },
+  { if = "x.arr", use = ["py_copy"], viv = "py_copy({x})", type = "T('arr', x.rank, x.py, 'nd')" },
+  { viv = "{x}", type = "x", prec = "x.prec" },
+]
+tests = [{ x = [1.0, 2.0] }, { x = -1.5 }, { x = ["1+2j", "-0.5-1j"] }]
+
+# ---------------------------------------------------------------- refused NumPy
+
+[[rule]]
+id = "np.joining"
+match = ["np.append(...)", "np.tile(...)", "np.repeat(...)"]
+exactness = "refuse"
+gap = "R10"
+cases = [
+  { refuse = "{name}", hint = "Allocate the result with np.zeros and fill it in a loop; joining and reshaping arrays is R10/R17.", gap = "R10" },
+]
+
+[[rule]]
+id = "np.reshaping"
+match = ["np.flatten(...)"]
+exactness = "refuse"
+gap = "R10"
+cases = [
+  { refuse = "{name}", hint = "NumPy has no np.flatten (Python raises AttributeError); write a.flatten() or np.ravel(a).", gap = "R10" },
+]
+
+[[rule]]
+id = "np.random"
+match = "np.random*(...)"
+exactness = "refuse"
+lift = "each distribution transcribed into lib/nprandom from NumPy's source, draw for draw (family np-random-legacy, np-random-generator below)"
+cases = [
+  { refuse = "{name}", hint = "Not translated. np.random.seed with rand, random_sample, uniform, randint, choice, shuffle and permutation are, and rng = np.random.default_rng(seed) with random, integers, uniform, standard_normal, normal, choice, shuffle and permutation." },
+]
+
+[[rule]]
+id = "np.emath"
+match = ["np.emath.*(...)", "np.lib.scimath.*(...)", "np.ma.*(...)"]
+exactness = "refuse"
+lift = "complex-valued results for a negative or out-of-domain argument, per function (np.emath) and masked arrays (np.ma): not planned"
+cases = [
+  { refuse = "`{name}`", hint = "np.emath returns complex values where the argument leaves the real domain (np.emath.sqrt(-1.0) is 1j), and np.ma masks entries; use the plain np function if the argument stays in its domain." },
+]
+
+# ---------------------------------------------------------------- one-argument functions, elementwise
+#
+# The same Viv builtin, one argument, elementwise on arrays. Each name is spelled out: a name
+# with another module path in the middle (np.emath.sqrt, np.linalg.sqrt) reaches no rule here
+# (np.emath is refused above; np.linalg.sqrt does not exist, and is refused as an unknown
+# NumPy function). Of a math.* function of a number, `mpath` picks the guarded form: `guard`
+# (py_msqrt, py_mlog, ...: stop where math raises ValueError or OverflowError), `trig`
+# (py_mtrig: stop at an infinite argument), `hyp` (py_mhyp: stop on overflow), `floor` (an
+# int). A math.* function of an array raises TypeError in Python and is refused. NumPy's
+# second positional argument is `out`, the array the result is written into (np.log(x, b) is
+# not a logarithm to base b), and is refused.
+
+[[family]]
+id = "elementwise"
+cases = [
+  { if = "nargs > 1 and module == 'np'", refuse = "{name} with a second positional argument", hint = "NumPy's second argument is `out`, the array the result is written into{', not a base (write np.log(x) / np.log(b))' if short == 'log' else ''}; drop it." },
+  { eval = ["x"] },
+  { if = "module == 'math' and x.kind not in ['num', 'unknown']", refuse = "{name} of {x.words}", hint = "math functions take one real number (Python raises TypeError); use the NumPy function for an array." },
+  { if = "x.arr and x.py == 'bool'", refuse = "{name} of a Bool array", hint = "NumPy computes it in float16; use a number array." },
+  { if = "fn not in ['sqrt', 'abs', 'floor', 'ceil'] or x.kind in ['cnum', 'carr']", inexact = "{fn} (Viv's libm is not the platform's)", exactness = "tolerance", rtol = 2.2e-16, atol = 0.0, evidence = "a libm function, or a complex argument: 1 ulp against the platform's (SUBSET.md)" },
+  { if = "module == 'math' and x.kind == 'num' and mpath == 'guard'", use = ["{mhelper}"], viv = "{mhelper}({x})", type = "NUM_F" },
+  { if = "module == 'math' and x.kind == 'num' and mpath == 'trig'", use = ["py_mtrig"], viv = "{fn}(py_mtrig({x}))", type = "NUM_F" },
+  { if = "module == 'math' and x.kind == 'num' and mpath == 'hyp'", tmps = ["x"], hoist = ["{tmp_x} = {x}"], use = ["py_mhyp"], viv = "py_mhyp({fn}({tmp_x}), {tmp_x})", type = "NUM_F" },
+  { if = "module == 'math' and x.kind == 'num' and mpath == 'floor'", use = ["py_m{fn}"], viv = "py_m{fn}({x})", type = "NUM_I" },
+  { if = "x.kind == 'bool'", refuse = "{name} of a Bool", hint = "Use a number." },
+  { if = "short == 'fabs' and x.kind in ['cnum', 'carr']", refuse = "np.fabs of a complex value", hint = "NumPy raises TypeError; np.abs takes complex values." },
+  { if = "x.kind == 'carr' and fn != 'abs'", refuse = "{name} of a complex array", hint = "Viv's {fn} takes a complex number, not a complex array: loop over the entries." },
+  { if = "x.kind == 'cnum' and fn not in ['abs', 'exp', 'log', 'sqrt', 'sin', 'cos', 'tan']", refuse = "{name} of a complex number", hint = "Only abs/exp/log/sqrt/sin/cos/tan take complex values." },
+  { if = "x.arr", viv = "{fn}({x})", type = "arr(x.rank) if x.kind == 'arr' or fn == 'abs' else x" },
+  { if = "x.kind == 'cnum'", viv = "{fn}({x})", type = "NUM_F if fn == 'abs' else CNUM" },
+  { viv = "{fn}({x})", type = "NUM_I if short in ['floor', 'ceil'] and module == 'math' else NUM_F" },
+]
+
+[[family.rule]]
+id = "sqrt"
+match = ["np.sqrt(x, /, *out)", "math.sqrt(x, /)"]
+vars = { fn = "sqrt", mpath = "guard", mhelper = "py_msqrt" }
+exactness = "exact"
+evidence = "mapping.py:32 np.sqrt(p), :42 math.sqrt(2.0): bitwise; sqrt is correctly rounded in IEEE arithmetic"
+tests = [{ x = [0.1, 2.0, 9.0] }, { x = 2.0 }, { x = [1, 4, 2] }]
+
+[[family.rule]]
+id = "exp"
+match = ["np.exp(x, /, *out)", "math.exp(x, /)"]
+vars = { fn = "exp", mpath = "guard", mhelper = "py_mexp" }
+exactness = "tolerance"
+rtol = 1.6e-16
+atol = 0.0
+evidence = "mapping.py:32 np.exp(x): within 1.6e-16 relative; :42 math.exp(1.5): bitwise"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = 1.5 }]
+
+[[family.rule]]
+id = "log"
+match = ["np.log(x, /, *out)", "math.log(x, /)"]
+vars = { fn = "log", mpath = "guard", mhelper = "py_mlog" }
+exactness = "tolerance"
+rtol = 2e-16
+atol = 0.0
+evidence = "mapping.py:32 np.log(p): within 2e-16 relative; :42 math.log(10.0): bitwise"
+tests = [{ x = [0.1, 2.0, 10.0] }, { x = 10.0 }]
+
+[[family.rule]]
+id = "sin"
+match = ["np.sin(x, /, *out)", "math.sin(x, /)"]
+vars = { fn = "sin", mpath = "trig", mhelper = "" }
+exactness = "tolerance"
+rtol = 2.2e-16
+atol = 0.0
+evidence = "mapping.py:32 np.sin(x), :43 math.sin(0.5): bitwise on 9 values; a libm function, 1 ulp against the platform libm (SUBSET.md)"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "cos"
+match = ["np.cos(x, /, *out)", "math.cos(x, /)"]
+vars = { fn = "cos", mpath = "trig", mhelper = "" }
+exactness = "tolerance"
+rtol = 2.2e-16
+atol = 0.0
+evidence = "mapping.py:32 np.cos(x), :43 math.cos(0.5): bitwise on 9 values; a libm function, 1 ulp against the platform libm (SUBSET.md)"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "tan"
+match = ["np.tan(x, /, *out)", "math.tan(x, /)"]
+vars = { fn = "tan", mpath = "trig", mhelper = "" }
+exactness = "tolerance"
+rtol = 1.4e-16
+atol = 0.0
+evidence = "mapping.py:32 np.tan(x): within 1.4e-16 relative; :43 math.tan(0.5): bitwise"
+tests = [{ x = [-1.5, 0.5, 1.2] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "tanh"
+match = ["np.tanh(x, /, *out)", "math.tanh(x, /)"]
+vars = { fn = "tanh", mpath = "none", mhelper = "" }
+exactness = "tolerance"
+rtol = 1.2e-16
+atol = 0.0
+evidence = "mapping.py:33 np.tanh(x): within 1.2e-16 relative; :44 math.tanh(0.5): bitwise"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "sinh"
+match = ["np.sinh(x, /, *out)", "math.sinh(x, /)"]
+vars = { fn = "sinh", mpath = "hyp", mhelper = "" }
+exactness = "tolerance"
+rtol = 1.2e-16
+atol = 0.0
+evidence = "mapping.py:33 np.sinh(x): within 1.2e-16 relative; :44 math.sinh(0.5): bitwise"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "cosh"
+match = ["np.cosh(x, /, *out)", "math.cosh(x, /)"]
+vars = { fn = "cosh", mpath = "hyp", mhelper = "" }
+exactness = "tolerance"
+rtol = 1.4e-16
+atol = 0.0
+evidence = "mapping.py:33 np.cosh(x): within 1.4e-16 relative; :44 math.cosh(0.5): bitwise"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "asin"
+match = ["np.arcsin(x, /, *out)", "np.asin(x, /, *out)", "math.asin(x, /)"]
+vars = { fn = "asin", mpath = "guard", mhelper = "py_masin" }
+exactness = "tolerance"
+rtol = 2.1e-16
+atol = 0.0
+evidence = "mapping.py:34 np.arcsin(x / 2.0): within 2.1e-16 relative; :43 math.asin(0.5): within 2.1e-16"
+note = "np.asin is NumPy 2's name for np.arcsin."
+tests = [{ x = [-0.75, 0.25, 0.5] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "acos"
+match = ["np.arccos(x, /, *out)", "np.acos(x, /, *out)", "math.acos(x, /)"]
+vars = { fn = "acos", mpath = "guard", mhelper = "py_macos" }
+exactness = "tolerance"
+rtol = 2.1e-16
+atol = 0.0
+evidence = "mapping.py:34 np.arccos(x / 2.0): within 2.1e-16 relative; :43 math.acos(0.5): within 2.1e-16"
+note = "np.acos is NumPy 2's name for np.arccos."
+tests = [{ x = [-0.75, 0.25, 0.5] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "atan"
+match = ["np.arctan(x, /, *out)", "np.atan(x, /, *out)", "math.atan(x, /)"]
+vars = { fn = "atan", mpath = "none", mhelper = "" }
+exactness = "tolerance"
+rtol = 2e-16
+atol = 0.0
+evidence = "mapping.py:33 np.arctan(x): within 2e-16 relative; :43 math.atan(0.5): within 1.2e-16"
+note = "np.atan is NumPy 2's name for np.arctan."
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = 0.5 }]
+
+[[family.rule]]
+id = "erf"
+match = "math.erf(x, /)"
+vars = { fn = "erf", mpath = "guard", mhelper = "py_merf" }
+exactness = "tolerance"
+rtol = 4.5e-16
+atol = 0.0
+evidence = "mapping.py:44 math.erf(0.5): within 2.1e-16 relative; check_rules.py: erf(-1.25) 2 ulp off (2.4e-16 relative)"
+tests = [{ x = 0.5 }, { x = -1.25 }]
+
+[[family.rule]]
+id = "gamma"
+match = "math.gamma(x, /)"
+vars = { fn = "gamma", mpath = "guard", mhelper = "py_mgamma" }
+exactness = "tolerance"
+rtol = 2e-15
+atol = 0.0
+evidence = "mapping.py:44 math.gamma(4.5): within 4.6e-16 relative; check_rules.py: gamma(-1.5) 1.3e-15 relative, gamma(3.0) 1.2e-15 (6.000000000000007)"
+tests = [{ x = 4.5 }, { x = -1.5 }]
+
+[[family.rule]]
+id = "floor"
+match = "np.floor(x, /, *out)"
+vars = { fn = "floor", mpath = "floor", mhelper = "" }
+exactness = "exact"
+evidence = "mapping.py:33 np.floor(x): bitwise"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = -2.5 }]
+
+[[family.rule]]
+id = "ceil"
+match = "np.ceil(x, /, *out)"
+vars = { fn = "ceil", mpath = "floor", mhelper = "" }
+exactness = "exact"
+evidence = "mapping.py:33 np.ceil(x): bitwise"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = -2.5 }]
+
+[[family.rule]]
+id = "fabs"
+match = "np.fabs(x, /, *out)"
+vars = { fn = "abs", mpath = "none", mhelper = "" }
+exactness = "exact"
+evidence = "the abs rule's evidence (builtins.toml): correctly rounded"
+tests = [{ x = [-1.5, 0.5, 2.0] }, { x = -3 }]
+
+# ---------------------------------------------------------------- methods of an array
+#
+# The receiver `a` is translated first; a string, a non-array, or a keyword argument is
+# refused before these rules are tried (py2viv.py, _method_call). A method no rule takes is
+# refused with "the method `.m`". A positional argument (a.sum(0), an axis) is refused.
+
+[[rule]]
+id = "a.sum"
+match = "a.sum(axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:48 M.sum(): bitwise; as np.sum"
+cases = [
+  { if = "a.kind == 'unknown'", viv = "sum({a})", type = "NUM_F" },
+  { if = "a.kind == 'carr'", refuse = "the sum of a complex array", hint = "Sum the real and imaginary parts." },
+  { if = "a.py in ['int', 'bool']", use = ["py_isum"], viv = "py_isum({a})", type = "NUM_I" },
+  { if = "a.py == 'mixed'", refuse = "the sum of a list mixing ints and floats", hint = "Python adds the ints exactly first; make them all floats." },
+  { if = "in_grad", inexact = "np.sum left to right inside a differentiated def (Viv's grad cannot follow the pairwise recursion)", viv = "sum({a})", type = "NUM_F", exactness = "tolerance", rtol = 1e-13, atol = 1e-16, evidence = "as np.sum inside grad" },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed and not in_grad and a.py == 'float'", use = ["py_npsum"], viv = "py_npsum(transpose({a}))", type = "NUM_F" },
+  { use = ["py_npsum"], viv = "py_npsum({a})", type = "NUM_F" },
+]
+tests = [{ a = [[1.0, 2.5], [-3.0, 0.25]] }, { a = [1, 2, 3] }]
+
+[[rule]]
+id = "a.max"
+match = ["a.max(axis=None, *, keepdims=False)", "a.min(axis=None, *, keepdims=False)"]
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:48 M.max(), M.min(): bitwise; as np.max"
+cases = [
+  { if = "a.kind == 'carr' or a.py == 'bool'", refuse = "the method `.{name}` of {a.words}", hint = "Pass a real number array." },
+  { if = "a.py == 'int'", viv = "{name}({a})", type = "NUM_I" },
+  { use = ["py_np{name}"], viv = "py_np{name}({a})", type = "NUM_F" },
+]
+tests = [{ a = [[1.0, 2.5], [-3.0, 0.25]] }, { a = [4, 1, 7] }]
+
+[[rule]]
+id = "a.mean"
+match = "a.mean(axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:48 M.mean(): bitwise; as np.mean"
+cases = [
+  { if = "a.kind == 'carr'", refuse = "the method `.mean` of a complex array", hint = "Average the real and imaginary parts." },
+  { if = "in_grad", inexact = ".mean() left to right inside a differentiated def", viv = "sum({a}) / numel({a})", type = "NUM_F", prec = "70", exactness = "tolerance", rtol = 1e-13, atol = 1e-16, evidence = "as np.sum inside grad" },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed and not in_grad and a.py == 'float'", use = ["py_mean"], viv = "py_mean(transpose({a}))", type = "NUM_F" },
+  { use = ["py_mean"], viv = "py_mean({a})", type = "NUM_F" },
+]
+tests = [{ a = [-1.5, 0.5, 0.25, 2.0] }]
+
+[[rule]]
+id = "a.std"
+match = "a.std(axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "mapping.py:48 x.std(): bitwise; as np.std"
+cases = [
+  { if = "in_grad", refuse = ".{name}() inside a differentiated def", hint = "Write it out with sum(...) / n." },
+  { if = "a.kind == 'carr'", refuse = "the method `.std` of a complex array", hint = "Use a real array." },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed", use = ["py_mean", "py_var", "py_std"], viv = "py_std(transpose({a}))", type = "NUM_F" },
+  { use = ["py_mean", "py_var", "py_std"], viv = "py_std({a})", type = "NUM_F" },
+]
+tests = [{ a = [-1.5, 0.5, 0.25, 2.0] }]
+
+[[rule]]
+id = "a.var"
+match = "a.var(axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "as np.var"
+cases = [
+  { if = "in_grad", refuse = ".{name}() inside a differentiated def", hint = "Write it out with sum(...) / n." },
+  { if = "a.kind == 'carr'", refuse = "the method `.var` of a complex array", hint = "Use a real array." },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed", use = ["py_mean", "py_var"], viv = "py_var(transpose({a}))", type = "NUM_F" },
+  { use = ["py_mean", "py_var"], viv = "py_var({a})", type = "NUM_F" },
+]
+tests = [{ a = [-1.5, 0.5, 0.25, 2.0] }]
+
+[[rule]]
+id = "a.copy"
+match = "a.copy()"
+exactness = "exact"
+evidence = "mapping.py:47 v.copy(): bitwise"
+cases = [
+  { if = "a.kind == 'carr'", refuse = "copying a complex array", hint = "Allocate czeros(n) and copy in a loop." },
+  { use = ["py_copy"], viv = "py_copy({a})", type = "a" },
+]
+tests = [{ a = [3.0, -1.0, 2.5] }]
+
+[[rule]]
+id = "a.dot"
+match = "a.dot(b)"
+exactness = "tolerance"
+rtol = 1e-15
+atol = 0.0
+evidence = "mapping.py:48 v.dot(w): bitwise; held to mapping.py's declared rtol 1e-15 (BLAS)"
+cases = [
+  { eval = [] },
+  { inexact = ".dot (BLAS sums in its own order)" },
+  { eval = ["b"] },
+  { if = "a.kind != 'arr' or b.kind != 'arr' or a.py == 'bool' or b.py == 'bool' or a.rank > 2 or b.rank > 2", refuse = "the method `.dot` of {a.words} and {b.words}", hint = "Only real vectors and matrices." },
+  { if = "a.py == 'int' and b.py == 'int'", refuse = "the method `.dot` of two integer arrays", hint = "NumPy's integer products wrap at 2^63; make one of them float." },
+  { if = "a.rank == 1 and b.rank == 1", use = ["py_vdot"], viv = "py_vdot({a}, {b})", type = "NUM_F" },
+  { if = "a.rank == 2 and b.rank == 2", use = ["py_mm"], viv = "py_mm({a}, {b})", type = "arr(2)" },
+  { if = "a.rank == 2", use = ["py_mv"], viv = "py_mv({a}, {b})", type = "arr(1)" },
+  { use = ["py_vm"], viv = "py_vm({a}, {b})", type = "arr(1)" },
+]
+tests = [{ a = [3.0, -1.0, 2.5], b = [0.5, 4.0, -1.0] }]
+
+[[rule]]
+id = "a.transpose"
+match = "a.transpose()"
+exactness = "exact"
+evidence = "as np.transpose"
+note = "A view of `a`, as np.transpose."
+cases = [
+  { if = "a.rank == 2", viv = "transpose({a})", type = "a" },
+  { if = "a.rank > 2", refuse = "the method `.transpose` of {a.words}", hint = "Only the 2-D transpose is in the subset.", gap = "R10" },
+  { viv = "{a}", type = "a", prec = "a.prec" },
+]
+tests = [{ a = [[1.0, 2.0], [3.0, 4.0]] }, { a = [1.0, 2.0] }]
+
+[[rule]]
+id = "a.astype"
+match = "a.astype(dtype)"
+params = { dtype = "dtype" }
+exactness = "exact"
+evidence = "a copy"
+cases = [
+  { eval = [] },
+  { if = "a.kind == 'carr'", refuse = "astype of a complex array", hint = "NumPy discards the imaginary parts (with a warning); take .real." },
+  { if = "dtype in ['float', 'np.float64']", use = ["py_copy"], viv = "py_copy({a})", type = "T(a.kind, a.rank, 'float', 'nd')" },
+  { refuse = "astype({dtype})", hint = "Only astype(float) is in the subset." },
+]
+tests = [{ a = [1, 2, 3], dtype = "float" }, { a = [[1.5, -2.0], [0.0, 3.0]], dtype = "np.float64" }]
+
+[[rule]]
+id = "a.tolist"
+match = "a.tolist()"
+exactness = "exact"
+evidence = "the same array, typed as a list for printing"
+cases = [
+  { viv = "{a}", type = "T(a.kind, a.rank, a.py, 'list')", prec = "a.prec" },
+]
+tests = [{ a = [1.0, 2.0] }]
+
+[[rule]]
+id = "a.argmax"
+match = ["a.argmax(axis=None, *, keepdims=False)", "a.argmin(axis=None, *, keepdims=False)"]
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "as np.argmax"
+cases = [
+  { if = "a.kind == 'carr'", refuse = "the method `.{name}` of a complex array", hint = "Use a real array." },
+  { use = ["py_{name}"], viv = "py_{name}({a})", type = "NUM_I" },
+]
+tests = [{ a = [1.0, 3.0, 3.0, -2.0] }]
+
+[[rule]]
+id = "a.prod"
+match = "a.prod(axis=None, *, keepdims=False)"
+when = "(not axis.given or axis.syntax == 'Constant' and axis.lit == None) and (not keepdims.given or keepdims.syntax == 'Constant' and keepdims.lit == False)"
+exactness = "exact"
+evidence = "as np.prod"
+cases = [
+  { if = "a.kind == 'carr' or a.py == 'bool'", refuse = "the method `.prod` of {a.words}", hint = "Use a real number array." },
+  { if = "a.py == 'int'", use = ["py_flat", "py_prod", "py_int"], viv = "py_int(py_prod({a}))", type = "NUM_I" },
+  { if = "a.arr and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy adds (or multiplies) a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "a.arr and a.rank == 2 and a.transposed and a.py == 'float'", use = ["py_flat", "py_prod"], viv = "py_prod(transpose({a}))", type = "NUM_F" },
+  { use = ["py_flat", "py_prod"], viv = "py_prod({a})", type = "NUM_F" },
+]
+tests = [{ a = [3.0, -1.0, 2.5] }, { a = [2, 3] }]
+
+[[rule]]
+id = "a.cumsum"
+match = "a.cumsum(axis=None)"
+exactness = "exact"
+evidence = "as np.cumsum"
+cases = [
+  { if = "a.kind == 'carr' or a.py in ['bool', 'mixed']", refuse = "the method `.cumsum` of {a.words}", hint = "Pass a real number array.", gap = "R9" },
+  { if = "axis.given and not (axis.syntax == 'Constant' and axis.lit == None) and axis.axis_lit == None", refuse = "`.cumsum` with an axis that is not an int literal", hint = "Write the axis as a number.", at = "axis" },
+  { if = "axis.axis_lit != None and (axis.axis_lit < 0 - a.rank or axis.axis_lit >= a.rank)", refuse = "`.cumsum` with axis={axis.axis_lit} of {a.words}", hint = "NumPy raises AxisError: the axes of a rank-{a.rank} array are {0 - a.rank} to {a.rank - 1}.", at = "axis" },
+  { if = "a.rank > 1 and axis.axis_lit != None and a.py == 'int'", use = ["py_cumsum_ax", "py_int_arr"], viv = "py_int_arr(py_cumsum_ax({a}, {axk(axis, a)}))", type = "T('arr', a.rank, 'int', 'nd')" },
+  { if = "a.rank > 1 and axis.axis_lit != None", use = ["py_cumsum_ax"], viv = "py_cumsum_ax({a}, {axk(axis, a)})", type = "arr(a.rank)" },
+  { if = "a.rank > 1 and a.py == 'int'", use = ["py_cumsum", "py_flat", "py_int_arr"], viv = "py_int_arr(py_cumsum(py_flat({a})))", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "a.rank > 1", use = ["py_cumsum", "py_flat"], viv = "py_cumsum(py_flat({a}))", type = "arr(1)" },
+  { if = "a.py == 'int'", use = ["py_cumsum", "py_int_arr"], viv = "py_int_arr(py_cumsum({a}))", type = "T('arr', 1, 'int', 'nd')" },
+  { use = ["py_cumsum"], viv = "py_cumsum({a})", type = "arr(1)" },
+]
+tests = [{ a = [-1.5, 0.5, 0.25, 2.0] }, { a = [1, 2, 3] }, { a = [[1.0, -2.5, 3.0], [0.5, 0.25, -1.0]], axis = -1 }]
+
+[[rule]]
+id = "a.reshaping"
+match = ["a.squeeze(...)"]
+exactness = "refuse"
+gap = "R10"
+cases = [
+  { refuse = "`.{name}`", hint = "Reshaping is R10; allocate the new shape and copy in a loop.", gap = "R10" },
+]
+
+# ---------------------------------------------------------------- Python lists (funcs.py)
+#
+# A list's own methods, for a list py2viv can follow: one that nothing else holds (`a.grows`)
+# for the methods that change it, and any
+# Python list for index and count. The hook `list_method` writes the Viv (funcs.py); the
+# helpers raise where CPython raises, with its words, and stop (a run-time refusal) where
+# CPython's answer depends on object identity (a NaN).
+
+[[rule]]
+id = "list.pop"
+match = "a.pop(i=None, /)"
+when = "a.grows"
+params = { a = "list" }
+exactness = "exact"
+evidence = "tests/test_py_funcs.py (CPython against the three engines) and check_rules.py's generated cases (results/rule_tests.json)"
+guard = "a list nothing else can hold (py2viv.py's grow_refusal proves it and refuses the list otherwise), of numbers of one type or of rows of one length; the whole value of an assignment or a return"
+note = "O(n): the list is copied without its item (Viv has no shrink yet)."
+cases = [
+  { eval = ["a"] },
+  { hook = "list_method", args = ["pop", "a", "i"] },
+]
+tests = [{ a = [1.5, -2.0, 3.25] }, { a = [4, 5, 6], i = 0 }, { a = [1.5, -2.0], i = -1 }, { a = [], i = 0 }, { a = [7, 8], i = 5 }]
+
+[[rule]]
+id = "list.index-count"
+match = ["a.index(x, /)", "a.count(x, /)"]
+when = "nargs == 1 and nkw == 0"
+params = { a = "list" }
+exactness = "exact"
+evidence = "tests/test_py_funcs.py (CPython against the three engines) and check_rules.py's generated cases (results/rule_tests.json)"
+guard = "a Python list of numbers; x not NaN (the run stops: CPython finds a NaN only as the same object)"
+cases = [
+  { eval = ["a", "x"] },
+  { if = "not (a.arr and a.container == 'list' and a.rank == 1 and a.kind == 'arr')", next = true },
+  { hook = "list_method", args = ["{name}", "a", "x"] },
+]
+tests = [{ a = [1.5, 2.0, 1.5], x = 1.5 }, { a = [3, 1, 3, 3], x = 3 }, { a = [1.5, 2.0], x = 4.0 }]
+
+[[rule]]
+id = "a.list-methods"
+match = ["a.append(...)", "a.extend(...)", "a.insert(...)", "a.pop(...)", "a.remove(...)", "a.index(...)", "a.count(...)"]
+exactness = "refuse"
+gap = "R17"
+cases = [
+  { refuse = "list.{name}", hint = "py2viv changes a list (append, pop, insert, extend, remove, clear, reverse, sort) only when nothing else can hold it: bound only to new lists (`[]`, a list literal, a comprehension, list(...), sorted(...)) and read nowhere an alias could be taken (a second name, an argument, a container, a nested def); otherwise allocate the final size with np.zeros(n) and write by index.", gap = "R17" },
+]
+
+[[rule]]
+id = "a.sort-as-a-value"
+match = "a.sort(...)"
+exactness = "refuse"
+lift = "none needed: np.sort(a) is the value form, a.sort() the statement"
+cases = [
+  { refuse = "the method `.sort`", hint = "np.sort(a) returns a sorted copy; a.sort() as a statement sorts in place." },
+]
+
+# ---------------------------------------------------------------- methods as statements
+
+[[rule]]
+id = "list.append-statement"
+match = "a.append(x, /)"
+context = "stmt"
+when = "a.grows"
+params = { x = "list" }
+exactness = "exact"
+evidence = "results/rule_tests.json (list.append-statement): bitwise in the three engines"
+guard = "a list bound only to new lists that nothing can alias (py2viv.py refuses the `[]` of any other list); its appends all ints or all floats, or all rows of one length (a new list or array, a copy, or a tuple: a list of lists shares its rows in Python)"
+note = "Viv's append gives a new array, so a second name would not see it; the translator proves there is none (grow_refusal) and refuses the `[]` otherwise. A row goes on as a new row of a matrix; rows of different lengths stop the run (a run-time refusal)."
+cases = [
+  { eval = ["x"] },
+  { if = "not (x.kind == 'num' and x.py in ['int', 'float'] or x.kind == 'arr' and x.rank == 1 or x.syntax == 'Tuple' or x.kind == 'str')", refuse = "appending {x.words} to a list", hint = "A list py2viv grows holds numbers, or rows of numbers (a new list, a copy, or a tuple).", gap = "R17", at = "x" },
+  { hook = "grow_append", args = ["a", "x"] },
+]
+tests = [{ a = [], x = 1.5 }, { a = [], x = 3 }, { a = [], x = [1.5, 2.0] }]
+
+[[rule]]
+id = "list.methods-statement"
+match = ["a.pop(i=None, /)", "a.insert(i, x, /)", "a.extend(x, /)", "a.remove(x, /)", "a.clear()", "a.reverse()"]
+context = "stmt"
+when = "a.grows"
+params = { a = "list" }
+exactness = "exact"
+evidence = "tests/test_py_funcs.py (CPython against the three engines) and check_rules.py's generated cases (results/rule_tests.json)"
+guard = "a list nothing else can hold (py2viv.py's grow_refusal proves it and refuses the list otherwise), of numbers of one type or of rows of one length"
+note = "pop, insert and remove copy the list (O(n)); extend and append grow it in place."
+cases = [
+  { eval = ["a"] },
+  { hook = "list_method", args = ["{name}", "a", "i", "x"] },
+]
+tests = [{ a = [1.5, -2.0, 3.25] }, { a = [4, 5, 6], i = 1, x = 9 }, { a = [1.5, 2.0], x = [0.5, 0.25] }, { a = [1.5, 2.0, 1.5], x = 1.5 }, { a = [1, 2], i = -5, x = 0 }, { a = [], x = 2.0 }]
+
+[[rule]]
+id = "list.sort-key-statement"
+match = "a.sort(*, key=None, reverse=False)"
+context = "stmt"
+when = "nkw > 0"
+params = { a = "list" }
+exactness = "exact"
+evidence = "tests/test_py_funcs.py (CPython against the three engines) and check_rules.py's generated cases (results/rule_tests.json)"
+guard = "a Python list; no NaN key (py_msort stops: the order would be Timsort's)"
+note = "A stable merge sort of the keys: every stable sort gives the same order, so it is CPython's Timsort's; the list's items are written back in place (every name holding it sees them)."
+cases = [
+  { eval = ["a"] },
+  { hook = "list_method", args = ["sort", "a", "key", "reverse"] },
+]
+tests = [{ a = [0.5, -1.0, 2.0, 0.25], reverse = true }, { a = [3, 1, 2, 1], reverse = false }]
+
+[[rule]]
+id = "a.list-methods-statement"
+match = ["a.append(...)", "a.extend(...)", "a.insert(...)", "a.pop(...)", "a.remove(...)", "a.clear(...)"]
+context = "stmt"
+exactness = "refuse"
+gap = "R17"
+cases = [
+  { refuse = "list.{name}", hint = "py2viv changes a list (append, pop, insert, extend, remove, clear, reverse, sort) only when nothing else can hold it: bound only to new lists (`[]`, a list literal, a comprehension, list(...), sorted(...)) and read nowhere an alias could be taken (a second name, an argument, a container, a nested def); otherwise allocate the final size with np.zeros(n) and write by index.", gap = "R17" },
+]
+
+[[rule]]
+id = "a.sort-statement"
+match = "a.sort()"
+context = "stmt"
+when = "nargs == 0 and nkw == 0"
+exactness = "exact"
+evidence = "adapters.py:19 a.sort(): bitwise"
+guard = "no NaN, and not 0.0 with -0.0 (py_sort_ip stops at run time on either)"
+cases = [
+  { if = "a.arr and a.rank == 1 and a.kind != 'carr' and a.py != 'bool'", use = ["py_sort_ip"], viv = "py_sort_ip({a})" },
+  { next = true },
+]
+tests = [{ a = [0.5, -1.0, 2.0, 0.25] }]
+
+[[rule]]
+id = "a.fill-statement"
+match = "a.fill(v)"
+context = "stmt"
+when = "nargs == 1"
+exactness = "exact"
+evidence = "a store"
+cases = [
+  { eval = ["a", "v"] },
+  { if = "not a.arr", next = true },
+  { if = "a.arr and a.container == 'list'", refuse = "the method `.fill` of a Python list", hint = "Python raises AttributeError (a list has no .fill); make it a NumPy array: np.array(...)." },
+  { if = "not a.arr or not v.scalar", refuse = "the method `.fill` of {a.words} with {v.words}", hint = "Fill an array with a number." },
+  { if = "a.kind == 'arr' and v.kind == 'cnum'", refuse = "`.fill` of a real array with a complex number", hint = "NumPy discards the imaginary part (with a warning)." },
+  { if = "a.py == 'int' and v.py != 'int'", refuse = "`.fill` of an int array with a value that is not an int", hint = "NumPy truncates the value to the array's int dtype; pass an int." },
+  { if = "a.py == 'bool' and v.kind != 'bool'", refuse = "`.fill` of a Bool array with a number", hint = "Fill with True or False." },
+  { if = "v.kind == 'bool'", use = ["py_b01"], viv = "fill({a}, py_b01({v}))" },
+  { viv = "fill({a}, {v})" },
+]
+tests = [{ a = [0.0, 0.0, 0.0], v = 2.5 }, { a = [0.0, 1.0], v = -0.0 }]
+
+# ---------------------------------------------------------------- attributes of an array
+
+[[rule]]
+id = "a.T"
+match = "a.T"
+exactness = "exact"
+evidence = "mapping.py:31 M.T: bitwise"
+note = "A view of `a`, as np.transpose."
+cases = [
+  { if = "a.arr and a.rank == 1", viv = "{a}", type = "a", prec = "a.prec" },
+  { if = "a.arr and a.rank > 2", refuse = "the attribute `.T` of {a.words}", hint = "Only the 2-D transpose is in the subset.", gap = "R10" },
+  { if = "a.arr", viv = "transpose({a})", type = "a" },
+]
+tests = [{ a = [[1.0, 2.0], [3.0, 4.0]] }, { a = [1.0, 2.0] }]
+
+[[rule]]
+id = "a.shape"
+match = "a.shape"
+exactness = "exact"
+evidence = "mapping.py:48 M.shape[1]: bitwise"
+cases = [
+  { if = "a.arr", viv = "shape({a})", type = "T('arr', 1, 'int', 'shape')" },
+]
+tests = [{ a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] }]
+
+[[rule]]
+id = "a.size"
+match = "a.size"
+exactness = "exact"
+evidence = "mapping.py:48 M.size: bitwise"
+cases = [
+  { if = "a.arr", viv = "numel({a})", type = "NUM_I" },
+]
+tests = [{ a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] }]
+
+[[rule]]
+id = "a.ndim"
+match = "a.ndim"
+exactness = "exact"
+evidence = "mapping.py:48 M.ndim: a constant from the static type"
+cases = [
+  { if = "a.arr", viv = "{a.rank}", type = "NUM_I" },
+]
+tests = [{ a = [[1.0, 2.0], [3.0, 4.0]] }]
+
+[[rule]]
+id = "a.real"
+match = "a.real"
+exactness = "exact"
+evidence = "adapters.py:27 X.real"
+cases = [
+  { if = "a.kind == 'carr'", viv = "re({a})", type = "arr(a.rank)" },
+  { if = "a.arr", viv = "{a}", type = "a", prec = "a.prec" },
+  { if = "a.kind == 'cnum'", viv = "re({a})", type = "NUM_F" },
+  { if = "a.kind == 'num'", viv = "{a}", type = "a", prec = "a.prec" },
+]
+tests = [{ a = [1.0, 2.0] }, { a = -1.5 }]
+
+[[rule]]
+id = "a.imag"
+match = "a.imag"
+exactness = "exact"
+evidence = "adapters.py:28 X.imag"
+cases = [
+  { if = "a.kind == 'carr'", viv = "im({a})", type = "arr(a.rank)" },
+  { if = "a.kind == 'cnum'", viv = "im({a})", type = "NUM_F" },
+]
+tests = [{ a = ["0.5+1j", "-1-2.5j"] }, { a = "2-0.5j" }]
+
+# ---------------------------------------------------------------- module constants
+
+[[rule]]
+id = "pi"
+match = ["np.pi", "math.pi"]
+exactness = "exact"
+evidence = "mapping.py:45 math.pi: bitwise (the double, written by repr)"
+cases = [{ const = "pi" }]
+tests = [{}]
+
+[[rule]]
+id = "e"
+match = ["np.e", "math.e"]
+exactness = "exact"
+evidence = "mapping.py:45 math.e: bitwise"
+cases = [{ const = "e" }]
+tests = [{}]
+
+[[rule]]
+id = "tau"
+match = "math.tau"
+exactness = "exact"
+evidence = "the double, written by repr"
+cases = [{ const = "tau" }]
+tests = [{}]
+
+[[rule]]
+id = "inf"
+match = ["np.inf", "math.inf", "np.Inf"]
+exactness = "exact"
+evidence = "(1.0 / 0.0)"
+cases = [{ const = "inf" }]
+tests = [{}]
+
+[[rule]]
+id = "nan"
+match = ["np.nan", "math.nan", "np.NaN"]
+exactness = "exact"
+evidence = "(0.0 / 0.0)"
+cases = [{ const = "nan" }]
+tests = [{}]
+
+[[rule]]
+id = "np.random-attribute"
+match = "np.random*"
+exactness = "refuse"
+lift = "a function value (np.random.rand passed as an argument) is not translated; call it"
+cases = [
+  { refuse = "np.random", hint = "Call the function (np.random.rand(3)); np.random's functions are translated as calls, not as values." },
+]
+
+# ---------------------------------------------------------------- indexing
+#
+# A subscript with a range, `a[lo:hi]`, `A[:, j]`, `A[1:-1, 1:-1]`, `T[i, :, 2:]`: py2viv.py
+# splits it into its axes, gives each range to this rule (with `n`, the Viv code of the axis's
+# length, and `axis`) and writes each plain index itself (a negative one through py_ix). The
+# result is a Viv slice, which copies. NumPy's slice is a view, so py2viv.py refuses a slice
+# whose shared memory a write could show (views.py): a write into the slice or into the array
+# it came from, anywhere in the scope, or a call of a def that writes into either. A range of a
+# rank-1 Python list is a copy in Python too.
+
+[[rule]]
+id = "slice"
+match = "a[lo:hi:step]"
+exactness = "exact"
+evidence = "check_rules.py: each bound omitted, 0, inside, at and past either end, negative, a variable, reversed (an empty slice); steps 1 to 3; each axis of ranks 1 to 3, beside plain and negative indices; each reduction of a slice checked against NumPy's order (study of 2026-09-27: a slice sums as its copy, blocked pairwise)"
+note = "Bounds are normalized as Python's slice.indices does (py_lo, py_hi): Viv's ranges need 0 <= lo <= hi <= n. A negative or variable step is refused (Viv's ranges step forward)."
+cases = [
+  { if = "step.given and not (step.syntax == 'Constant' and step.kind == 'num' and step.py == 'int')", refuse = "a slice with the step `{step.code}`", hint = "Viv's slices take a literal step of 1 or more; a negative step walks backward, which they do not. Write the loop over the indices.", at = "step" },
+  { if = "step.given and step.lit < 1", refuse = "a slice with the step {step.lit}", hint = "Python raises ValueError for a step of 0; a negative step walks backward, which Viv's slices do not. Write the loop over the indices.", at = "step" },
+  { if = "lo.given and not (lo.kind == 'num' and lo.py == 'int')", refuse = "a slice bound that is {lo.words}", hint = "Python takes only ints as slice bounds (a float raises TypeError); convert with int(...).", at = "lo" },
+  { if = "hi.given and not (hi.kind == 'num' and hi.py == 'int')", refuse = "a slice bound that is {hi.words}", hint = "Python takes only ints as slice bounds (a float raises TypeError); convert with int(...).", at = "hi" },
+  { if = "not lo.given and not hi.given", viv = ":{(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { if = "not hi.given and lo.syntax == 'Constant' and lo.lit == 0", viv = ":{(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { if = "not hi.given and lo.syntax == 'Constant'", viv = "min({lo}, {n}):{(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { if = "not hi.given", use = ["py_lo"], viv = "py_lo({lo}, {n}):{(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { if = "not lo.given and hi.syntax == 'Constant'", viv = ":min({hi}, {n}){(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { if = "not lo.given", use = ["py_lo"], viv = ":py_lo({hi}, {n}){(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { if = "lo.syntax == 'Constant' and hi.syntax == 'Constant' and lo.lit <= hi.lit and lo.lit == 0", viv = ":min({hi}, {n}){(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { if = "lo.syntax == 'Constant' and hi.syntax == 'Constant' and lo.lit <= hi.lit", viv = "min({lo}, {n}):min({hi}, {n}){(':' + step.code) if step.given and step.lit != 1 else ''}" },
+  { use = ["py_lo", "py_hi"], viv = "py_lo({lo}, {n}):py_hi({lo}, {hi}, {n}){(':' + step.code) if step.given and step.lit != 1 else ''}" },
+]
+tests = [{ a = [1.5, -2.0, 3.25, 4.0, -0.5, 6.0], lo = 1, hi = 4 }, { a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], lo = 1 }, { a = [1, 2, 3, 4, 5, 6, 7], lo = 1, hi = -1, step = 2 }, { a = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], hi = 1 }]
+
+# ---------------------------------------------------------------- broadcasting
+#
+# `x + y`, `x < y` and the other operators of two arrays: py2viv.py gives each one to these
+# rules with both operands translated and the result's type (rt). NumPy broadcasts two shapes
+# (aligned at the last axis, a length 1 stretched); each entry of the result is one operation
+# on the entries it reads, so expanding the operands (copies, `take`) and then combining them
+# entry by entry is exact (helpers.toml, "broadcasting"). Operands whose shapes are equal by
+# their form (`same_shape`: one array, ranges of it that trim as much, `np.roll` of it,
+# arithmetic of these with numbers) keep Viv's own operator.
+
+[[rule]]
+id = "broadcast"
+match = ["x + y", "x - y", "x * y", "x / y"]
+exactness = "exact"
+evidence = "check_rules.py's generated cases: shapes that broadcast at ranks 1 to 3 (a length 1 on either side, a lower rank, an empty axis), shapes that do not (the run stops with the start of NumPy's ValueError), ints, Bools, complex numbers, NaN, inf and -0.0; each entry one IEEE operation, as NumPy's loop"
+vars = { names = { "+" = "add", "-" = "sub", "*" = "mul", "/" = "div" } }
+cases = [
+  { if = "max(x.rank, y.rank) > 4", refuse = "`{op}` of a rank-{x.rank} and a rank-{y.rank} array", hint = "Viv's arrays have at most 4 axes." },
+  { if = "(x.kind == 'carr' or y.kind == 'carr') and op == '/'", refuse = "`/` of two arrays, one of them complex", hint = "Viv divides a complex array by a number only; write the loop over the entries." },
+  { if = "x.kind == 'carr' and y.kind == 'carr'", use = ["py_cb{names[op]}"], viv = "py_cb{names[op]}({x}, {y})", type = "rt" },
+  { if = "x.kind == 'carr'", use = ["py_cbmulcr"], viv = "py_cbmulcr({x}, {y})", type = "rt" },
+  { if = "y.kind == 'carr'", use = ["py_cbmulrc"], viv = "py_cbmulrc({x}, {y})", type = "rt" },
+  { if = "same_shape(x, y) and rt.py == 'int'", use = ["py_int_arr"], viv = "py_int_arr({x:70} {op} {y:71})", type = "rt" },
+  { if = "same_shape(x, y) and op in ['+', '-']", viv = "{x:60} {op} {y:61}", type = "rt", prec = "60" },
+  { if = "same_shape(x, y)", viv = "{x:70} {op} {y:71}", type = "rt", prec = "70" },
+  { if = "rt.py == 'int'", use = ["py_int_arr", "py_b{names[op]}"], viv = "py_int_arr(py_b{names[op]}({x}, {y}))", type = "rt" },
+  { use = ["py_b{names[op]}"], viv = "py_b{names[op]}({x}, {y})", type = "rt" },
+]
+tests = [{ x = [[1.5, -2.0, 3.25], [4.0, -0.5, 6.0]], y = [10.0, 20.0, 30.0] }, { x = [[1.5], [-2.0]], y = [0.5, 4.0, -1.0] }, { x = [1, 2, 3], y = [[4], [5]] }, { x = [1.0, 2.0], y = [1.0, 2.0] }]
+
+[[rule]]
+id = "np.add"
+match = ["np.add(x, y, /)", "np.subtract(x, y, /)", "np.multiply(x, y, /)", "np.divide(x, y, /)", "np.true_divide(x, y, /)"]
+exactness = "exact"
+evidence = "the operator (rules broadcast, and py2viv.py's for numbers); np.divide of two numbers is NumPy's float64 division, inf or NaN for a zero divisor (Viv's `/`), where Python's `/` raises"
+note = "`out=`, `where=`, `dtype=` and the other ufunc keywords are refused (strict binding)."
+cases = [
+  { eval = ["x", "y"] },
+  { if = "x.kind not in ['num', 'arr'] or y.kind not in ['num', 'arr'] or (x.arr and x.container != 'nd' and y.arr and y.container != 'nd')", refuse = "{name} of {x.words} and {y.words}", hint = "Pass real numbers or NumPy arrays." },
+  { if = "short == 'add'", python = "x + y" },
+  { if = "short == 'subtract'", python = "x - y" },
+  { if = "short == 'multiply'", python = "x * y" },
+  { if = "x.arr or y.arr", python = "x / y" },
+  { viv = "{x:70} / {y:71}", type = "NUM_F", prec = "70" },
+]
+tests = [{ x = [[1.5, -2.0], [0.5, 4.0]], y = [10.0, -0.0] }, { x = 3, y = 4 }, { x = 1.0, y = 0.0 }, { x = [1, 2, 3], y = 2 }]
+
+[[rule]]
+id = "broadcast-compare"
+match = ["x < y", "x <= y", "x > y", "x >= y", "x == y", "x != y"]
+exactness = "exact"
+evidence = "check_rules.py's generated cases, as `broadcast`; `==` and `!=` of shapes that do not broadcast stop with a py2viv line (NumPy 1.24 gives one False and warns, NumPy 2 raises)"
+vars = { names = { "<" = "lt", "<=" = "le", ">" = "gt", ">=" = "ge", "==" = "eq", "!=" = "ne" } }
+cases = [
+  { if = "max(x.rank, y.rank) > 4", refuse = "`{op}` of a rank-{x.rank} and a rank-{y.rank} array", hint = "Viv's arrays have at most 4 axes." },
+  { if = "same_shape(x, y)", viv = "{x:51} {op} {y:51}", type = "rt", prec = "50" },
+  { use = ["py_b{names[op]}"], viv = "py_b{names[op]}({x}, {y})", type = "rt" },
+]
+tests = [{ x = [[1.5, -2.0, 3.25], [4.0, -0.5, 6.0]], y = [1.5, 20.0, 3.0] }, { x = [[1], [5]], y = [0, 5, 9] }, { x = [1.0, 2.0], y = [1.0, 2.0] }]
+
+[[rule]]
+id = "newaxis"
+match = "a[None]"
+exactness = "exact"
+evidence = "check_rules.py's generated cases: `None` and np.newaxis before, between and after the axes of ranks 1 to 3, beside ranges and plain indices; a view in NumPy, so the view check (views.py) refuses one a write could show"
+note = "`axes` are the positions of the new axes in the result (py2viv.py counts them from the subscript); the subscript without them is `a`."
+cases = [
+  { if = "a.kind == 'carr' or a.kind != 'arr'", refuse = "`None` (np.newaxis) in a subscript of {a.words}", hint = "Only a real NumPy array takes new axes here; reshape it." },
+  { if = "a.container != 'nd'", refuse = "`None` (np.newaxis) in a subscript of a Python list", hint = "Python raises TypeError; make it a NumPy array: np.array(...)." },
+  { if = "a.rank + nnew > 4", refuse = "`None` (np.newaxis) making a rank-{a.rank + nnew} array", hint = "Viv's arrays have at most 4 axes." },
+  { use = ["py_newax"], viv = "py_newax({a}, {axes})", type = "T('arr', a.rank + nnew, a.py, 'nd')" },
+]
+tests = [{ a = [1.5, -2.0, 3.25] }, { a = [[1, 2], [3, 4], [5, 6]] }]
+
+# ---------------------------------------------------------------- masks and integer indices
+#
+# A subscript with a Bool array (a mask) or an integer array among its items gives a new array
+# in NumPy (a copy, never a view), and a store through one writes into the array. py2viv.py
+# gives these rules the subscript's shape: `a[i]` (one index array, on the first axis; the
+# axes after it whole), `a[:, i]` (on a later axis), `a[i, j]` (an index for every axis, each
+# an integer array or an int). The helpers gather and scatter by flat index in row-major order
+# of the result, so a repeated index is read twice, and written twice with the last write
+# winning; `a[idx] += v` reads, adds and writes once, as NumPy does.
+
+[[rule]]
+id = "index-array"
+match = ["a[i]", "a[:, i]", "a[:, :, i]"]
+exactness = "exact"
+evidence = "check_rules.py's generated cases: masks all true, all false, empty and of the wrong length (IndexError), integer indices repeated, negative and out of bounds (IndexError), on each axis of ranks 1 to 3, ints and Bools and floats in the array; entries are copied"
+cases = [
+  { if = "a.container != 'nd'", refuse = "{i.words} as an index into {a.words} held in a Python list", hint = "Python raises TypeError for a list index that is an array; make it a NumPy array: np.array(...)." },
+  { if = "a.kind != 'arr'", refuse = "a mask or integer indices into {a.words}", hint = "Only a real array is indexed this way here; loop over the entries." },
+  { if = "axis >= a.rank", refuse = "{nitems} indices into a rank-{a.rank} array", hint = "Use one index per axis." },
+  { if = "i.py not in ['bool', 'int']", refuse = "an index array of {i.py} numbers", hint = "NumPy raises IndexError (arrays used as indices must be of integer or Boolean type); convert with .astype(int)." },
+  { if = "i.py == 'bool' and axis == 0 and i.rank == a.rank", use = ["py_mask"], viv = "py_mask({a}, {i})", type = "T('arr', 1, a.py, 'nd')" },
+  { if = "i.py == 'bool' and i.rank == 1", use = ["py_maskax"], viv = "py_maskax({a}, {i}, {axis})", type = "T('arr', a.rank, a.py, 'nd')" },
+  { if = "i.py == 'bool'", refuse = "a rank-{i.rank} mask on axis {axis} of a rank-{a.rank} array", hint = "Use a mask of the array's shape, or a vector along one axis." },
+  { if = "a.rank - 1 + i.rank > 4", refuse = "integer indices giving a rank-{a.rank - 1 + i.rank} array", hint = "Viv's arrays have at most 4 axes." },
+  { use = ["py_gath"], viv = "py_gath({a}, {i}, {axis})", type = "T('arr', a.rank - 1 + i.rank, a.py, 'nd')" },
+]
+tests = [{ a = [1.5, -2.0, 3.25, 4.0], i = [1, 0, 1, -1] }, { a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], i = [2, 0], only = ["[:,#]"] }, { a = [1.5, -2.0, 3.25], i = [true, false, true] }, { a = [[1, 2, 3], [4, 5, 6]], i = [true, false] }, { a = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], i = [1, 0, 1] }]
+
+[[rule]]
+id = "index-arrays"
+match = ["a[i, j]", "a[i, j, k]"]
+exactness = "exact"
+evidence = "check_rules.py's generated cases: index arrays that broadcast together and that do not (IndexError), an int beside an array, negative, repeated and out-of-bounds indices, ranks 2 and 3"
+cases = [
+  { if = "a.container != 'nd'", refuse = "array indices into {a.words} held in a Python list", hint = "Python raises TypeError; make it a NumPy array: np.array(...)." },
+  { if = "a.kind != 'arr'", refuse = "integer indices into {a.words}", hint = "Only a real array is indexed this way here; loop over the entries." },
+  { if = "a.rank != nitems", refuse = "{nitems} indices, one of them an array, into a rank-{a.rank} array", hint = "Give an index (an int or an integer array) for every axis, or index one axis with an array and the others with `:`." },
+  { if = "'bool' in [i.py, j.py, k.py if nitems == 3 else 'int']", refuse = "a Bool mask beside another index", hint = "NumPy turns the mask into the indices where it holds; write them: np.nonzero(m)[0]." },
+  { if = "not (i.py == 'int' and j.py == 'int' and (nitems == 2 or k.py == 'int'))", refuse = "an index that is not an int or an integer array", hint = "NumPy raises IndexError for a float index; convert with .astype(int) or int(...)." },
+  { if = "nitems == 2", use = ["py_gath2"], viv = "py_gath2({a}, {vec(i)}, {vec(j)})", type = "T('arr', max(i.rank, j.rank, 1), a.py, 'nd')" },
+  { use = ["py_gath3"], viv = "py_gath3({a}, {vec(i)}, {vec(j)}, {vec(k)})", type = "T('arr', max(i.rank, j.rank, k.rank, 1), a.py, 'nd')" },
+]
+tests = [{ a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], i = [0, 1, 1], j = [2, 0, -1] }, { a = [[1, 2, 3], [4, 5, 6]], i = 1, j = [0, 2] }]
+
+[[rule]]
+id = "index-array-store"
+match = ["a[i] = v", "a[:, i] = v", "a[:, :, i] = v"]
+exactness = "exact"
+evidence = "check_rules.py's generated cases: a number, a vector of the selected length, one entry broadcast, a value of another length (NumPy raises); repeated indices (the last write wins), `+=` through repeated indices (added once), masks all true, all false and empty"
+cases = [
+  { if = "a.container != 'nd'", refuse = "a store through {i.words} into a Python list", hint = "Python raises TypeError; make it a NumPy array: np.array(...)." },
+  { if = "a.kind != 'arr'", refuse = "a store through a mask or integer indices into {a.words}", hint = "Only a real array is written this way here; loop over the entries." },
+  { if = "axis >= a.rank", refuse = "{nitems} indices into a rank-{a.rank} array", hint = "Use one index per axis." },
+  { if = "a.py == 'bool'", refuse = "a store into a Bool array", hint = "Store numbers into a number array." },
+  { if = "v.kind in ['cnum', 'carr']", refuse = "a complex value stored into a real array", hint = "NumPy drops the imaginary part (with a warning); take the real part yourself." },
+  { if = "v.kind == 'bool' or (v.arr and v.py == 'bool')", refuse = "a Bool stored into a number array", hint = "Store 1.0 or 0.0." },
+  { if = "v.kind not in ['num', 'arr']", refuse = "storing {v.words} through a mask or integer indices", hint = "Store a number or an array." },
+  { if = "a.py == 'int' and v.py != 'int'", refuse = "a float stored into a NumPy integer array (NumPy truncates it)", hint = "Make the array float: np.zeros(n) or np.array([...], dtype=float)." },
+  { if = "i.py not in ['bool', 'int']", refuse = "an index array of {i.py} numbers", hint = "NumPy raises IndexError (arrays used as indices must be of integer or Boolean type); convert with .astype(int)." },
+  { if = "i.py == 'bool' and axis == 0 and i.rank == a.rank and v.arr and v.rank > 1", refuse = "a rank-{v.rank} value stored through a mask", hint = "NumPy raises TypeError (a store through a mask of the array's shape takes a number or a vector)." },
+  { if = "i.py == 'bool' and axis == 0 and i.rank == a.rank", use = ["py_mset"], viv = "py_mset({a}, {i}, {vec(v)})" },
+  { if = "i.py == 'bool' and i.rank != 1", refuse = "a store through a rank-{i.rank} mask on axis {axis} of a rank-{a.rank} array", hint = "Use a mask of the array's shape, or a vector along one axis." },
+  { if = "v.arr and v.rank > a.rank - 1 + i.rank", refuse = "a rank-{v.rank} value stored through indices whose result has rank {a.rank - 1 + i.rank}", hint = "NumPy drops the value's leading axes of length 1, or raises; reshape it to the result's shape first." },
+  { if = "i.py == 'bool'", use = ["py_msetax"], viv = "py_msetax({a}, {i}, {axis}, {vec(v)})" },
+  { use = ["py_setax"], viv = "py_setax({a}, {i}, {axis}, {vec(v)})" },
+]
+tests = [{ a = [1.5, -2.0, 3.25, 4.0], i = [3, 0, 3], v = [7.0, 8.0, 9.0] }, { a = [1.5, -2.0, 3.25], i = [true, false, true], v = -1.0 }, { a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], i = [2, 0], v = [[0.5, 0.25]], only = ["[:,#]"] }, { a = [[1, 2, 3], [4, 5, 6]], i = [false, true], v = 7 }, { a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], i = [1, 1], v = [0.5, 0.25, -1.0], only = ["[#]"] }]
+
+[[rule]]
+id = "index-arrays-store"
+match = ["a[i, j] = v", "a[i, j, k] = v"]
+exactness = "exact"
+evidence = "check_rules.py's generated cases: as `index-arrays`, with the value a number, a vector of the result's length, broadcast, or of another shape (NumPy raises); repeated pairs (the last write wins)"
+cases = [
+  { if = "a.container != 'nd'", refuse = "a store through array indices into a Python list", hint = "Python raises TypeError; make it a NumPy array: np.array(...)." },
+  { if = "a.kind != 'arr'", refuse = "a store through integer indices into {a.words}", hint = "Only a real array is written this way here; loop over the entries." },
+  { if = "a.rank != nitems", refuse = "{nitems} indices, one of them an array, into a rank-{a.rank} array", hint = "Give an index (an int or an integer array) for every axis." },
+  { if = "a.py == 'bool'", refuse = "a store into a Bool array", hint = "Store numbers into a number array." },
+  { if = "v.kind in ['cnum', 'carr']", refuse = "a complex value stored into a real array", hint = "NumPy drops the imaginary part (with a warning); take the real part yourself." },
+  { if = "v.kind == 'bool' or (v.arr and v.py == 'bool')", refuse = "a Bool stored into a number array", hint = "Store 1.0 or 0.0." },
+  { if = "v.kind not in ['num', 'arr']", refuse = "storing {v.words} through integer indices", hint = "Store a number or an array." },
+  { if = "a.py == 'int' and v.py != 'int'", refuse = "a float stored into a NumPy integer array (NumPy truncates it)", hint = "Make the array float: np.zeros(n) or np.array([...], dtype=float)." },
+  { if = "'bool' in [i.py, j.py, k.py if nitems == 3 else 'int']", refuse = "a Bool mask beside another index", hint = "NumPy turns the mask into the indices where it holds; write them: np.nonzero(m)[0]." },
+  { if = "not (i.py == 'int' and j.py == 'int' and (nitems == 2 or k.py == 'int'))", refuse = "an index that is not an int or an integer array", hint = "NumPy raises IndexError for a float index; convert with .astype(int) or int(...)." },
+  { if = "v.arr and v.rank > max(i.rank, j.rank, k.rank if nitems == 3 else 0, 1)", refuse = "a rank-{v.rank} value stored through integer indices", hint = "NumPy drops the value's leading axes of length 1, or raises; reshape it to the indices' shape first." },
+  { if = "nitems == 2", use = ["py_set2"], viv = "py_set2({a}, {vec(i)}, {vec(j)}, {vec(v)})" },
+  { use = ["py_set3"], viv = "py_set3({a}, {vec(i)}, {vec(j)}, {vec(k)}, {vec(v)})" },
+]
+tests = [{ a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], i = [0, 1, 0], j = [2, 0, 2], v = [7.0, 8.0, 9.0] }, { a = [[1, 2, 3], [4, 5, 6]], i = 1, j = [0, 2], v = 0 }]
+
+[[rule]]
+id = "np.nonzero-item"
+match = "np.nonzero(a)[k]"
+exactness = "exact"
+evidence = "check_rules.py's generated cases: each axis of ranks 1 to 3, an axis past the last (IndexError), all zeros, NaN (nonzero) and -0.0 (zero), ints, Bools"
+cases = [
+  { if = "not (a.kind == 'arr')", refuse = "{name} of {a.words}", hint = "Pass a real array (NumPy's nonzero of a number is deprecated)." },
+  { if = "k.axis_lit == None", refuse = "{name}(...)[k] with k not an int literal", hint = "Index the tuple with a literal: np.nonzero(a)[0].", at = "k" },
+  { if = "k.axis_lit >= a.rank or k.axis_lit < 0 - a.rank", refuse = "{name}(...)[{k.axis_lit}] of a rank-{a.rank} array", hint = "Python raises IndexError (tuple index out of range): a rank-{a.rank} array gives {a.rank} index arrays." },
+  { use = ["py_nzax"], viv = "py_nzax({a}, {k.axis_lit + a.rank if k.axis_lit < 0 else k.axis_lit})", type = "T('arr', 1, 'int', 'nd')" },
+]
+tests = [{ a = [0.0, 1.5, 0.0, -2.0], k = 0 }, { a = [[0, 3], [4, 0], [0, 0]], k = 1 }]
+
+[[rule]]
+id = "np.where-item"
+match = "np.where(condition, /)[k]"
+exactness = "exact"
+evidence = "np.where with one argument is np.nonzero (NumPy's documentation); check_rules.py's generated cases as np.nonzero's"
+cases = [
+  { if = "not (condition.kind == 'arr')", refuse = "{name} of {condition.words}", hint = "Pass a real array." },
+  { if = "k.axis_lit == None", refuse = "{name}(...)[k] with k not an int literal", hint = "Index the tuple with a literal: np.where(m)[0].", at = "k" },
+  { if = "k.axis_lit >= condition.rank or k.axis_lit < 0 - condition.rank", refuse = "{name}(...)[{k.axis_lit}] of a rank-{condition.rank} array", hint = "Python raises IndexError (tuple index out of range)." },
+  { use = ["py_nzax"], viv = "py_nzax({condition}, {k.axis_lit + condition.rank if k.axis_lit < 0 else k.axis_lit})", type = "T('arr', 1, 'int', 'nd')" },
+]
+tests = [{ condition = [0.0, 1.5, 0.0, -2.0], k = 0 }, { condition = [[0, 3], [4, 0]], k = 0 }]
+
+[[rule]]
+id = "np.nonzero-unpack"
+match = ["I, J = np.nonzero(a)", "I, J = np.where(condition, /)"]
+exactness = "exact"
+evidence = "check_rules.py's generated cases: matrices with no, one and several nonzero entries, NaN and -0.0"
+cases = [
+  { if = "not targets_named", refuse = "unpacking {name} into something other than names", hint = "Write `i, j = {name}(A)`.", at = "targets" },
+  { if = "name == 'np.nonzero' and not (a.kind == 'arr' and a.rank == ntargets)", refuse = "unpacking {name} of {a.words} into {ntargets} names", hint = "A rank-k array gives k index arrays; index the tuple instead: {name}(a)[0].", at = "targets" },
+  { if = "name == 'np.where' and not (condition.kind == 'arr' and condition.rank == ntargets)", refuse = "unpacking {name} of {condition.words} into {ntargets} names", hint = "A rank-k array gives k index arrays; index the tuple instead: {name}(a)[0].", at = "targets" },
+  { if = "ntargets != 2", refuse = "unpacking {name} into {ntargets} names", hint = "Index the tuple instead: {name}(a)[0].", at = "targets" },
+  { if = "name == 'np.where'", use = ["py_nzax", "py_nz2"], stmts = ["{I}, {J} = py_nz2({condition})"], targets = ["T('arr', 1, 'int', 'nd')", "T('arr', 1, 'int', 'nd')"] },
+  { use = ["py_nzax", "py_nz2"], stmts = ["{I}, {J} = py_nz2({a})"], targets = ["T('arr', 1, 'int', 'nd')", "T('arr', 1, 'int', 'nd')"] },
+]
+tests = [{ a = [[0.0, 1.5], [-2.0, 0.0], [0.0, 3.0]] }, { condition = [[1, 0], [0, 1]] }]
+
+[[rule]]
+id = "np.nonzero-as-a-value"
+match = "np.nonzero(...)"
+exactness = "refuse"
+gap = "R5"
+cases = [
+  { refuse = "{name} outside `{name}(a)[k]` and `i, j = {name}(A)`", hint = "NumPy gives a tuple of index arrays: index it, np.nonzero(a)[0], or unpack it on its own line.", gap = "R5" },
+]
+
+[[rule]]
+id = "np.flatnonzero"
+match = "np.flatnonzero(a)"
+exactness = "exact"
+evidence = "check_rules.py's generated cases: ranks 1 to 3, all zeros, NaN (nonzero) and -0.0 (zero)"
+cases = [
+  { if = "not (a.kind == 'arr')", refuse = "np.flatnonzero of {a.words}", hint = "Pass a real array." },
+  { use = ["py_nzflat"], viv = "py_nzflat({a})", type = "T('arr', 1, 'int', 'nd')" },
+]
+tests = [{ a = [0.0, 1.5, 0.0, -2.0] }, { a = [[0, 3], [4, 0]] }]
+
+[[rule]]
+id = "np.count_nonzero"
+match = "np.count_nonzero(a, axis=None, *, keepdims=False)"
+exactness = "exact"
+evidence = "check_rules.py's generated cases: ranks 1 to 3, all zeros, NaN (nonzero) and -0.0 (zero); NumPy returns a Python int"
+cases = [
+  { if = "axis.given or keepdims.given", refuse = "np.count_nonzero with axis= or keepdims=", hint = "Count along the axis with np.sum(a != 0, axis=k)." },
+  { if = "not (a.kind == 'arr')", refuse = "np.count_nonzero of {a.words}", hint = "Pass a real array." },
+  { use = ["py_nzflat"], viv = "len(py_nzflat({a}))", type = "NUM_I" },
+]
+tests = [{ a = [0.0, 1.5, 0.0, -2.0] }, { a = [[0, 3], [4, 0]] }]
+
+[[rule]]
+id = "np.argwhere"
+match = "np.argwhere(a)"
+exactness = "exact"
+evidence = "check_rules.py's generated cases: ranks 1 to 3, all zeros, NaN and -0.0"
+cases = [
+  { if = "not (a.kind == 'arr')", refuse = "np.argwhere of {a.words}", hint = "Pass a real array." },
+  { use = ["py_argwhere"], viv = "py_argwhere({a})", type = "T('arr', 2, 'int', 'nd')" },
+]
+tests = [{ a = [0.0, 1.5, 0.0, -2.0] }, { a = [[0, 3], [4, 0]] }]
+
+# ---------------------------------------------------------------- reductions along an axis
+#
+# `np.sum(A, axis=0)`, `A.mean(axis=-1, keepdims=True)`, `np.max(T, 1)`: the rules above take
+# a call without an axis (and without keepdims=True); these take the rest. The helpers reduce
+# in NumPy's own order (helpers.toml, "reductions along an axis"): a sum along the last axis
+# is NumPy's blocked pairwise sum, along any other axis the slabs added in order. A matrix
+# NumPy may hold in a transpose's memory order is summed as NumPy sums it (a transpose itself:
+# the original, along the other axis) or refused.
+
+[[family]]
+id = "reduce-axis"
+exactness = "exact"
+evidence = "check_rules.py's generated cases: every axis of ranks 1 to 3, negative axes, keepdims, the edge values; the order of each reduction checked against NumPy 1.24 on random arrays up to 30000 entries (results/axis_order.txt)"
+cases = [
+  { eval = ["a"] },
+  { if = "not a.arr", refuse = "{name} of {a.words} with axis= or keepdims=", hint = "Pass a real array." },
+  { if = "a.kind == 'carr'", refuse = "{name} of a complex array with axis= or keepdims=", hint = "Reduce the real and imaginary parts." },
+  { if = "a.py == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "a.py == 'bool' and op != 'sum'", refuse = "{name} of a Bool array with axis= or keepdims=", hint = "Use a number array." },
+  { if = "in_grad", refuse = "{name} with axis= or keepdims= inside a differentiated def", hint = "Write the loop over the axis; Viv's grad does not follow NumPy's order of summation." },
+  { if = "axis.given and not (axis.syntax == 'Constant' and axis.lit == None) and axis.axis_lit == None", refuse = "{name} with an axis that is not an int literal", hint = "Write the axis as a number (a tuple of axes is not in the subset).", at = "axis" },
+  { if = "keepdims.given and not (keepdims.syntax == 'Constant' and keepdims.lit in [True, False, 0, 1])", refuse = "{name} with keepdims={keepdims.code}", hint = "Pass keepdims=True or keepdims=False.", at = "keepdims" },
+  { if = "axis.axis_lit != None and (axis.axis_lit < 0 - a.rank or axis.axis_lit >= a.rank)", refuse = "{name} with axis={axis.axis_lit} of {a.words}", hint = "NumPy raises AxisError: the axes of a rank-{a.rank} array are {0 - a.rank} to {a.rank - 1}.", at = "axis" },
+  { if = "a.rank > 4 - kd(keepdims)", refuse = "{name} of {a.words}", hint = "Viv's arrays have at most four axes." },
+  { if = "order and a.rank >= 2 and a.f_order and not a.transposed", refuse = "{name} of a matrix NumPy may hold in a transpose's memory order", hint = "NumPy reduces a transpose, and what is computed elementwise from one, in memory order; the translation's transpose is a copy in row order. Reduce the untransposed array, or copy it in row order first (`.copy()`)." },
+  { if = "order and a.transposed and axk(axis, a) >= 0 and kd(keepdims) == 1", use = ["{helper}"], viv = "transpose({helper}(transpose({a}), {1 - axk(axis, a)}, 1{flag}))", type = "arr(2, 'int' if intres or a.py in ['int', 'bool'] and intin else 'float')" },
+  { if = "order and a.transposed", use = ["{helper}"], viv = "{helper}(transpose({a}), {1 - axk(axis, a) if axk(axis, a) >= 0 else -1}, {kd(keepdims)}{flag})", type = "arr(2 if axk(axis, a) < 0 else 1, 'int' if intres or a.py in ['int', 'bool'] and intin else 'float')" },
+  { if = "a.rank == 1 and axk(axis, a) >= 0 and kd(keepdims) == 0 and a.py in ['int', 'bool'] and op == 'sum'", use = ["py_isum_ax"], viv = "py_isum_ax({a}, 0, 1)[0]", type = "NUM_I" },
+  { if = "a.rank == 1 and axk(axis, a) >= 0 and kd(keepdims) == 0 and a.py in ['int', 'bool'] and op == 'prod'", use = ["{helper}", "py_int"], viv = "py_int({helper}({a}, 0, 1{flag})[0])", type = "NUM_I" },
+  { if = "a.rank == 1 and axk(axis, a) >= 0 and kd(keepdims) == 0", use = ["{helper}"], viv = "{helper}({a}, 0, 1{flag})[0]", type = "NUM_I if intres or a.py in ['int', 'bool'] and intin else NUM_F" },
+  { if = "a.py in ['int', 'bool'] and op == 'sum'", use = ["py_isum_ax"], viv = "py_isum_ax({a}, {axk(axis, a)}, {kd(keepdims)})", type = "arr(a.rank if axk(axis, a) < 0 else a.rank - 1 + kd(keepdims), 'int')" },
+  { if = "a.py in ['int', 'bool'] and op == 'prod'", use = ["{helper}", "py_int_arr"], viv = "py_int_arr({helper}({a}, {axk(axis, a)}, {kd(keepdims)}{flag}))", type = "arr(a.rank if axk(axis, a) < 0 else a.rank - 1 + kd(keepdims), 'int')" },
+  { use = ["{helper}"], viv = "{helper}({a}, {axk(axis, a)}, {kd(keepdims)}{flag})", type = "arr(a.rank if axk(axis, a) < 0 else a.rank - 1 + kd(keepdims), 'int' if intres or a.py in ['int', 'bool'] and intin else 'float')" },
+]
+
+[[family.rule]]
+id = "np.sum-axis"
+match = "np.sum(a, axis=None, *, keepdims=False)"
+vars = { op = "sum", helper = "py_sum_ax", flag = "", order = true, intres = false, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 1e16]], axis = 0 }, { a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 1e16]], axis = -1, keepdims = true }, { a = [[[0.5, 1.5], [2.0, -1.0]], [[3.0, 0.1], [0.2, 0.3]]], axis = 1 }, { a = [1, 2, 3], axis = 0 }]
+
+[[family.rule]]
+id = "a.sum-axis"
+match = "a.sum(axis=None, *, keepdims=False)"
+vars = { op = "sum", helper = "py_sum_ax", flag = "", order = true, intres = false, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 1e16]], axis = 1 }, { a = [[1, 2], [3, 4]], axis = 0, keepdims = true }]
+
+[[family.rule]]
+id = "np.mean-axis"
+match = "np.mean(a, axis=None, *, keepdims=False)"
+vars = { op = "mean", helper = "py_mean_ax", flag = "", order = true, intres = false, intin = false }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 0.1]], axis = 0 }, { a = [[1, 2, 3], [4, 5, 7]], axis = 1, keepdims = true }, { a = [[[0.5, 1.5], [2.0, -1.0]], [[3.0, 0.1], [0.2, 0.3]]], axis = -3 }]
+
+[[family.rule]]
+id = "a.mean-axis"
+match = "a.mean(axis=None, *, keepdims=False)"
+vars = { op = "mean", helper = "py_mean_ax", flag = "", order = true, intres = false, intin = false }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 0.1]], axis = 1 }]
+
+[[family.rule]]
+id = "np.var-axis"
+match = ["np.var(a, axis=None, *, keepdims=False)"]
+vars = { op = "var", helper = "py_var_ax", flag = "", order = true, intres = false, intin = false }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 0.1]], axis = 0 }, { a = [[1, 2, 3], [4, 5, 7]], axis = -1, keepdims = true }]
+
+[[family.rule]]
+id = "np.std-axis"
+match = ["np.std(a, axis=None, *, keepdims=False)"]
+vars = { op = "std", helper = "py_std_ax", flag = "", order = true, intres = false, intin = false }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 0.1]], axis = 1 }, { a = [[[0.5, 1.5], [2.0, -1.0]], [[3.0, 0.1], [0.2, 0.3]]], axis = 0 }]
+
+[[family.rule]]
+id = "a.var-axis"
+match = ["a.var(axis=None, *, keepdims=False)"]
+vars = { op = "var", helper = "py_var_ax", flag = "", order = true, intres = false, intin = false }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 0.1]], axis = 0 }]
+
+[[family.rule]]
+id = "a.std-axis"
+match = ["a.std(axis=None, *, keepdims=False)"]
+vars = { op = "std", helper = "py_std_ax", flag = "", order = true, intres = false, intin = false }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 0.1]], axis = 1 }]
+
+[[family.rule]]
+id = "np.prod-axis"
+match = "np.prod(a, axis=None, *, keepdims=False)"
+vars = { op = "prod", helper = "py_prod_ax", flag = "", order = true, intres = false, intin = true }
+tests = [{ a = [[1.5, 2.5, -3.0], [-3.0, 0.25, 7.0]], axis = 0 }, { a = [[1, 2, 3], [4, 5, 6]], axis = 1 }]
+
+[[family.rule]]
+id = "a.prod-axis"
+match = "a.prod(axis=None, *, keepdims=False)"
+vars = { op = "prod", helper = "py_prod_ax", flag = "", order = true, intres = false, intin = true }
+tests = [{ a = [[1.5, 2.5, -3.0], [-3.0, 0.25, 7.0]], axis = 1 }]
+
+[[family.rule]]
+id = "np.max-axis"
+match = ["np.max(a, axis=None, *, keepdims=False)", "np.amax(a, axis=None, *, keepdims=False)"]
+vars = { op = "max", helper = "py_max_ax", flag = ", 1", order = false, intres = false, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 7.0]], axis = 0 }, { a = [[1, 5], [3, 2]], axis = 1, keepdims = true }]
+
+[[family.rule]]
+id = "np.min-axis"
+match = ["np.min(a, axis=None, *, keepdims=False)", "np.amin(a, axis=None, *, keepdims=False)"]
+vars = { op = "min", helper = "py_max_ax", flag = ", 0", order = false, intres = false, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 7.0]], axis = 1 }, { a = [[[0.5, 1.5], [2.0, -1.0]], [[3.0, 0.1], [0.2, 0.3]]], axis = 2 }]
+
+[[family.rule]]
+id = "a.max-axis"
+match = "a.max(axis=None, *, keepdims=False)"
+vars = { op = "max", helper = "py_max_ax", flag = ", 1", order = false, intres = false, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 7.0]], axis = 0 }]
+
+[[family.rule]]
+id = "a.min-axis"
+match = "a.min(axis=None, *, keepdims=False)"
+vars = { op = "min", helper = "py_max_ax", flag = ", 0", order = false, intres = false, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 0.25, 7.0]], axis = 1 }]
+
+[[family.rule]]
+id = "np.argmax-axis"
+match = "np.argmax(a, axis=None, *, keepdims=False)"
+vars = { op = "argmax", helper = "py_argmax_ax", flag = ", 1", order = false, intres = true, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 2.5, 7.0]], axis = 0 }, { a = [[1, 5, 5], [3, 2, 3]], axis = 1, keepdims = true }]
+
+[[family.rule]]
+id = "np.argmin-axis"
+match = "np.argmin(a, axis=None, *, keepdims=False)"
+vars = { op = "argmin", helper = "py_argmax_ax", flag = ", 0", order = false, intres = true, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 2.5, 7.0]], axis = 1 }]
+
+[[family.rule]]
+id = "a.argmax-axis"
+match = "a.argmax(axis=None, *, keepdims=False)"
+vars = { op = "argmax", helper = "py_argmax_ax", flag = ", 1", order = false, intres = true, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 2.5, 7.0]], axis = 1 }]
+
+[[family.rule]]
+id = "a.argmin-axis"
+match = "a.argmin(axis=None, *, keepdims=False)"
+vars = { op = "argmin", helper = "py_argmax_ax", flag = ", 0", order = false, intres = true, intin = true }
+tests = [{ a = [[1.0, 2.5, -3.0], [-3.0, 2.5, 7.0]], axis = 0 }]
+
+# ---------------------------------------------------------------- reshaping and joining
+#
+# np.reshape and ravel give a view of their array where NumPy can (py2viv.py refuses the
+# translation where a write could show it, as for a slice); a.flatten, np.concatenate, the
+# stacks and np.meshgrid give new arrays. The joins map onto Viv's concat (vectors end to end),
+# vcat (rows stacked, a vector one row) and hcat (side by side, a vector one column).
+
+[[rule]]
+id = "np.reshape"
+match = "np.reshape(a, newshape, /, order='C')"
+params = { newshape = "shape" }
+exactness = "exact"
+evidence = "check_rules.py's generated cases: shapes of 1 to 4 lengths, -1, sizes that do not agree, int, Bool and float arrays"
+note = "A view of `a` in NumPy (py2viv.py refuses it where a write could show that). A negative length (NumPy 1.24 takes any, usually -1) stands for the length that makes the sizes agree."
+cases = [
+  { eval = ["a"] },
+  { if = "order.given and order.strlit != 'c'", refuse = "{name} with order={order.code}", hint = "Only NumPy's row-major order (order='C') is in the subset.", at = "order" },
+  { if = "not a.arr", refuse = "{name} of {a.words}", hint = "Pass an array." },
+  { if = "a.kind == 'carr'", refuse = "{name} of a complex array", hint = "Reshape the real and imaginary parts." },
+  { if = "a.py == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { eval = ["newshape"] },
+  { if = "not newshape.dims_int", refuse = "{name} to a shape that is not ints", hint = "NumPy raises TypeError; pass ints.", at = "newshape" },
+  { if = "newshape.ndims > 4", refuse = "{name} to {newshape.ndims} axes", hint = "Viv's arrays have at most four axes." },
+  { use = ["py_reshape"], viv = "py_reshape({a}, [{newshape}])", type = "T('arr', newshape.ndims, a.py, 'nd')" },
+]
+tests = [{ a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], newshape = [2, 3] }, { a = [[1, 2, 3], [4, 5, 6]], newshape = [3, -1] }, { a = [[1.0, 2.0], [3.0, 4.0]], newshape = -1 }]
+
+[[rule]]
+id = "a.reshape"
+match = "a.reshape(shape, /, *, order='C')"
+when = "nargs == 1"
+params = { shape = "shape" }
+exactness = "exact"
+evidence = "as np.reshape"
+note = "`a.reshape(2, 3)` is the rule a.reshape-lengths."
+cases = [
+  { if = "order.given and order.strlit != 'c'", refuse = "`.reshape` with order={order.code}", hint = "Only NumPy's row-major order (order='C') is in the subset.", at = "order" },
+  { if = "a.kind == 'carr'", refuse = "`.reshape` of a complex array", hint = "Reshape the real and imaginary parts." },
+  { if = "a.py == 'mixed'", refuse = "`.reshape` of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "not shape.dims_int", refuse = "`.reshape` to a shape that is not ints", hint = "NumPy raises TypeError; pass ints.", at = "shape" },
+  { if = "shape.ndims > 4", refuse = "`.reshape` to {shape.ndims} axes", hint = "Viv's arrays have at most four axes." },
+  { use = ["py_reshape"], viv = "py_reshape({a}, [{shape}])", type = "T('arr', shape.ndims, a.py, 'nd')" },
+]
+tests = [{ a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], shape = [3, 2] }, { a = [[1, 2], [3, 4]], shape = -1 }]
+
+[[rule]]
+id = "a.reshape-lengths"
+match = "a.reshape(d0, d1, d2=None, d3=None, /, *, order='C')"
+exactness = "exact"
+evidence = "as np.reshape"
+cases = [
+  { if = "order.given and order.strlit != 'c'", refuse = "`.reshape` with order={order.code}", hint = "Only NumPy's row-major order (order='C') is in the subset.", at = "order" },
+  { if = "a.kind == 'carr'", refuse = "`.reshape` of a complex array", hint = "Reshape the real and imaginary parts." },
+  { if = "a.py == 'mixed'", refuse = "`.reshape` of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "not all_int(d0, d1, d2, d3) or d0.kind != 'num' or d1.kind != 'num' or (d2.given and d2.kind != 'num') or (d3.given and d3.kind != 'num')", refuse = "`.reshape` to lengths that are not ints", hint = "NumPy raises TypeError; pass ints." },
+  { if = "d3.given", use = ["py_reshape"], viv = "py_reshape({a}, [{d0}, {d1}, {d2}, {d3}])", type = "T('arr', 4, a.py, 'nd')" },
+  { if = "d2.given", use = ["py_reshape"], viv = "py_reshape({a}, [{d0}, {d1}, {d2}])", type = "T('arr', 3, a.py, 'nd')" },
+  { use = ["py_reshape"], viv = "py_reshape({a}, [{d0}, {d1}])", type = "T('arr', 2, a.py, 'nd')" },
+]
+tests = [{ a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], d0 = 2, d1 = 3 }, { a = [1, 2, 3, 4, 5, 6, 7, 8], d0 = 2, d1 = -1, d2 = 2 }]
+
+[[rule]]
+id = "np.ravel"
+match = "np.ravel(a, /, order='C')"
+exactness = "exact"
+evidence = "check_rules.py's generated cases; the entries in row-major order"
+note = "A view of `a` in NumPy where it can be (py2viv.py refuses the translation where a write could show it)."
+cases = [
+  { eval = ["a"] },
+  { if = "order.given and order.strlit != 'c'", refuse = "{name} with order={order.code}", hint = "Only NumPy's row-major order (order='C') is in the subset.", at = "order" },
+  { if = "not a.arr", refuse = "{name} of {a.words}", hint = "Pass an array." },
+  { if = "a.kind == 'carr'", refuse = "{name} of a complex array", hint = "Flatten the real and imaginary parts." },
+  { if = "a.py == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { use = ["py_flat"], viv = "py_flat({a})", type = "T('arr', 1, a.py, 'nd')" },
+]
+tests = [{ a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] }, { a = [3, 1, 2] }]
+
+[[rule]]
+id = "a.ravel"
+match = ["a.ravel(order='C')", "a.flatten(order='C')"]
+exactness = "exact"
+evidence = "as np.ravel; flatten always copies"
+cases = [
+  { if = "order.given and order.strlit != 'c'", refuse = "`.{name}` with order={order.code}", hint = "Only NumPy's row-major order (order='C') is in the subset.", at = "order" },
+  { if = "a.kind == 'carr'", refuse = "`.{name}` of a complex array", hint = "Flatten the real and imaginary parts." },
+  { if = "a.py == 'mixed'", refuse = "`.{name}` of a list mixing ints and floats", hint = "Make them all floats." },
+  { use = ["py_flat"], viv = "py_flat({a})", type = "T('arr', 1, a.py, 'nd')" },
+]
+tests = [{ a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] }, { a = [[1, 2], [3, 4]] }]
+
+[[rule]]
+id = "np.concatenate"
+match = "np.concatenate(seq, /, axis=0)"
+params = { seq = "seq" }
+exactness = "exact"
+evidence = "check_rules.py's generated cases: vectors and matrices along each axis, axis=None, ints, Bools, complex arrays, lists"
+cases = [
+  { eval = ["seq"] },
+  { if = "seq_n(seq) == 0", refuse = "{name} of no arrays", hint = "NumPy raises ValueError; pass at least one array." },
+  { if = "seq_kinds(seq) not in [['arr'], ['carr']]", refuse = "{name} of values that are not all real arrays or all complex arrays", hint = "Join arrays of one kind (a number is refused: NumPy raises for a zero-dimensional array)." },
+  { if = "seq_py(seq) == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "axis.given and axis.syntax == 'Constant' and axis.lit == None and seq_kinds(seq) == ['arr']", viv = "concat({seq_codes(seq, 'py_flat')})", type = "T('arr', 1, seq_py(seq), 'nd')" },
+  { if = "axis.given and axis.syntax == 'Constant' and axis.lit == None", refuse = "{name} of complex arrays with axis=None", hint = "Flatten the real and imaginary parts." },
+  { if = "len(seq_ranks(seq)) != 1", refuse = "{name} of arrays of different ranks", hint = "NumPy raises ValueError; give every array the same rank." },
+  { if = "axis.given and axis.axis_lit == None", refuse = "{name} with an axis that is not an int literal", hint = "Write the axis as a number.", at = "axis" },
+  { if = "seq_ranks(seq) not in [[1], [2]]", refuse = "{name} of rank-{seq_ranks(seq)[0]} arrays", hint = "Only vectors and matrices are joined (Viv's concat, vcat and hcat)." },
+  { if = "axis.axis_lit != None and (axis.axis_lit < 0 - seq_ranks(seq)[0] or axis.axis_lit >= seq_ranks(seq)[0])", refuse = "{name} with axis={axis.axis_lit}", hint = "NumPy raises AxisError: the axes of rank-{seq_ranks(seq)[0]} arrays are {0 - seq_ranks(seq)[0]} to {seq_ranks(seq)[0] - 1}.", at = "axis" },
+  { if = "seq_ranks(seq) == [1]", viv = "concat({seq})", type = "T(seq_kinds(seq)[0], 1, seq_py(seq), 'nd')" },
+  { if = "axis.axis_lit in [1, -1]", viv = "hcat({seq})", type = "T(seq_kinds(seq)[0], 2, seq_py(seq), 'nd')" },
+  { viv = "vcat({seq})", type = "T(seq_kinds(seq)[0], 2, seq_py(seq), 'nd')" },
+]
+tests = [{ seq = [[1.0, 2.0], [3.0, -0.5, 4.0]] }, { seq = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0]]], axis = 0 }, { seq = [[[1, 2], [3, 4]], [[5], [6]]], axis = 1 }]
+
+[[rule]]
+id = "np.stack"
+match = "np.stack(seq, /, axis=0)"
+params = { seq = "seq" }
+exactness = "exact"
+evidence = "check_rules.py's generated cases: vectors along each axis"
+cases = [
+  { eval = ["seq"] },
+  { if = "seq_n(seq) == 0", refuse = "{name} of no arrays", hint = "NumPy raises ValueError; pass at least one array." },
+  { if = "seq_kinds(seq) not in [['arr'], ['carr']]", refuse = "{name} of values that are not all real arrays or all complex arrays", hint = "Stack arrays of one kind." },
+  { if = "seq_py(seq) == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "seq_ranks(seq) != [1]", refuse = "{name} of arrays that are not all vectors", hint = "Stacking matrices makes a rank-3 array; only vectors are stacked (Viv's vcat and hcat)." },
+  { if = "axis.given and axis.axis_lit == None", refuse = "{name} with an axis that is not an int literal", hint = "Write the axis as a number.", at = "axis" },
+  { if = "axis.axis_lit != None and axis.axis_lit not in [0, 1, -1, -2]", refuse = "{name} with axis={axis.axis_lit}", hint = "NumPy raises AxisError: stacking vectors gives axes -2 to 1.", at = "axis" },
+  { if = "axis.axis_lit in [1, -1]", viv = "hcat({seq})", type = "T(seq_kinds(seq)[0], 2, seq_py(seq), 'nd')" },
+  { viv = "vcat({seq})", type = "T(seq_kinds(seq)[0], 2, seq_py(seq), 'nd')" },
+]
+tests = [{ seq = [[1.0, 2.0, 3.0], [4.0, -0.5, 6.0]] }, { seq = [[1, 2], [3, 4], [5, 6]], axis = 1 }]
+
+[[rule]]
+id = "np.vstack"
+match = ["np.vstack(seq, /)", "np.row_stack(seq, /)"]
+params = { seq = "seq" }
+exactness = "exact"
+evidence = "check_rules.py's generated cases: vectors (each a row) and matrices"
+cases = [
+  { eval = ["seq"] },
+  { if = "seq_n(seq) == 0", refuse = "{name} of no arrays", hint = "NumPy raises ValueError; pass at least one array." },
+  { if = "seq_kinds(seq) not in [['arr'], ['carr']]", refuse = "{name} of values that are not all real arrays or all complex arrays", hint = "Stack arrays of one kind." },
+  { if = "seq_py(seq) == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "seq_ranks(seq) not in [[1], [2], [1, 2]]", refuse = "{name} of arrays of rank {seq_ranks(seq)[-1]}", hint = "Only vectors and matrices are stacked (Viv's vcat)." },
+  { viv = "vcat({seq})", type = "T(seq_kinds(seq)[0], 2, seq_py(seq), 'nd')" },
+]
+tests = [{ seq = [[1.0, 2.0, 3.0], [4.0, -0.5, 6.0]] }, { seq = [[[1, 2], [3, 4]], [5, 6]] }]
+
+[[rule]]
+id = "np.hstack"
+match = "np.hstack(seq, /)"
+params = { seq = "seq" }
+exactness = "exact"
+evidence = "check_rules.py's generated cases: vectors end to end, matrices side by side"
+cases = [
+  { eval = ["seq"] },
+  { if = "seq_n(seq) == 0", refuse = "{name} of no arrays", hint = "NumPy raises ValueError; pass at least one array." },
+  { if = "seq_kinds(seq) not in [['arr'], ['carr']]", refuse = "{name} of values that are not all real arrays or all complex arrays", hint = "Join arrays of one kind." },
+  { if = "seq_py(seq) == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "seq_ranks(seq) == [1]", viv = "concat({seq})", type = "T(seq_kinds(seq)[0], 1, seq_py(seq), 'nd')" },
+  { if = "seq_ranks(seq) == [2]", viv = "hcat({seq})", type = "T(seq_kinds(seq)[0], 2, seq_py(seq), 'nd')" },
+  { refuse = "{name} of arrays of ranks {seq_ranks(seq)}", hint = "NumPy joins arrays of one rank (a vector beside a matrix raises ValueError); only vectors and matrices are joined." },
+]
+tests = [{ seq = [[1.0, 2.0], [3.0, -0.5, 4.0]] }, { seq = [[[1, 2], [3, 4]], [[5], [6]]] }]
+
+[[rule]]
+id = "np.column_stack"
+match = "np.column_stack(seq, /)"
+params = { seq = "seq" }
+exactness = "exact"
+evidence = "check_rules.py's generated cases: vectors (each a column) and matrices"
+cases = [
+  { eval = ["seq"] },
+  { if = "seq_n(seq) == 0", refuse = "{name} of no arrays", hint = "NumPy raises ValueError; pass at least one array." },
+  { if = "seq_kinds(seq) not in [['arr'], ['carr']]", refuse = "{name} of values that are not all real arrays or all complex arrays", hint = "Stack arrays of one kind." },
+  { if = "seq_py(seq) == 'mixed'", refuse = "{name} of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "seq_ranks(seq) not in [[1], [2], [1, 2]]", refuse = "{name} of arrays of rank {seq_ranks(seq)[-1]}", hint = "Only vectors and matrices are stacked (Viv's hcat)." },
+  { viv = "hcat({seq})", type = "T(seq_kinds(seq)[0], 2, seq_py(seq), 'nd')" },
+]
+tests = [{ seq = [[1.0, 2.0, 3.0], [4.0, -0.5, 6.0]] }, { seq = [[[1, 2], [3, 4]], [5, 6]] }]
+
+[[rule]]
+id = "np.meshgrid"
+match = "X, Y = np.meshgrid(x, y, /, *, indexing='xy')"
+params = { indexing = "literal" }
+exactness = "exact"
+evidence = "check_rules.py's generated cases: both indexings, ints and floats"
+note = "NumPy's meshgrid returns copies (copy=True). Two vectors only."
+cases = [
+  { eval = ["x", "y"] },
+  { if = "not targets_named", refuse = "unpacking np.meshgrid into something other than two names", hint = "Write `X, Y = np.meshgrid(x, y)`.", at = "targets" },
+  { if = "ntargets != 2", refuse = "unpacking np.meshgrid of two vectors into {ntargets} names", hint = "Two vectors give two arrays.", at = "targets" },
+  { if = "not (x.kind == 'arr' and y.kind == 'arr' and x.rank == 1 and y.rank == 1)", refuse = "np.meshgrid of {x.words} and {y.words}", hint = "Pass two real vectors (NumPy flattens anything else)." },
+  { if = "x.py == 'mixed' or y.py == 'mixed'", refuse = "np.meshgrid of a list mixing ints and floats", hint = "Make them all floats." },
+  { if = "indexing.given and indexing.strlit not in ['xy', 'ij']", refuse = "np.meshgrid with indexing={indexing.code}", hint = "Pass indexing='xy' or indexing='ij' as a literal.", at = "indexing" },
+  { if = "indexing.strlit == 'ij'", use = ["py_meshgrid"], stmts = ["{X}, {Y} = py_meshgrid({x}, {y}, 1)"], targets = ["T('arr', 2, x.py, 'nd')", "T('arr', 2, y.py, 'nd')"] },
+  { use = ["py_meshgrid"], stmts = ["{X}, {Y} = py_meshgrid({x}, {y}, 0)"], targets = ["T('arr', 2, x.py, 'nd')", "T('arr', 2, y.py, 'nd')"] },
+]
+tests = [{ x = [1.0, 2.0, 3.0], y = [-0.5, 4.0] }, { x = [1, 2], y = [3, 4, 5], indexing = "ij" }]
+
+[[rule]]
+id = "np.meshgrid-as-a-value"
+match = "np.meshgrid(...)"
+exactness = "refuse"
+gap = "R5"
+cases = [
+  { refuse = "np.meshgrid outside `X, Y = np.meshgrid(x, y)`", hint = "Unpack it into two names on its own line (two vectors only).", gap = "R5" },
+]
+
+# ---------------------------------------------------------------- np.random (lib/nprandom)
+#
+# NumPy's random numbers, draw for draw: np.random's legacy functions over its global MT19937
+# (family np-random-legacy) and a Generator's methods over PCG64 (family np-random-generator),
+# computed by lib/nprandom (the helpers npr_*, py_npr_*, py_npg_*). The source they follow is
+# NumPy 1.24.4 (tag v1.24.4, commit 9315a9072b2636f75c831b4eca9f42a5f67ca2fb): mtrand.pyx,
+# _generator.pyx, _bounded_integers.pyx.in, bit_generator.pyx, src/mt19937, src/pcg64 and
+# src/distributions/distributions.c. A legacy draw is translated only in a file that calls
+# np.random.seed (`np_seeded`), and stops at run time if it comes before the seed; a Generator
+# only from default_rng(seed) with a seed. np.random.randn, standard_normal and normal are
+# refused: NumPy computes them with the platform's log, whose last bit Viv's libm does not
+# reproduce. A Generator's normals stop at run time in the few draws whose value rests on the
+# platform's log1p or exp (the ziggurat's tail). The size is None, an int or a pair; each
+# helper checks the arguments and the size where NumPy does, in NumPy's order.
+# check_rules.py runs each rule after `setup` (Python lines), from several seeds, sizes and
+# interleavings (Gen.random_cases).
+
+[[family]]
+id = "np-random-legacy"
+exactness = "exact"
+evidence = "lib/nprandom/selftest.viv: NumPy 1.24.4's own draws, equal in the three engines; check_rules.py's np.random cases"
+setup = ["np.random.seed(12345)"]
+
+[[family.rule]]
+id = "np.random.seed"
+match = "np.random.seed(seed=None)"
+setup = []
+cases = [
+  { if = "not seed.given or seed.syntax == 'Constant' and seed.lit == None", refuse = "np.random.seed() without a seed", hint = "NumPy then seeds from the operating system, and its values cannot be reproduced; pass an int." },
+  { eval = ["seed"] },
+  { if = "seed.kind == 'num' and seed.py == 'int'", use = ["py_npr_seed"], viv = "py_npr_seed({seed})", type = "NONE" },
+  { if = "seed.arr and seed.rank == 1 and seed.py == 'int'", use = ["py_npr_seed_array"], viv = "py_npr_seed_array({seed})", type = "NONE" },
+  { refuse = "np.random.seed of {seed.words}", hint = "Pass an int in [0, 2**32 - 1], or a list of them; NumPy raises TypeError for a float." },
+]
+tests = [{ seed = 0 }, { seed = 4294967295 }, { seed = [1, 2, 3] }]
+
+[[family.rule]]
+id = "np.random.rand"
+match = "np.random.rand(d0=None, d1=None, /, *more)"
+cases = [
+  { if = "not np_seeded", refuse = "np.random.rand without np.random.seed in this file", hint = "NumPy seeds np.random from the operating system; call np.random.seed(s) first." },
+  { if = "nargs > 2", refuse = "np.random.rand of rank {nargs}", hint = "Translated sizes have one or two dimensions." },
+  { if = "not d0.given", use = ["py_npr_rand"], viv = "py_npr_rand()", type = "NUM_F" },
+  { eval = ["d0", "d1"] },
+  { if = "not all_int(d0, d1) or d0.kind != 'num' or d1.given and d1.kind != 'num'", refuse = "np.random.rand of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "not d1.given", use = ["py_npr_rand"], viv = "py_npr_rand_v({d0})", type = "arr(1)" },
+  { use = ["py_npr_rand"], viv = "py_npr_rand_m({d0}, {d1})", type = "arr(2)" },
+]
+tests = [{}, { d0 = 5 }, { d0 = 2, d1 = 3 }]
+
+[[family.rule]]
+id = "np.random.random_sample"
+match = ["np.random.random_sample(size=None)", "np.random.random(size=None)", "np.random.ranf(size=None)", "np.random.sample(size=None)"]
+params = { size = "shape" }
+cases = [
+  { if = "not np_seeded", refuse = "{name} without np.random.seed in this file", hint = "NumPy seeds np.random from the operating system; call np.random.seed(s) first." },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npr_rand"], viv = "py_npr_rand()", type = "NUM_F" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "{name} of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims == 1", use = ["py_npr_rand"], viv = "py_npr_rand_v({size})", type = "arr(1)" },
+  { if = "size.ndims == 2", use = ["py_npr_rand"], viv = "py_npr_rand_m({size})", type = "arr(2)" },
+  { refuse = "{name} of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+]
+tests = [{}, { size = 4 }, { size = [2, 3] }]
+
+[[family.rule]]
+id = "np.random.uniform"
+match = "np.random.uniform(low=0.0, high=1.0, size=None)"
+params = { size = "shape" }
+cases = [
+  { if = "not np_seeded", refuse = "np.random.uniform without np.random.seed in this file", hint = "NumPy seeds np.random from the operating system; call np.random.seed(s) first." },
+  { eval = ["low", "high"] },
+  { if = "low.kind not in ['num', 'bool'] or high.kind not in ['num', 'bool']", refuse = "np.random.uniform of {low.words} and {high.words}", hint = "Pass numbers; array bounds broadcast, which is not translated." },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npr_uniform"], viv = "py_npr_uniform({low}, {high})", type = "NUM_F" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "np.random.uniform of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims == 1", use = ["py_npr_uniform"], viv = "py_npr_uniform_v({low}, {high}, {size})", type = "arr(1)" },
+  { if = "size.ndims == 2", use = ["py_npr_uniform"], viv = "py_npr_uniform_m({low}, {high}, {size})", type = "arr(2)" },
+  { refuse = "np.random.uniform of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+]
+tests = [{}, { low = -2.0, high = 3.0 }, { low = 1.0, high = 5.0, size = 4 }, { low = 0.0, high = 1.0, size = [2, 2] }]
+
+[[family.rule]]
+id = "np.random.randint"
+match = "np.random.randint(low, high=None, size=None, dtype=None)"
+params = { size = "shape", dtype = "dtype" }
+cases = [
+  { if = "not np_seeded", refuse = "np.random.randint without np.random.seed in this file", hint = "NumPy seeds np.random from the operating system; call np.random.seed(s) first." },
+  { if = "dtype == None and ('dtype' in kw_names or nargs > 3)", refuse = "np.random.randint with dtype=None", hint = "NumPy reads dtype=None as float64 and raises TypeError; leave the dtype out." },
+  { if = "dtype not in [None, 'int', 'np.int64', 'int64', 'np.int_']", refuse = "np.random.randint with dtype={dtype}", hint = "Other dtypes draw differently (NumPy buffers the words of narrow ints); use the default int." },
+  { eval = ["low", "high"] },
+  { if = "low.kind != 'num' or low.py != 'int' or high.given and not (high.syntax == 'Constant' and high.lit == None) and (high.kind != 'num' or high.py != 'int')", refuse = "np.random.randint of {low.words} and {high.words}", hint = "Pass ints; NumPy truncates a float bound, and array bounds broadcast." },
+  { if = "high.given and not (high.syntax == 'Constant' and high.lit == None) and (not size.given or size.syntax == 'Constant' and size.lit == None)", use = ["py_npr_randint"], viv = "py_npr_randint({low}, {high})", type = "NUM_I" },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npr_randint"], viv = "py_npr_randint(0, {low})", type = "NUM_I" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "np.random.randint of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims > 2", refuse = "np.random.randint of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+  { if = "high.given and not (high.syntax == 'Constant' and high.lit == None) and size.ndims == 1", use = ["py_npr_randint"], viv = "py_npr_randint_v({low}, {high}, {size})", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "high.given and not (high.syntax == 'Constant' and high.lit == None)", use = ["py_npr_randint"], viv = "py_npr_randint_m({low}, {high}, {size})", type = "T('arr', 2, 'int', 'nd')" },
+  { if = "size.ndims == 1", use = ["py_npr_randint"], viv = "py_npr_randint_v(0, {low}, {size})", type = "T('arr', 1, 'int', 'nd')" },
+  { use = ["py_npr_randint"], viv = "py_npr_randint_m(0, {low}, {size})", type = "T('arr', 2, 'int', 'nd')" },
+]
+tests = [{ low = 10 }, { low = -3, high = 7 }, { low = 0, high = 10, size = 6 }, { low = 1, high = 4294967297, size = 3 }, { low = 5, high = 9, size = [2, 3] }]
+
+[[family.rule]]
+id = "np.random.choice"
+match = "np.random.choice(a, size=None, replace=True, p=None)"
+params = { size = "shape" }
+cases = [
+  { if = "not np_seeded", refuse = "np.random.choice without np.random.seed in this file", hint = "NumPy seeds np.random from the operating system; call np.random.seed(s) first." },
+  { if = "replace.given", eval = ["replace"] },
+  { if = "replace.given and replace.kind != 'bool'", refuse = "np.random.choice with replace= that is {replace.words}", hint = "Pass True or False." },
+  { if = "replace.given and replace.syntax != 'Constant'", use = ["py_b01"] },
+  { eval = ["a"] },
+  { if = "not (a.kind == 'num' and a.py == 'int' or a.arr and a.kind == 'arr' and a.rank == 1 and a.py in ['int', 'float'])", refuse = "np.random.choice from {a.words}", hint = "Pass an int (the population size) or a vector of numbers; NumPy raises ValueError for a float or a matrix." },
+  { if = "size.given and not (size.syntax == 'Constant' and size.lit == None)", eval = ["size"] },
+  { if = "size.given and not (size.syntax == 'Constant' and size.lit == None) and (not size.dims_int or size.ndims != 1)", refuse = "np.random.choice with this size", hint = "Pass an int size (or none); NumPy raises TypeError for a float, and a shape with two dimensions is not translated." },
+  { if = "p.given and not (p.syntax == 'Constant' and p.lit == None)", eval = ["p"] },
+  { if = "p.given and not (p.syntax == 'Constant' and p.lit == None) and not (p.arr and p.kind == 'arr' and p.rank == 1 and p.py in ['int', 'float'])", refuse = "np.random.choice with p that is {p.words}", hint = "Pass a vector of probabilities." },
+  { if = "a.kind == 'num' and (not size.given or size.syntax == 'Constant' and size.lit == None)", use = ["py_npr_choice"], viv = "py_npr_choice1({a}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0})", type = "NUM_I" },
+  { if = "a.kind == 'num'", use = ["py_npr_choice"], viv = "py_npr_choice_n({a}, {size}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0})", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npr_choice"], viv = "py_npr_choice_a1({a}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0})", type = "T('num', 0, a.py)" },
+  { use = ["py_npr_choice"], viv = "py_npr_choice_a({a}, {size}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0})", type = "T('arr', 1, a.py, 'nd')" },
+]
+tests = [{ a = 10 }, { a = 10, size = 6 }, { a = [1.5, -2.0, 3.25, 4.0], size = 3 }, { a = 5, size = 4, replace = false }, { a = 4, size = 6, p = [0.1, 0.2, 0.3, 0.4] }, { a = 4, size = 3, replace = false, p = [0.1, 0.2, 0.3, 0.4] }]
+
+[[family.rule]]
+id = "np.random.shuffle"
+match = "np.random.shuffle(x, /)"
+cases = [
+  { if = "not np_seeded", refuse = "np.random.shuffle without np.random.seed in this file", hint = "NumPy seeds np.random from the operating system; call np.random.seed(s) first." },
+  { if = "x.syntax != 'Name'", refuse = "np.random.shuffle of an expression", hint = "Shuffle a variable: NumPy shuffles it in place, and a slice would be a copy in the translation." },
+  { eval = ["x"] },
+  { if = "x.kind == 'arr' and x.rank == 1", use = ["py_npr_shuffle"], viv = "py_npr_shuffle({x})", type = "NONE" },
+  { if = "x.kind == 'arr' and x.rank == 2 and x.container == 'nd'", use = ["py_npr_shuffle"], viv = "py_npr_shuffle_rows({x})", type = "NONE" },
+  { refuse = "np.random.shuffle of {x.words}", hint = "Shuffle a vector, a list of numbers or the rows of a matrix." },
+]
+tests = [{ x = [1.0, 2.0, 3.0, 4.0, 5.0] }, { x = [[1, 2], [3, 4], [5, 6]] }]
+
+[[family.rule]]
+id = "np.random.permutation"
+match = "np.random.permutation(x, /)"
+cases = [
+  { if = "not np_seeded", refuse = "np.random.permutation without np.random.seed in this file", hint = "NumPy seeds np.random from the operating system; call np.random.seed(s) first." },
+  { eval = ["x"] },
+  { if = "x.kind == 'num' and x.py == 'int'", use = ["py_npr_permutation"], viv = "py_npr_perm_n({x})", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "x.kind == 'arr' and x.rank == 1 and x.py in ['int', 'float', 'bool']", use = ["py_npr_permutation"], viv = "py_npr_perm_v({x})", type = "T('arr', 1, x.py, 'nd')" },
+  { if = "x.kind == 'arr' and x.rank == 2 and x.py in ['int', 'float', 'bool']", use = ["py_npr_permutation"], viv = "py_npr_perm_m({x})", type = "T('arr', 2, x.py, 'nd')" },
+  { refuse = "np.random.permutation of {x.words}", hint = "Pass an int, a vector or a matrix; NumPy raises IndexError for a float." },
+]
+tests = [{ x = 8 }, { x = [1.5, 2.5, -3.0, 4.0] }, { x = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]] }]
+
+[[rule]]
+id = "np.random.normal-legacy"
+match = ["np.random.randn(...)", "np.random.standard_normal(...)", "np.random.normal(...)"]
+exactness = "refuse"
+lift = "Viv computing the platform libm's log bit for bit (a libm that matches macOS's, glibc's, ... per platform)"
+cases = [
+  { refuse = "`{name}`", hint = "NumPy's legacy normals (Marsaglia's polar method) take the platform libm's log of every pair of draws, and Viv's libm differs from macOS's in the last bit on about 7% of them, so the values cannot be promised bit for bit. Use a Generator: rng = np.random.default_rng(seed); rng.standard_normal(...) is translated." },
+]
+
+[[rule]]
+id = "np.random.RandomState"
+match = ["np.random.RandomState(...)", "np.random.Generator(...)", "np.random.PCG64(...)", "np.random.MT19937(...)", "np.random.SeedSequence(...)"]
+exactness = "refuse"
+lift = "the object forms of the generators np.random.seed and default_rng translate"
+cases = [
+  { refuse = "`{name}`", hint = "Use np.random.seed(s) and the np.random functions, or rng = np.random.default_rng(seed)." },
+]
+
+[[family]]
+id = "np-random-generator"
+exactness = "exact"
+evidence = "lib/nprandom/selftest.viv: NumPy 1.24.4's own draws, equal in the three engines; check_rules.py's np.random cases"
+setup = ["@g = np.random.default_rng(12345)"]
+
+[[family.rule]]
+id = "np.random.default_rng"
+match = "np.random.default_rng(seed=None)"
+setup = []
+cases = [
+  { if = "not seed.given or seed.syntax == 'Constant' and seed.lit == None", refuse = "np.random.default_rng() without a seed", hint = "NumPy then seeds from the operating system, and its values cannot be reproduced; pass an int." },
+  { if = "seed_words(seed) != None", use = ["npr_generator"], viv = "npr_pcg_from_entropy({seed_words(seed)})", type = "T('rng')" },
+  { eval = ["seed"] },
+  { if = "seed.kind == 'num' and seed.py == 'int'", use = ["py_npg_new"], viv = "py_npg_new({seed})", type = "T('rng')" },
+  { if = "seed.kind == 'arr' and seed.rank == 1 and seed.py == 'int'", use = ["py_npg_new"], viv = "py_npg_new_arr({seed})", type = "T('rng')" },
+  { refuse = "np.random.default_rng of {seed.words}", hint = "Pass an int, or a list of int literals; NumPy raises TypeError for a float." },
+]
+tests = [{ seed = 0 }, { seed = 42 }, { seed = 4294967295 }, { seed = [3, 4294967296] }]
+
+[[family.rule]]
+id = "Generator.random"
+match = "g.random(size=None, dtype=None, out=None)"
+params = { size = "shape", dtype = "dtype" }
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { if = "out.given", refuse = "Generator.random with out=", hint = "Assign the result instead." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'float64']", refuse = "Generator.random with dtype={dtype}", hint = "A float32 draw is another stream; use the default float64." },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["npr_generator"], viv = "npr_pcg_double({g})", type = "NUM_F" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "Generator.random of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims == 1", use = ["py_npg_random"], viv = "py_npg_random_v({g}, {size})", type = "arr(1)" },
+  { if = "size.ndims == 2", use = ["py_npg_random"], viv = "py_npg_random_m({g}, {size})", type = "arr(2)" },
+  { refuse = "Generator.random of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+]
+tests = [{ g = "@g" }, { g = "@g", size = 5 }, { g = "@g", size = [2, 3] }]
+
+[[family.rule]]
+id = "Generator.standard_normal"
+match = "g.standard_normal(size=None, dtype=None, out=None)"
+params = { size = "shape", dtype = "dtype" }
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { if = "out.given", refuse = "Generator.standard_normal with out=", hint = "Assign the result instead." },
+  { if = "dtype not in [None, 'float', 'np.float64', 'float64']", refuse = "Generator.standard_normal with dtype={dtype}", hint = "A float32 draw is another stream; use the default float64." },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npg_normal"], viv = "py_npg_z({g})", type = "NUM_F" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "Generator.standard_normal of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims == 1", use = ["py_npg_normal"], viv = "py_npg_normal_v({g}, 0.0, 1.0, {size})", type = "arr(1)" },
+  { if = "size.ndims == 2", use = ["py_npg_normal"], viv = "py_npg_normal_m({g}, 0.0, 1.0, {size})", type = "arr(2)" },
+  { refuse = "Generator.standard_normal of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+]
+tests = [{ g = "@g" }, { g = "@g", size = 6 }, { g = "@g", size = [3, 2] }]
+
+[[family.rule]]
+id = "Generator.normal"
+match = "g.normal(loc=0.0, scale=1.0, size=None)"
+params = { size = "shape" }
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { eval = ["loc", "scale"] },
+  { if = "loc.kind not in ['num', 'bool'] or scale.kind not in ['num', 'bool']", refuse = "Generator.normal of {loc.words} and {scale.words}", hint = "Pass numbers; array parameters broadcast, which is not translated." },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npg_normal"], viv = "py_npg_normal({g}, {loc}, {scale})", type = "NUM_F" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "Generator.normal of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims == 1", use = ["py_npg_normal"], viv = "py_npg_normal_v({g}, {loc}, {scale}, {size})", type = "arr(1)" },
+  { if = "size.ndims == 2", use = ["py_npg_normal"], viv = "py_npg_normal_m({g}, {loc}, {scale}, {size})", type = "arr(2)" },
+  { refuse = "Generator.normal of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+]
+tests = [{ g = "@g" }, { g = "@g", loc = 1.5, scale = 2.0 }, { g = "@g", loc = -1.0, scale = 0.5, size = 5 }, { g = "@g", loc = 0.0, scale = 3.0, size = [2, 2] }]
+
+[[family.rule]]
+id = "Generator.uniform"
+match = "g.uniform(low=0.0, high=1.0, size=None)"
+params = { size = "shape" }
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { eval = ["low", "high"] },
+  { if = "low.kind not in ['num', 'bool'] or high.kind not in ['num', 'bool']", refuse = "Generator.uniform of {low.words} and {high.words}", hint = "Pass numbers; array bounds broadcast, which is not translated." },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npg_uniform"], viv = "py_npg_uniform({g}, {low}, {high})", type = "NUM_F" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "Generator.uniform of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims == 1", use = ["py_npg_uniform"], viv = "py_npg_uniform_v({g}, {low}, {high}, {size})", type = "arr(1)" },
+  { if = "size.ndims == 2", use = ["py_npg_uniform"], viv = "py_npg_uniform_m({g}, {low}, {high}, {size})", type = "arr(2)" },
+  { refuse = "Generator.uniform of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+]
+tests = [{ g = "@g" }, { g = "@g", low = -2.0, high = 3.0 }, { g = "@g", low = 1.0, high = 5.0, size = 4 }, { g = "@g", low = 0.0, high = 2.0, size = [2, 2] }]
+
+[[family.rule]]
+id = "Generator.integers"
+match = "g.integers(low, high=None, size=None, dtype=None, endpoint=False)"
+params = { size = "shape", dtype = "dtype" }
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { if = "dtype == None and ('dtype' in kw_names or nargs > 3)", refuse = "Generator.integers with dtype=None", hint = "NumPy reads dtype=None as float64 and raises TypeError; leave the dtype out." },
+  { if = "dtype not in [None, 'int', 'np.int64', 'int64', 'np.int_']", refuse = "Generator.integers with dtype={dtype}", hint = "Other dtypes draw differently (NumPy buffers the words of narrow ints); use the default int64." },
+  { if = "endpoint.given", eval = ["endpoint"] },
+  { if = "endpoint.given and endpoint.kind != 'bool'", refuse = "Generator.integers with endpoint= that is {endpoint.words}", hint = "Pass True or False." },
+  { if = "endpoint.given and endpoint.syntax != 'Constant'", use = ["py_b01"] },
+  { eval = ["low", "high"] },
+  { if = "low.kind != 'num' or low.py != 'int' or high.given and not (high.syntax == 'Constant' and high.lit == None) and (high.kind != 'num' or high.py != 'int')", refuse = "Generator.integers of {low.words} and {high.words}", hint = "Pass ints; NumPy truncates a float bound, and array bounds broadcast." },
+  { if = "high.given and not (high.syntax == 'Constant' and high.lit == None) and (not size.given or size.syntax == 'Constant' and size.lit == None)", use = ["py_npg_integers"], viv = "py_npg_integers({g}, {low}, {high}, {('1' if endpoint.lit else '0') if endpoint.given and endpoint.syntax == 'Constant' else (('py_b01(' + endpoint.code + ')') if endpoint.given else '0')})", type = "NUM_I" },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npg_integers"], viv = "py_npg_integers({g}, 0, {low}, {('1' if endpoint.lit else '0') if endpoint.given and endpoint.syntax == 'Constant' else (('py_b01(' + endpoint.code + ')') if endpoint.given else '0')})", type = "NUM_I" },
+  { eval = ["size"] },
+  { if = "not size.dims_int", refuse = "Generator.integers of a size that is not an int", hint = "NumPy raises TypeError; pass ints." },
+  { if = "size.ndims > 2", refuse = "Generator.integers of a size with {size.ndims} dimensions", hint = "Translated sizes have one or two dimensions." },
+  { if = "high.given and not (high.syntax == 'Constant' and high.lit == None) and size.ndims == 1", use = ["py_npg_integers"], viv = "py_npg_integers_v({g}, {low}, {high}, {size}, {('1' if endpoint.lit else '0') if endpoint.given and endpoint.syntax == 'Constant' else (('py_b01(' + endpoint.code + ')') if endpoint.given else '0')})", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "high.given and not (high.syntax == 'Constant' and high.lit == None)", use = ["py_npg_integers"], viv = "py_npg_integers_m({g}, {low}, {high}, {size}, {('1' if endpoint.lit else '0') if endpoint.given and endpoint.syntax == 'Constant' else (('py_b01(' + endpoint.code + ')') if endpoint.given else '0')})", type = "T('arr', 2, 'int', 'nd')" },
+  { if = "size.ndims == 1", use = ["py_npg_integers"], viv = "py_npg_integers_v({g}, 0, {low}, {size}, {('1' if endpoint.lit else '0') if endpoint.given and endpoint.syntax == 'Constant' else (('py_b01(' + endpoint.code + ')') if endpoint.given else '0')})", type = "T('arr', 1, 'int', 'nd')" },
+  { use = ["py_npg_integers"], viv = "py_npg_integers_m({g}, 0, {low}, {size}, {('1' if endpoint.lit else '0') if endpoint.given and endpoint.syntax == 'Constant' else (('py_b01(' + endpoint.code + ')') if endpoint.given else '0')})", type = "T('arr', 2, 'int', 'nd')" },
+]
+tests = [{ g = "@g", low = 10 }, { g = "@g", low = -3, high = 7 }, { g = "@g", low = 0, high = 10, size = 6 }, { g = "@g", low = 1, high = 6, size = 5, endpoint = true }, { g = "@g", low = 0, high = 1099511627776, size = 3 }, { g = "@g", low = 2, high = 9, size = [2, 3] }]
+
+[[family.rule]]
+id = "Generator.choice"
+match = "g.choice(a, size=None, replace=True, p=None, axis=0, shuffle=True)"
+params = { size = "shape" }
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { if = "replace.given", eval = ["replace"] },
+  { if = "replace.given and replace.kind != 'bool'", refuse = "Generator.choice with replace= that is {replace.words}", hint = "Pass True or False." },
+  { if = "replace.given and replace.syntax != 'Constant'", use = ["py_b01"] },
+  { if = "shuffle.given", eval = ["shuffle"] },
+  { if = "shuffle.given and shuffle.kind != 'bool'", refuse = "Generator.choice with shuffle= that is {shuffle.words}", hint = "Pass True or False." },
+  { if = "shuffle.given and shuffle.syntax != 'Constant'", use = ["py_b01"] },
+  { if = "axis.given and axis.axis_lit != 0", refuse = "Generator.choice along an axis other than 0", hint = "Choose from a vector." },
+  { eval = ["a"] },
+  { if = "not (a.kind == 'num' and a.py == 'int' or a.arr and a.kind == 'arr' and a.rank == 1 and a.py in ['int', 'float'])", refuse = "Generator.choice from {a.words}", hint = "Pass an int (the population size) or a vector of numbers." },
+  { if = "size.given and not (size.syntax == 'Constant' and size.lit == None)", eval = ["size"] },
+  { if = "size.given and not (size.syntax == 'Constant' and size.lit == None) and (not size.dims_int or size.ndims != 1)", refuse = "Generator.choice with this size", hint = "Pass an int size (or none); NumPy raises TypeError for a float, and a shape with two dimensions is not translated." },
+  { if = "p.given and not (p.syntax == 'Constant' and p.lit == None)", eval = ["p"] },
+  { if = "p.given and not (p.syntax == 'Constant' and p.lit == None) and not (p.arr and p.kind == 'arr' and p.rank == 1 and p.py in ['int', 'float'])", refuse = "Generator.choice with p that is {p.words}", hint = "Pass a vector of probabilities." },
+  { if = "a.kind == 'num' and (not size.given or size.syntax == 'Constant' and size.lit == None)", use = ["py_npg_choice"], viv = "py_npg_choice1({g}, {a}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0}, {('1' if shuffle.lit else '0') if shuffle.given and shuffle.syntax == 'Constant' else (('py_b01(' + shuffle.code + ')') if shuffle.given else '1')})", type = "NUM_I" },
+  { if = "a.kind == 'num'", use = ["py_npg_choice"], viv = "py_npg_choice_n({g}, {a}, {size}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0}, {('1' if shuffle.lit else '0') if shuffle.given and shuffle.syntax == 'Constant' else (('py_b01(' + shuffle.code + ')') if shuffle.given else '1')})", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "not size.given or size.syntax == 'Constant' and size.lit == None", use = ["py_npg_choice"], viv = "py_npg_choice_a1({g}, {a}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0}, {('1' if shuffle.lit else '0') if shuffle.given and shuffle.syntax == 'Constant' else (('py_b01(' + shuffle.code + ')') if shuffle.given else '1')})", type = "T('num', 0, a.py)" },
+  { use = ["py_npg_choice"], viv = "py_npg_choice_a({g}, {a}, {size}, {('1' if replace.lit else '0') if replace.given and replace.syntax == 'Constant' else (('py_b01(' + replace.code + ')') if replace.given else '1')}, {p.code if p.given and not (p.syntax == 'Constant' and p.lit == None) else 'zeros(0)'}, {1 if p.given and not (p.syntax == 'Constant' and p.lit == None) else 0}, {('1' if shuffle.lit else '0') if shuffle.given and shuffle.syntax == 'Constant' else (('py_b01(' + shuffle.code + ')') if shuffle.given else '1')})", type = "T('arr', 1, a.py, 'nd')" },
+]
+tests = [{ g = "@g", a = 10 }, { g = "@g", a = 10, size = 6 }, { g = "@g", a = [1.5, -2.0, 3.25, 4.0], size = 3 }, { g = "@g", a = 5, size = 4, replace = false }, { g = "@g", a = 30, size = 5, replace = false, shuffle = false }, { g = "@g", a = 4, size = 6, p = [0.1, 0.2, 0.3, 0.4] }, { g = "@g", a = 4, size = 3, replace = false, p = [0.1, 0.2, 0.3, 0.4] }]
+
+[[family.rule]]
+id = "Generator.shuffle"
+match = "g.shuffle(x, axis=0)"
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { if = "axis.given and axis.axis_lit != 0", refuse = "Generator.shuffle along an axis other than 0", hint = "Shuffle the rows, or transpose first." },
+  { if = "x.syntax != 'Name'", refuse = "Generator.shuffle of an expression", hint = "Shuffle a variable: NumPy shuffles it in place, and a slice would be a copy in the translation." },
+  { eval = ["x"] },
+  { if = "x.kind == 'arr' and x.rank == 1", use = ["py_npg_shuffle"], viv = "py_npg_shuffle({g}, {x})", type = "NONE" },
+  { if = "x.kind == 'arr' and x.rank == 2 and x.container == 'nd'", use = ["py_npg_shuffle"], viv = "py_npg_shuffle_rows({g}, {x})", type = "NONE" },
+  { refuse = "Generator.shuffle of {x.words}", hint = "Shuffle a vector, a list of numbers or the rows of a matrix." },
+]
+tests = [{ g = "@g", x = [1.0, 2.0, 3.0, 4.0, 5.0] }, { g = "@g", x = [[1, 2], [3, 4], [5, 6]] }]
+
+[[family.rule]]
+id = "Generator.permutation"
+match = "g.permutation(x, axis=0)"
+cases = [
+  { if = "g.kind != 'rng'", next = true },
+  { if = "axis.given and axis.axis_lit != 0", refuse = "Generator.permutation along an axis other than 0", hint = "Permute the rows, or transpose first." },
+  { eval = ["x"] },
+  { if = "x.kind == 'num' and x.py == 'int'", use = ["py_npg_shuffle"], viv = "py_npg_perm_n({g}, {x})", type = "T('arr', 1, 'int', 'nd')" },
+  { if = "x.kind == 'arr' and x.rank == 1 and x.py in ['int', 'float', 'bool']", use = ["py_npg_shuffle"], viv = "py_npg_perm_v({g}, {x})", type = "T('arr', 1, x.py, 'nd')" },
+  { if = "x.kind == 'arr' and x.rank == 2 and x.py in ['int', 'float', 'bool']", use = ["py_npg_shuffle"], viv = "py_npg_perm_m({g}, {x})", type = "T('arr', 2, x.py, 'nd')" },
+  { refuse = "Generator.permutation of {x.words}", hint = "Pass an int, a vector or a matrix; NumPy raises for a float." },
+]
+tests = [{ g = "@g", x = 8 }, { g = "@g", x = [1.5, 2.5, -3.0, 4.0] }, { g = "@g", x = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]] }]

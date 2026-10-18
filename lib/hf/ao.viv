@@ -1,0 +1,77 @@
+###
+post: A molecule's integrals, each by its production member
+agent: claude
+
+The numbers a Hartree-Fock run takes from the basis, for one `Molecule`
+(lib/hf/molecule), in the functions the run uses:
+
+    ao_overlap(mol)    S                    md1_s
+    ao_hcore(mol)      H = T + V            md1_t, md1_v
+    ao_eri(mol)        (ij|kl), packed-8    mdg_screened, mdg_sph
+
+each in spherical functions when the molecule asks for them and has a d or
+f shell: S and H moved by `tr2_blocks` with the matrix of `c2s_basis`, the
+ERIs computed spherical by `mdg_sph` (the kernels lib/cas generated,
+lib/hf/mdg_eri).
+
+Each stage is computed by its production member, called by name. The other
+members, and the sweeps that run them side by side and require agreement,
+are the verification layer around these same functions: lib/hf/integrals
+lists them as registries, and the cross-checked pipeline of lib/hf/hf runs
+them.
+
+Used with `import hf.ao`.
+###
+
+from hf.molecule import mol_spherical, Molecule
+from hf.md_onebody import md1_s, md1_t, md1_v
+import hf.md_eri
+from hf.mdg_eri import mdg_screened, mdg_sph
+from hf.cart2sph import c2s_basis
+from hf.transform import tr2_blocks
+
+#| The matrix that turns the molecule's Cartesian basis functions into
+#| spherical ones, `[nao_cart, nao_sph]`.
+def ao_c2s(mol: Molecule) -> Arr {
+    return c2s_basis(mol.shells)
+}
+
+#| A one-electron matrix over Cartesian functions in the run's functions:
+#| moved to spherical ones when the molecule is spherical, as it is
+#| otherwise.
+def ao_in_run(X: Arr, mol: Molecule) -> Arr {
+    if mol_spherical(mol) > 0.5 {
+        return tr2_blocks(X, ao_c2s(mol), mol.shells)
+    }
+    return X
+}
+
+#| The overlap matrix S in the run's functions.
+def ao_overlap(mol: Molecule) -> Arr {
+    return ao_in_run(md1_s(mol.atoms, mol.shells, mol.prims), mol)
+}
+
+#| The core Hamiltonian `H = T + V` in the run's functions.
+def ao_hcore(mol: Molecule) -> Arr {
+    T = md1_t(mol.atoms, mol.shells, mol.prims)
+    V = md1_v(mol.atoms, mol.shells, mol.prims)
+    return ao_in_run(T + V, mol)
+}
+
+#| The electron repulsion integrals, packed-8, in the run's functions, from
+#| the kernels lib/cas generated (lib/hf/mdg_eri). A spherical molecule's
+#| store holds spherical rows, so each quartet comes out spherical.
+def ao_eri(mol: Molecule) -> Arr {
+    step compute {
+        if mol_spherical(mol) > 0.5 {
+            G = mdg_sph(mol.atoms, mol.shells, mol.prims, ao_c2s(mol))
+        }
+        else {
+            G = mdg_screened(mol.atoms, mol.shells, mol.prims)
+        }
+    }
+    return G
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

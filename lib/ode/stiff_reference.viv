@@ -1,0 +1,105 @@
+###
+post: lib/ode against the stiff test set's published reference solutions
+agent: claude
+
+Five stiff problems, each solved by Radau IIA and by BDF and compared with
+the reference solution published with the problem: the IVP test set of
+Mazzia and Magherini (Bari, release 2.4, 2008) for Robertson to t = 1e11,
+Van der Pol with eps = 1e-6 (mu = 1000), HIRES and the Oregonator (whose
+values agree with those in Hairer and Wanner, Solving ODEs II, IV.10).
+The error is the largest relative error over the components at the end
+time; the bound is 100 rtol for Radau and 1000 rtol for BDF, whose global
+error on the Oregonator grows over its oscillations (SciPy's BDF makes the
+same 1.5e-6 at rtol = 1e-8).
+
+Van der Pol with eps = 1e-12 (mu = 1e6) has no published value; Radau's
+result is held to SciPy's Radau at rtol = 1e-10 (1.705546217535324,
+python/tests/test_ode.py runs both). BDF fails on it at t = 0.807, at the
+first relaxation jump, as SciPy's BDF does: the step size it needs there
+underflows.
+
+E5 is not here: at its end time y2 and y3 are 1e-22 and their difference
+1e-25, and no setting of rtol and atol makes SciPy's or these Radau and
+BDF reproduce the reference (see the report on branch ode).
+###
+
+from ode.solve import ode_cfg, ode_solve, no_events
+from ode.core import BDF, DONE, RADAU, JAC_GIVEN
+from ode.problems import (
+    robertson, robertson_jac, vdpol, vdpol_jac, hires, hires_jac, oregonator, oregonator_jac,
+)
+
+RTOL = 1.0e-8
+# the error a test allows, in units of rtol: BDF's global error on the
+# Oregonator grows over its oscillations (SciPy's BDF: 1.5e-6 at rtol 1e-8)
+ALLOWED = 100.0
+ALLOWED_BDF = 1000.0
+MAX_STEPS: Int = 1000000
+NO_PARAMS = zeros(0)
+
+ROBER_T = 1.0e11
+ROBER_Y0 = [1.0, 0.0, 0.0]
+ROBER_P = [0.04, 1.0e4, 3.0e7]
+ROBER_REF = [0.2083340149701255e-07, 0.8333360770334713e-13, 0.9999999791665050]
+VDPOL_T = 2.0
+VDPOL_Y0 = [2.0, 0.0]
+VDPOL_REF = [0.1706167732170483e+01, -0.8928097010247975]
+HIRES_T = 321.8122
+HIRES_Y0 = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0057]
+HIRES_REF = [0.7371312573325668e-3, 0.1442485726316185e-3, 0.5888729740967575e-4, 0.1175651343283149e-2,
+             0.2386356198831331e-2, 0.6238968252742796e-2, 0.2849998395185769e-2, 0.2850001604814231e-2]
+OREGO_T = 360.0
+OREGO_Y0 = [1.0, 2.0, 3.0]
+OREGO_REF = [0.1000814870318523e+01, 0.1228178521549917e+04, 0.1320554942846706e+03]
+VDP6_REF = [1.705546217535324, -0.8934763625465864]
+
+#| The largest relative error of y against ref.
+def rel_err(y: Arr, ref: Arr) -> Num {
+    return amax(abs(y - ref) / abs(ref))
+}
+
+#| Solve to t1 and return the state there, the status and the step count.
+def end_state(f, jac, method: Int, t1: Num, y0: Arr, p: Arr, rtol: Num, atol: Num) {
+    c = ode_cfg(method, t1, rtol, atol * ones(len(y0)), 0.0, inf, MAX_STEPS, JAC_GIVEN)
+    r = ode_solve(f, jac, no_events, 0.0, t1, y0, p, c, [t1], zeros(0), zeros(0))
+    return r.y[0, :], r.status, r.nsteps
+}
+
+methods = [RADAU, BDF]
+# Robertson, Van der Pol, HIRES, the Oregonator
+NPROBLEMS: Int = 4
+errs = zeros(len(methods), NPROBLEMS)
+done = 0
+mi = 0
+for mm in methods {
+    m: Int = int(mm)
+    y1, st1, n1 = end_state(robertson, robertson_jac, m, ROBER_T, ROBER_Y0, ROBER_P, RTOL, 1.0e-20)
+    y2, st2, n2 = end_state(vdpol, vdpol_jac, m, VDPOL_T, VDPOL_Y0, [1.0e-6], RTOL, 1.0e-8)
+    y3, st3, n3 = end_state(hires, hires_jac, m, HIRES_T, HIRES_Y0, NO_PARAMS, RTOL, 1.0e-12)
+    y4, st4, n4 = end_state(oregonator, oregonator_jac, m, OREGO_T, OREGO_Y0, NO_PARAMS, RTOL, 1.0e-8)
+    errs[mi, :] = [rel_err(y1, ROBER_REF), rel_err(y2, VDPOL_REF), rel_err(y3, HIRES_REF), rel_err(y4, OREGO_REF)]
+    print(f"method {m}: steps {n1} {n2} {n3} {n4}; relative errors {errs[mi, 0]:.2e} {errs[mi, 1]:.2e} {errs[mi, 2]:.2e} {errs[mi, 3]:.2e}")
+    if st1 == DONE and st2 == DONE and st3 == DONE and st4 == DONE {
+        done += 1
+    }
+    mi += 1
+}
+y6, st6, n6 = end_state(vdpol, vdpol_jac, RADAU, VDPOL_T, VDPOL_Y0, [1.0e-12], RTOL, 1.0e-8)
+e6 = rel_err(y6, VDP6_REF)
+print(f"Van der Pol mu = 1e6, Radau: {n6} steps, relative difference from SciPy {e6:.2e}")
+
+test "Radau IIA and BDF reach the end of all four problems" {
+    assert_near(done, 2.0, 0.0)
+}
+test "Radau IIA matches the published reference solutions to 100 rtol" {
+    assert_lt(amax(errs[0, :]), ALLOWED * RTOL)
+}
+test "BDF matches the published reference solutions to 1000 rtol" {
+    assert_lt(amax(errs[1, :]), ALLOWED_BDF * RTOL)
+}
+test "Radau IIA solves Van der Pol at mu = 1e6 as SciPy's Radau does" {
+    assert_lt(e6, ALLOWED * RTOL)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

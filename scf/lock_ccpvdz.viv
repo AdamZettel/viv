@@ -1,0 +1,74 @@
+# Water in the larger bases: cc-pVDZ and def2-SVP (d functions on oxygen
+# and p on hydrogen) and def2-TZVP (the first f shell, 48 Cartesian AOs).
+#
+# lib/hfref holds checksums, the pair diagonal and 256 samples for these,
+# and the computed integrals (MD and HGP swept over every integral) are held
+# to them. Energies against PySCF 2.5.0, within 1e-9:
+#
+#     cc-pVDZ   6D -76.027107008870573   5D -76.026765673119627
+#     def2-SVP  6D -75.96221113003139    5D -75.96097516698583
+#     def2-TZVP                          5D -76.05899070651952
+#
+# TZVP is run in its spherical form only, PySCF's default for that basis.
+#
+#     tools/both-engines.sh scf lock_ccpvdz
+from hf.hf import hf_lock_sampled
+from hf.molecule import molecule_packs
+from hfref.water_ccpvdz import (
+    waterccpvdz_atoms, WATERCCPVDZ_E_RHF, WATERCCPVDZ_E_RHF_CART, waterccpvdz_eri8_cart_diag,
+    waterccpvdz_eri8_cart_idx, WATERCCPVDZ_ERI8_CART_SUMSQ, waterccpvdz_eri8_cart_val,
+    WATERCCPVDZ_ERI8_CART_WSUM, waterccpvdz_eri8_sph_diag, waterccpvdz_eri8_sph_idx,
+    WATERCCPVDZ_ERI8_SPH_SUMSQ, waterccpvdz_eri8_sph_val, WATERCCPVDZ_ERI8_SPH_WSUM,
+    waterccpvdz_prims, waterccpvdz_s_sph, waterccpvdz_s_unit, WATERCCPVDZ_SEED_WSUM,
+    waterccpvdz_shells, waterccpvdz_t_sph, waterccpvdz_t_unit, waterccpvdz_v_sph,
+    waterccpvdz_v_unit,
+)
+from hfref.water_svp import (
+    watersvp_atoms, WATERSVP_E_RHF, WATERSVP_E_RHF_CART, watersvp_eri8_cart_diag,
+    watersvp_eri8_cart_idx, WATERSVP_ERI8_CART_SUMSQ, watersvp_eri8_cart_val,
+    WATERSVP_ERI8_CART_WSUM, watersvp_eri8_sph_diag, watersvp_eri8_sph_idx,
+    WATERSVP_ERI8_SPH_SUMSQ, watersvp_eri8_sph_val, WATERSVP_ERI8_SPH_WSUM, watersvp_prims,
+    watersvp_s_sph, watersvp_s_unit, WATERSVP_SEED_WSUM, watersvp_shells, watersvp_t_sph,
+    watersvp_t_unit, watersvp_v_sph, watersvp_v_unit,
+)
+from hfref.water_tzvp import (
+    watertzvp_atoms, WATERTZVP_E_RHF, WATERTZVP_E_RHF_CART, watertzvp_eri8_cart_diag,
+    watertzvp_eri8_cart_idx, WATERTZVP_ERI8_CART_SUMSQ, watertzvp_eri8_cart_val,
+    WATERTZVP_ERI8_CART_WSUM, watertzvp_eri8_sph_diag, watertzvp_eri8_sph_idx,
+    WATERTZVP_ERI8_SPH_SUMSQ, watertzvp_eri8_sph_val, WATERTZVP_ERI8_SPH_WSUM, watertzvp_prims,
+    watertzvp_s_sph, watertzvp_s_unit, WATERTZVP_SEED_WSUM, watertzvp_shells, watertzvp_t_sph,
+    watertzvp_t_unit, watertzvp_v_sph, watertzvp_v_unit,
+)
+
+test "water cc-pVDZ: RHF Cartesian -76.027107008870573 and spherical -76.026765673119627" {
+    lkc_e6, lkc_e5 = hf_lock_sampled(molecule_packs(waterccpvdz_atoms(), waterccpvdz_shells(), waterccpvdz_prims()),
+        waterccpvdz_eri8_cart_idx(), waterccpvdz_eri8_cart_val(), waterccpvdz_eri8_cart_diag(), [WATERCCPVDZ_ERI8_CART_SUMSQ, WATERCCPVDZ_ERI8_CART_WSUM],
+        waterccpvdz_eri8_sph_idx(), waterccpvdz_eri8_sph_val(), waterccpvdz_eri8_sph_diag(), [WATERCCPVDZ_ERI8_SPH_SUMSQ, WATERCCPVDZ_ERI8_SPH_WSUM], WATERCCPVDZ_SEED_WSUM,
+        waterccpvdz_s_unit(), waterccpvdz_t_unit() + waterccpvdz_v_unit(), waterccpvdz_s_sph(), waterccpvdz_t_sph() + waterccpvdz_v_sph(), -76.027107008870573, -76.026765673119627, 1)
+    assert_lt(abs(lkc_e6), 1.0e-9)
+    assert_lt(abs(lkc_e5), 1.0e-9)
+    # the stored module constants agree with the ladder values
+    assert_lt(abs(WATERCCPVDZ_E_RHF_CART - -76.027107008870573), 1.0e-11)
+    assert_lt(abs(WATERCCPVDZ_E_RHF - -76.026765673119627), 1.0e-11)
+}
+
+test "water def2-SVP: RHF 6D -75.96221113003139 and 5D -75.96097516698583" {
+    lkc_e6, lkc_e5 = hf_lock_sampled(molecule_packs(watersvp_atoms(), watersvp_shells(), watersvp_prims()),
+        watersvp_eri8_cart_idx(), watersvp_eri8_cart_val(), watersvp_eri8_cart_diag(), [WATERSVP_ERI8_CART_SUMSQ, WATERSVP_ERI8_CART_WSUM],
+        watersvp_eri8_sph_idx(), watersvp_eri8_sph_val(), watersvp_eri8_sph_diag(), [WATERSVP_ERI8_SPH_SUMSQ, WATERSVP_ERI8_SPH_WSUM], WATERSVP_SEED_WSUM,
+        watersvp_s_unit(), watersvp_t_unit() + watersvp_v_unit(), watersvp_s_sph(), watersvp_t_sph() + watersvp_v_sph(), WATERSVP_E_RHF_CART, WATERSVP_E_RHF, 1)
+    assert_lt(abs(lkc_e6), 1.0e-9)
+    assert_lt(abs(lkc_e5), 1.0e-9)
+}
+
+test "water def2-TZVP 5D: RHF -76.05899070651952, the first f shell" {
+    lkc_e6, lkc_e5 = hf_lock_sampled(molecule_packs(watertzvp_atoms(), watertzvp_shells(), watertzvp_prims()),
+        watertzvp_eri8_cart_idx(), watertzvp_eri8_cart_val(), watertzvp_eri8_cart_diag(), [WATERTZVP_ERI8_CART_SUMSQ, WATERTZVP_ERI8_CART_WSUM],
+        watertzvp_eri8_sph_idx(), watertzvp_eri8_sph_val(), watertzvp_eri8_sph_diag(), [WATERTZVP_ERI8_SPH_SUMSQ, WATERTZVP_ERI8_SPH_WSUM], WATERTZVP_SEED_WSUM,
+        watertzvp_s_unit(), watertzvp_t_unit() + watertzvp_v_unit(), watertzvp_s_sph(), watertzvp_t_sph() + watertzvp_v_sph(), WATERTZVP_E_RHF_CART, WATERTZVP_E_RHF, 0)
+    assert_lt(abs(lkc_e6), 1.0e-9)
+    assert_lt(abs(lkc_e5), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

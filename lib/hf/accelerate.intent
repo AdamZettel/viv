@@ -1,0 +1,218 @@
+module lib/hf/accelerate
+  What the SCF diagonalizes next. One SCF iteration maps a Fock matrix to a
+  density and the density back to a Fock matrix; repeating that map as it
+  is converges slowly or not at all when the density swings between two
+  shapes. An accelerator chooses the matrix the next step diagonalizes from
+  the recent ones: commutator DIIS (production), plain iteration, or
+  damping, picked by `opts[OPT_ACCEL]`.
+
+  DIIS (direct inversion in the iterative subspace, Pulay's method) keeps
+  the recent Fock matrices and their errors, the commutators
+  `F P - P F` in the orthonormal basis, which are zero at the solution. It
+  finds the combination `F = sum c_i F_i` with `sum c_i = 1` whose combined
+  error is smallest, a small linear system.
+
+  The history is the record `Diis`: `hist` holds the matrices and their
+  errors in a ring of fixed capacity, plus the matrix the last step used,
+  `meta` holds the count stored, the newest slot, the capacity and the
+  number of steps, and `gram` the inner products of the stored errors, one
+  row per ring slot. It is filled in place and does not grow.
+
+accel_capacity  @73e00ace
+  why    A history of zero matrices would make every slot computation divide
+         by zero, so the capacity is never below one.
+  opts   the options column array; `opts[OPT_DIIS_N]` is the requested size
+
+accel_meta_new  @f506e9b7
+  why    The newest slot starts before the first one, so the first push lands
+         in slot `0`.
+  nd     the ring's capacity
+  meta   the bookkeeping vector: count, newest slot, capacity, steps
+
+accel_new  @c60753be
+  why    The SCF makes one history per run, before the loop, sized for the
+         number of densities and the orthonormal basis.
+  k      how many matrices a step stores: one per density
+  m      the size of the orthonormal basis
+  opts   the options column array
+  nd     the ring's capacity
+
+accel_slot  @551ae360
+  why    Every reader of the history asks for a step by how recent it is;
+         this turns that age into a ring position.
+  meta   the bookkeeping vector
+  age    how many steps before the newest: `0` for the newest
+  nd     the ring's capacity
+
+accel_push  @c298152e
+  why    Each SCF iteration adds its Fock matrix and error; when the ring is
+         full the oldest step is overwritten
+         [test "the ring keeps the newest nd steps and damping mixes with the last used matrix"].
+  d      the history, written in place
+  Fp     the newest Fock matrices in the orthonormal basis, `[k, m, m]`
+  Ep     their errors, the commutators, `[k, m, m]`
+  nd     the ring's capacity
+  head   the slot the new step goes into
+  s      a stored slot
+  g      the new error's inner product with slot s's
+
+  = g    the new error against each stored one: one row and column of gram, k inner products where a rebuilt DIIS matrix takes k (k + 1) / 2 [test "the inner products accel_push keeps are the ones recomputed from the history"]
+
+accel_newest  @c8e4c15f
+  why    Plain iteration, damping, and DIIS when its system cannot be solved
+         all start from the newest matrix; this returns a copy (`slab`
+         copies), so the caller cannot change the history.
+  hist   the ring of matrices and errors
+  meta   the bookkeeping vector
+
+accel_solve  @6fb84851
+  why    The DIIS system is small and can be nearly singular when two stored
+         errors are almost parallel. Writing the elimination here lets it
+         report that case instead of returning a meaningless answer, and
+         keeps the arithmetic identical in both engines.
+  A      the system's matrix, `[k, k]`, overwritten by the elimination
+  y      the right-hand side, overwritten by the solution
+  k      the system's size
+  tol    a pivot below `tol` times the largest entry counts as zero
+  big    the largest entry of A
+  c      the column being eliminated
+  p      the pivot row for column c
+  r      a row below c
+  t      a value being swapped
+  f      the multiple of row c subtracted from row r
+  i      the row being solved in back substitution
+  s      row i's right-hand side minus the solved terms
+
+  = big      the scale for the singularity test
+  = p#2      partial pivoting: the row with the largest entry in column c
+  = f        eliminate column c from the rows below
+  = s        back substitution, from the last row up
+
+accel_diis_coeffs  @d37a0c09
+  why    This is DIIS itself: the error of a combination is
+         `sum c_t e_t`, its squared size is `c^T B c` with
+         `B_tu = <e_t, e_u>`, and minimizing that subject to `sum c_t = 1`
+         with a Lagrange multiplier gives the bordered linear system below.
+  G      the inner products of the stored errors, by ring slot
+  meta   the bookkeeping vector
+  k      how many of the newest steps to combine
+  B      the bordered system: the error inner products by age, then a row and column of `-1`
+  st     the ring slot of age t
+  top    the largest diagonal entry of B, which scales the error block
+  y      the right-hand side, then the coefficients and the multiplier
+  ok     `1` when the system solved
+  t      a step's age
+  u      another step's age
+
+  $$ \begin{pmatrix} B & -\mathbf{1} \\ -\mathbf{1}^\top & 0 \end{pmatrix} \begin{pmatrix} c \\ \lambda \end{pmatrix} = \begin{pmatrix} 0 \\ -1 \end{pmatrix} $$  [test "DIIS solves an affine problem in as many steps as it has directions"]
+  = B#2      the inner products of the k newest errors, by age, from G (both spins summed for UHF)
+  = top      scale the error block so the pivot test in accel_solve is relative
+  = ok       solve for the coefficients and the multiplier
+
+accel_cdiis_gram  @e9c7f1a4
+  why    On an affine problem DIIS finds the solution once it has seen as
+         many steps as the error has directions, which plain iteration does
+         not [test "DIIS solves an affine problem in as many steps as it has directions"].
+         Dropping the oldest steps when the system is singular keeps it
+         working when the history holds nearly repeated errors, and with
+         one step, or errors that are all zero, it falls back to the newest
+         matrix [test "zero errors and a single step fall back to the newest matrix"].
+  hist   the ring of matrices and errors
+  meta   the bookkeeping vector
+  G      the inner products of the stored errors, by ring slot
+  sh     the shape of hist
+  R      the combined Fock matrices, `[k, m, m]`
+  k      how many steps are combined
+  c      the DIIS coefficients
+  ok     `1` once the system solved
+  t      a step's age
+
+accel_cdiis  @8d8eb609
+  why    The registry member: a member called through `apply` gets no
+         `gram`, so it recomputes the inner products from the history with
+         the same inner product `accel_push` uses and gives the same bits as
+         the production path [test "accel_extrapolate runs the member the registry holds at each option value"].
+  hist   the ring of matrices and errors
+  meta   the bookkeeping vector
+  opts   not read
+
+accel_inner  @09368ec1
+  why    The one inner product the DIIS matrix is made of, used both when a
+         step is pushed and when the matrix is recomputed, so the two agree to
+         the bit.
+  E      an error, `[k, m, m]`
+  hist   the ring of matrices and errors
+  slot   the slot of the other error
+
+accel_gram  @78aeb37a
+  why    The inner products of every stored error pair from the history
+         alone, for a member called through the registry.
+  hist   the ring of matrices and errors
+  meta   the bookkeeping vector
+  nd     the ring's capacity
+  G      the inner products, `[nd, nd]` by ring slot
+  s      a stored slot
+  e      slot s's error
+  t      another stored slot
+  g      their inner product
+
+accel_none  @69568ccd
+  why    Plain iteration, the reference the tests compare DIIS with.
+  hist   the ring
+  meta   the bookkeeping vector
+  opts   not read
+
+accel_damp  @9e7ca2fe
+  why    Mixing each new matrix with the previous one cannot speed up slow
+         convergence, but it can turn an oscillation between two densities
+         into convergence.
+  hist   the ring, whose slot `2 nd` holds the matrix the previous step used
+  meta   the bookkeeping vector
+  opts   the options column array; `opts[OPT_DAMP]` is the weight of the old matrix
+  R      the newest matrices
+  a      the weight of the previous matrix, the default when unset
+
+accel_methods  @c45c6336
+  why    The SCF picks its accelerator by number, and tests compare them.
+
+accel_extrapolate  @30e23b55
+  why    The SCF calls one def whatever accelerator the options pick, and
+         this def calls each member by name, so the default options reach
+         CDIIS without a registry. The matrix it returns is stored, because
+         damping needs the matrix the previous step used, not the previous
+         step's raw Fock matrix.
+  d      the history, written in place; its `gram` goes to CDIIS
+  opts   the options column array; `opts[OPT_ACCEL]` picks the member
+  k      the member the options name: `ACCEL_CDIIS`, `ACCEL_NONE` or `ACCEL_DAMP`
+  R      the matrices for the next diagonalization
+
+accel_t_opts  @96d3a465
+  why    The tests pick members and history sizes by number.
+  k      the accelerator member
+  n      the history size
+
+accel_t_system  @46326bac
+  why    The linear test problem: a small symmetric matrix A. Its residual is
+         affine in the unknowns, which is where DIIS's exactness can be
+         checked.
+
+accel_t_residual  @f97041c7
+  why    The test problem's error: the residual of the linear system at x,
+         with the unknowns stored as a stand-in Fock matrix.
+  x      the unknowns, as a `[1, 2, 2]` stand-in Fock matrix
+  e      the residual, written in place in the same shape
+  A      the test system's matrix
+  y      its right-hand side
+  worst  the largest residual entry
+  s      one residual entry
+
+accel_t_run  @7db5f4c6
+  why    Runs Richardson's iteration `x -> x + (y - A x)`, the fixed-point map
+         of the test problem, under one accelerator, as the SCF would.
+  k      the accelerator member
+  steps  how many steps
+  o      the options with accelerator k
+  d      the history
+  x      the unknowns
+  e      the residual at x
+  it     the step

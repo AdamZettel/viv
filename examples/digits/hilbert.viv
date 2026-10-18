@@ -1,0 +1,51 @@
+#| Solve H x = H 1 for the n x n Hilbert matrix, H[i][j] = 1/(i + j + 1),
+#| by Gaussian elimination with partial pivoting written out in loops. The
+#| exact answer is all ones; the condition number grows like e^(3.5 n), and
+#| the digits of x that survive fall with it.
+n = 6
+H = zeros(n, n)
+for i to n {
+    for j to n {
+        H[i, j] = 1.0 / (i + j + 1.0)
+    }
+}
+b = zeros(n)
+for i to n {
+    b[i] = sum(H[i, :])
+}
+A = H
+for c to n {
+    p = c
+    for r from c + 1 to n {
+        if abs(A[r, c]) > abs(A[p, c]) {
+            p = r
+        }
+    }
+    for j to n {
+        tmp = A[c, j]
+        A[c, j] = A[p, j]
+        A[p, j] = tmp
+    }
+    tb = b[c]
+    b[c] = b[p]
+    b[p] = tb
+    for r from c + 1 to n {
+        f = A[r, c] / A[c, c]
+        for j from c to n {
+            A[r, j] = A[r, j] - f * A[c, j]
+        }
+        b[r] = b[r] - f * b[c]
+    }
+}
+x = zeros(n)
+for i to n reversed {
+    s = b[i]
+    for j from i + 1 to n {
+        s = s - A[i, j] * x[j]
+    }
+    x[i] = s / A[i, i]
+}
+print("x = ", x)
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

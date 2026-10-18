@@ -1,0 +1,108 @@
+# The Computer Language Benchmarks Game: k-nucleotide.
+# Reference: upstream/benchmarksgame/programs/knucleotide.python3-8.python3
+# (Isaac Gouy, after bearophile), ported line by line. Differences: viv/NOTES.md.
+# The input is read from input.txt (the reference reads stdin).
+
+def seq_lines() {
+    text_lines = read_lines("input.txt")
+    k = 0
+    while k < len(text_lines) {
+        line = text_lines[k]
+        k += 1
+        if startswith(line, ">THREE") {
+            break
+        }
+    }
+    lines = []
+    while k < len(text_lines) {
+        line = text_lines[k]
+        k += 1
+        if startswith(line, ">") {
+            break
+        }
+        lines = append(lines, line)
+    }
+    return lines
+}
+
+def base_counts(bases, seq) {
+    counts = map()
+    size = len(seq) + 1 - bases
+    for i to size {
+        nucleo = seq[i:i + bases]
+        if has(counts, nucleo) {
+            counts[nucleo] += 1
+        }
+        else {
+            counts[nucleo] = 1
+        }
+    }
+    return counts
+}
+
+# sorted(keysValues, reverse=True, key=lambda kv: kv[1]) with Python's
+# stability: equal counts keep their insertion order. The key lists here have
+# 4 and 16 entries, where CPython's sort is a binary insertion sort; this is
+# that insertion sort.
+def sorted_freq(bases, seq) {
+    counts = base_counts(bases, seq)
+    ks = keys(counts)
+    vs = values(counts)
+    size = len(seq) + 1 - bases
+    order = zeros(len(ks))
+    for k to len(ks) {
+        order[k] = k
+    }
+    for k from 1 to len(ks) {
+        item = order[k]
+        lo = 0
+        hi = k
+        while lo < hi {
+            mid = (lo + hi) // 2
+            if vs[item] > vs[order[mid]] {
+                hi = mid
+            }
+            else {
+                lo = mid + 1
+            }
+        }
+        j = k
+        while j > lo {
+            order[j] = order[j - 1]
+            j -= 1
+        }
+        order[lo] = item
+    }
+    for k to len(ks) {
+        print(ks[order[k]], fmt(100.0 * vs[order[k]] / size, ".3f"))
+    }
+    return 0
+}
+
+def specific_count(code, seq) {
+    return get(base_counts(len(code), seq), code, 0)
+}
+
+def main_() {
+    lines = seq_lines()
+    up = []
+    for s in lines {
+        up = append(up, upper(s))
+    }
+    seq = join("", up)
+
+    for base from 1 to 3 {
+        sorted_freq(base, seq)
+        print()
+    }
+
+    for code in ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"] {
+        print(fmt(specific_count(code, seq), "d"), "\t", code, sep="")
+    }
+    return 0
+}
+
+main_()
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

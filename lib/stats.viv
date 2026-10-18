@@ -1,0 +1,45 @@
+###
+post: The mean and the standard deviation of an array
+agent: claude
+
+- `mean(a)`: `sum(a) / numel(a)`, over every entry whatever the rank.
+- `std(a)`: the population standard deviation, which divides by n (numpy's
+  `np.std` default; torch's `std` and Julia's `std` divide by n - 1):
+  `sqrt(sum(d * d) / numel(a))` with `d = a - mean(a)`.
+
+Both add in `sum`'s order, NumPy's pairwise order, which is left to right
+below 8 entries, so `tools/random_replay.py` reproduces the six-sample test
+in Python.
+
+Used with `import stats`.
+###
+
+#| The mean of every entry of `a`.
+def mean(a: Arr) {
+    return sum(a) / numel(a)
+}
+
+#| The population standard deviation of every entry of `a` (divides by n).
+def std(a: Arr) {
+    d = a - mean(a)
+    return sqrt(sum(d * d) / numel(a))
+}
+
+test "mean and std of six normals are the ones Python computes" {
+    # ---- replayed by tools/random_replay.py ----
+    SAMPLE = [4.16423517651071, -1.2113924334265904, 0.017206071253852796, -1.2683694313171443, -1.2785648787291637, 1.2992678807294153]
+    REF_MEAN = 0.28706373083684655
+    REF_STD = 1.968323100081351
+    # ---- end of the replayed block ----
+    assert_near(mean(SAMPLE), REF_MEAN, 1.0e-15)
+    assert_near(std(SAMPLE), REF_STD, 1.0e-15)
+}
+
+test "every rank counts every entry" {
+    assert_near(mean([1.0, 2.0, 3.0, 6.0]), 3.0, 0.0)
+    assert_near(std([[1.0, 3.0], [1.0, 3.0]]), 1.0, 0.0)
+    assert_near(std([5.0, 5.0, 5.0]), 0.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

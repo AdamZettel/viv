@@ -1,0 +1,69 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// One showcase. Everything here is scripts/show-build.mjs's output: the prose
+// is the program's `###` header, the figure and the tests are its build-time
+// run (and the reader's own run, after Run), and the code is its source.
+import Base from '../../layouts/Base.astro';
+import ShowRun from '../../components/ShowRun.jsx';
+import data from '../../data/show.json';
+import { repoLink } from '../../lib/repo.js';
+import { atlasHref } from '../../lib/atlasLink.js';
+import flip from '../../data/flip.json';
+import '../../styles/pde.css';
+import '../../styles/run.css';
+import '../../styles/show.css';
+import '../../styles/scenes.css';
+import 'katex/dist/katex.min.css';
+
+export function getStaticPaths() {
+  return data.pages.map((s, i) => ({
+    params: { slug: s.slug },
+    props: { s, prev: data.pages[i - 1] || null, next: data.pages[i + 1] || null },
+  }));
+}
+const { s, prev, next } = Astro.props;
+// the same code on the vipyr side (scripts/flip-build.mjs): its functions and gallery examples
+const vipyr: { href: string; label: string }[] = (flip.pages as any)[`/show/${s.slug}`] || [];
+const files = s.file.split('/').pop();
+---
+
+<Base title={`${s.title} · Viv`} description={s.summaryPlain}>
+  <p class="eyebrow"><a href="/gallery">Gallery</a></p>
+  <h1>{s.title}</h1>
+  <div class="pde-hero" set:html={s.equationHtml} />
+  <div class="show-lede" set:html={s.summaryHtml} />
+
+  <h2 id="problem">The problem</h2>
+  <div class="show-prose" set:html={s.bodyHtml} />
+
+  <ShowRun client:visible slug={s.slug} figure={s.figure} tests={s.tests} seconds={s.seconds} reference={s.reference} />
+
+  <h2 id="program">The program</h2>
+  <p>
+    {s.file}, {s.lines} lines. The imports it names are the site's library modules; Run splices them in and runs the
+    whole thing.
+  </p>
+  <pre class="dump code show-code" data-lang="viv"><code set:html={s.programHtml} /></pre>
+  <ul class="show-links">
+    <li><a href={`/workbench?open=show/${s.slug}.viv`}>Open it in the workbench</a></li>
+    {!s.explore && <li><a href={atlasHref(`show/${s.slug}.viv`)}>The atlas</a>: its defs and the calls between them, made in your browser</li>}
+    {s.explore && <li><a href={`/explore/walk/${s.explore}`}>Walk through a recorded run</a>, call by call</li>}
+    {s.explore && <li><a href={`/explore/${s.explore}`}>Explore the run</a> step by step</li>}
+    {s.post && <li><a href={`/p/${s.post}`}>The post</a> this program is</li>}
+    {vipyr.length > 0 && (
+      <li>
+        From Python, in vipyr:{' '}
+        {vipyr.map((v, k) => (
+          <>{k > 0 && ', '}<a href={v.href}>{v.label.replace(/^Gallery: /, '')}</a></>
+        ))}
+      </li>
+    )}
+    {repoLink(s.file) && <li><a href={repoLink(s.file)} rel="noopener">{files} on GitHub</a></li>}
+  </ul>
+
+  <nav class="run-pager" aria-label="Other showcases">
+    {prev ? <a href={`/show/${prev.slug}`} rel="prev"><span>Previous</span>{prev.title}</a> : <span />}
+    {next ? <a href={`/show/${next.slug}`} rel="next"><span>Next</span>{next.title}</a> : <span />}
+  </nav>
+</Base>

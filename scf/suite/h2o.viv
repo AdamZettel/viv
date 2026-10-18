@@ -1,0 +1,108 @@
+# PySCF's test_h2o.py replayed: water in 6-31G, closed shell (RHF and UHF),
+# the cation (ROHF), the core-Hamiltonian guess and E_nuc.
+#
+# Every row is one assertAlmostEqual from PySCF v2.5.0's own tests, harvested
+# into lib/hfref/pyscf_tests.viv (PST_H2O_<line>). The integrals are computed
+# here from the basis packs, with every member of each integral stage swept,
+# and the SCF runs on them. `sts_row` scores a row the way unittest does and
+# prints the line tools/hf_score.sh counts.
+#
+# What the PySCF variants map to. `max_memory=0` makes PySCF compute the
+# integrals on the fly: here that is the direct J/K member, which recomputes
+# them from the basis every iteration. `direct_scf=False` keeps them in core
+# without screening: here the pair-matrix J/K member. `symmetry=1` makes
+# PySCF build symmetry-adapted orbitals; this code has none, so those rows
+# run the plain SCF and ask only that it lands on the same state.
+#
+#     tools/both-engines.sh scf/suite h2o
+from hf.hf import hf_blob, hf_eri, hf_gap, hf_hcore, hf_overlap, hf_scf, hf_setup_of
+from hf.molecule import mol_enuc, Molecule, molecule_packs
+from hf.scf_loop import scf_opts, ScfSetup
+from hf.opts import scf_checked, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.guess import GS_CORE, gs_of
+from hf.jk import JK_PAIRS
+from hf.jk_direct import INT_JK_DIRECT
+from hfref.water_631g import water631g_atoms, water631g_prims, water631g_shells
+from hfref.pyscf_tests import (
+    PST_FILE_H2O, PST_H2O_118, PST_H2O_118_P, PST_H2O_124, PST_H2O_124_P, PST_H2O_131,
+    PST_H2O_131_P, PST_H2O_138, PST_H2O_138_P, PST_H2O_153, PST_H2O_153_P, PST_H2O_156,
+    PST_H2O_156_P, PST_H2O_164, PST_H2O_164_P, PST_H2O_182, PST_H2O_182_P, PST_H2O_190,
+    PST_H2O_190_P, PST_H2O_255, PST_H2O_255_P, PST_H2O_265, PST_H2O_265_P, PST_H2O_270,
+    PST_H2O_270_P, PST_H2O_55, PST_H2O_55_P, PST_H2O_72, PST_H2O_72_P, PST_H2O_80, PST_H2O_80_P,
+    pst_water_atoms,
+)
+from scf.suite.ref.sts import sts_norm, sts_row
+
+#| A setup on the integrals computed below (`G` packed, or the blob for the
+#| direct member): charge, spin, method, J/K member and level shift.
+def suh_setup(mol: Molecule, H: Arr, S: Arr, G: Arr, charge, spin, method, jk, shift) -> ScfSetup {
+    o = ScfOptions { method: method, jk: jk, level_shift: shift, ..scf_checked() }
+    return hf_setup_of(Molecule { charge: charge, spin: spin, ..mol }, H, S, G, o)
+}
+
+#| One SCF. Asserts convergence and returns the energy.
+def suh_energy(p: ScfSetup) {
+    r = hf_scf(p)
+    assert_near(r.converged, 1.0, 0.0)
+    return r.energy
+}
+
+suh_mol = molecule_packs(water631g_atoms(), water631g_shells(), water631g_prims())
+suh_S = hf_overlap(suh_mol, scf_checked())
+suh_H = hf_hcore(suh_mol, scf_checked())
+suh_G = hf_eri(suh_mol, scf_checked())
+suh_B = hf_blob(suh_mol)
+
+test "the lib/hfref water is test_h2o.py's molecule, and E_nuc is test_h2o.py:156" {
+    assert_lt(hf_gap(suh_mol.atoms, pst_water_atoms(), 12), 1.0e-15)
+    assert_near(sts_row(PST_FILE_H2O, 156, mol_enuc(suh_mol), PST_H2O_156, PST_H2O_156_P), 1.0, 0.0)
+}
+
+test "RHF: in core, direct and without screening all land on -75.98394849812 (lines 55, 118, 131, 164)" {
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_RHF, 0, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 55, suh_e, PST_H2O_55, PST_H2O_55_P), 1.0, 0.0)
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_B, 0, 0, SCF_RHF, INT_JK_DIRECT, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 118, suh_e, PST_H2O_118, PST_H2O_118_P), 1.0, 0.0)
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_RHF, JK_PAIRS, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 131, suh_e, PST_H2O_131, PST_H2O_131_P), 1.0, 0.0)
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_RHF, 0, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 164, suh_e, PST_H2O_164, PST_H2O_164_P), 1.0, 0.0)
+}
+
+test "UHF on the closed shell: the same energy in core, direct, unscreened and level-shifted (lines 80, 124, 138, 153, 190)" {
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_UHF, 0, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 80, suh_e, PST_H2O_80, PST_H2O_80_P), 1.0, 0.0)
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_B, 0, 0, SCF_UHF, INT_JK_DIRECT, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 124, suh_e, PST_H2O_124, PST_H2O_124_P), 1.0, 0.0)
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_UHF, JK_PAIRS, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 138, suh_e, PST_H2O_138, PST_H2O_138_P), 1.0, 0.0)
+    # a level shift of 0.2 raises the virtual orbitals while iterating; the
+    # converged state is the same
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_UHF, 0, 0.2))
+    assert_near(sts_row(PST_FILE_H2O, 153, suh_e, PST_H2O_153, PST_H2O_153_P), 1.0, 0.0)
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_UHF, 0, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 190, suh_e, PST_H2O_190, PST_H2O_190_P), 1.0, 0.0)
+}
+
+test "H2O+ ROHF -75.578396379589748 (lines 72, 182)" {
+    suh_e = suh_energy(suh_setup(suh_mol, suh_H, suh_S, suh_G, 1, 1, SCF_ROHF, 0, 0.0))
+    assert_near(sts_row(PST_FILE_H2O, 72, suh_e, PST_H2O_72, PST_H2O_72_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_H2O, 182, suh_e, PST_H2O_182, PST_H2O_182_P), 1.0, 0.0)
+}
+
+test "the core-Hamiltonian guess: |D| = 5.3700828975288122, and |(Da, Db)| is that over sqrt 2 (lines 255, 265, 270)" {
+    # PySCF's init_guess_by_1e fills the lowest orbitals of H C = S C e; RHF
+    # keeps the total density, ROHF the pair (D/2, D/2), whose norm is
+    # |D| / sqrt(2)
+    suh_p = suh_setup(suh_mol, suh_H, suh_S, suh_G, 0, 0, SCF_RHF, 0, 0.0)
+    suh_o = scf_opts(ScfSetup { options: ScfOptions { guess: GS_CORE, ..suh_p.options }, ..suh_p })
+    suh_D2 = gs_of(suh_H, suh_S, suh_G, zeros(2, 13, 13), suh_o)
+    suh_Dt = slab(suh_D2, 0) + slab(suh_D2, 1)
+    assert_near(sts_row(PST_FILE_H2O, 255, sts_norm(suh_Dt), PST_H2O_255, PST_H2O_255_P), 1.0, 0.0)
+    suh_n2 = sts_norm(suh_D2)
+    assert_near(sts_row(PST_FILE_H2O, 265, suh_n2, PST_H2O_265, PST_H2O_265_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_H2O, 270, suh_n2, PST_H2O_270, PST_H2O_270_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

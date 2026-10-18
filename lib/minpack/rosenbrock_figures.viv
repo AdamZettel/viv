@@ -1,0 +1,408 @@
+# The two figures the Read view of lmder's run on Rosenbrock shows beside
+# its core path (/explore/minpack-rosenbrock):
+#
+#   rf_path_figure  the iterates on Rosenbrock's level curves, with the
+#                   trust region each accepted step was taken in and the
+#                   rejected first trial;
+#   rf_phi_figure   the secular function phi(lambda) that lmpar solves on the
+#                   first pass that needs lambda > 0, with its bracket and
+#                   the values of lambda it tries.
+#
+# Everything drawn is computed here, from lmder's hist and from Rosenbrock's
+# residuals and Jacobian (mgh_fcn); nothing is typed in. The tests at the end
+# check the numbers against the gfortran oracle's record of the same run
+# (lm_rosenbrock_oracle in lmder.viv).
+#
+# Used with `import minpack.rosenbrock_figures`.
+
+from minpack.lmder import (
+    H_ACCEPT, H_DELTA_IN, H_FNORM1, H_PAR_LM, H_PNORM, H_X, lm_rosenbrock_oracle, lmder, lmder1,
+    LMDER1_FACTOR, lmder1_maxfev,
+)
+from minpack.lmpar import LMPAR_MAXITER, LMPAR_TOL
+from minpack.enorm import enorm, EPSMCH
+from minpack.mgh import mgh_data, mgh_fcn, mgh_start
+
+# Rosenbrock's function in MINPACK's test set: problem 4, 2 residuals in 2
+# unknowns
+RF_NPROB = 4.0
+RF_M = 2.0
+RF_N = 2.0
+# Rosenbrock's first residual is RF_WEIGHT (x2 - x1^2)
+RF_WEIGHT = 10.0
+# a full turn, in radians
+RF_TURN = 2.0 * 3.141592653589793
+# points on each closed curve drawn (a level curve or a trust region)
+RF_CURVE_PTS = 181
+# the sums of squares the level curves are drawn at; the start's is 24.2
+RF_LEVELS = [0.25, 1.0, 4.0, 24.2, 100.0]
+# the window of the path figure
+RF_X1_LO = -2.2
+RF_X1_HI = 2.2
+RF_X2_LO = -4.2
+RF_X2_HI = 2.2
+# the values of lambda the secular function is drawn at: log-spaced from
+# RF_LAM_LO to the upper bound of lmpar's bracket
+RF_PHI_PTS = 161
+RF_LAM_LO = 1.0e-4
+# the phi axis runs up to this many trust radii, so the band where lmpar
+# stops (a tenth of a radius either side of zero) can be seen; phi at
+# lambda = 0 is far above it
+RF_PHI_TOP = 2.0
+# the label of the upper bound sits this fraction of it to the left, inside
+# the window (the axis is logarithmic)
+RF_LABEL_IN = 0.3
+
+# Rosenbrock's residuals at x, into f, and its Jacobian, into J.
+def rf_eval(x: Arr, f: Arr, J: Arr) {
+    data = mgh_data(RF_NPROB, RF_M, RF_N)
+    mgh_fcn(data, x, f, J, 1.0)
+    mgh_fcn(data, x, f, J, 2.0)
+    return 0
+}
+
+# The scaling D lmder chooses in mode 1: the norm of each column of the
+# Jacobian at x (enorm, as qrfac computes it).
+def rf_scaling(x: Arr, D: Arr) {
+    f = zeros(RF_M)
+    J = zeros(RF_M, RF_N)
+    rf_eval(x, f, J)
+    col = zeros(RF_M)
+    for j to RF_N {
+        for i to RF_M {
+            col[i] = J[i, j]
+        }
+        D[j] = enorm(RF_M, col)
+    }
+    return 0
+}
+
+# The closed curve (cx + ax cos t, cy + ay sin t), t from 0 to 2 pi, into xs
+# and ys: an ellipse with semi-axes ax and ay.
+def rf_ellipse(cx, cy, ax, ay, xs: Arr, ys: Arr) {
+    npts = len(xs)
+    for k to npts {
+        t = (RF_TURN * k) / (npts - 1.0)
+        xs[k] = cx + ax * cos(t)
+        ys[k] = cy + ay * sin(t)
+    }
+    return 0
+}
+
+# The level curve f1^2 + f2^2 = c of Rosenbrock's function, into xs and ys:
+# with f2 = 1 - x1 = sqrt(c) cos t and f1 = RF_WEIGHT (x2 - x1^2) = sqrt(c) sin t.
+def rf_level(c, xs: Arr, ys: Arr) {
+    npts = len(xs)
+    for k to npts {
+        t = (RF_TURN * k) / (npts - 1.0)
+        xs[k] = 1.0 - sqrt(c) * cos(t)
+        ys[k] = xs[k] * xs[k] + (sqrt(c) * sin(t)) / RF_WEIGHT
+    }
+    return 0
+}
+
+# The Gauss-Newton step from x, into p: the solution of J p = -f, which for
+# a square, invertible J is the minimizer of |f + J p|.
+def rf_gauss_newton(x: Arr, p: Arr) {
+    f = zeros(RF_M)
+    J = zeros(RF_M, RF_N)
+    rf_eval(x, f, J)
+    lin_solve(J, -f, p)
+    return 0
+}
+
+# The trial steps of a hist whose row r was accepted, and the point each
+# started from: rows is how many rows hold trial steps (nfev - 1). Returns
+# the number of accepted steps; start[k] and after[k] (rows of RF_N) are the
+# point before and after the k-th, delta[k] the radius it was taken in.
+def rf_accepted(hist: Arr, rows, x0: Arr, start: Arr, after: Arr, delta: Arr) {
+    nacc = 0
+    cur = zeros(RF_N)
+    for j to RF_N {
+        cur[j] = x0[j]
+    }
+    for r to rows {
+        if hist[r, H_ACCEPT] == 1.0 {
+            for j to RF_N {
+                start[nacc, j] = cur[j]
+                after[nacc, j] = hist[r, H_X + j]
+                cur[j] = hist[r, H_X + j]
+            }
+            delta[nacc] = hist[r, H_DELTA_IN]
+            nacc = nacc + 1.0
+        }
+    }
+    return nacc
+}
+
+# The first figure: Rosenbrock's level curves, the iterates of lmder from x0
+# (read from hist, rows of them), the trust region |D p| <= delta of each
+# accepted step as the ellipse it is in x (semi-axes delta / D_j), and the
+# rejected first trial, the Gauss-Newton step. Returns the number of
+# accepted steps drawn.
+def rf_path_figure(hist: Arr, rows, x0: Arr) {
+    step collect {
+        D = zeros(RF_N)
+        rf_scaling(x0, D)
+        start = zeros(rows, RF_N)
+        after = zeros(rows, RF_N)
+        delta = zeros(rows)
+        nacc = rf_accepted(hist, rows, x0, start, after, delta)
+    }
+    figure("Rosenbrock: lmder's path and its trust regions", "x1", "x2", RF_X1_LO, RF_X1_HI, RF_X2_LO, RF_X2_HI)
+    aspect("equal")
+    cx = zeros(RF_CURVE_PTS)
+    cy = zeros(RF_CURVE_PTS)
+    step levels {
+        for k to len(RF_LEVELS) {
+            rf_level(RF_LEVELS[k], cx, cy)
+            plot(cx, cy, "level curves of the sum of squares")
+        }
+        floor_x = linspace(RF_X1_LO, RF_X1_HI, RF_CURVE_PTS)
+        plot(floor_x, floor_x * floor_x, "the valley floor, x2 = x1^2")
+    }
+    step regions {
+        for k to nacc {
+            rf_ellipse(start[k, 0], start[k, 1], delta[k] / D[0], delta[k] / D[1], cx, cy)
+            plot(cx, cy, "the trust region of each accepted step")
+        }
+    }
+    step path {
+        px = zeros(nacc + 1.0)
+        py = zeros(nacc + 1.0)
+        px[0] = x0[0]
+        py[0] = x0[1]
+        for k to nacc {
+            px[k + 1] = after[k, 0]
+            py[k + 1] = after[k, 1]
+        }
+        plot(px, py, "the accepted iterates")
+    }
+    step rejected {
+        p = zeros(RF_N)
+        rf_gauss_newton(x0, p)
+        scatter([x0[0] + p[0]], [x0[1] + p[1]], "the rejected first trial (Gauss-Newton)", "red")
+        segment("first trial", x0[0], x0[1], x0[0] + p[0], x0[1] + p[1])
+    }
+    style("level curves of the sum of squares", "s6 thin nomarker")
+    style("the valley floor, x2 = x1^2", "dot s6 thin nomarker")
+    style("the trust region of each accepted step", "s3 thin nomarker")
+    style("the accepted iterates", "s1 circle")
+    return nacc
+}
+
+# The step of the damped normal equations at lam, into u:
+# (J^T J + lam D^T D) u = J^T f, the step lmpar solves for (lmder flips its
+# sign). Returns |D u|.
+def rf_damped_step(J: Arr, f: Arr, D: Arr, lam, u: Arr) {
+    N = transpose(J) @ J
+    for j to RF_N {
+        N[j, j] = N[j, j] + lam * D[j] * D[j]
+    }
+    lin_solve(N, transpose(J) @ f, u)
+    return enorm(RF_N, D * u)
+}
+
+# |q|^2 for the Newton correction of lmpar at lam: v^T (J^T J + lam D^T D)^-1 v
+# with v = D^T D u / |D u|, the same number lmpar gets from its triangle.
+def rf_q2(J: Arr, D: Arr, lam, u: Arr) {
+    N = transpose(J) @ J
+    for j to RF_N {
+        N[j, j] = N[j, j] + lam * D[j] * D[j]
+    }
+    v = (D * D * u) / enorm(RF_N, D * u)
+    w = zeros(RF_N)
+    lin_solve(N, v, w)
+    return sum(v * w)
+}
+
+# lmpar's search for lambda with the Gauss-Newton step too long, done again
+# from its formulas with the normal equations (lmpar works from the QR
+# factorization instead): from x with trust radius delta and the caller's
+# starting lambda par0. The values of lambda tried go into lams and phi at
+# each into phis; bracket gets the first lower and upper bounds. Returns the
+# number of values tried; the last is lmpar's answer.
+def rf_secular(x: Arr, delta, par0, lams: Arr, phis: Arr, bracket: Arr) {
+    f = zeros(RF_M)
+    J = zeros(RF_M, RF_N)
+    D = zeros(RF_N)
+    u = zeros(RF_N)
+    step bounds {
+        rf_eval(x, f, J)
+        rf_scaling(x, D)
+        fp = rf_damped_step(J, f, D, 0.0, u) - delta
+        parl = (fp / delta) / rf_q2(J, D, 0.0, u)
+        paru = enorm(RF_N, (transpose(J) @ f) / D) / delta
+        bracket[0] = parl
+        bracket[1] = paru
+        par = min(max(par0, parl), paru)
+    }
+    ntried = 0
+    done = false
+    while not done {
+        step try {
+            fprev = fp
+            fp = rf_damped_step(J, f, D, par, u) - delta
+            lams[ntried] = par
+            phis[ntried] = fp
+            ntried = ntried + 1.0
+            done = abs(fp) <= LMPAR_TOL * delta or (parl == 0.0 and fp <= fprev and fprev < 0.0) or ntried == LMPAR_MAXITER
+        }
+        if not done {
+            step next {
+                parc = (fp / delta) / rf_q2(J, D, par, u)
+                if fp > 0.0 {
+                    parl = max(parl, par)
+                }
+                if fp < 0.0 {
+                    paru = min(paru, par)
+                }
+                par = max(parl, par + parc)
+            }
+        }
+    }
+    return ntried
+}
+
+# The second figure: phi(lambda) = |D p(lambda)| - delta from x, on a log
+# axis of lambda, with the band |phi| <= delta / 10 lmpar accepts, the first
+# bracket [lambda_l, lambda_u], and the values of lambda lmpar tries,
+# starting from par0. Returns the number of values tried.
+def rf_phi_figure(x: Arr, delta, par0) {
+    lams = zeros(LMPAR_MAXITER)
+    phis = zeros(LMPAR_MAXITER)
+    bracket = zeros(RF_N)
+    ntried = rf_secular(x, delta, par0, lams, phis, bracket)
+    lam = zeros(RF_PHI_PTS)
+    phi = zeros(RF_PHI_PTS)
+    step curve {
+        f = zeros(RF_M)
+        J = zeros(RF_M, RF_N)
+        rf_eval(x, f, J)
+        D = zeros(RF_N)
+        rf_scaling(x, D)
+        u = zeros(RF_N)
+        for k to RF_PHI_PTS {
+            lam[k] = RF_LAM_LO * pow(bracket[1] / RF_LAM_LO, k / (RF_PHI_PTS - 1.0))
+            phi[k] = rf_damped_step(J, f, D, lam[k], u) - delta
+        }
+    }
+    figure("lmpar on the first pass: phi(lambda) = |D p| - delta", "lambda", "phi", RF_LAM_LO, bracket[1], min(phi) - LMPAR_TOL * delta, RF_PHI_TOP * delta)
+    xscale("log")
+    fill_between("lmpar stops inside this band, |phi| <= delta / 10", lam, zeros(RF_PHI_PTS) - LMPAR_TOL * delta, zeros(RF_PHI_PTS) + LMPAR_TOL * delta)
+    plot(lam, phi, "phi(lambda)")
+    step marks {
+        tried_l = zeros(ntried)
+        tried_p = zeros(ntried)
+        for k to ntried {
+            tried_l[k] = lams[k]
+            tried_p[k] = phis[k]
+        }
+        scatter(tried_l, tried_p, "the values of lambda lmpar tries", "red")
+        vline("lower bound", bracket[0])
+        vline("upper bound", bracket[1])
+        label("lower", "lambda_l", bracket[0], RF_PHI_TOP * delta * 0.85)
+        label("upper", "lambda_u", bracket[1] * RF_LABEL_IN, RF_PHI_TOP * delta * 0.85)
+    }
+    style("phi(lambda)", "s1 nomarker")
+    style("the values of lambda lmpar tries", "s6 cross")
+    return ntried
+}
+
+# ---- tests --------------------------------------------------------------
+
+# lmder1 on Rosenbrock from the standard start, with every trial step in
+# hist; returns the number of trial steps (nfev - 1).
+#~ test
+def rf_run(hist: Arr) {
+    x = mgh_start(RF_NPROB, RF_N, 1.0)
+    counts = zeros(2)
+    lmder1(mgh_fcn, mgh_data(RF_NPROB, RF_M, RF_N), x, zeros(RF_M), zeros(RF_M, RF_N), sqrt(EPSMCH), zeros(RF_N), counts, hist)
+    return counts[0] - 1.0
+}
+
+test "the path figure draws the Fortran's iterates, and each region with the radius lmpar was given" {
+    hist = zeros(lmder1_maxfev(RF_N), H_X + RF_N)
+    rows = rf_run(hist)
+    x0 = mgh_start(RF_NPROB, RF_N, 1.0)
+    start = zeros(rows, RF_N)
+    after = zeros(rows, RF_N)
+    delta = zeros(rows)
+    nacc = rf_accepted(hist, rows, x0, start, after, delta)
+    ref = lm_rosenbrock_oracle()
+    assert_near(rows, len(ref), 0.0)
+    k = 0
+    for r to len(ref) {
+        if ref[r, H_ACCEPT] == 1.0 {
+            for j to RF_N {
+                assert_near(after[k, j], ref[r, H_X + j], 0.0)
+            }
+            assert_near(delta[k], ref[r, H_DELTA_IN], 0.0)
+            k = k + 1.0
+        }
+    }
+    # 5 of the 20 trial steps are rejected
+    assert_near(nacc, 15.0, 0.0)
+    assert_near(k, nacc, 0.0)
+}
+
+test "D is the first Jacobian's column norms on every pass, so each region is one ellipse in x" {
+    x = mgh_start(RF_NPROB, RF_N, 1.0)
+    D = zeros(RF_N)
+    rf_scaling(x, D)
+    # lmder's own diag, after the whole run (mode 1: scales only grow)
+    diag = zeros(RF_N)
+    lmder(mgh_fcn, mgh_data(RF_NPROB, RF_M, RF_N), x, zeros(RF_M), zeros(RF_M, RF_N), sqrt(EPSMCH), sqrt(EPSMCH), 0.0, lmder1_maxfev(RF_N), diag, 1.0, LMDER1_FACTOR, 0.0, zeros(RF_N), zeros(RF_N), zeros(2), zeros(1, H_X + RF_N))
+    for j to RF_N {
+        assert_near(diag[j], D[j], 0.0)
+    }
+    # |D x0| is the first radius over factor: 3051.03 / 100
+    x0 = mgh_start(RF_NPROB, RF_N, 1.0)
+    ref = lm_rosenbrock_oracle()
+    assert_near(LMDER1_FACTOR * enorm(RF_N, D * x0), ref[0, H_DELTA_IN], 1.0e-12 * ref[0, H_DELTA_IN])
+}
+
+test "the rejected first trial drawn is the Fortran's: |D p| 71.66, and |f| 48.4 there" {
+    x0 = mgh_start(RF_NPROB, RF_N, 1.0)
+    p = zeros(RF_N)
+    rf_gauss_newton(x0, p)
+    D = zeros(RF_N)
+    rf_scaling(x0, D)
+    ref = lm_rosenbrock_oracle()
+    assert_near(enorm(RF_N, D * p), ref[0, H_PNORM], 1.0e-12 * ref[0, H_PNORM])
+    f = zeros(RF_M)
+    J = zeros(RF_M, RF_N)
+    rf_eval(x0 + p, f, J)
+    assert_near(enorm(RF_M, f), ref[0, H_FNORM1], 1.0e-12 * ref[0, H_FNORM1])
+    # the trial point is (1, -3.84)
+    assert_near(x0[0] + p[0], 1.0, 1.0e-14)
+    assert_near(x0[1] + p[1], -3.84, 1.0e-14)
+}
+
+test "the secular function figure ends where lmpar did on the second trial: lambda 0.00782, its lower bound, tried first and kept" {
+    ref = lm_rosenbrock_oracle()
+    x0 = mgh_start(RF_NPROB, RF_N, 1.0)
+    lams = zeros(LMPAR_MAXITER)
+    phis = zeros(LMPAR_MAXITER)
+    bracket = zeros(RF_N)
+    # the second trial: radius 7.17, and lmder hands lmpar par = 0 (the first trial's 0, over t)
+    ntried = rf_secular(x0, ref[1, H_DELTA_IN], 0.0, lams, phis, bracket)
+    last = ntried - 1.0
+    assert_near(lams[last], ref[1, H_PAR_LM], 1.0e-9 * ref[1, H_PAR_LM])
+    assert_lt(abs(phis[last]), LMPAR_TOL * ref[1, H_DELTA_IN])
+    # one value is enough: Newton's step from lambda = 0 lands within a tenth of delta
+    assert_near(ntried, 1.0, 0.0)
+    assert_near(lams[0], bracket[0], 0.0)
+    assert_lt(lams[last], bracket[1])
+    # phi at the Gauss-Newton step (lambda = 0) is |D p| - delta = 71.66 - 7.17
+    f = zeros(RF_M)
+    J = zeros(RF_M, RF_N)
+    rf_eval(x0, f, J)
+    D = zeros(RF_N)
+    rf_scaling(x0, D)
+    u = zeros(RF_N)
+    assert_near(rf_damped_step(J, f, D, 0.0, u) - ref[1, H_DELTA_IN], ref[0, H_PNORM] - ref[1, H_DELTA_IN], 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

@@ -1,0 +1,146 @@
+module dft/pwdft_it
+  The iterative engine: the same Kohn-Sham calculation as dft/pwdft.viv,
+  without ever forming the Hamiltonian as a matrix.
+
+  The dense engine builds H(k), a matrix with one row per plane wave, and
+  diagonalizes it. The work grows as the cube of the number of plane waves,
+  which is fine for silicon and too slow for copper. This engine only
+  applies H to vectors, and asks for only the lowest bands:
+
+  - kinetic energy is diagonal in G: multiply each coefficient by
+    `|k + G|^2 / 2`;
+  - the local potential is diagonal in real space: put the coefficients on
+    the FFT grid, transform to real space, multiply by `V(r)`, transform
+    back;
+  - the nonlocal pseudopotential is a short sum of projectors,
+    `sum_IJ |beta_I> D_IJ <beta_J|`, applied with two matrix products.
+
+  An eigensolver that needs only products `H x`, LOBPCG from lib/lobpcg,
+  finds the lowest bands, warm-started at each SCF iteration from the
+  previous iteration's wavefunctions. Wavefunctions are rows of a matrix
+  padded to NPWMAX columns; a mask marks the real plane waves.
+
+  The file runs after the deck, dft/kmesh.viv and dft/pw_common.viv, in
+  this order:
+
+  1. the projectors: NPROJ, one per (atom, l, m, i), and the coupling
+     matrix DMAT, block diagonal with the pseudopotential's `h^l` blocks;
+  2. for each SCF k-point, setup_k (basis, kinetic energies, FFT indices,
+     mask, projectors) and start_vectors;
+  3. the SCF loop: from the density RHO, the exchange-correlation energy
+     density and potential, the local potential in real space and the
+     Hartree energy; a few LOBPCG steps at every k-point; the Fermi level
+     and occupations; the number of bands that must converge from now on
+     (up to the highest occupied); the new density and the band energy; the
+     total energy and the density change DRHO; then, if not converged,
+     Anderson mixing. It stops when the density, the energy and every
+     occupied band's residual have all settled;
+  4. the band structure: at each path point, a cold start from new starting
+     vectors and up to NITER_BANDS LOBPCG steps, with the converged
+     potential held fixed;
+  5. the band energies in eV from the valence-band maximum (insulator) or
+     the Fermi level (metal).
+
+  It mirrors dft/ref/pwdft_iter.py step for step, down to the random
+  numbers the starting vectors are made from. It is checked against the
+  dense numpy reference, a different algorithm as well as a different
+  language [test "every band at every point of the path agrees with the numpy reference (eV)"].
+
+real_ylm  @7753898a
+  what  The real spherical harmonic `S_lm` at a unit vector, for `l` up to
+        two and `m` counted from zero.
+  why   Real harmonics satisfy
+        `sum_m S_lm(a) S_lm(b) = (2l+1)/(4 pi) P_l(a.b)`. That identity makes
+        the projector form used here equal to the Legendre form the dense
+        engine uses; the two engines agreeing on the total energy is the
+        check [test "total energy agrees with the numpy reference"].
+
+setup_k  @c643e22c
+  what  Fill one slot for a k-point given in fractional coordinates: which
+        plane waves pass the cutoff, their kinetic energies TK, their flat
+        indices IDX in the FFT box, the mask, and every projector evaluated
+        at every plane wave (BETA, one projector per row).
+  how   Loop over all integer triples m in the bounding box. For each that
+        passes the cutoff, record the kinetic energy and index, then for
+        every atom, l, m and projector i store
+        `phase * S_lm(unit(k+G)) * p_i^l(|k+G|)`, where the phase is the
+        structure factor `exp(-i G.tau)` of that atom. Padding columns get
+        index PADIDX and zero projectors.
+  why   Everything that depends only on k is computed here once, so that
+        applying H in the SCF loop is only FFTs and matrix products.
+
+hpsi  @b5bcc523
+  what  H at one k-point applied to each row of x. H is never formed.
+  how   For each row: scatter the coefficients into the FFT box, inverse
+        FFT to real space, multiply by the local potential VR, FFT back,
+        gather, mask, and add the kinetic term `TK * x`. Then add the
+        nonlocal term for all rows at once: `((x B^H) D) B`, with B the
+        projector matrix and D the coupling matrix DMAT.
+
+h_at_kpoint  @5940c375
+  what  H at the k-point named in KPOINT, applied to the rows of x: the
+        operator LOBPCG is handed, as a function of one argument.
+
+teter_payne_allan  @d4a9f576
+  what  The preconditioner LOBPCG applies to a residual r of the band x: an
+        approximation to `(H - e)^-1` built from kinetic energy alone.
+  how   With `q = TK / (1.5 T_x)`, where `T_x` is the band's own kinetic
+        energy, multiply each coefficient by
+        `(27 + 18q + 12q^2 + 8q^3) / (27 + 18q + 12q^2 + 8q^3 + 16q^4)`.
+  why   At large G the Hamiltonian is nearly its kinetic part, so the
+        residual there should be divided by about the kinetic energy; the
+        factor falls off like `1 / (2q)` for large q and stays close to one
+        for the low plane waves, which it leaves alone.
+
+solve_bands  @42a233d0
+  what  Improve one k-point's bands with up to nit LOBPCG steps, starting
+        from the wavefunctions already in PSI, and write the new
+        wavefunctions and eigenvalues back. Returns the largest residual
+        norm `|H psi - e psi|` among the lowest nconv bands.
+
+start_vectors  @2ad1c29e
+  what  Starting wavefunctions for one slot: for each band, the plane wave
+        with the lowest kinetic energy not yet used, plus small noise on
+        every coefficient.
+  why   The noise keeps any eigenvector from being orthogonal to the
+        starting vectors by symmetry. It comes from Viv's `rand()`, which
+        the numpy reference reproduces bit for bit, so both start from the
+        same vectors.
+
+build_vg  @54bf6ecb
+  what  The ionic local potential plus the Hartree potential on the grid,
+        in G space, stored in VG; returns the Hartree energy.
+  how   Hartree from Poisson's equation, which is algebraic in G space:
+        `V_H(G) = 4 pi rho(G) / |G|^2`, skipping `G = 0` (see gth_vloc in
+        dft/pw_common.intent). The Hartree energy is
+        `(OMEGA / 2) sum_G 4 pi |rho(G)|^2 / |G|^2`.
+  rg    the density on the grid after a forward FFT, `rho(G)` times NGRID
+
+add_density  @a6e16494
+  what  Add the density of one k-point's occupied bands to acc and return
+        the sum.
+  how   For each band with nonzero occupation, put its coefficients in the
+        FFT box, inverse FFT to get `psi(r)` on the grid, and add
+        `weight * occupation * |psi(r)|^2`, normalized by the cell volume.
+
+new_density  @b22a2794
+  what  The density from every k-point's occupied bands: the output density
+        of this SCF iteration.
+
+local_potential  @f74ccf98
+  what  The total local potential in real space for a density: ionic plus
+        Hartree (computed in G space, then inverse FFT) plus the
+        exchange-correlation potential already computed on the grid, and
+        the Hartree energy.
+  rho   the density on the real-space grid
+  vxc   the exchange-correlation potential on the same grid
+  rg    the density after a forward FFT, `rho(G)` times NGRID
+  eh    the Hartree energy, hartree
+
+band_energy  @e8539090
+  what  The band energy: the sum over k-points and bands of weight times
+        occupation times eigenvalue.
+
+cell_integral  @737399f6
+  what  The integral of `f(r) g(r)` over the cell, as a sum over the grid
+        times the volume of one grid cell.

@@ -1,0 +1,391 @@
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
+/* SPDX-FileCopyrightText: 2026 The Viv authors */
+/* The walk through a run (components/ZoomWalk.jsx). It wears the atlas's
+   styles (codemap.css); this file adds the playback controls, the timeline,
+   the running line and the trail, and the phone layout. */
+
+.zw .zw-back {
+  display: inline-flex;
+  gap: 6px;
+  min-width: 0;
+  max-width: 34ch;
+  font-weight: 600;
+}
+.zw .zw-back span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zw-play .zw-playbtn {
+  min-width: 68px;
+  font-weight: 600;
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+  color: var(--on-accent);
+}
+.zw-play .zw-playbtn[aria-pressed='true'] {
+  background: var(--bg-card);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.zw-speed {
+  font: inherit;
+  font-size: 13px;
+  height: 30px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+}
+.zw .cm-search {
+  width: min(240px, 24vw);
+}
+.zw-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+}
+.cm-route button.is-picked {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* ---- the body: the graph and the panel, the timeline under the graph */
+.zw .zw-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(380px, 40%, 720px);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas: 'stage pane' 'time pane';
+}
+.zw .zw-stage {
+  grid-area: stage;
+  min-height: 0;
+  overflow: hidden;
+}
+.zw .zw-pane {
+  grid-area: pane;
+  width: auto;
+  min-height: 0;
+}
+.zw-time {
+  grid-area: time;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.zw-stop {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  min-width: 13ch;
+}
+.zw-time input[type='range'] {
+  flex: 1;
+  min-width: 80px;
+  height: 18px;
+  accent-color: var(--accent-fill);
+}
+.zw-loops {
+  white-space: nowrap;
+}
+.zw-loops select {
+  font: inherit;
+  font-size: 12.5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  padding: 2px 4px;
+}
+
+/* ---- what is happening */
+.zw-now {
+  margin: 8px 0 6px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent-fill);
+  background: var(--accent-wash);
+  border-radius: 0 6px 6px 0;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.zw-now p {
+  margin: 0;
+}
+.zw-now code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.zw-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  margin-top: 2px !important;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.zw-step {
+  margin-top: 4px !important;
+  color: var(--text);
+}
+
+/* ---- the code: the running line, as the strongest mark on the panel */
+.zw .cm-ln.is-run {
+  background: color-mix(in srgb, var(--data-1) 22%, var(--bg-code));
+  box-shadow: inset 4px 0 0 var(--data-1);
+  font-weight: 600;
+}
+.zw .cm-ln.is-run .cm-num {
+  color: var(--data-text);
+}
+.zw .cm-ln.is-picked {
+  background: color-mix(in srgb, var(--hot) 16%, var(--bg-code));
+  box-shadow: inset 4px 0 0 var(--hot);
+}
+
+/* ---- the trail: the defs the run left last, fading */
+.cm-tile.is-trail rect:first-child {
+  stroke: var(--data-1);
+  stroke-width: 1.5;
+}
+.cm-tile.is-trail-1 rect:first-child {
+  stroke-opacity: 0.7;
+}
+.cm-tile.is-trail-2 rect:first-child {
+  stroke-opacity: 0.45;
+}
+.cm-tile.is-trail-3 rect:first-child {
+  stroke-opacity: 0.25;
+}
+.cm-edges path.is-ret {
+  stroke: var(--data-1);
+  stroke-dasharray: 5 4;
+}
+.cm-arrow-ret path {
+  fill: var(--accent-fill);
+}
+.cm-k-sel {
+  background: var(--accent-fill);
+  height: 10px;
+  width: 14px;
+}
+.cm-k-trail {
+  background: var(--accent-fill);
+  opacity: 0.4;
+}
+
+@media (max-width: 900px) {
+  .zw .zw-body {
+    display: flex;
+    flex-direction: column;
+  }
+  .zw .zw-stage {
+    flex: none;
+    height: 44vh;
+    height: 44dvh;
+  }
+  .zw-time {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    order: 2;
+    padding: 6px 16px;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+  .zw .zw-pane {
+    order: 3;
+  }
+  .zw .cm-search {
+    width: 100%;
+  }
+  .zw .zw-back {
+    max-width: 100%;
+  }
+  .zw-time input[type='range'] {
+    order: 3;
+    flex-basis: 100%;
+  }
+}
+/* a def on the stack is drawn as the path, even when it also calls the def shown */
+.zw .cm-tile.is-route rect:first-child {
+  stroke-dasharray: none;
+}
+
+/* ---- the walk as a card on the home page: the graph, what is happening, and
+   the code, large enough to read while it plays */
+.zw-card {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+.zw-card-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.zw-card-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  padding: 0 0 8px;
+}
+.zw-card-bar .zw-playbtn {
+  min-width: 76px;
+  height: 32px;
+  font: 600 13px var(--font-sans);
+  border-radius: 6px;
+  border: 1px solid var(--accent-fill);
+  background: var(--accent-fill);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+/* a stop back, a stop forward: beside Play, quieter than it */
+.zw-card-bar .zw-stepbtn {
+  min-width: 32px;
+  padding: 0 8px;
+  font-size: 16px;
+  background: var(--bg-card);
+  color: var(--accent);
+}
+.zw-card-bar .zw-playbtn[aria-pressed='true'] {
+  background: var(--bg-card);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.zw-card-stop {
+  font: 12.5px var(--font-mono);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.zw-card-route {
+  font: 13px var(--font-mono);
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex: 1 1 200px;
+}
+.zw-card-route .is-cur {
+  color: var(--data-text);
+  font-weight: 600;
+}
+.zw-card-route .cm-sep {
+  margin: 0 5px;
+}
+.zw-card-now .zw-now {
+  margin: 0 0 8px;
+  font-size: clamp(15px, 1.6vw, 18px);
+  min-height: 3.6em;
+}
+.zw-card-now .zw-now code {
+  font-size: 0.92em;
+}
+.zw-card-now .zw-values {
+  font-size: 14px;
+}
+.zw-card-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.zw-card .zw-card-stage {
+  position: relative;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.zw-card-stage .cm-svg {
+  position: absolute;
+  inset: 0;
+}
+.zw-card .cm-pane {
+  width: auto;
+  min-height: 0;
+}
+.zw-card .cm-pane-head h1 {
+  font-size: 1.05rem;
+}
+.zw-card .cm-ln.is-run {
+  background: color-mix(in srgb, var(--data-1) 22%, var(--bg-code));
+  box-shadow: inset 4px 0 0 var(--data-1);
+  font-weight: 600;
+}
+.zw-card .cm-tile.is-sel rect:first-child {
+  stroke-width: 4;
+}
+@media (max-width: 760px) {
+  .zw-card-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 2fr) minmax(0, 3fr);
+  }
+  .zw-card-route {
+    display: none;
+  }
+  .zw-card-now .zw-now {
+    min-height: 0;
+  }
+  .zw-card .cm-pane-head {
+    padding: 6px 10px 4px;
+  }
+  .zw-card .cm-intent,
+  .zw-card .cm-where {
+    display: none;
+  }
+  .zw-card .cm-pane {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
+
+/* the walk's running def and call path are data: the data palette's cyan
+   (src/styles/data-palette.css), glowing softly in dark mode; everything else
+   in the graph stays quiet */
+.zw .cm-edges path.is-route,
+.zw-card .cm-edges path.is-route {
+  stroke: var(--data-1);
+  filter: drop-shadow(0 0 3px var(--data-glow));
+}
+.zw .cm-tile.is-route rect:first-child,
+.zw-card .cm-tile.is-route rect:first-child {
+  fill: color-mix(in srgb, var(--data-1) 10%, var(--bg-card));
+  stroke: var(--data-1);
+}
+.zw .cm-tile.is-sel rect:first-child,
+.zw-card .cm-tile.is-sel rect:first-child {
+  fill: var(--data-text);
+  stroke: var(--data-text);
+  filter: drop-shadow(0 0 6px var(--data-glow));
+}
+.zw .cm-arrow-route path,
+.zw-card .cm-arrow-route path {
+  fill: var(--data-1);
+}
+.zw .cm-tile.is-sel text,
+.zw-card .cm-tile.is-sel text {
+  fill: var(--data-bg);
+}
+
+/* what the walk will show, under the spinner while the run is recorded */
+.zw-loading .zw-loading-what {
+  max-width: 46ch;
+  margin: 10px auto 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-align: center;
+}

@@ -1,0 +1,519 @@
+###
+post: The tension in each of two ropes holding up a box
+date: 2026-09-24
+channel: physics
+kind: article
+tags: statics, forces, tension, free-body diagram
+equation: T_1 = \frac{W \cos\theta_2}{\sin(\theta_1 + \theta_2)}, \qquad T_2 = \frac{W \cos\theta_1}{\sin(\theta_1 + \theta_2)}, \qquad T = \frac{W}{2 \sin\theta} \text{ when both angles are } \theta
+agent: claude
+lane: ai
+summary: A box of weight W hangs from two ropes that make angles θ₁ and θ₂ with the ceiling. Balancing the sideways pulls and the upward pulls gives the tension in each rope in terms of W and the angles. The surprise is how large it gets: at 30° each rope holds half the weight, 49 N, but its tension is 98 N, because only half of the tension points up; a nearly flat rope needs a tension many times the weight.
+
+Start with a guess. A box weighing $98\ \text{N}$ (that is a $10\ \text{kg}$ box, since
+$W = mg$ and $g = 9.8\ \text{m/s}^2$) hangs from two ropes, each making a $30^\circ$ angle with the
+ceiling: the angles $\theta_1$ and $\theta_2$ marked in the first figure. With two ropes holding it up,
+is the tension in each rope half the weight, $49\ \text{N}$? Each rope does hold half the weight,
+$49\ \text{N}$, through the upward part of its tension, $T\sin\theta$. But the tension in each rope is
+$98\ \text{N}$: at $30^\circ$ only half of the tension points up. The other part points sideways and
+is canceled by the other rope. The tension can be larger than the weight itself. The cells below show why, give the tension for any pair of angles, and hang the same box
+a second way, with one rope steeper than the other.
+
+[figure]
+###
+
+###
+## The box's weight
+
+A box's *weight* is the force gravity pulls it down with: its mass times $g = 9.8\ \text{m/s}^2$,
+measured in newtons (N). The program measures angles in degrees, the way problems state them,
+and converts to radians only where it calls `sin` and `cos`.
+###
+
+GRAVITY = 9.8
+PI = 3.141592653589793
+
+#| An angle in degrees, in radians.
+#@ f93d50e1
+def radians(degrees) {
+    return degrees * PI / 180.0
+}
+
+weight = 10.0 * GRAVITY
+show weight
+
+###
+A $10\ \text{kg}$ box weighs $98\ \text{N}$ (`weight`).
+
+## The setup, with its angles
+
+The figures on this page are drawn by the program from the angles themselves. Each angle is
+measured at the ceiling, between the ceiling and the rope, and marked there with an arc. The
+function below draws one hanging box: the ceiling, the two ropes from where they are fixed down to
+the knot, the box under the knot, and the two angles.
+###
+
+# a diagram's units are pixels at full size
+ARC_POINTS = 13          # points along each angle's arc: enough for a smooth curve
+ARC_RADIUS = 46.0
+CEILING_MARGIN = 26.0    # how far the ceiling runs past each rope's end
+HOOK = 16.0              # the short rope from the knot down to the box
+BOX_W = 62.0
+BOX_H = 44.0
+
+#| The x coordinates (which = 0) or y coordinates (which = 1) of an arc of
+#| radius r around (cx, cy), from the angle a0 to a1 (degrees, counterclockwise
+#| from the +x direction). The diagram marks have no arc, so the arc is a
+#| curve through ARC_POINTS points on it.
+#@ 9e5d9cc0
+def arc_points(cx, cy, r, a0, a1, which) {
+    pts = zeros(ARC_POINTS)
+    for k to ARC_POINTS {
+        a = radians(a0 + (a1 - a0) * k / (ARC_POINTS - 1))
+        if which == 0 {
+            pts[k] = cx + r * cos(a)
+        }
+        else {
+            pts[k] = cy + r * sin(a)
+        }
+    }
+    return pts
+}
+
+# above this angle a label hangs below its point, clear of the other rope's label
+STEEP = 45.0
+
+#| Where an angle's label hangs from its point: centered on it, or, for a
+#| steep rope, below it.
+#@ eb067346
+def label_anchor(theta) -> Str {
+    if theta > STEEP {
+        return "top"
+    }
+    return "middle"
+}
+
+#| Draws a box hanging from two ropes into the open diagram. The knot is at
+#| (kx, ky) and hangs `drop` below the ceiling; the left rope makes theta1 with
+#| the ceiling, the right rope theta2 (degrees). Each angle gets an arc at the
+#| ceiling and a label, left rope in color s1, right rope in s2.
+#@ c7225d51
+def draw_hanging(id: Str, kx, ky, drop, theta1, theta2, box_text: Str, label1: Str, label2: Str) {
+    top = ky + drop
+    left_x = kx - drop / tan(radians(theta1))
+    right_x = kx + drop / tan(radians(theta2))
+    box("ceiling" + id, "muted tint square", left_x - CEILING_MARGIN, top, right_x + CEILING_MARGIN, top + 8.0)
+    arrow("rope1" + id, "ink nohead thick", [left_x, kx], [top, ky])
+    arrow("rope2" + id, "ink nohead thick", [right_x, kx], [top, ky])
+    arrow("hook" + id, "ink nohead thick", [kx, kx], [ky, ky - HOOK])
+    box("box" + id, "s3 tint square thick", kx - BOX_W / 2.0, ky - HOOK, kx + BOX_W / 2.0, ky - HOOK - BOX_H)
+    note("weight" + id, box_text, "s3 center middle bold", kx, ky - HOOK - BOX_H / 2.0)
+    # the left rope leaves its end theta1 below the ceiling, heading right
+    arrow("arc1" + id, "s1 nohead curved thick", arc_points(left_x, top, ARC_RADIUS, 0.0 - theta1, 0.0, 0), arc_points(left_x, top, ARC_RADIUS, 0.0 - theta1, 0.0, 1))
+    arrow("arc2" + id, "s2 nohead curved thick", arc_points(right_x, top, ARC_RADIUS, 180.0, 180.0 + theta2, 0), arc_points(right_x, top, ARC_RADIUS, 180.0, 180.0 + theta2, 1))
+    # each label sits inside its angle, just past the arc, and below the ceiling
+    gap = ARC_RADIUS + 8.0
+    y1 = min(top - 11.0, top - gap * sin(radians(theta1 / 2.0)))
+    y2 = min(top - 11.0, top - gap * sin(radians(theta2 / 2.0)))
+    note("angle1" + id, label1, "s1 left large bold " + label_anchor(theta1), left_x + gap * cos(radians(theta1 / 2.0)), y1)
+    note("angle2" + id, label2, "s2 right large bold " + label_anchor(theta2), right_x - gap * cos(radians(theta2 / 2.0)), y2)
+}
+
+figure("A 98 N box hanging from two ropes at 30 degrees", "", "", 0, 560, 50, 290, "diagram")
+draw_hanging("", 280.0, 150.0, 128.0, 30.0, 30.0, "W = 98 N", "θ₁ = 30°", "θ₂ = 30°")
+note("knot", "knot", "muted left middle", 290.0, 146.0)
+
+###
+## What pulls on the knot
+
+The knot is the point where the two ropes meet, just above the box. If we look at the knot, there are three forces acting on it, and they must cancel, because the knot is not moving. The box
+pulls straight down with its weight $W$. The left rope pulls up and to the left along its own
+length with some force $T_1$, and the right rope pulls up and to the right with $T_2$. A rope can
+only pull along itself; that pull is what *tension* means.
+
+## Splitting each pull into sideways and upward parts
+
+The angle a rope makes with the ceiling is also the angle it makes with the horizontal line
+through the knot: the ceiling and that line are parallel, and the rope crosses both. So a rope at
+angle $\theta$ pulls on the knot partly sideways and partly up. With tension $T$, the sideways part
+is $T\cos\theta$ and the upward part is $T\sin\theta$: the rope's pull is the long side of a right
+triangle, $\cos$ gives the side along the horizontal, $\sin$ the side going up. The free-body
+diagram further down draws those triangles.
+
+Now require that nothing moves.
+
+*Sideways:* the left rope's sideways pull must cancel the right rope's:
+$$T_1 \cos\theta_1 = T_2 \cos\theta_2.$$
+
+*Up and down:* the two upward parts together must hold up the weight:
+$$T_1 \sin\theta_1 + T_2 \sin\theta_2 = W.$$
+
+Two equations, two unknowns, $T_1$ and $T_2$. The function below is those two equations written
+as code. Given candidate tensions, it adds up the three forces and reports how much is left over.
+For the right tensions the answer is zero; the checks further down use it on every answer.
+###
+
+#| What is left over when the three forces at the knot are added: zero for a
+#| box that is not moving. Returns the size of the leftover force.
+#@ ea4e2f3d
+def leftover_force(weight, theta1, theta2, t: Arr) {
+    a = radians(theta1)
+    b = radians(theta2)
+    sideways = 0.0 - t[0] * cos(a) + t[1] * cos(b)
+    upward = t[0] * sin(a) + t[1] * sin(b) - weight
+    return sqrt(sideways * sideways + upward * upward)
+}
+
+###
+## Solving the symmetric case first
+
+When both ropes make the same angle $\theta$, the sideways equation says $T_1 = T_2$. Call it $T$.
+The up-and-down equation becomes $2T\sin\theta = W$, so
+$$\frac{T}{W} = \frac{1}{2\sin\theta}.$$
+
+Before running: what is $T/W$ with the ropes straight up ($90^\circ$), and at $30^\circ$?
+###
+
+#| The tension in each rope of the symmetric case, divided by the weight.
+#@ 4b0500b8
+def symmetric_ratio(theta) {
+    return 1.0 / (2.0 * sin(radians(theta)))
+}
+
+ratio_straight_up = symmetric_ratio(90.0)
+ratio_at_30_degrees = symmetric_ratio(30.0)
+show ratio_straight_up
+show ratio_at_30_degrees
+
+###
+Straight up, each rope carries half the weight, $0.5\,W$ (`ratio_straight_up`), as the guess at
+the top expected. At $30^\circ$ it is $1\,W$ (`ratio_at_30_degrees`): $\sin 30^\circ = \tfrac12$,
+so $T = W$, the answer from the start, now explained. Each rope still holds half the weight
+through its upward part, $T\sin\theta$. At $30^\circ$ only half of the tension points up, so the
+tension is twice that half: $98\ \text{N}$, equal to the weight of the box. The rest of the tension, $T\cos\theta$,
+points sideways and is canceled by the other rope.
+
+## Solving for any two angles
+
+From the sideways equation, $T_2 = T_1 \cos\theta_1 / \cos\theta_2$. Put that into the
+up-and-down equation, multiply through by $\cos\theta_2$, and use
+$\sin\theta_1\cos\theta_2 + \cos\theta_1\sin\theta_2 = \sin(\theta_1+\theta_2)$:
+$$T_1 = \frac{W\cos\theta_2}{\sin(\theta_1+\theta_2)}, \qquad T_2 = \frac{W\cos\theta_1}{\sin(\theta_1+\theta_2)}.$$
+
+Each rope's tension has the *other* rope's angle on top.
+###
+
+#| The two tensions from the formulas above, for a weight hanging from two
+#| ropes at angles theta1 and theta2 (degrees above the horizontal).
+#@ 75b03fd6
+def tensions_by_formula(weight, theta1, theta2) {
+    a = radians(theta1)
+    b = radians(theta2)
+    return [weight * cos(b) / sin(a + b), weight * cos(a) / sin(a + b)]
+}
+
+at30 = tensions_by_formula(weight, 30.0, 30.0)
+tension_at_30_degrees = at30[0]
+show tension_at_30_degrees
+sideways_part_at_30 = at30[0] * cos(radians(30.0))
+upward_part_at_30 = at30[0] * sin(radians(30.0))
+show sideways_part_at_30
+show upward_part_at_30
+
+###
+At $30^\circ$ and $30^\circ$ the general formula gives $98\ \text{N}$ (`tension_at_30_degrees`), the
+same as the symmetric case. Of each rope's $98\ \text{N}$, $84.9\ \text{N}$ points sideways
+(`sideways_part_at_30`) and $49\ \text{N}$ points up (`upward_part_at_30`). The $49\ \text{N}$ up is
+the half of the weight each rope holds; the $84.9\ \text{N}$ sideways is canceled by the other
+rope's sideways part.
+
+## The free-body diagram, to scale
+
+The next figure is the knot alone, with the three forces on it drawn as arrows, all to one scale.
+Each rope's pull is split into its sideways part and its upward part, drawn dashed as the two
+short sides of a triangle. The two sideways parts are equal and opposite; the two upward parts
+add up to the weight. The rope arrows come out as long as the weight arrow, because each tension
+is $98\ \text{N}$, while each upward part is $49\ \text{N}$.
+###
+
+PX_PER_NEWTON = 1.1
+KNOT_X = 280.0
+KNOT_Y = 170.0
+
+#| Draws one rope's pull on the knot: the arrow along the rope, its sideways
+#| and upward parts as dashed arrows (the two short sides of a right triangle),
+#| and the angle at the knot. side = -1 for the left rope, +1 for the right.
+#@ c3e3b349
+def draw_pull(id: Str, tension, theta, side, color: Str, name: Str, angle_name: Str) {
+    dx = side * tension * cos(radians(theta)) * PX_PER_NEWTON
+    dy = tension * sin(radians(theta)) * PX_PER_NEWTON
+    arrow("across" + id, color + " dash", [KNOT_X, KNOT_X + dx], [KNOT_Y, KNOT_Y])
+    arrow("up" + id, color + " dash", [KNOT_X + dx, KNOT_X + dx], [KNOT_Y, KNOT_Y + dy])
+    arrow("pull" + id, color + " thick", [KNOT_X, KNOT_X + dx], [KNOT_Y, KNOT_Y + dy])
+    # the angle at the knot, between the horizontal and the rope
+    start = 0.0
+    if side < 0 {
+        start = 180.0 - theta
+    }
+    arrow("angle" + id, color + " nohead curved", arc_points(KNOT_X, KNOT_Y, ARC_RADIUS * 0.7, start, start + theta, 0), arc_points(KNOT_X, KNOT_Y, ARC_RADIUS * 0.7, start, start + theta, 1))
+    align = "right"
+    if side > 0 {
+        align = "left"
+    }
+    mid = radians(start + theta / 2.0)
+    note("theta" + id, angle_name, color + " center middle", KNOT_X + ARC_RADIUS * cos(mid), KNOT_Y + ARC_RADIUS * sin(mid))
+    note("name" + id, name + " = " + fmt(tension, ".0f") + " N", color + " " + align + " bottom bold", KNOT_X + dx, KNOT_Y + dy + 8.0)
+    note("sin" + id, name + " sin " + angle_name + " = " + fmt(tension * sin(radians(theta)), ".0f") + " N", color + " " + align + " middle", KNOT_X + dx + side * 8.0, KNOT_Y + dy / 2.0)
+    # under the sideways part, starting beside the weight arrow and running outward
+    note("cos" + id, name + " cos " + angle_name + " = " + fmt(tension * cos(radians(theta)), ".1f") + " N", color + " " + align + " top", KNOT_X + side * 8.0, KNOT_Y - 8.0)
+}
+
+figure("The knot at 30 degrees: each pull split into a sideways and an upward part", "", "", 0, 560, 20, 262, "diagram")
+draw_pull("1", at30[0], 30.0, -1.0, "s1", "T₁", "θ₁")
+draw_pull("2", at30[1], 30.0, 1.0, "s2", "T₂", "θ₂")
+arrow("weight", "s3 thick", [KNOT_X, KNOT_X], [KNOT_Y, KNOT_Y - weight * PX_PER_NEWTON])
+note("weight name", "W = " + fmt(weight, ".0f") + " N", "s3 left middle bold", KNOT_X + 10.0, KNOT_Y - weight * PX_PER_NEWTON + 12.0)
+note("sum across", "across: " + fmt(sideways_part_at_30, ".1f") + " N left, " + fmt(sideways_part_at_30, ".1f") + " N right", "muted right bottom", 550.0, 48.0)
+note("sum up", "up: " + fmt(upward_part_at_30, ".0f") + " N + " + fmt(upward_part_at_30, ".0f") + " N = " + fmt(weight, ".0f") + " N = W", "muted right bottom", 550.0, 28.0)
+
+###
+## Two ways to hang the same box
+
+Now hang the same $98\ \text{N}$ box with the left rope steeper, at $60^\circ$, and the right rope
+still at $30^\circ$. Before running: which rope carries more tension? And the $30^\circ$ rope, which carried
+$98\ \text{N}$ in the symmetric case: more or less now?
+###
+
+steep_and_shallow = tensions_by_formula(weight, 60.0, 30.0)
+show steep_and_shallow
+# per unit of weight
+steep_and_shallow_ratio = tensions_by_formula(1.0, 60.0, 30.0)
+show steep_and_shallow_ratio
+
+test "at 30 degrees the tension in each rope equals the weight of the box" {
+    assert_near(tension_at_30_degrees, weight, 1.0e-12)
+    assert_near(at30[1], weight, 1.0e-12)
+}
+
+PANEL_W = 330.0
+PANEL_H = 230.0
+PANEL_DROP = 86.0
+PANEL_KNOT_Y = 120.0
+PANEL_PX_PER_NEWTON = 0.9
+
+#| One panel of the comparison: a box hanging at theta1 and theta2, each rope's
+#| pull on the knot drawn along the rope to the same scale in every panel, and
+#| the two tensions written under it.
+#@ 47d007ec
+def draw_panel(id: Str, title: Str, theta1, theta2) {
+    t = tensions_by_formula(weight, theta1, theta2)
+    # center the ropes' span in the panel
+    left_reach = PANEL_DROP / tan(radians(theta1))
+    right_reach = PANEL_DROP / tan(radians(theta2))
+    kx = PANEL_W / 2.0 + (left_reach - right_reach) / 2.0
+    figure(title, "", "", 0, PANEL_W, 0, PANEL_H, "diagram")
+    draw_hanging(id, kx, PANEL_KNOT_Y, PANEL_DROP, theta1, theta2, fmt(weight, ".0f") + " N", "θ₁ = " + fmt(theta1, ".0f") + "°", "θ₂ = " + fmt(theta2, ".0f") + "°")
+    s = PANEL_PX_PER_NEWTON
+    arrow("pull1" + id, "s1 thick", [kx, kx - t[0] * cos(radians(theta1)) * s], [PANEL_KNOT_Y, PANEL_KNOT_Y + t[0] * sin(radians(theta1)) * s])
+    arrow("pull2" + id, "s2 thick", [kx, kx + t[1] * cos(radians(theta2)) * s], [PANEL_KNOT_Y, PANEL_KNOT_Y + t[1] * sin(radians(theta2)) * s])
+    note("t1" + id, "T₁ = " + fmt(t[0], ".3g") + " N", "s1 left bottom large bold", 12.0, 8.0)
+    note("t2" + id, "T₂ = " + fmt(t[1], ".3g") + " N", "s2 right bottom large bold", PANEL_W - 12.0, 8.0)
+}
+
+grid("The same 98 N box hung two ways; the colored arrows are the ropes' pulls, to scale", 1, 2)
+draw_panel("a", "Both ropes at 30°", 30.0, 30.0)
+draw_panel("b", "Left rope at 60°, right rope at 30°", 60.0, 30.0)
+
+###
+With $60^\circ$ and $30^\circ$ the steep rope's tension is $84.9\ \text{N}$ and the tension in the rope at the smaller angle is
+$49\ \text{N}$ (`steep_and_shallow`): per unit of weight, $0.866\,W$ and $0.5\,W$
+(`steep_and_shallow_ratio`). The steeper rope, the one closer to vertical, carries more tension. The
+$30^\circ$ rope is at the same angle as before, yet its tension fell from $98\ \text{N}$ to
+$49\ \text{N}$, because the steep rope now holds most of the weight: $73.5\ \text{N}$ of it, against
+$24.5\ \text{N}$. The right panel balances the
+same way the symmetric one does: sideways, $84.9\cos 60^\circ = 49\cos 30^\circ = 42.4\ \text{N}$, and
+up, $84.9\sin 60^\circ + 49\sin 30^\circ = 73.5 + 24.5 = 98\ \text{N}$. The two tensions add up to
+more than $W$, because neither rope points straight up.
+###
+
+sideways_60_30 = steep_and_shallow[0] * cos(radians(60.0))
+upward_steep = steep_and_shallow[0] * sin(radians(60.0))
+upward_shallow = steep_and_shallow[1] * sin(radians(30.0))
+show sideways_60_30
+show upward_steep
+show upward_shallow
+
+###
+## Checking the algebra a second way
+
+The formulas came from a few lines of algebra, and algebra can go wrong. So the program also finds
+the tensions without them: the two balance equations are a pair of linear equations in $T_1$ and
+$T_2$,
+$$\begin{pmatrix} \cos\theta_1 & -\cos\theta_2 \\ \sin\theta_1 & \sin\theta_2 \end{pmatrix}
+\begin{pmatrix} T_1 \\ T_2 \end{pmatrix} = \begin{pmatrix} 0 \\ W \end{pmatrix},$$
+and `lin_solve` solves such a system directly. The tests compare the two answers over eight pairs
+of angles, and check with `leftover_force` that the formula's tensions cancel the weight.
+###
+
+#| The same two tensions found without the formula: write the sideways and the
+#| up-and-down balance as two linear equations and solve them directly. This is
+#| the check on the algebra.
+#@ 772bfa41
+def tensions_by_solving(weight, theta1, theta2) {
+    a = radians(theta1)
+    b = radians(theta2)
+    balance = [[cos(a), 0.0 - cos(b)], [sin(a), sin(b)]]
+    needed = [0.0, weight]
+    t = zeros(2)
+    lin_solve(balance, needed, t)
+    return t
+}
+
+# the pairs of angles each of the two tests below tries
+ANGLE_PAIRS = 8
+
+test "the formulas and a direct solve of the balance equations agree" {
+    for i to ANGLE_PAIRS {
+        th1 = 10.0 + 9.0 * i
+        th2 = 80.0 - 7.0 * i
+        by_formula = tensions_by_formula(weight, th1, th2)
+        by_solving = tensions_by_solving(weight, th1, th2)
+        assert_near(by_formula[0], by_solving[0], 1.0e-10)
+        assert_near(by_formula[1], by_solving[1], 1.0e-10)
+    }
+}
+
+test "the three forces on the knot cancel" {
+    for i to ANGLE_PAIRS {
+        th1 = 12.0 + 8.0 * i
+        th2 = 75.0 - 6.0 * i
+        assert_lt(leftover_force(weight, th1, th2, tensions_by_formula(weight, th1, th2)), 1.0e-10)
+    }
+}
+
+###
+## Why a flatter rope carries more tension
+
+Before running: $T/W = 1/(2\sin\theta)$ was $1$ at $30^\circ$. At $10^\circ$, is it more or less than
+$2$? At $5^\circ$?
+###
+
+ratio_at_10_degrees = symmetric_ratio(10.0)
+ratio_at_5_degrees = symmetric_ratio(5.0)
+show ratio_at_10_degrees
+show ratio_at_5_degrees
+
+n = 171
+angles = linspace(5.0, 90.0, n)
+ratio = zeros(n)
+for i to n {
+    ratio[i] = symmetric_ratio(angles[i])
+}
+figure("Tension in each rope, as a multiple of the weight", "angle of the ropes above the horizontal (degrees)", "tension / weight", 0.0, 90.0, 0.0, 6.0)
+plot(angles, ratio, "both ropes at the same angle")
+plot([0.0, 90.0], [1.0, 1.0], "tension equal to the weight")
+style("tension equal to the weight", "dash")
+
+###
+More: $2.9\,W$ at $10^\circ$ (`ratio_at_10_degrees`) and $5.7\,W$ at $5^\circ$
+(`ratio_at_5_degrees`). The figure shows the whole curve. At $90^\circ$ each tension is $W/2$, and
+as the ropes flatten out the tension climbs, slowly at first and then steeply. A rope pulled
+perfectly flat would need infinite tension, because none of its pull would point up. That is why
+a clothesline sags: no rope can be pulled tight enough to be straight while holding anything.
+
+## The angle trap
+
+Problems measure the angle in two ways, and mixing them up is a common mistake. If the
+angle $\varphi$ is measured from the *vertical* instead of the ceiling, then $\varphi = 90^\circ - \theta$,
+and $\sin\theta$ becomes $\cos\varphi$:
+$$T = \frac{W}{2\cos\varphi}.$$
+The ropes at $30^\circ$ above the ceiling are at $60^\circ$ from the vertical. Put into the new formula,
+that should give the same $98\ \text{N}$.
+###
+
+phi = 90.0 - 30.0
+tension_from_the_vertical = weight / (2.0 * cos(radians(phi)))
+show tension_from_the_vertical
+# the mistake: the angle from the ceiling put into the formula for the angle from the vertical
+wrong_angle_ratio = 1.0 / (2.0 * cos(radians(30.0)))
+show wrong_angle_ratio
+
+###
+It does: $98\ \text{N}$ (`tension_from_the_vertical`). Putting $30^\circ$ into the cosine formula by
+mistake would give $W/(2\cos 30^\circ) = 0.58\,W$ instead (`wrong_angle_ratio`), which is less than the weight and
+wrong. Before using a formula, check which angle the problem gives you.
+
+## Checking an answer without the formula
+
+Three quick checks find many mistakes. If both ropes hang straight down ($\theta = 90^\circ$), each
+tension should be $W/2$. If the two angles are equal, $T_1$ and $T_2$ should be equal. And as a rope goes flat,
+its tension should grow without limit; at $0.2^\circ$ each tension should be more than $100\,W$.
+The test puts the general formula through all three.
+###
+
+test "straight up is W/2 each, equal angles give equal tensions, and at 0.2 degrees each tension is over 100 W" {
+    straight = tensions_by_formula(weight, 90.0, 90.0)
+    assert_near(straight[0], weight / 2.0, 1.0e-10)
+    equal = tensions_by_formula(weight, 37.0, 37.0)
+    assert_near(equal[0], equal[1], 1.0e-12)
+    nearly_flat = tensions_by_formula(weight, 0.2, 0.2)
+    assert_lt(100.0 * weight, nearly_flat[0])
+}
+
+###
+## Try one
+
+A $50\ \text{N}$ sign hangs from two wires at $45^\circ$ and $60^\circ$ above the horizontal. Which wire
+carries more tension, and how much more? Work it out before running the cell: the $45^\circ$ wire's tension
+has $\cos 60^\circ$ on top, the $60^\circ$ wire's has $\cos 45^\circ$, and both have
+$\sin 105^\circ$ underneath.
+###
+
+# the 45-degree wire first, then the 60-degree wire
+sign = tensions_by_formula(50.0, 45.0, 60.0)
+show sign
+
+###
+The $60^\circ$ wire carries more tension: $T = 50\cos 45^\circ / \sin 105^\circ = 36.6\ \text{N}$, against
+$25.9\ \text{N}$ for the $45^\circ$ wire (`sign`, in that order: $45^\circ$ first). The steeper
+wire carries more, as before.
+
+## What was checked
+
+The program computes each tension two independent ways, from the formulas and by solving the two
+balance equations directly, and checks that they agree and that the three forces cancel. The
+last test checks every number quoted on this page against a third computation outside the
+program: `posts/refs/a-box-hanging-from-two-ropes.py` solves the same balance equations with
+`numpy.linalg.solve`, and its output is beside it.
+###
+
+test "every number quoted on the page matches the numpy reference" {
+    # posts/refs/a-box-hanging-from-two-ropes.out
+    assert_near(weight, 98.0, 1.0e-12)
+    assert_near(tension_at_30_degrees, 98.00000000000001, 1.0e-12)
+    assert_near(sideways_part_at_30, 84.87048957087501, 1.0e-12)
+    assert_near(upward_part_at_30, 49.0, 1.0e-12)
+    assert_near(ratio_straight_up, 0.5, 1.0e-15)
+    assert_near(ratio_at_30_degrees, 1.0000000000000002, 1.0e-15)
+    # the second way to hang it: 60 and 30 degrees
+    assert_near(steep_and_shallow[0], 84.870489570875, 1.0e-12)
+    assert_near(steep_and_shallow[1], 49.00000000000001, 1.0e-12)
+    assert_near(steep_and_shallow_ratio[0], 0.8660254037844387, 1.0e-15)
+    assert_near(steep_and_shallow_ratio[1], 0.5000000000000001, 1.0e-15)
+    assert_near(sideways_60_30, 42.435244785437504, 1.0e-12)
+    assert_near(steep_and_shallow[1] * cos(radians(30.0)), 42.435244785437504, 1.0e-12)
+    assert_near(upward_steep, 73.5, 1.0e-12)
+    assert_near(upward_shallow, 24.5, 1.0e-12)
+    # the flatter ropes: 2.9 W at 10 degrees, 5.7 W at 5 degrees, over 100 W at 0.2
+    assert_near(ratio_at_10_degrees, 2.879385241571817, 1.0e-14)
+    assert_near(ratio_at_5_degrees, 5.736856622834928, 1.0e-14)
+    assert_near(symmetric_ratio(0.2), 143.23973967132798, 1.0e-10)
+    # the angle trap
+    assert_near(tension_from_the_vertical, 98.00000000000001, 1.0e-12)
+    assert_near(wrong_angle_ratio, 0.5773502691896257, 1.0e-15)
+    # the sign: the 45-degree wire, then the 60-degree wire
+    assert_near(sign[0], 25.881904510252085, 1.0e-12)
+    assert_near(sign[1], 36.60254037844387, 1.0e-12)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

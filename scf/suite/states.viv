@@ -1,0 +1,106 @@
+# PySCF's tests that ask which state an SCF lands on, replayed: the
+# stretched water of test_diis.py (its default RHF state is a saddle point,
+# with a lower RHF state below it), follow_state and remove_linear_dep_ from
+# test_addons.py, and the spin = -2 water of test_rhf.py and test_uhf.py.
+#
+# The rows of test_diis.py:54 (EDIIS cut off after 4 cycles), :72 (a
+# rollback cut off after 10) and test_addons.py:271 (a dynamic level shift
+# cut off after 4) assert where an unconverged iteration happens to be, so
+# they depend on PySCF's exact path and are not replayed. test_diis.py:95
+# restores the first run's DIIS history and runs 3 cycles; it lands on the
+# converged state, so it is replayed here as that state and scored as a
+# path row.
+#
+#     tools/both-engines.sh scf/suite states
+from hf.hf import hf_gap, hf_scf, hf_scf_from, hf_setup, hf_setup_of
+from hf.molecule import mol_nalpha, mol_nbeta, Molecule, molecule_packs
+from hf.scf_loop import scf_densities, scf_opts, ScfSetup
+from hf.opts import scf_checked, SCF_ROHF, SCF_UHF, ScfOptions
+from hfref.water_631g import water631g_atoms, water631g_prims, water631g_shells
+from hfref.water_631g_stretched import (
+    water631g_stretched_atoms, WATER631G_STRETCHED_E_RHF_STABLE, water631g_stretched_prims,
+    water631g_stretched_shells,
+)
+from hfref.h4_diffuse import h4_diffuse_atoms, h4_diffuse_prims, h4_diffuse_shells
+from hfref.pyscf_tests import (
+    PST_ADDONS_217, PST_ADDONS_217_P, PST_ADDONS_261, PST_ADDONS_261_P, PST_ADDONS_414,
+    PST_ADDONS_414_P, PST_DIIS_89, PST_DIIS_89_P, PST_DIIS_95, PST_DIIS_95_P, PST_FILE_ADDONS,
+    PST_FILE_DIIS, PST_FILE_RHF, PST_FILE_UHF, pst_h4_atoms, pst_h4_prims, pst_h4_shells,
+    PST_RHF_386, PST_RHF_386_P, PST_UHF_155, PST_UHF_155_P, pst_water_stretched_atoms,
+)
+from scf.suite.ref.sts import sts_ao_vectors, sts_eig, sts_fock, sts_orth, sts_row
+
+#| The SCF energy of a setup; asserts convergence.
+def sut_energy(p: ScfSetup) {
+    r = hf_scf(p)
+    assert_near(r.converged, 1.0, 0.0)
+    return r.energy
+}
+
+test "stretched water RHF from the default guess lands on PySCF's default state -75.44606939063496 (test_diis.py:89, and :95 as a path row)" {
+    sut_m = molecule_packs(water631g_stretched_atoms(), water631g_stretched_shells(), water631g_stretched_prims())
+    assert_lt(hf_gap(sut_m.atoms, pst_water_stretched_atoms(), 12), 1.0e-15)
+    sut_e = sut_energy(hf_setup(sut_m, scf_checked()))
+    assert_near(sts_row(PST_FILE_DIIS, 89, sut_e, PST_DIIS_89, PST_DIIS_89_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_DIIS, 95, sut_e, PST_DIIS_95, PST_DIIS_95_P), 1.0, 0.0)
+    # the state is the saddle point: the stable RHF state is 0.028 below it
+    assert_lt(WATER631G_STRETCHED_E_RHF_STABLE + 0.02, sut_e)
+}
+
+test "water 6-31G spin -2: UHF -75.726396909036637 and ROHF -75.723654936331599 (test_uhf.py:155, test_rhf.py:386); follow_state with no reference is the plain RHF (test_addons.py:217)" {
+    sut_w = molecule_packs(water631g_atoms(), water631g_shells(), water631g_prims())
+    sut_m = Molecule { spin: -2, ..sut_w }
+    # spin = Na - Nb = -2: 4 alpha and 6 beta electrons, as PySCF counts them
+    assert_near(mol_nalpha(sut_m), 4, 0.0)
+    assert_near(mol_nbeta(sut_m), 6, 0.0)
+    sut_p = hf_setup(sut_m, ScfOptions { method: SCF_UHF, ..scf_checked() })
+    sut_e = sut_energy(sut_p)
+    assert_near(sts_row(PST_FILE_UHF, 155, sut_e, PST_UHF_155, PST_UHF_155_P), 1.0, 0.0)
+    sut_e = sut_energy(hf_setup_of(sut_m, sut_p.h, sut_p.s, sut_p.eri, ScfOptions { method: SCF_ROHF, ..scf_checked() }))
+    assert_near(sts_row(PST_FILE_RHF, 386, sut_e, PST_RHF_386, PST_RHF_386_P), 1.0, 0.0)
+    sut_e = sut_energy(hf_setup_of(sut_w, sut_p.h, sut_p.s, sut_p.eri, scf_checked()))
+    assert_near(sts_row(PST_FILE_ADDONS, 217, sut_e, PST_ADDONS_217, PST_ADDONS_217_P), 1.0, 0.0)
+}
+
+test "H4 with a diffuse s on every atom: canonical orthogonalization drops the near-null combinations and gives -1.6291001503057689 (test_addons.py:414)" {
+    sut_m = molecule_packs(h4_diffuse_atoms(), h4_diffuse_shells(), h4_diffuse_prims())
+    assert_lt(hf_gap(sut_m.atoms, pst_h4_atoms(), 16), 1.0e-15)
+    assert_lt(hf_gap(sut_m.shells, pst_h4_shells(), 64), 0.5)
+    assert_lt(hf_gap(sut_m.prims, pst_h4_prims(), 32), 1.0e-15)
+    # remove_linear_dep_(threshold=1e-8): keep the eigenvectors of S whose
+    # eigenvalue is above 1e-8, the canonical orthogonalizer's own threshold
+    sut_p = hf_setup(sut_m, ScfOptions { lindep: 1.0e-8, ..scf_checked() })
+    # one combination of the eight functions falls below the threshold
+    sut_X = sts_orth(sut_p.s, scf_opts(sut_p))
+    assert_near(shape(sut_X)[1], 7, 0.0)
+    sut_e = sut_energy(sut_p)
+    assert_near(sts_row(PST_FILE_ADDONS, 414, sut_e, PST_ADDONS_414, PST_ADDONS_414_P), 1.0, 0.0)
+}
+
+test "the closed-shell orbitals occupied [2, 2, 2, 2, 1, 1] by hand converge to the triplet ROHF -75.723654936331542 (test_addons.py:261)" {
+    # PySCF's test takes the closed-shell orbitals, occupies [2, 2, 2, 2, 1, 1]
+    # (alpha in 0-3 and 5, beta in 0-3) and runs ROHF with the maximum-overlap
+    # method, which keeps the occupied orbitals those that overlap most with
+    # the previous ones. There is no MOM driver here. This row imports the
+    # same start density and runs ROHF with aufbau occupations; the state it
+    # converges to has the occupation MOM holds ([2, 2, 2, 2, 1, 1] is also
+    # the aufbau occupation of the triplet), so the two runs end on one state.
+    sut_w = molecule_packs(water631g_atoms(), water631g_shells(), water631g_prims())
+    sut_p = hf_setup(sut_w, scf_checked())
+    sut_o = scf_opts(sut_p)
+    sut_r = hf_scf(sut_p)
+    sut_F = sts_fock(sut_p.h, sut_p.eri, scf_densities(sut_r), sut_o, 1)
+    sut_C = sts_ao_vectors(sts_eig(slab(sut_F, 0), sut_p.s, sut_o), sut_p.s, sut_o)
+    # beta in orbitals 0-3, alpha in 0-3 and 5
+    sut_Cb = sut_C[:, 0:4]
+    sut_c5 = sut_C[:, 5:6]
+    sut_Db = sut_Cb @ transpose(sut_Cb)
+    sut_Da = sut_Db + sut_c5 @ transpose(sut_c5)
+    sut_t = hf_setup_of(Molecule { spin: 2, ..sut_w }, sut_p.h, sut_p.s, sut_p.eri, ScfOptions { method: SCF_ROHF, ..scf_checked() })
+    sut_x = hf_scf_from(sut_t, sut_Da, sut_Db)
+    assert_near(sut_x.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_ADDONS, 261, sut_x.energy, PST_ADDONS_261, PST_ADDONS_261_P), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

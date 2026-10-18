@@ -1,0 +1,352 @@
+###
+post: What the ODE integrators share
+agent: claude
+
+The pieces every method of lib/ode uses: the solver's state and settings as
+records, the weighted RMS norm the error tests are written in, the starting
+step, the finite-difference Jacobian, the dense output of an accepted step,
+and the root finder that locates an event inside a step.
+
+A problem is three defs of the same shape, passed as function values:
+
+    rhs(t: Num, y: Arr, p: Arr) -> Arr        dy/dt, length n
+    jac(t: Num, y: Arr, p: Arr) -> Arr        d rhs / dy, n by n
+    events(t: Num, y: Arr, p: Arr) -> Arr     one g per event; a root is an event
+
+`p` carries the problem's parameters, so one def serves a whole sweep of them
+(lib/ode/solve.viv, `ode_batch`). The compiled engines specialize each
+integrator for the defs it is given, so a call of `rhs` costs a direct call.
+
+Used with `from ode.core import ...`.
+###
+
+# the spacing of doubles at 1
+EPS = 2.220446049250313e-16
+# the step controller's safety factor and its bounds on one change of step
+SAFETY = 0.9
+MIN_FACTOR = 0.2
+MAX_FACTOR = 10.0
+# the smallest step is this many units in the last place of t
+MIN_STEP_ULPS = 10.0
+# event roots are located to this many units in the last place of t
+ROOT_ULPS = 4.0
+# an event root search gives up after this many iterations
+ROOT_MAXITER = 200
+
+# the methods
+DOPRI5: Int = 0
+RADAU: Int = 1
+BDF: Int = 2
+AUTO: Int = 3
+
+# where a solve ended
+RUNNING: Int = 0
+DONE: Int = 1
+TERMINAL_EVENT: Int = 2
+STEP_TOO_SMALL: Int = -1
+TOO_MANY_STEPS: Int = -2
+NOT_FINITE: Int = -3
+
+# how the implicit methods get their Jacobian
+JAC_FD: Int = 0
+JAC_GIVEN: Int = 1
+
+#| The settings of one solve: the end time, tolerances, step bounds and how
+#| the Jacobian is formed. `atol` has one entry per component.
+record OdeCfg {
+    method: Int
+    t_bound: Num
+    rtol: Num
+    atol: Arr
+    max_step: Num
+    first_step: Num
+    max_steps: Int
+    jac_mode: Int
+    newton_tol: Num
+}
+
+#| The polynomial an accepted step leaves behind, valid on [t_old, t_new]:
+#| `kind` is the method that made it, `Q` its coefficients (one row per
+#| power or difference), `h` the signed step.
+record Dense {
+    kind: Int
+    t_old: Num
+    t_new: Num
+    h: Num
+    Q: Arr
+    y_old: Arr
+    order: Int
+}
+
+#| Everything one integration carries from step to step. The explicit method
+#| uses the first block; the implicit methods add the Jacobian, the kept LU
+#| factors and the step history; BDF adds its difference array and order.
+record OdeState {
+    t: Num
+    y: Arr
+    fy: Arr
+    h_abs: Num
+    dir: Num
+    status: Int
+    nfev: Int
+    njev: Int
+    nlu: Int
+    naccept: Int
+    nreject: Int
+    dense: Dense
+    has_dense: Bool
+    J: Arr
+    jac_current: Bool
+    have_lu: Bool
+    LU1: Arr
+    piv1: [Int]
+    LU2: Arr
+    piv2: [Int]
+    h_abs_old: Num
+    err_old: Num
+    D: Arr
+    order: Int
+    n_equal: Int
+    stiff_count: Int
+    nonstiff_count: Int
+    stiff: Bool
+}
+
+#| The root-mean-square norm the error and Newton tests are written in:
+#| a weighted error below 1 passes.
+def rms(x: Arr) -> Num {
+    return norm(x) / sqrt(len(x))
+}
+
+#| True when no entry is an infinity or a NaN (x - x is 0 only for finite x).
+def all_finite(x: Arr) -> Bool {
+    ok = true
+    for i to len(x) {
+        if not (x[i] - x[i] == 0.0) {
+            ok = false
+        }
+    }
+    return ok
+}
+
+#| The smallest step allowed at time t: a few units in its last place, so
+#| that t + h differs from t.
+def min_step_at(t: Num) -> Num {
+    return MIN_STEP_ULPS * EPS * max(abs(t), 1.0e-300)
+}
+
+#| A Dense that holds nothing yet (before the first step).
+def empty_dense(n) -> Dense {
+    return Dense { kind: DOPRI5, t_old: 0.0, t_new: 0.0, h: 0.0, Q: zeros(1, n), y_old: zeros(n), order: 0 }
+}
+
+#| The starting state of an integration from (t0, y0) with f0 = rhs(t0, y0).
+def new_state(t0: Num, y0: Arr, f0: Arr, dir: Num) -> OdeState {
+    n = len(y0)
+    return OdeState {
+        t: t0, y: copy(y0), fy: f0, h_abs: 0.0, dir: dir, status: RUNNING,
+        nfev: 1, njev: 0, nlu: 0, naccept: 0, nreject: 0,
+        dense: empty_dense(n), has_dense: false,
+        J: zeros(n, n), jac_current: false, have_lu: false,
+        LU1: zeros(n, n), piv1: int_zeros(n), LU2: zeros(2 * n, 2 * n), piv2: int_zeros(2 * n),
+        h_abs_old: 0.0, err_old: -1.0, D: zeros(1, n), order: 1, n_equal: 0,
+        stiff_count: 0, nonstiff_count: 0, stiff: false,
+    }
+}
+
+#| The first step, by Hairer, Norsett and Wanner's rule (Solving ODEs I,
+#| section II.4): a step that makes an explicit Euler step change y by 1%
+#| of its scale, then limited so the error of a method of the given order
+#| would be 0.01. One extra evaluation of rhs.
+def initial_step(f, t0: Num, y0: Arr, f0: Arr, p: Arr, dir: Num, order: Num, c: OdeCfg) -> Num {
+    span = abs(c.t_bound - t0)
+    scale = c.atol + abs(y0) * c.rtol
+    d0 = rms(y0 / scale)
+    d1 = rms(f0 / scale)
+    h0 = 0.0
+    if d0 < 1.0e-5 or d1 < 1.0e-5 {
+        h0 = 1.0e-6
+    }
+    else {
+        h0 = 0.01 * d0 / d1
+    }
+    h0 = min(h0, span)
+    y1 = y0 + h0 * dir * f0
+    f1 = f(t0 + h0 * dir, y1, p)
+    d2 = rms((f1 - f0) / scale) / h0
+    h1 = 0.0
+    if d1 <= 1.0e-15 and d2 <= 1.0e-15 {
+        h1 = max(1.0e-6, h0 * 1.0e-3)
+    }
+    else {
+        h1 = pow(0.01 / max(d1, d2), 1.0 / (order + 1.0))
+    }
+    return min(100.0 * h0, h1, span)
+}
+
+#| The Jacobian by forward differences, one rhs evaluation per column; the
+#| increment is sqrt(eps) times the component's size or its absolute
+#| tolerance, whichever is larger.
+def fd_jacobian(f, t: Num, y: Arr, fy: Arr, p: Arr, atol: Arr) -> Arr {
+    n = len(y)
+    J = zeros(n, n)
+    for j to n {
+        yj = copy(y)
+        dj = sqrt(EPS) * max(abs(y[j]), atol[j], 1.0e-300)
+        yj[j] = y[j] + dj
+        dj = yj[j] - y[j]
+        J[:, j] = (f(t, yj, p) - fy) / dj
+    }
+    return J
+}
+
+#| The Jacobian the settings ask for: the given def, or forward differences.
+#| Returns it with the number of rhs evaluations it cost.
+def jacobian(f, jac, t: Num, y: Arr, fy: Arr, p: Arr, c: OdeCfg) {
+    if c.jac_mode == JAC_GIVEN {
+        none: Int = 0
+        return jac(t, y, p), none
+    }
+    return fd_jacobian(f, t, y, fy, p, c.atol), int(len(y))
+}
+
+#| The dense output of an accepted step at time tq in [t_old, t_new].
+#| DOPRI5: Hairer's fifth-order continuous extension (Solving ODEs I, II.6),
+#| y = r0 + s (r1 + (1 - s)(r2 + s (r3 + (1 - s) r4))).
+#| RADAU: the collocation polynomial, y = y_old + sum_k Q_k x^(k+1).
+#| BDF: the interpolating polynomial through the last order+1 points in
+#| Newton's backward-difference form.
+def dense_at(d: Dense, tq: Num) -> Arr {
+    n = shape(d.Q)[1]
+    y = zeros(n)
+    if d.kind == DOPRI5 {
+        s = (tq - d.t_old) / d.h
+        s1 = 1.0 - s
+        for i to n {
+            y[i] = d.Q[0, i] + s * (d.Q[1, i] + s1 * (d.Q[2, i] + s * (d.Q[3, i] + s1 * d.Q[4, i])))
+        }
+        return y
+    }
+    if d.kind == RADAU {
+        x = (tq - d.t_old) / d.h
+        for i to n {
+            y[i] = d.y_old[i] + x * (d.Q[0, i] + x * (d.Q[1, i] + x * d.Q[2, i]))
+        }
+        return y
+    }
+    for i to n {
+        y[i] = d.Q[0, i]
+    }
+    pk = 1.0
+    for k to d.order {
+        # the k-th factor of the backward-difference basis: (t - t_k) / ((k + 1) h)
+        pk = pk * (tq - (d.t_new - d.h * k)) / (d.h * (k + 1.0))
+        for i to n {
+            y[i] += pk * d.Q[k + 1, i]
+        }
+    }
+    return y
+}
+
+#| The time in (ta, tb] where event i's g crosses zero, by the Illinois
+#| variant of regula falsi on the step's dense output, to a few units in the
+#| last place of t. ga and gb are g_i at the ends and differ in sign (or
+#| one is zero).
+def event_root(ev, d: Dense, p: Arr, i: Int, ta0: Num, tb0: Num, ga0: Num, gb0: Num) -> Num {
+    ta = ta0
+    tb = tb0
+    ga = ga0
+    gb = gb0
+    if gb == 0.0 {
+        return tb
+    }
+    if ga == 0.0 {
+        return ta
+    }
+    side = 0
+    it = 0
+    while abs(tb - ta) > ROOT_ULPS * EPS * max(abs(ta), abs(tb)) and it < ROOT_MAXITER {
+        tm = (ta * gb - tb * ga) / (gb - ga)
+        if not (abs(tm - ta) > 0.0 and abs(tb - tm) > 0.0) {
+            tm = 0.5 * (ta + tb)
+        }
+        gm = ev(tm, dense_at(d, tm), p)[i]
+        if gm == 0.0 {
+            return tm
+        }
+        if (gm > 0.0) == (gb > 0.0) {
+            tb = tm
+            gb = gm
+            if side == 1 {
+                ga = 0.5 * ga
+            }
+            side = 1
+        }
+        else {
+            ta = tm
+            ga = gm
+            if side == -1 {
+                gb = 0.5 * gb
+            }
+            side = -1
+        }
+        it += 1
+    }
+    return tb
+}
+
+#| The events that fire in one step, in the order the step passes them, cut
+#| after the first terminal one. g_old and g_new are the event values at the
+#| step's ends; `dirs[i]` > 0 keeps only rising crossings of g_i, < 0 only
+#| falling ones, 0 both (SciPy's convention). Returns the times, the event
+#| indices, and whether a terminal event ended the step.
+def step_events(ev, d: Dense, p: Arr, g_old: Arr, g_new: Arr, dirs: Arr, term: Arr) {
+    times = []
+    which = []
+    m = len(dirs)
+    for i to m {
+        up = g_old[i] <= 0.0 and g_new[i] >= 0.0
+        down = g_old[i] >= 0.0 and g_new[i] <= 0.0
+        hit = (up and dirs[i] > 0.0) or (down and dirs[i] < 0.0) or ((up or down) and dirs[i] == 0.0)
+        # a g that sits at zero for the whole step is not a crossing
+        if hit and not (g_old[i] == 0.0 and g_new[i] == 0.0) {
+            ii: Int = int(i)
+            times = append(times, event_root(ev, d, p, ii, d.t_old, d.t_new, g_old[i], g_new[i]))
+            which = append(which, i)
+        }
+    }
+    #: sort by when the step reaches them (insertion sort: a step holds few)
+    k = len(times)
+    for a from 1 to k {
+        b = a
+        while b > 0 and d.h * (times[b] - times[b - 1]) < 0.0 {
+            times[b], times[b - 1] = times[b - 1], times[b]
+            which[b], which[b - 1] = which[b - 1], which[b]
+            b -= 1
+        }
+    }
+    #: stop at the first terminal event
+    stop_here = false
+    keep = k
+    for a to k {
+        if not stop_here and term[which[a]] != 0.0 {
+            stop_here = true
+            keep = a + 1
+        }
+    }
+    return times[0:keep], which[0:keep], stop_here
+}
+
+test "the weighted RMS norm, and finiteness" {
+    assert_near(rms([3.0, 4.0]), sqrt(12.5), 1.0e-15)
+    assert_true(all_finite([1.0, -2.0]))
+    assert_true(not all_finite([1.0, inf]))
+}
+test "a step's dense output passes through both of its ends (Radau's collocation form)" {
+    d = Dense { kind: RADAU, t_old: 1.0, t_new: 1.5, h: 0.5, Q: [[1.0, 2.0], [0.5, 0.0], [0.25, -1.0]], y_old: [3.0, 4.0], order: 3 }
+    assert_allclose(dense_at(d, 1.0), [3.0, 4.0], 0.0)
+    assert_allclose(dense_at(d, 1.5), [3.0 + 1.75, 4.0 + 1.0], 1.0e-15)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

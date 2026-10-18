@@ -1,0 +1,223 @@
+###
+post: A small GPT, written to be read while it runs
+agent: claude
+
+A GPT in the shape of nanoGPT and the modded-nanogpt speedrun, small enough
+that training it for a few dozen steps takes seconds in the interpreter: token
+and position embeddings, a stack of blocks (RMSNorm, causal self-attention
+with several heads, a residual; RMSNorm, a ReLU-squared MLP, a residual), a
+final RMSNorm and a linear map to one logit per token of the vocabulary.
+Training minimizes the cross-entropy of the next token with Muon on the
+blocks' matrices and Adam on the embeddings and the output map, as the
+speedrun does.
+
+The model is a record of its matrices: a `Gpt` holds the two embeddings, an
+array of `Block`s and the output map; a block holds its `Attention` (one
+`Head` of query, key and value matrices per head, and the output projection)
+and its `Mlp`. A matrix is read where it is, `model.blocks[l].attn.Wo`. A
+training step runs the whole batch at once: the tokens are a batch by
+positions matrix, the stream a stack of one matrix per sequence, and `@` and
+the reductions work on each matrix of the stack, as PyTorch's do. The
+gradient is `value_and_grad` of the batch's loss with respect to the model: a
+`Gpt` of the same shape, which the backward pass the compiler writes from the
+forward pass fills, and a test checks against central
+differences. The optimizers update the model in place, matrix by matrix
+(`for_leaves`).
+
+The sizes live in a `GptConfig` record, which builds the model and sets the
+batch; the model itself reads its sizes from its matrices. `lib/gpt/story_gpt`
+trains one on a sentence and asks it to continue a prompt.
+
+Used with `import gpt.gpt`.
+###
+
+from nn import attention, embedding, relu2, rmsnorm, softmax_rows
+from optim import adam_update, AdamSettings, muon_update, MuonSettings
+from random import choice, randn_matrix
+
+# the optimizers' settings (lib/optim)
+GPT_MUON = MuonSettings { lr: 0.05, momentum: 0.95 }
+GPT_ADAM = AdamSettings { lr: 0.05, beta1: 0.9, beta2: 0.99, eps: 1.0e-8 }
+# the step size falls in a straight line to this fraction of its start
+LR_FLOOR = 0.1
+
+record GptConfig {
+    vocab: Num,
+    context: Num = 8,
+    width: Num = 16,
+    heads: Num = 2,
+    layers: Num = 2,
+    hidden: Num = 64,
+    batch: Num = 4,
+}
+
+record Head { Wq: Arr, Wk: Arr, Wv: Arr }
+record Attention { heads: [Head], Wo: Arr }
+record Mlp { up: Arr, down: Arr }
+record Block { attn: Attention, mlp: Mlp }
+record Gpt { tok: Arr, pos: Arr, blocks: [Block], unembed: Arr }
+
+phrase "the step-size scale at step t of steps" -> 1.0 - (1.0 - LR_FLOOR) * t / steps
+
+def init_matrix(rows, cols) {
+    return (1.0 / sqrt(rows)) * randn_matrix(rows, cols)
+}
+
+def Head(c: GptConfig) -> Head {
+    hd = c.width / c.heads
+    return Head {
+        Wq: init_matrix(c.width, hd),
+        Wk: init_matrix(c.width, hd),
+        Wv: init_matrix(c.width, hd),
+    }
+}
+
+def Block(c: GptConfig) -> Block {
+    attn = Attention { heads: [Head(c) for h to c.heads], Wo: init_matrix(c.width, c.width) }
+    mlp = Mlp { up: init_matrix(c.width, c.hidden), down: init_matrix(c.hidden, c.width) }
+    return Block { attn: attn, mlp: mlp }
+}
+
+def Gpt(c: GptConfig) -> Gpt {
+    tok = randn_matrix(c.vocab, c.width)
+    pos = randn_matrix(c.context, c.width)
+    blocks = [Block(c) for l to c.layers]
+    return Gpt { tok: tok, pos: pos, blocks: blocks, unembed: zeros(c.width, c.vocab) }
+}
+
+def count_into(w: Arr, n: Arr) {
+    n[0] += numel(w)
+}
+
+def gpt_size(m: Gpt) {
+    n = [0.0]
+    for_leaves(count_into, m, n)
+    return n[0]
+}
+
+def self_attention(a: Attention, N: Arr) {
+    hd = shape(N)[-1] / len(a.heads)
+    Z = zeros_like(N)
+    for i, h in enumerate(a.heads) {
+        step head: Z[:, :, i * hd:(i + 1) * hd] = attention(N, h.Wq, h.Wk, h.Wv)
+    }
+    step project: Y = Z @ a.Wo
+    return Y
+}
+
+def block(b: Block, X: Arr) {
+    step attention: X = X + self_attention(b.attn, rmsnorm(X))
+    step mlp: X = X + relu2(rmsnorm(X) @ b.mlp.up) @ b.mlp.down
+    return X
+}
+
+def gpt_forward(m: Gpt, tokens: Arr) {
+    step embed: X = embedding(m.tok, tokens) + m.pos[0:shape(tokens)[-1], :]
+    for b in m.blocks {
+        step block: X = block(b, X)
+    }
+    step logits: logits = rmsnorm(X) @ m.unembed
+    return logits
+}
+
+def sequence_loss(m: Gpt, x: Arr, y: Arr) {
+    step forward: logits = gpt_forward(m, x)
+    step loss: loss = take the cross-entropy of logits against y
+    return loss
+}
+
+def optimizer_step(model: Gpt, g: Gpt, m: Gpt, v: Gpt, taken, lr_scale) {
+    step muon: for_leaves(muon_update, model.blocks, g.blocks, m.blocks, lr_scale, GPT_MUON)
+    step adam {
+        adam_update(model.tok, g.tok, m.tok, v.tok, taken, lr_scale, GPT_ADAM)
+        adam_update(model.pos, g.pos, m.pos, v.pos, taken, lr_scale, GPT_ADAM)
+        adam_update(model.unembed, g.unembed, m.unembed, v.unembed, taken, lr_scale, GPT_ADAM)
+    }
+}
+
+def batch_windows(tokens: Arr, c: GptConfig, t, shift) {
+    starts = [mod(t * c.batch + b, len(tokens) - c.context) + shift for b to c.batch]
+    return [tokens[s:s + c.context] for s in starts]
+}
+
+def train(model: Gpt, c: GptConfig, tokens: Arr, steps) {
+    losses = zeros(steps)
+    m, v = zeros_like(model), zeros_like(model)
+    for t to steps {
+        step batch: xs, ys = batch_windows(tokens, c, t, 0), batch_windows(tokens, c, t, 1)
+        step forward_backward {
+            loss, grad = take the value and gradient of sequence_loss(model, xs, ys) with respect to model
+            losses[t] = loss
+        }
+        step measure: gnorm = sqrt(sum(grad * grad))
+        step update {
+            lr_scale = take the step-size scale at step t of steps
+            optimizer_step(model, grad, m, v, t + 1, lr_scale)
+        }
+    }
+    return losses
+}
+
+def sample(m: Gpt, prompt: Arr, count, seed) {
+    srand(seed)
+    n = len(m.pos)
+    out = prompt
+    for k to count {
+        step context: ctx = take the last n elements of out
+        step probs: p = softmax_rows(gpt_forward(m, reshape(ctx, 1, len(ctx)))[0, len(ctx) - 1, :])
+        step draw: out = append(out, choice(p))
+    }
+    return out
+}
+
+def encode(text: Str, vocab: [Str]) {
+    stoi = {c: i for i, c in enumerate(vocab)}
+    return [stoi[c] for c in text]
+}
+
+def decode(tokens: Arr, vocab: [Str]) {
+    return join("", [vocab[i] for i in tokens])
+}
+
+# ---- checks ----
+
+def gpt_test_config() {
+    return GptConfig { vocab: 5, context: 4, width: 8, hidden: 12, batch: 1 }
+}
+
+# each entry of w moved by h both ways, the loss's change against g's entry;
+# found[0] keeps the largest difference, found[1] the largest |g|
+def fd_check(w: Arr, g: Arr, x: Arr, y: Arr, found: Arr, m: Gpt) {
+    h = 1.0e-5
+    rows, cols = shape(w)
+    for i to rows {
+        for j to cols {
+            was = w[i, j]
+            w[i, j] = was + h
+            up = sequence_loss(m, x, y)
+            w[i, j] = was - h
+            dn = sequence_loss(m, x, y)
+            w[i, j] = was
+            found[0] = max(found[0], abs((up - dn) / (2.0 * h) - g[i, j]))
+            found[1] = max(found[1], abs(g[i, j]))
+        }
+    }
+}
+
+test "the generated gradient agrees with central differences of the loss" {
+    c = gpt_test_config()
+    srand(3.0)
+    m = Gpt(c)
+    # the output map starts at zero; give it values so every gradient is nonzero
+    m.unembed = 0.5 * randn_matrix(c.width, c.vocab)
+    x = [[0.0, 3.0, 1.0, 4.0], [2.0, 2.0, 0.0, 1.0]]
+    y = [[3.0, 1.0, 4.0, 2.0], [2.0, 0.0, 1.0, 3.0]]
+    loss, g = take the value and gradient of sequence_loss(m, x, y) with respect to m
+    assert_near(loss, sequence_loss(m, x, y), 0.0)
+    found = [0.0, 0.0]
+    for_leaves(fd_check, m, g, x, y, found, m)
+    assert_lt(found[0], 1.0e-7 * found[1])
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

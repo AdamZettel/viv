@@ -1,0 +1,99 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// The index of /compare: every Python/Viv pair in study/compare, by topic.
+// scripts/compare-build.mjs writes the data and checks each pair.
+import RepoLink from '../../components/RepoLink.astro';
+import Base from '../../layouts/Base.astro';
+import data from '../../data/compare.json';
+import '../../styles/compare.css';
+
+const pairs = data.topics.flatMap((t) => t.pairs);
+const differing = pairs.filter((p) => p.output === 'differs');
+const href = (p) => `/compare/${p.topic}/${p.name}`;
+// `code` in the notes below is set in the code face
+const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const code = (t) => esc(t).replace(/`([^`]+)`/g, '<code>$1</code>');
+const find = (topic, name) => pairs.find((p) => p.topic === topic && p.name === name);
+// the differences a Python programmer meets first, each with the pair that shows it
+const NOTABLE = [
+  ['basics', 'printing', 'A bare float prints with six significant digits (`fmt(x)` gives Python’s digits); `print` puts a space between its arguments, as Python’s does.'],
+  ['basics', 'arithmetic', 'A number is a double unless declared `Int`; power is `^`; `round` takes a tie away from zero, so `round(2.5)` is 3; booleans print as `true` and `false`.'],
+  ['basics', 'functions', 'No default or keyword arguments; a lambda is `fn(x) -> expr`.'],
+  ['basics', 'loops', '`for i to n`, `for i from a to b by s`, `for i to n reversed`; braces, not indentation.'],
+  ['lists', 'growable', '`a.append(x)` is `a = append(a, x)`; comprehensions, `in` and negative indices read as in Python; `for row in rows(table)` walks a matrix.'],
+  ['lists', 'slicing', 'A slice of an array is a copy, where a NumPy slice is a view.'],
+  ['lists', 'sorting', '`sort(a)` sorts in place and returns nothing; `sorted(xs, key=f)` takes numbers or strings as keys, not tuples.'],
+  ['maps', 'word_freq', 'A dict is `map()`; `get(m, k, d)` and `remove(m, k)` are functions, and `k in m` reads as in Python.'],
+  ['records', 'state', 'A record is a value: `r.f = v` changes the variable’s own record, never another name’s; `T { f: v, ..old }` builds a changed copy.'],
+  ['recursion', 'fib_memo', 'No `global` statement: a function cannot assign a global number, only write into a global array or map.'],
+  ['errors', 'checked', 'No exceptions: a function returns a flag with its result, and `stop("...")` ends the run.'],
+  ['tests', 'test_blocks', '`test "name" { ... }` blocks run where they stand and print `PASS` or `FAIL`.'],
+];
+---
+
+<Base
+  title="Python and Viv, side by side · Viv"
+  description={`${pairs.length} small programs, each written in Python and in Viv with the same algorithm and the same output, shown region against region.`}
+  eyebrow="Compare"
+  heading="Python and Viv, side by side">
+  <p class="lede">
+    {pairs.length} small programs, each written twice, once in Python and once in Viv. The two
+    versions use the same algorithm, print the same output, and are cut into the same regions, so a
+    page can show them line against line. The notes on each page list the differences in syntax to
+    look for.
+  </p>
+  <p>
+    A script, <code>study/compare/check.sh</code>, runs every pair: the Python with CPython and NumPy,
+    the Viv in the interpreter, compiled to C and compiled to wasm. It fails unless the outputs match. Where
+    a pair's output differs, its notes name the lines and why, and the rest of the output must still match.
+    Each page also shows what <RepoLink path="tools/py2viv/SUBSET.md">py2viv</RepoLink>,
+    the translator from numeric Python, makes of the Python, or its reason for refusing it.
+  </p>
+
+  <div class="cmp-topics">
+    {
+      data.topics.map((t) => (
+        <section class="cmp-topic">
+          <h2>{t.title}</h2>
+          <p>{t.blurb}</p>
+          <ol>
+            {t.pairs.map((p) => (
+              <li>
+                <a href={href(p)}>{p.title}</a>
+                <span class:list={['cmp-tag', { diff: p.output === 'differs' }]}>
+                  {p.output === 'differs' ? 'output differs' : 'same output'}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ))
+    }
+  </div>
+
+  <h2>The differences to learn first</h2>
+  <ul class="cmp-index-diffs">
+    {
+      NOTABLE.map(([topic, name, text]) => {
+        const p = find(topic, name);
+        return (
+          <li>
+            <Fragment set:html={code(text)} /> <a href={href(p)}>{p.title}</a>
+          </li>
+        );
+      })
+    }
+  </ul>
+
+  <h2>Where the outputs differ</h2>
+  <ul class="cmp-index-diffs">
+    {
+      differing.map((p) => (
+        <li>
+          <a href={href(p)}>{p.title}</a>: <Fragment set:html={p.reasonHtml} />
+        </li>
+      ))
+    }
+  </ul>
+</Base>

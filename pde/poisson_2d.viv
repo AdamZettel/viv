@@ -1,0 +1,118 @@
+#! pde Poisson's equation
+#! equation -\nabla^2 u = f
+#! kind elliptic
+#! method five-point Laplacian, solved by conjugate gradients without ever forming the matrix
+#! checks a manufactured solution; the measured order; and that conjugate gradients converges in far fewer steps than unknowns
+#! | The equation of electrostatics, steady heat flow and pressure in an incompressible fluid.
+#! | There is no time to march through: every unknown depends on every other, and the work is
+#! | solving a large sparse linear system.
+#! |
+#! | Pick the answer first -- $u = \sin(\pi x)\sin(2\pi y) + x(1-x)\,y(1-y)$, zero on the boundary of
+#! | the unit square -- and the right-hand side follows by differentiating:
+#! | $f = 5\pi^2 \sin(\pi x)\sin(2\pi y) + 2x(1-x) + 2y(1-y)$. That is a *manufactured solution*, and it
+#! | turns "is the solver right?" into a subtraction.
+#! |
+#! | The polynomial term is there on purpose. A pure sine product is an eigenvector of the discrete
+#! | Laplacian, and conjugate gradients solves an eigenvector problem in ONE step -- which would
+#! | make the iteration count below meaningless. The bubble $x(1-x)y(1-y)$ has a piece of every mode.
+#! |
+#! | The five-point Laplacian is symmetric positive definite, which is exactly what conjugate
+#! | gradients wants. CG only ever needs the matrix *applied* to a vector, so the matrix is never
+#! | built: the grid carries a ring of zeros around it, a neighbor is a `roll`, and a mask puts
+#! | the boundary back to zero.
+
+pi = 3.141592653589793
+
+#| Apply -h^2 Laplacian to a padded (n+2) x (n+2) grid; the boundary ring stays zero.
+def apply_laplacian(u, mask) {
+    lap = 4.0 * u - roll(u, 1.0, 0.0) - roll(u, -1.0, 0.0) - roll(u, 1.0, 1.0) - roll(u, -1.0, 1.0)
+    return lap * mask
+}
+
+#| 1 on interior points, 0 on the boundary ring.
+def interior_mask(n) {
+    m = zeros(n + 2.0, n + 2.0)
+    for i to n {
+        for j to n {
+            m[i + 1.0, j + 1.0] = 1.0
+        }
+    }
+    return m
+}
+
+#| The manufactured solution sampled on the padded grid.
+def exact_solution(n) {
+    h = 1.0 / (n + 1.0)
+    x = reshape(arange(n + 2.0) * h, -1, 1)   # a column: x runs down the rows
+    y = arange(n + 2.0) * h                   # a row: y runs across
+    return sin(pi * x) * sin(2.0 * pi * y) + x * (1.0 - x) * y * (1.0 - y)
+}
+
+#| Its right-hand side, f = -Laplacian(u), worked out by hand.
+def right_hand_side(n) {
+    h = 1.0 / (n + 1.0)
+    x = reshape(arange(n + 2.0) * h, -1, 1)
+    y = arange(n + 2.0) * h
+    return 5.0 * pi * pi * sin(pi * x) * sin(2.0 * pi * y) + 2.0 * x * (1.0 - x) + 2.0 * y * (1.0 - y)
+}
+
+ITERS = zeros(1)        #: ITERS  how many CG steps the last solve took (a one-element out-parameter)
+
+#| Solve -Laplacian u = f on an n x n interior by conjugate gradients.
+def solve_poisson(n) {
+    h = 1.0 / (n + 1.0)
+    mask = interior_mask(n)
+    b = (h * h) * right_hand_side(n) * mask
+    u = zeros(n + 2.0, n + 2.0)
+    r = b
+    p = r
+    rr = sum(r * r)
+    target = 1.0e-20 * rr
+    k = 0.0
+    while rr > target and k < 2000.0 {
+        ap = apply_laplacian(p, mask)
+        alpha = rr / sum(p * ap)
+        u = u + alpha * p
+        r = r - alpha * ap
+        rr_new = sum(r * r)
+        p = r + (rr_new / rr) * p
+        rr = rr_new
+        k = k + 1.0
+    }
+    ITERS[0] = k
+    return u
+}
+
+#| L2 error of the solve on an n x n grid.
+def poisson_error(n) {
+    h = 1.0 / (n + 1.0)
+    d = solve_poisson(n) - exact_solution(n)
+    return sqrt(sum(d * d)) * h
+}
+
+e1 = poisson_error(16.0)
+e2 = poisson_error(33.0)
+iters = ITERS[0]
+order = log(e1 / e2) / log(2.0)
+show e1
+show e2
+show order
+show iters
+
+# u[i, j] is the solution at x = i h, y = j h: transposed, x runs across and y up
+figure("The solution of Poisson's equation", "x", "y")
+origin("lower")
+plot2d(transpose(solve_poisson(40.0)), "u")
+
+test "the solve matches the manufactured solution" {
+    assert_lt(e2, 2.0e-3)
+}
+test "the five-point Laplacian is second order" {
+    assert_near(order, 2.0, 0.1)
+}
+test "conjugate gradients needs far fewer steps than there are unknowns (33 x 33 = 1089)" {
+    assert_lt(iters, 120.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

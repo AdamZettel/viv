@@ -1,0 +1,31 @@
+# Oxygen-16, 8 protons and 8 neutrons filling the 1s and 1p shells, held
+# together by the Skyrme force SLy5. Each pass computes the mean fields from
+# the densities, finds the lowest orbital of each (l, j) block on a radial
+# mesh, builds new densities from those orbitals, mixes them with the old
+# ones, and stops when the energy settles.
+#
+# The mesh is 0.1 fm over a 15 fm box. The tests compare the answer with the
+# same calculation in numpy, from the post on oxygen-16
+# (posts/2026-09-25-skyrme-hartree-fock-of-oxygen-16.viv).
+from skyrme.skyrme import SK_TWIN, skyrme_o16
+
+SO_H = 0.1
+SO_BOX = 15.0
+so_nr = round(SO_BOX / SO_H)
+so_res = skyrme_o16(SO_H, so_nr)
+print("E/A (MeV)", so_res.e_per_a)
+print("radii of the protons, the neutrons and the charge (fm)", so_res.r_p, so_res.r_n, so_res.r_ch)
+print("orbital energies, neutron 1s1/2 1p3/2 1p1/2 then proton (MeV)", so_res.levels)
+print("passes", so_res.iterations)
+
+test "on the 0.1 fm mesh E/A, the radii and the six orbital energies are the numpy twin's to 1e-7" {
+    # SK_TWIN (lib/skyrme/skyrme) is the post's numpy twin in that order
+    so_got = concat([so_res.e_per_a, so_res.r_p, so_res.r_n, so_res.r_ch], so_res.levels)
+    assert_lt(max(abs(so_got - SK_TWIN)), 1.0e-7)
+}
+test "the energy settles to 1e-9 MeV in 38 iterations, as in the post" {
+    assert_near(so_res.iterations, 38, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

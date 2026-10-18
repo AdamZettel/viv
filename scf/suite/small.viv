@@ -1,0 +1,191 @@
+# PySCF's small cases replayed: the one- and two-electron atoms of
+# test_he.py, test_rhf.py and test_uhf.py, the atom-free model of
+# test_natm_eq_0, and the integral facts of test_mole.py and the Schwarz
+# test (test_rhf.py:944).
+#
+# The values asserted come from lib/hfref/pyscf_tests.viv (PST_<FILE>_<LINE>);
+# the integrals are computed here from the basis packs with every member of
+# each integral stage swept. `sts_row` scores a row as unittest does.
+#
+#     tools/both-engines.sh scf/suite small
+from hf.hf import hf_energy, hf_gap, hf_hcore, hf_overlap, hf_scf
+from hf.molecule import Molecule, molecule_packs
+from hf.basis import bas_nc, bas_ncart, bas_nsph, bas_odfact, BAS_PI, bas_powers
+from hf.eri_store import es_len8, es_pair
+from hf.cart2sph import c2s_block
+from hf.scf_loop import scf_setup
+from hf.opts import opt_new, scf_checked, scf_defaults, SCF_RHF, SCF_ROHF, SCF_UHF, ScfOptions
+from hf.integrals import int_eri, int_nuclear
+from hf.sweep import sw_rep_new
+from hfref.he import (
+    he_ccpvdz_atoms, he_ccpvdz_prims, he_ccpvdz_shells, he_sto3g_atoms, he_sto3g_prims,
+    he_sto3g_shells,
+)
+from hfref.h_sto3g import h_sto3g_atoms, h_sto3g_prims, h_sto3g_shells
+from hfref.pyscf_tests import (
+    PST_C2S_P, PST_C2S_S, PST_FILE_HE, PST_FILE_MOLE, PST_FILE_RHF, PST_FILE_UHF,
+    pst_frac_atoms, pst_h2_schwarz_atoms, pst_h2_schwarz_prims, pst_h2_schwarz_shells,
+    pst_h_atoms, PST_HE_47, PST_HE_47_P, PST_HE_52, PST_HE_52_P, PST_HE_57, PST_HE_57_P,
+    pst_he_atoms, pst_model_h, PST_MODEL_N, PST_MODEL_NELEC, PST_MODEL_U, PST_MOLE_520,
+    PST_MOLE_520_P, PST_MOLE_529, PST_MOLE_529_P, PST_MOLE_942, PST_MOLE_942_P, PST_MOLE_980,
+    PST_MOLE_980_P, PST_RHF_264, PST_RHF_264_P, PST_RHF_636, PST_RHF_636_P, PST_RHF_640,
+    PST_RHF_640_P, PST_RHF_757, PST_RHF_757_P, PST_SCHWARZ_BOUND, PST_SCHWARZ_ERI, PST_UHF_109,
+    PST_UHF_109_P, PST_UHF_111, PST_UHF_111_P, PST_UHF_374, PST_UHF_374_P, PST_UHF_392,
+    PST_UHF_392_P, PST_UHF_396, PST_UHF_396_P,
+)
+from scf.suite.ref.sts import sts_eig, sts_row, sts_row_lt
+from scf.suite.ref.stb import stb_frac_atoms, stb_frac_prims, stb_frac_shells
+
+#| The SCF energy of a molecule with `charge`, `spin` = Na - Nb, and
+#| `method` (lib/hf/opts), every integral member swept. Asserts convergence.
+def sus_energy(mol: Molecule, charge, spin, method) {
+    r = hf_energy(Molecule { charge: charge, spin: spin, ..mol }, ScfOptions { method: method, ..scf_checked() })
+    assert_near(r.converged, 1.0, 0.0)
+    return r.energy
+}
+
+#| The atom-free model of test_natm_eq_0: h = diag(0, 1, 2), S = I, and
+#| (ii|ii) = u the only nonzero integral, packed 8-fold.
+def sus_model_eri(n, u) {
+    G = zeros(es_len8(n))
+    for i to n {
+        p = i * (i + 1) / 2 + i
+        G[p * (p + 1) / 2 + p] = u
+    }
+    return G
+}
+
+#| The integral of `x^a y^b z^c` over the unit sphere:
+#| `4 pi (a-1)!! (b-1)!! (c-1)!! / (a+b+c+1)!!` when every power is even,
+#| else 0.
+def sus_sphere(a, b, c) {
+    if mod(a, 2) > 0.5 or mod(b, 2) > 0.5 or mod(c, 2) > 0.5 {
+        return 0.0
+    }
+    return 4.0 * BAS_PI * bas_odfact(a / 2) * bas_odfact(b / 2) * bas_odfact(c / 2) / bas_odfact((a + b + c) / 2 + 1)
+}
+
+#| The largest gap between `factor * M_l` (lib/hf's map, which for l <= 1 is
+#| PySCF's `cart2sph(l, normalized='sp')`) and the same map with every
+#| spherical function scaled to unit norm over the sphere, which is what
+#| libcint's default `cart2sph(l)` gives for s and p.
+def sus_c2s_gap(l, factor) {
+    M = c2s_block(l)
+    P = bas_powers(l)
+    nc = bas_ncart(l)
+    w = 0.0
+    for m to bas_nsph(l) {
+        # the spherical function as a polynomial: a unit component is Nc times a monomial
+        q = 0.0
+        for c to nc {
+            for d to nc {
+                ac = M[c, m] * bas_nc(P[c, 0], P[c, 1], P[c, 2])
+                ad = M[d, m] * bas_nc(P[d, 0], P[d, 1], P[d, 2])
+                q = q + ac * ad * sus_sphere(P[c, 0] + P[d, 0], P[c, 1] + P[d, 1], P[c, 2] + P[d, 2])
+            }
+        }
+        for c to nc {
+            w = max(w, abs(factor * M[c, m] - M[c, m] / sqrt(q)))
+        }
+    }
+    return w
+}
+
+test "He cc-pVDZ: lowest core eigenvalue -1.9936233377269388, RHF and UHF -2.8551604772427379 (test_he.py:47, 52, 57)" {
+    sus_m = molecule_packs(he_ccpvdz_atoms(), he_ccpvdz_shells(), he_ccpvdz_prims())
+    sus_R = sts_eig(hf_hcore(sus_m, scf_checked()), hf_overlap(sus_m, scf_checked()), opt_new())
+    assert_near(sts_row(PST_FILE_HE, 47, sus_R[0, 0], PST_HE_47, PST_HE_47_P), 1.0, 0.0)
+    sus_e = sus_energy(sus_m, 0, 0, SCF_RHF)
+    assert_near(sts_row(PST_FILE_HE, 52, sus_e, PST_HE_52, PST_HE_52_P), 1.0, 0.0)
+    sus_e = sus_energy(sus_m, 0, 0, SCF_UHF)
+    assert_near(sts_row(PST_FILE_HE, 57, sus_e, PST_HE_57, PST_HE_57_P), 1.0, 0.0)
+}
+
+test "one electron: H STO-3G ROHF (scf.RHF with spin 1) and UHF with spin -1 and 1 give -0.46658184955727555 (test_rhf.py:264, test_uhf.py:109, 111)" {
+    sus_m = molecule_packs(h_sto3g_atoms(), h_sto3g_shells(), h_sto3g_prims())
+    assert_lt(hf_gap(sus_m.atoms, pst_h_atoms(), 4), 1.0e-15)
+    # scf.RHF on an open shell dispatches to ROHF
+    sus_e = sus_energy(sus_m, 0, 1, SCF_ROHF)
+    assert_near(sts_row(PST_FILE_RHF, 264, sus_e, PST_RHF_264, PST_RHF_264_P), 1.0, 0.0)
+    sus_e = sus_energy(sus_m, 0, -1, SCF_UHF)
+    assert_near(sts_row(PST_FILE_UHF, 109, sus_e, PST_UHF_109, PST_UHF_109_P), 1.0, 0.0)
+    sus_e = sus_energy(sus_m, 0, 1, SCF_UHF)
+    assert_near(sts_row(PST_FILE_UHF, 111, sus_e, PST_UHF_111, PST_UHF_111_P), 1.0, 0.0)
+}
+
+test "He STO-3G: RHF and UHF -2.8077839575399737 to 12 places, and He2+ with no electrons at 0 (test_rhf.py:636, 640, test_uhf.py:392, 396)" {
+    sus_m = molecule_packs(he_sto3g_atoms(), he_sto3g_shells(), he_sto3g_prims())
+    assert_lt(hf_gap(sus_m.atoms, pst_he_atoms(), 4), 1.0e-15)
+    sus_e = sus_energy(sus_m, 0, 0, SCF_RHF)
+    assert_near(sts_row(PST_FILE_RHF, 636, sus_e, PST_RHF_636, PST_RHF_636_P), 1.0, 0.0)
+    sus_e = sus_energy(sus_m, 2, 0, SCF_RHF)
+    assert_near(sts_row(PST_FILE_RHF, 640, sus_e, PST_RHF_640, PST_RHF_640_P), 1.0, 0.0)
+    sus_e = sus_energy(sus_m, 0, 0, SCF_UHF)
+    assert_near(sts_row(PST_FILE_UHF, 392, sus_e, PST_UHF_392, PST_UHF_392_P), 1.0, 0.0)
+    sus_e = sus_energy(sus_m, 2, 0, SCF_UHF)
+    assert_near(sts_row(PST_FILE_UHF, 396, sus_e, PST_UHF_396, PST_UHF_396_P), 1.0, 0.0)
+}
+
+test "He STO-3G (11|11) = 1.0557129427350722 to 12 places (test_mole.py:942)" {
+    sus_rep = sw_rep_new()
+    sus_G = int_eri(he_sto3g_atoms(), he_sto3g_shells(), he_sto3g_prims(), 0, sus_rep)
+    assert_near(sts_row(PST_FILE_MOLE, 942, sus_G[0], PST_MOLE_942, PST_MOLE_942_P), 1.0, 0.0)
+}
+
+test "no atoms: h = diag(0, 1, 2), S = I, (ii|ii) = 0.2; RHF gives 0.2 and UHF with spin 2 gives 1.0 (test_rhf.py:757, test_uhf.py:374)" {
+    sus_H = pst_model_h()
+    sus_S = zeros(3, 3)
+    for sus_i to 3 {
+        sus_S[sus_i, sus_i] = 1.0
+    }
+    sus_G = sus_model_eri(PST_MODEL_N, PST_MODEL_U)
+    sus_r = hf_scf(scf_setup(sus_H, sus_S, sus_G, PST_MODEL_NELEC / 2, PST_MODEL_NELEC / 2, 0.0, scf_defaults()))
+    assert_near(sus_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_RHF, 757, sus_r.energy, PST_RHF_757, PST_RHF_757_P), 1.0, 0.0)
+    sus_r = hf_scf(scf_setup(sus_H, sus_S, sus_G, PST_MODEL_NELEC, 0, 0.0, scf_defaults()))
+    assert_near(sus_r.method, SCF_UHF, 0.0)
+    assert_near(sus_r.converged, 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_UHF, 374, sus_r.energy, PST_UHF_374, PST_UHF_374_P), 1.0, 0.0)
+}
+
+test "a fractional nuclear charge: V is the charge-weighted sum of the unit-charge attractions (test_mole.py:980)" {
+    # V from the whole molecule (O carries 2.5) against sum_A Z_A V_A, where
+    # V_A is the attraction to a unit charge at A alone
+    sus_at = pst_frac_atoms()
+    sus_sh = stb_frac_shells()
+    sus_pr = stb_frac_prims()
+    sus_g = stb_frac_atoms()
+    assert_allclose(sus_g[:, 1:4], sus_at[:, 1:4], 1.0e-15)
+    sus_rep = sw_rep_new()
+    sus_V = int_nuclear(sus_at, sus_sh, sus_pr, sus_rep)
+    sus_sum = zeros(7, 7)
+    for sus_a to 3 {
+        sus_one = copy(sus_at)
+        sus_one[:, 0] = 0.0
+        sus_one[sus_a, 0] = 1.0
+        sus_sum = sus_sum + sus_at[sus_a, 0] * int_nuclear(sus_one, sus_sh, sus_pr, sus_rep)
+    }
+    sus_w = hf_gap(sus_V, sus_sum, 49)
+    assert_near(sts_row(PST_FILE_MOLE, 980, sus_w, PST_MOLE_980, PST_MOLE_980_P), 1.0, 0.0)
+}
+
+test "cart2sph: the s and p factors 0.282094791773878143 and 0.488602511902919921 normalize the solid harmonics (test_mole.py:520, 529)" {
+    assert_near(sts_row(PST_FILE_MOLE, 520, sus_c2s_gap(0, PST_C2S_S), PST_MOLE_520, PST_MOLE_520_P), 1.0, 0.0)
+    assert_near(sts_row(PST_FILE_MOLE, 529, sus_c2s_gap(1, PST_C2S_P), PST_MOLE_529, PST_MOLE_529_P), 1.0, 0.0)
+}
+
+test "Schwarz: (0 2|3 3) sits under sqrt((02|02)) sqrt((33|33)) (test_rhf.py:944)" {
+    sus_rep = sw_rep_new()
+    sus_G = int_eri(pst_h2_schwarz_atoms(), pst_h2_schwarz_shells(), pst_h2_schwarz_prims(), 0, sus_rep)
+    sus_p02 = es_pair(2, 0)
+    sus_p33 = es_pair(3, 3)
+    sus_eri = sus_G[es_pair(sus_p33, sus_p02)]
+    sus_bound = sqrt(sus_G[es_pair(sus_p02, sus_p02)]) * sqrt(sus_G[es_pair(sus_p33, sus_p33)])
+    # both sides are PySCF's to 1e-12 relative, so the inequality is tested on the same numbers
+    assert_lt(abs(sus_eri - PST_SCHWARZ_ERI), 1.0e-12 * PST_SCHWARZ_ERI)
+    assert_lt(abs(sus_bound - PST_SCHWARZ_BOUND), 1.0e-12 * PST_SCHWARZ_BOUND)
+    assert_near(sts_row_lt(PST_FILE_RHF, 944, sus_eri, sus_bound), 1.0, 0.0)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

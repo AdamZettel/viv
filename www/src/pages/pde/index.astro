@@ -1,0 +1,96 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// PDE solvers: the index. Every row is scripts/pde-build.mjs's reading of one
+// program in pde/ -- its equation, its method, what its tests hold it to.
+import Base from '../../layouts/Base.astro';
+import data from '../../data/pde.json';
+import builtins from '../../data/builtins.json';
+import '../../styles/pde.css';
+import 'katex/dist/katex.min.css';
+
+const bySlug = Object.fromEntries(data.solvers.map((s) => [s.slug, s]));
+const nTests = data.solvers.reduce((n, s) => n + s.tests.length, 0);
+const sodOrder = Number(bySlug.euler_sod?.shown.find((v) => v.name === 'l1_order')?.value ?? NaN).toFixed(2);
+
+// What the solvers lean on, in the reference's own measured words.
+const TOOLS = ['roll', 'tridiag_solve', 'fft', 'ifft', 'slab', 'setslab', 'transpose', 'max (reduce)', 'pow (array)', 'sum'];
+const items = builtins.groups.flatMap((g) => g.items);
+const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] as string);
+const tools = TOOLS.map((n) => items.find((i) => i.name === n)).filter(Boolean).map((i) => ({
+  sig: i.sig,
+  html: esc(i.blurb).replace(/`([^`]+)`/g, '<code>$1</code>'),
+}));
+---
+
+<Base
+  title="PDE solvers · Viv"
+  description={`${data.solvers.length} partial differential equations, each solved by a complete Viv program that checks itself against an exact solution: heat, wave, advection, Poisson, Laplace, Schrödinger, KdV, Burgers, Euler, Black–Scholes and more.`}
+  eyebrow="PDE solvers"
+  heading="Partial differential equations, solved and checked">
+  <p class="lede">
+    {data.solvers.length} equations. Each is one Viv program that solves it, draws the solution, and
+    ends in tests against something exact: a closed-form solution, a conserved quantity, a measured
+    order of accuracy. {nTests} tests in all.
+  </p>
+  <p>
+    The programs are short enough to read whole, and every page has the source in an editable cell:
+    change the scheme, the time step or the initial condition and run it again.
+  </p>
+
+  {
+    data.groups.map((g) => (
+      <section class="pde-group">
+        <h2 id={g.kind.replace(/\s+/g, '-')}>{g.title}</h2>
+        <p class="pde-blurb" set:html={g.blurbHtml} />
+        <div class="pde-list">
+          {g.slugs.map((slug) => {
+            const s = bySlug[slug];
+            return (
+              <a class="pde-row" href={`/pde/${s.slug}`}>
+                <div class="pde-eq" set:html={s.equationHtml} />
+                <div class="pde-what">
+                  <h3>{s.title}</h3>
+                  <p set:html={s.methodHtml} />
+                  <p class="pde-checks"><span>checked:</span> <Fragment set:html={s.checksHtml} /></p>
+                  <p class="pde-count">{s.tests.length} tests · {s.lines} lines</p>
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      </section>
+    ))
+  }
+
+  <section class="pde-group">
+    <h2 id="tools">The builtins they use</h2>
+    <p class="pde-blurb">
+      A finite-difference stencil is array arithmetic on shifted copies; an implicit step is a
+      tridiagonal solve; a spectral step is an FFT. These are the builtins the solvers use, with the
+      descriptions from the <a href="/reference#builtins">reference</a>.
+    </p>
+    <dl class="pde-tools">
+      {tools.map((t) => (
+        <>
+          <dt><code>{t.sig}</code></dt>
+          <dd set:html={t.html} />
+        </>
+      ))}
+    </dl>
+  </section>
+
+  <section class="pde-group">
+    <h2 id="checked">How they are checked</h2>
+    <dl class="deflist">
+      <dt>Against something exact</dt>
+      <dd>A closed-form solution where there is one (a decaying mode, a soliton, d'Alembert, Black–Scholes, the Riemann problem); a manufactured solution where there is not.</dd>
+      <dt>The order is measured, not quoted</dt>
+      <dd>Each solver runs at two or three resolutions and a test asserts the observed convergence rate. That includes the rates below the textbook figure: the first-order shock-capturing scheme for the <a href="/pde/euler_sod">Euler equations</a> converges at {sodOrder} in L1, because the contact discontinuity smears, and its test asserts a rate between one half and one.</dd>
+      <dt>Conservation to rounding</dt>
+      <dd>Where the equation conserves something and the scheme is built to, the test tolerance is 1e-12.</dd>
+      <dt>In the interpreter and in C</dt>
+      <dd><code>pde/check.sh</code> runs every program through the interpreter and through Viv → C → native, and requires the two outputs to agree line for line.</dd>
+    </dl>
+  </section>
+</Base>

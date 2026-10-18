@@ -1,0 +1,78 @@
+###
+post: Training the speedrun's model on a paragraph of Dickens
+agent: claude
+
+The same model and optimizer as `check.viv`, but initialized here, the way
+`train_gpt.py` initializes it, instead of from PyTorch's weights. It needs
+nothing from `reference.py`.
+###
+
+from gpt import (
+    D, EMB, G, GSCALE, GW1, H, L, LM, M, model, POST, QK, RESID, SCAL, STEPS, train, V, VE, WFC,
+    WO, WQK, WV,
+)
+from params import param_offset, param_set, param_zeros
+from text import TEXT, tokenize
+from random import randn
+
+#| A `rows` by `cols` matrix of draws from `dist`, scaled.
+def random_matrix(rows, cols, scale, dist) {
+    A = zeros(rows, cols)
+    for i to rows {
+        for j to cols {
+            A[i, j] = scale * apply(dist)
+        }
+    }
+    return A
+}
+
+#| Uniform on [-1, 1).
+def uniform() {
+    return 2.0 * rand() - 1.0
+}
+
+#| The file's initialization (GPT.__init__, init_attn, init_mlp, init_misc,
+#| init_mudd_gate), at this size.
+def init_weights() {
+    theta = param_zeros(model)
+    bound = sqrt(3.0) * 0.5 / sqrt(D)
+    lm = random_matrix(D, V, 0.005, randn)
+    param_set(theta, model, LM, lm)
+    param_set(theta, model, EMB, transpose(lm))
+    param_set(theta, model, VE, random_matrix(V, D, 0.01, randn))
+    # ve gates, smear gate: zero
+    param_set(theta, model, SCAL, [[0.5, 1.0, 0.5, 1.0, 0.0]])
+    param_set(theta, model, RESID, zeros(L, 2) + sqrt(1.1))
+    param_set(theta, model, POST, zeros(L, 2) + 1.0)
+    param_set(theta, model, GW1, random_matrix(G, D, 1.0 / sqrt(D), uniform))
+    # gate W2 and b2: zero
+    theta[param_offset(model, GSCALE)] = 0.1
+    for l to L {
+        param_set(theta, model, WQK[l], random_matrix(2 * H * QK, D, bound, uniform))
+        param_set(theta, model, WV[l], random_matrix(D, D, bound, uniform))
+        param_set(theta, model, WO[l], random_matrix(D, D, bound, uniform))
+        param_set(theta, model, WFC[l], random_matrix(M, D, bound, uniform))
+        # c_proj: zero
+    }
+    return theta
+}
+
+srand(2026.0)
+tokens = tokenize(TEXT)
+theta = init_weights()
+losses = zeros(STEPS + 1)
+train(theta, tokens, losses)
+for s to STEPS / 5 + 1 {
+    step = 5 * s
+    loss_per_token = losses[step]
+    show step
+    show loss_per_token
+}
+
+test "it starts at chance, log 32, and learns" {
+    assert_lt(abs(losses[0] - log(32.0)), 0.01)
+    assert_lt(losses[29], losses[0] - 0.7)
+}
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Viv authors

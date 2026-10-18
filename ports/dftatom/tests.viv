@@ -1,0 +1,93 @@
+# Tests of ports/dftatom/dftatom.viv: upstream's own radial-solver tests
+# (tests/Z92n7all) and two checks of the mesh, the quadrature and the
+# Poisson solver against closed forms.
+#
+#     viv run ports/dftatom/tests.viv
+#
+# Derived from dftatom tests/Z92n7all/Z92_nonrel.f90 and Z92_rel.f90,
+# Copyright (c) 2006-2012 Ondrej Certik, Jiri Vackar, John Pask; MIT license,
+# see ports/dftatom/LICENSE.
+
+from dftatom import mesh_exp, mesh_exp_deriv, integrate, solve_radial_eigenproblem, E_nl, rpoisson_outward_pc
+
+test "the exponential mesh ends at r_min and r_max, its last interval a times its first" {
+    R = mesh_exp(1.0e-7, 50.0, 2.7e6, 1000)
+    assert_near(R[0], 1.0e-7, 0.0)
+    assert_near(R[1000], 50.0, 1.0e-12)
+    assert_near((R[1000] - R[999]) / (R[1] - R[0]), 2.7e6, 1.0e-4)
+}
+
+test "integrate gives 8/3 for r^2 over 0 to 2 on a 400-interval mesh, within 1e-10" {
+    R = mesh_exp(0.0, 2.0, 50.0, 400)
+    Rp = mesh_exp_deriv(0.0, 2.0, 50.0, 400)
+    assert_near(integrate(Rp, R * R), 8.0 / 3.0, 1.0e-10)
+}
+
+#| Upstream's tests/Z92n7all/Z92_nonrel.f90: every state n <= 7 of
+#| hydrogen-like uranium in the Schrodinger equation, within 1e-6 of
+#| -Z^2/2n^2, on upstream's mesh.
+test "hydrogen-like uranium, Schrodinger, n <= 7 (upstream Z92_nonrel)" {
+    Zu: Int = 92
+    NN: Int = 4000
+    R = mesh_exp(1.0e-7, 50.0, 2.7e6, NN)
+    Rp = mesh_exp_deriv(1.0e-7, 50.0, 2.7e6, NN)
+    V = zeros(NN + 1)
+    for pt to NN + 1 {
+        V[pt] = -Zu / R[pt]
+    }
+    P = zeros(NN + 1)
+    Q = zeros(NN + 1)
+    nmax: Int = 7
+    for n from 1 to nmax + 1 {
+        for l to n {
+            conv, E = solve_radial_eigenproblem(n, l, -100.0, 1.0e-6, 100, R, Rp, V, Zu, 137.035999037, 0, true, -10000.0, 0.0, P, Q)
+            assert_true(conv == 0)
+            assert_near(E, E_nl(137.035999037, n, l, Zu, 0), 1.0e-6)
+        }
+    }
+}
+
+#| Upstream's tests/Z92n7all/Z92_rel.f90: every state n <= 7 of hydrogen-like
+#| uranium in the Dirac equation, both j = l -+ 1/2, within 1e-6 of
+#| Sommerfeld's formula.
+test "hydrogen-like uranium, Dirac, n <= 7 (upstream Z92_rel)" {
+    Zu: Int = 92
+    c = 137.035999037
+    NN: Int = 4500
+    R = mesh_exp(1.0e-8, 50.0, 6.2e7, NN)
+    Rp = mesh_exp_deriv(1.0e-8, 50.0, 6.2e7, NN)
+    V = zeros(NN + 1)
+    for pt to NN + 1 {
+        V[pt] = -Zu / R[pt]
+    }
+    P = zeros(NN + 1)
+    Q = zeros(NN + 1)
+    nmax: Int = 7
+    for n from 1 to nmax + 1 {
+        for l to n {
+            rmax: Int = 3
+            if l == 0 {
+                rmax = 2
+            }
+            for relat from 2 to rmax + 1 {
+                conv, E = solve_radial_eigenproblem(n, l, -100.0, 5.0e-7, 100, R, Rp, V, Zu, c, relat, true, -10000.0, 0.0, P, Q)
+                assert_true(conv == 0)
+                assert_near(E, E_nl(c, n, l, Zu, relat), 1.0e-6)
+            }
+        }
+    }
+}
+
+test "the Hartree potential of a normalized Gaussian is 1/r far out and 2/(sqrt(pi) s) at the center" {
+    R = mesh_exp(1.0e-7, 30.0, 1.0e5, 2000)
+    Rp = mesh_exp_deriv(1.0e-7, 30.0, 1.0e5, 2000)
+    s = 0.7
+    rho = exp(-(R * R) / (s * s)) / (pow(pi, 1.5) * s * s * s)
+    V = rpoisson_outward_pc(R, Rp, rho)
+    assert_near(V[2000], 1.0 / 30.0, 1.0e-9)
+    assert_near(V[0], 2.0 / (sqrt(pi) * s), 1.0e-9)
+}
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2006-2012 Ondřej Čertík, Jiří Vackář, John Pask
+# SPDX-FileCopyrightText: 2026 The Viv authors

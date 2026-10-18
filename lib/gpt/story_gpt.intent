@@ -1,0 +1,65 @@
+module lib/gpt/story_gpt  documents every variable
+  A small GPT learns one line of text and then writes it. The text is
+  "hello world! " five times over, so every character is fixed by the two
+  before it: after "l" can come "l", "o" or "d", and only the character
+  before the "l" says which. A model that sees one character at a time
+  cannot learn that; the model has to look back, and attention is how it
+  looks back.
+
+<main>  @9b4a6e4a
+  what            Train a GPT with two blocks of two heads on the line, thirty
+                  steps of four windows each, then give it the prompt "hello" and
+                  let it write. It has 6,560 parameters and a vocabulary of the 9
+                  characters of the line
+                  [test "the model has 6,560 parameters, and 9 characters make its vocabulary"].
+                  The loss starts at $\log 9$, the loss of a uniform guess
+                  [test "the first loss is log 9 exactly, because the output map starts at zero"],
+                  and ends at 0.1991
+                  [test "thirty steps take the loss from 2.197 to 0.1991"];
+                  from the prompt the model writes the line on, character by
+                  character [test "from the prompt hello, the model writes the line on"].
+  TEXT         the training text
+  PROMPT       the text the model is asked to continue
+  STEPS        training steps
+  SAMPLES      characters to write after the prompt
+  INIT_SEED    the seed of the starting parameters
+  SAMPLE_SEED  the seed of the draws when writing
+  vocab        the distinct characters of the text, in code order
+  tokens       the text as tokens: each character's place in vocab
+  cfg          the model's sizes: at most 8 characters read at once, 16
+               numbers for a character inside the model, 2 attention heads
+               per block, 2 blocks, an MLP inner width of 64 (four times
+               the width, as in GPT-2), and 4 windows of text per training step
+  model        the model: its matrices, a record of them, trained in place
+  count        how many parameters the model has
+  losses       the loss of each training step's batch
+  written      the prompt and the characters the model wrote after it, as text
+
+  tokenize  list the characters the text uses and turn the text into their indices
+  build     size the model and draw its matrices' starting values
+    run       The model has {count} parameters.
+  train     train it on windows of the text
+  generate  continue the prompt one drawn character at a time, and turn the tokens back into text
+    run       The model wrote: {written}
+
+path core  How a GPT learns to continue a line
+  <main>                         The task: a line of text whose characters depend on the ones before
+    > The model reads up to eight characters and predicts the next one at every position. Before training it knows nothing, and its output map starts at zero, so its first prediction is uniform over the nine characters and its loss is $\log 9$ [test "the first loss is log 9 exactly, because the output map starts at zero"].
+  gpt_forward/embed              Characters become rows of numbers
+    > Each character becomes its row of the token embedding plus its position's row of the position embedding. The sequence is now a matrix with one row per position: the residual stream.
+  block                          A block: attention, then the MLP, each added to the stream
+  attention/scores               Each position scores every position by query against key
+  attention/mask                 The mask: no position may look ahead
+    > Without the mask, position $i$ could read position $i + 1$, the character it is being trained to predict, and would learn to copy it. The mask sets those scores so that their weights are exactly zero.
+  attention/weights              A softmax turns each row of scores into weights
+  attention/mix                  Each position's output is a weighted average of the values
+  block/mlp                      The MLP works on each position alone
+  sequence_loss/loss             Cross-entropy scores the prediction at every position
+  train/forward_backward         The gradient: the forward pass, run backward
+    > `value_and_grad` runs each window's forward pass and then the backward pass the compiler wrote for it. Backpropagation starts at the loss: the gradient with respect to the logits is the predicted distribution with one taken off the right character, and from there the gradient goes back through every step of the forward pass in reverse order, to the rows of the embeddings the window looked up.
+  optimizer_step/muon            Muon: momentum, orthogonalized, for the blocks' matrices
+  optimizer_step/adam            Adam for the embeddings and the output map
+  train                          Thirty steps: the loss falls from a guess toward zero
+    > The loss is measured on the batch each step trains on, so it jumps around: windows that start at different characters are not equally easy. It ends at 0.1991 [test "thirty steps take the loss from 2.197 to 0.1991"].
+  sample/draw                    Writing: draw a character, append it, repeat
+    > Each new character is drawn from the model's probabilities given the last eight characters written. From "hello" the model writes the line on [test "from the prompt hello, the model writes the line on"].

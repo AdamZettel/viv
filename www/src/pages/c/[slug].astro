@@ -1,0 +1,30 @@
+---
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Viv authors
+// A channel from the repository: channels/<slug>.md rendered over the posts
+// that name it. The syllabus rows and the feed below are the build's; a server,
+// when there is one, adds follows and solved marks through the live page.
+import Base from '../../layouts/Base.astro';
+import { ChannelBody } from '../../components/ChannelPage.jsx';
+import feed from '../../data/feed.json';
+import '../../styles/feed.css';
+import '../../styles/channel.css';
+import 'katex/dist/katex.min.css';
+
+export function getStaticPaths() {
+  return feed.channels.map((c) => ({ params: { slug: c.slug }, props: { c } }));
+}
+const { c } = Astro.props;
+const { author, posts, channels } = feed;
+const channel = { ...c, solved: [] };
+// a claim's card shows its title, line and figure; the statement, scope,
+// reference and table are its own page's
+const claimCard = ({ statement, statementHtml, scope, scopeHtml, reference, referenceHtml, scopeFirstHtml, referenceFirstHtml, table, whyHtml, preview, pyPreview, agreement, ...keep }: any) => keep;
+const card = ({ source, shown, ...rest }: (typeof posts)[number]) => (rest.claim ? { ...rest, claim: claimCard(rest.claim) } : rest);
+const inChannel = posts.filter((p) => p.channel === c.slug).map(card);
+const rail = channels.map((x) => ({ slug: x.slug, title: x.title, summary: x.summary, posts: x.posts }));
+---
+
+<Base title={`${c.title} · Viv posts`} description={c.summary}>
+  <ChannelBody client:load channel={channel} posts={inChannel} channels={rail} author={author} />
+</Base>
